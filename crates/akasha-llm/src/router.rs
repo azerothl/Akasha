@@ -52,6 +52,22 @@ fn agent_task_type_and_fallbacks(agent: &str) -> (&'static str, &'static [&'stat
 
 fn resolve_task_type_for_agent_impl(assigned_agent: &str, config: &RoutingConfig) -> String {
     let (primary, fallbacks) = agent_task_type_and_fallbacks(assigned_agent);
+    resolve_task_type_with_fallback_chain(primary, fallbacks, config)
+}
+
+/// Fallback chain for explicit `preferred_task_type` (API routes, compare synthesis, etc.).
+fn preferred_task_type_fallbacks(task_type: &str) -> &'static [&'static str] {
+    match task_type {
+        "research" => &["scientific_analysis", "conversation"],
+        _ => &[],
+    }
+}
+
+fn resolve_task_type_with_fallback_chain(
+    primary: &str,
+    fallbacks: &[&str],
+    config: &RoutingConfig,
+) -> String {
     if let Some(route) = config.get_route(primary) {
         if is_custom_route(route) {
             return primary.to_string();
@@ -60,11 +76,23 @@ fn resolve_task_type_for_agent_impl(assigned_agent: &str, config: &RoutingConfig
     for &fallback in fallbacks {
         if let Some(route) = config.get_route(fallback) {
             if is_custom_route(route) {
+                if fallback != primary {
+                    info!(
+                        requested_task_type = primary,
+                        resolved_task_type = fallback,
+                        "Router task_type fallback"
+                    );
+                }
                 return fallback.to_string();
             }
         }
     }
     primary.to_string()
+}
+
+fn resolve_preferred_task_type(preferred: &str, config: &RoutingConfig) -> String {
+    let fallbacks = preferred_task_type_fallbacks(preferred);
+    resolve_task_type_with_fallback_chain(preferred, fallbacks, config)
 }
 
 pub struct LLMRouter {
@@ -143,13 +171,21 @@ impl LLMRouter {
             .unwrap_or(300)
     }
 
-    /// List models per provider from routing config (for GET /api/router/models).
     /// Get the global configuration settings (timeout, retries, metrics, fallback).
     pub fn global_config(&self) -> crate::config::GlobalConfig {
         self.config
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .global
+            .clone()
+    }
+
+    /// List models per provider from routing config (for GET /api/router/models).
+    pub fn provider_configs(&self) -> std::collections::HashMap<String, crate::config::ProviderConfig> {
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .providers
             .clone()
     }
 
@@ -168,6 +204,12 @@ impl LLMRouter {
     pub fn resolve_task_type_for_agent(&self, assigned_agent: &str) -> String {
         let config = self.config.read().unwrap_or_else(|e| e.into_inner());
         resolve_task_type_for_agent_impl(assigned_agent, &config)
+    }
+
+    /// Resolve explicit preferred task type with category fallbacks (e.g. research → scientific_analysis → conversation).
+    pub fn resolve_preferred_task_type(&self, preferred: &str) -> String {
+        let config = self.config.read().unwrap_or_else(|e| e.into_inner());
+        resolve_preferred_task_type(preferred, &config)
     }
 
     /// Primary route `(provider, model)` for a task type from routing config (for token estimates, metrics labels).
@@ -261,6 +303,19 @@ impl LLMRouter {
         }
     }
 
+    /// Append provider/model to fallback chain for a task type. Applied immediately.
+    pub fn add_fallback_route(&self, task_type: &str, entry: crate::config::RouteEntry) {
+        match self.config.write() {
+            Ok(mut cfg) => {
+                cfg.add_fallback_route(task_type, entry);
+            }
+            Err(poisoned) => {
+                let mut cfg = poisoned.into_inner();
+                cfg.add_fallback_route(task_type, entry);
+            }
+        }
+    }
+
     fn resolve(&self) -> ProviderResolver {
         let providers = self.providers.clone();
         Arc::new(move |name: &str| providers.get(name).cloned())
@@ -269,10 +324,14 @@ impl LLMRouter {
     /// Complete using preferred_task_type if set, else classifier on prompt; then routing config and fallback.
     pub async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, String> {
         let preferred = request.preferred_task_type.as_deref().filter(|s| !s.is_empty());
-        let task_type_str = preferred.unwrap_or_else(|| {
+        let task_type_str = if let Some(p) = preferred {
+            let config = self.config.read().unwrap_or_else(|e| e.into_inner());
+            resolve_preferred_task_type(p, &config)
+        } else {
             let (task_type, _) = classify_task_type(&request.prompt);
-            task_type.as_str()
-        });
+            task_type.as_str().to_string()
+        };
+        let task_type_str = task_type_str.as_str();
         let span = tracing::info_span!("llm_call", task_type = task_type_str);
         if preferred.is_some() {
             info!(task_type = task_type_str, "Router using preferred task type (system/memory)");
@@ -321,14 +380,15 @@ impl LLMRouter {
         request: &CompletionRequest,
         chunk_tx: std::sync::mpsc::Sender<String>,
     ) -> Result<CompletionResponse, String> {
-        let task_type_str = request
-            .preferred_task_type
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                let (task_type, _) = classify_task_type(&request.prompt);
-                task_type.as_str()
-            });
+        let preferred = request.preferred_task_type.as_deref().filter(|s| !s.is_empty());
+        let task_type_str = if let Some(p) = preferred {
+            let config = self.config.read().unwrap_or_else(|e| e.into_inner());
+            resolve_preferred_task_type(p, &config)
+        } else {
+            let (task_type, _) = classify_task_type(&request.prompt);
+            task_type.as_str().to_string()
+        };
+        let task_type_str = task_type_str.as_str();
         info!(task_type = task_type_str, "Router classify (stream)");
 
         let task_config = self
@@ -537,6 +597,45 @@ mod tests {
         );
         #[cfg(not(feature = "embedded"))]
         assert!(!router.embedded_available());
+    }
+
+    #[test]
+    fn resolve_preferred_task_type_research_falls_back_to_scientific_analysis() {
+        let mut config = RoutingConfig::default_config();
+        config.task_types.insert(
+            "scientific_analysis".into(),
+            crate::config::TaskTypeConfig {
+                primary: Some(RouteEntry {
+                    provider: "openai".into(),
+                    model: "gpt-4".into(),
+                    config: None,
+                }),
+                fallback: vec![],
+                constraints: None,
+            },
+        );
+        assert_eq!(
+            resolve_preferred_task_type("research", &config),
+            "scientific_analysis"
+        );
+    }
+
+    #[test]
+    fn resolve_preferred_task_type_research_uses_explicit_research_route() {
+        let mut config = RoutingConfig::default_config();
+        config.task_types.insert(
+            "research".into(),
+            crate::config::TaskTypeConfig {
+                primary: Some(RouteEntry {
+                    provider: "ollama".into(),
+                    model: "llama3.2".into(),
+                    config: None,
+                }),
+                fallback: vec![],
+                constraints: None,
+            },
+        );
+        assert_eq!(resolve_preferred_task_type("research", &config), "research");
     }
 
     #[test]
