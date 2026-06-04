@@ -5,6 +5,7 @@ pub mod episodic_memory;
 pub mod facts;
 pub mod log;
 pub mod long_term_memory;
+pub mod memory_fusion;
 pub mod metrics;
 pub mod pipeline;
 pub mod schedules;
@@ -23,8 +24,13 @@ pub use facts::{extract_facts_simple, Fact, FactsStore};
 pub use long_term_memory::{
     cosine_similarity, decode_embedding_bytes, importance_score, recency_score,
     relation_kind_from_embedding_similarity, LongTermStore, MemoryEntry, MemoryImportance,
-    MemorySearchFilter, AUTO_RELATION_MIN_COSINE, AUTO_RELATION_RELATES_THRESHOLD,
-    AUTO_RELATION_SIMILAR_THRESHOLD,
+    MemorySearchFilter, MemorySearchMetadata, AUTO_RELATION_MIN_COSINE,
+    AUTO_RELATION_RELATES_THRESHOLD, AUTO_RELATION_SIMILAR_THRESHOLD,
+};
+pub use memory_fusion::{
+    hybrid_memory_search, memory_rrf_enabled, parse_score_weights_from_env,
+    reciprocal_rank_fusion, HybridSearchOptions, MemoryScoreWeights, DEFAULT_CANDIDATE_TOP_K,
+    DEFAULT_RRF_K,
 };
 pub use pipeline::{PipelineContext, PipelineState, PipelineStore};
 pub use schedules::{

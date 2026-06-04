@@ -24,6 +24,20 @@ pub struct MemoryEntry {
     /// When this memory expires (Phase 1). None = never.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// Retrieval confidence (maintenance boost/decay). Default 1.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+}
+
+/// Metadata for hybrid search re-ranking.
+#[derive(Debug, Clone)]
+pub struct MemorySearchMetadata {
+    pub id: String,
+    pub content: String,
+    pub embedding: Vec<u8>,
+    pub created_at: DateTime<Utc>,
+    pub importance: Option<i64>,
+    pub confidence: f32,
 }
 
 /// Cosine similarity between two vectors (result in [-1, 1]). Public for hybrid rerank in daemon.
@@ -172,6 +186,28 @@ impl LongTermStore {
         }
         if !has_col("expires_at")? {
             conn.execute("ALTER TABLE memory_entries ADD COLUMN expires_at TEXT", [])?;
+        }
+        // Phase 1 roadmap: maintenance / confidence
+        if !has_col("confidence")? {
+            conn.execute(
+                "ALTER TABLE memory_entries ADD COLUMN confidence REAL DEFAULT 1.0",
+                [],
+            )?;
+        }
+        if !has_col("last_recalled_at")? {
+            conn.execute("ALTER TABLE memory_entries ADD COLUMN last_recalled_at TEXT", [])?;
+        }
+        if !has_col("recall_count")? {
+            conn.execute(
+                "ALTER TABLE memory_entries ADD COLUMN recall_count INTEGER DEFAULT 0",
+                [],
+            )?;
+        }
+        if !has_col("useful_count")? {
+            conn.execute(
+                "ALTER TABLE memory_entries ADD COLUMN useful_count INTEGER DEFAULT 0",
+                [],
+            )?;
         }
         // Graph RAG: relations between memory entries (from_id, to_id, kind).
         conn.execute_batch(
@@ -606,6 +642,136 @@ impl LongTermStore {
         self.conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |row| row.get::<_, i64>(0).map(|n| n as u64)).map_err(Into::into)
     }
 
+    /// Load search metadata for hybrid fusion re-rank.
+    pub fn get_entries_search_metadata_by_ids(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<Vec<MemorySearchMetadata>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, content, embedding, created_at, importance, confidence FROM memory_entries WHERE id IN ({})",
+            placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            let created_at_s: String = row.get(3)?;
+            let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            Ok(MemorySearchMetadata {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                embedding: row.get(2)?,
+                created_at,
+                importance: row.get(4)?,
+                confidence: row.get::<_, Option<f64>>(5)?.unwrap_or(1.0) as f32,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Boost confidence after a successful recall (bounded per call).
+    pub fn record_recall_boost(&self, ids: &[String]) -> anyhow::Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut n = 0u64;
+        for id in ids {
+            let changed = self.conn.execute(
+                r#"
+                UPDATE memory_entries SET
+                    recall_count = COALESCE(recall_count, 0) + 1,
+                    last_recalled_at = ?2,
+                    confidence = MIN(1.0, COALESCE(confidence, 1.0) + 0.05)
+                WHERE id = ?1
+                "#,
+                rusqlite::params![id, now],
+            )?;
+            n += changed as u64;
+        }
+        Ok(n)
+    }
+
+    /// Decay confidence for entries recalled often but never marked useful.
+    pub fn record_recall_decay(&self, ids: &[String], threshold: i64) -> anyhow::Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut n = 0u64;
+        for id in ids {
+            let changed = self.conn.execute(
+                r#"
+                UPDATE memory_entries SET
+                    confidence = MAX(0.0, COALESCE(confidence, 1.0) - 0.02)
+                WHERE id = ?1
+                  AND COALESCE(recall_count, 0) >= ?2
+                  AND COALESCE(useful_count, 0) = 0
+                "#,
+                rusqlite::params![id, threshold],
+            )?;
+            n += changed as u64;
+        }
+        Ok(n)
+    }
+
+    pub fn mark_useful(&self, ids: &[String]) -> anyhow::Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut n = 0u64;
+        for id in ids {
+            let changed = self.conn.execute(
+                "UPDATE memory_entries SET useful_count = COALESCE(useful_count, 0) + 1 WHERE id = ?1",
+                rusqlite::params![id],
+            )?;
+            n += changed as u64;
+        }
+        Ok(n)
+    }
+
+    /// Delete entries past expires_at.
+    pub fn purge_expired_entries(&self) -> anyhow::Result<u64> {
+        let n = self.conn.execute(
+            "DELETE FROM memory_entries WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime('now')",
+            [],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Delete entries below confidence threshold (janitor).
+    pub fn purge_low_confidence(&self, threshold: f32) -> anyhow::Result<u64> {
+        let n = self.conn.execute(
+            "DELETE FROM memory_entries WHERE COALESCE(confidence, 1.0) < ?1 AND COALESCE(importance, 1) < 4",
+            rusqlite::params![threshold],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Update entry content and embedding; returns false if id not found.
+    pub fn update_entry_content(
+        &self,
+        id: Uuid,
+        content: &str,
+        embedding: &[u8],
+    ) -> anyhow::Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE memory_entries SET content = ?2, embedding = ?3 WHERE id = ?1",
+            rusqlite::params![id.to_string(), content, embedding],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Load (id, content, embedding) for given ids (for hybrid rerank, plan moyen terme 2).
     pub fn get_entries_with_embeddings_by_ids(
         &self,
@@ -740,6 +906,7 @@ impl LongTermStore {
                     importance,
                     scope,
                     expires_at,
+                    confidence: None,
                 };
                 (sim, entry)
             })
