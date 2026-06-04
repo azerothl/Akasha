@@ -1,6 +1,8 @@
 import { Suspense, lazy, type ReactNode } from "react";
+import { ModelUsageBadge } from "./ModelUsageBadge";
 import { preprocessDataUrlImages } from "../preprocessDataUrlImages";
 import { preprocessMessagePaths } from "../preprocessMessagePaths";
+import type { ModelUsageStats } from "../modelUsage";
 
 const LazyMarkdownContent = lazy(() => import("../MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -11,6 +13,7 @@ export type ChatMessage = {
   streaming?: boolean;
   taskId?: string;
   mapVisual?: unknown;
+  usage?: ModelUsageStats;
 };
 
 export type AskUserData = {
@@ -96,6 +99,7 @@ export function ChatRenderer({
                 {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}
               </div>
             )}
+            {m.role === "assistant" && m.usage && !m.streaming ? <ModelUsageBadge usage={m.usage} compact /> : null}
             {renderMapVisual ? renderMapVisual(m) : null}
           </div>
         );

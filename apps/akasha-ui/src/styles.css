@@ -6479,6 +6479,77 @@ a.settings-link-btn.refresh-btn {
   background: var(--akasha-bg-surface);
 }
 
+.compare-card-usage {
+  margin: 0.35rem 0 0.5rem;
+}
+
+.model-usage-badge {
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+}
+
+.message.assistant .model-usage-badge {
+  margin-top: 0.35rem;
+}
+
+.model-usage-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--akasha-border);
+  background: var(--akasha-bg-surface);
+  color: var(--akasha-text-muted);
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.model-usage-toggle:hover {
+  color: var(--akasha-text);
+  border-color: var(--akasha-text-dim);
+}
+
+.model-usage-icon {
+  opacity: 0.75;
+}
+
+.model-usage-summary {
+  font-variant-numeric: tabular-nums;
+}
+
+.model-usage-chevron {
+  opacity: 0.6;
+  font-size: 0.7rem;
+}
+
+.model-usage-details {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.75rem;
+  margin: 0.35rem 0 0;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--akasha-border);
+  background: var(--akasha-bg-card);
+  font-size: 0.78rem;
+}
+
+.model-usage-details dt {
+  margin: 0;
+  color: var(--akasha-text-dim);
+  font-weight: 500;
+}
+
+.model-usage-details dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-usage-compact .model-usage-details {
+  max-width: 22rem;
+}
+
 .cookbook-hardware-dl {
   display: grid;
   grid-template-columns: auto 1fr;

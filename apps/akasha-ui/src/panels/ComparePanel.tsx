@@ -1,4 +1,11 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
+import { ModelUsageBadge } from "../components/ModelUsageBadge";
+import {
+  buildCookbookPricingLookup,
+  lookupPriceRates,
+  type ModelPriceRates,
+  type ModelUsageStats,
+} from "../modelUsage";
 
 const LazyMarkdownContent = lazy(() => import("../MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -31,7 +38,11 @@ type CompareResult = {
   ok: boolean;
   provider?: string | null;
   model?: string | null;
+  model_used?: string | null;
   latency_ms?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cost_usd?: number | null;
 };
 
 type SelectedRow = {
@@ -108,6 +119,24 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels }: Props) {
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<CompareResult[]>([]);
   const [synthesis, setSynthesis] = useState("");
+  const [pricingLookup, setPricingLookup] = useState<Map<string, ModelPriceRates>>(new Map());
+
+  const compareUsage = useCallback(
+    (r: CompareResult): ModelUsageStats | undefined => {
+      if (!r.ok) return undefined;
+      const model = r.model_used ?? (r.provider && r.model ? `${r.provider}/${r.model}` : r.model) ?? undefined;
+      const usage: ModelUsageStats = {
+        model,
+        promptTokens: r.prompt_tokens,
+        completionTokens: r.completion_tokens,
+        costUsd: r.cost_usd ?? undefined,
+        latencyMs: r.latency_ms,
+      };
+      const rates = lookupPriceRates(pricingLookup, model, r.provider ?? undefined);
+      return rates ? { ...usage, priceRates: rates } : usage;
+    },
+    [pricingLookup],
+  );
 
   const providerList = useMemo(() => {
     if (!routerModels) return [];
@@ -133,6 +162,43 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels }: Props) {
         if (!cancelled) {
           setRouterLoadError(e instanceof Error ? e.message : String(e));
         }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchEndpoint]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchEndpoint("/api/cookbook/recommendations");
+        if (cancelled || !res.ok) return;
+        const j = JSON.parse(res.text) as {
+          recommendations?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+          suggestions?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+          huggingface_local?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+        };
+        const items = [...(j.recommendations ?? []), ...(j.suggestions ?? []), ...(j.huggingface_local ?? [])];
+        if (!cancelled) setPricingLookup(buildCookbookPricingLookup(items));
+      } catch {
+        /* optional */
       }
     })();
     return () => {
@@ -334,15 +400,17 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels }: Props) {
       <div className="compare-results-scroll">
         {results.length > 0 ? (
           <div className="compare-grid">
-            {results.map((r, i) => (
+            {results.map((r, i) => {
+              const usage = compareUsage(r);
+              return (
               <article key={i} className={`compare-card ${r.ok ? "" : "compare-card-error"}`}>
-                <h4>{r.label}</h4>
-                {!blind && r.provider ? (
-                  <p className="muted compare-card-meta">
-                    {r.provider}/{r.model}
-                    {r.latency_ms != null ? ` · ${r.latency_ms} ms` : ""}
-                  </p>
-                ) : null}
+              <h4>{r.label}</h4>
+              {!blind && r.provider ? (
+                <p className="muted compare-card-meta">
+                  {r.provider}/{r.model}
+                </p>
+              ) : null}
+              {usage ? <ModelUsageBadge usage={usage} compact className="compare-card-usage" /> : null}
                 <div className="compare-card-body markdown-rendered">
                   {r.ok && r.text ? (
                     <Suspense fallback={<span>…</span>}>
@@ -353,7 +421,8 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels }: Props) {
                   )}
                 </div>
               </article>
-            ))}
+              );
+            })}
           </div>
         ) : null}
         {synthesis ? (

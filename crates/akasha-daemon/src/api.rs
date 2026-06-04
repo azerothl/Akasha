@@ -1198,12 +1198,22 @@ pub fn new_process_registry() -> ProcessRegistry {
 pub type TaskCompletionRegistry =
     Arc<RwLock<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>>;
 
+/// Last LLM call stats for a task turn (GET /api/tasks/:id, task_completed events).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LastTurnUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cost_usd: f64,
+    pub latency_ms: u64,
+}
+
 /// Per-task and per-session LLM usage (tokens, cost USD) for GET /api/tasks/:id and cost visibility.
 #[derive(Default)]
 pub struct TaskUsageStore {
     by_task: RwLock<std::collections::HashMap<Uuid, (u64, f64)>>,
     by_session: RwLock<std::collections::HashMap<String, (u64, f64)>>,
-    by_task_last_turn: RwLock<std::collections::HashMap<Uuid, (u64, u64, f64)>>,
+    by_task_last_turn: RwLock<std::collections::HashMap<Uuid, LastTurnUsage>>,
+    by_task_last_model: RwLock<std::collections::HashMap<Uuid, String>>,
 }
 
 impl TaskUsageStore {
@@ -1217,6 +1227,8 @@ impl TaskUsageStore {
         prompt_tokens: u64,
         completion_tokens: u64,
         cost_usd: f64,
+        latency_ms: u64,
+        model_used: Option<&str>,
     ) {
         let tokens = prompt_tokens.saturating_add(completion_tokens);
         {
@@ -1227,7 +1239,21 @@ impl TaskUsageStore {
         }
         {
             let mut g = self.by_task_last_turn.write().await;
-            g.insert(task_id, (prompt_tokens, completion_tokens, cost_usd));
+            g.insert(
+                task_id,
+                LastTurnUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    cost_usd,
+                    latency_ms,
+                },
+            );
+        }
+        if let Some(model) = model_used.filter(|m| !m.is_empty()) {
+            self.by_task_last_model
+                .write()
+                .await
+                .insert(task_id, model.to_string());
         }
         if !session_id.is_empty() {
             let mut g = self.by_session.write().await;
@@ -1242,8 +1268,15 @@ impl TaskUsageStore {
     pub async fn get_session(&self, session_id: &str) -> Option<(u64, f64)> {
         self.by_session.read().await.get(session_id).copied()
     }
-    pub async fn get_last_turn(&self, task_id: Uuid) -> Option<(u64, u64, f64)> {
+    pub async fn get_last_turn(&self, task_id: Uuid) -> Option<LastTurnUsage> {
         self.by_task_last_turn.read().await.get(&task_id).copied()
+    }
+    pub async fn get_last_model(&self, task_id: Uuid) -> Option<String> {
+        self.by_task_last_model
+            .read()
+            .await
+            .get(&task_id)
+            .cloned()
     }
     pub async fn reset_session(&self, session_id: &str) {
         self.by_session.write().await.remove(session_id);
@@ -9648,6 +9681,10 @@ pub(crate) async fn run_message_via_llm(
                                 .map(|u| u.completion_tokens)
                                 .unwrap_or(0);
                             let cost = resp.cost_usd.unwrap_or(0.0);
+                            let latency_ms = resp
+                                .total_duration_ns
+                                .map(|ns| ns / 1_000_000)
+                                .unwrap_or(0);
                             store
                                 .add(
                                     task_id,
@@ -9655,6 +9692,8 @@ pub(crate) async fn run_message_via_llm(
                                     prompt_tokens,
                                     completion_tokens,
                                     cost,
+                                    latency_ms,
+                                    Some(resp.model_used.as_str()),
                                 )
                                 .await;
                         }
@@ -12097,6 +12136,19 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         "status": final_status_str,
         "model_used": last_llm_model_used
     });
+    if let Some(ref store) = task_usage_store {
+        if let Some(u) = store.get_last_turn(task_id).await {
+            if let Some(obj) = final_payload.as_object_mut() {
+                obj.insert("prompt_tokens".to_string(), serde_json::json!(u.prompt_tokens));
+                obj.insert(
+                    "completion_tokens".to_string(),
+                    serde_json::json!(u.completion_tokens),
+                );
+                obj.insert("cost_usd".to_string(), serde_json::json!(u.cost_usd));
+                obj.insert("latency_ms".to_string(), serde_json::json!(u.latency_ms));
+            }
+        }
+    }
     if studio_verify_error.is_some() {
         if let Some(obj) = final_payload.as_object_mut() {
             let reason_text: String = studio_verify_display_message
@@ -15858,10 +15910,16 @@ pub async fn handle_api(
         };
         match llm_router.complete(&req).await {
             Ok(resp) => {
+                let latency_ms = resp
+                    .total_duration_ns
+                    .map(|ns| ns / 1_000_000)
+                    .unwrap_or(0);
                 let body = serde_json::json!({
                     "text": resp.text,
                     "model_used": resp.model_used,
-                    "usage": resp.usage
+                    "usage": resp.usage,
+                    "cost_usd": resp.cost_usd,
+                    "latency_ms": latency_ms,
                 });
                 return json_response("200 OK", &body.to_string());
             }
@@ -16705,8 +16763,8 @@ async fn get_task_status(
         }
     }
     let (tokens_used, cost_usd) = task_usage_store.get_task(id).await.unwrap_or((0, 0.0));
-    let (last_turn_tokens_in, last_turn_tokens_out, last_turn_cost_usd) =
-        task_usage_store.get_last_turn(id).await.unwrap_or((0, 0, 0.0));
+    let last_turn = task_usage_store.get_last_turn(id).await.unwrap_or_default();
+    let last_turn_model = task_usage_store.get_last_model(id).await;
     let (todos, todos_updated_at) = store
         .get_todos_with_updated_at(id)
         .unwrap_or_else(|_| (Vec::new(), None));
@@ -16779,9 +16837,11 @@ async fn get_task_status(
         "progress": progress_list,
         "tokens_used": tokens_used,
         "cost_usd": cost_usd,
-        "last_turn_tokens_in": last_turn_tokens_in,
-        "last_turn_tokens_out": last_turn_tokens_out,
-        "last_turn_cost_usd": last_turn_cost_usd,
+        "last_turn_tokens_in": last_turn.prompt_tokens,
+        "last_turn_tokens_out": last_turn.completion_tokens,
+        "last_turn_cost_usd": last_turn.cost_usd,
+        "last_turn_latency_ms": last_turn.latency_ms,
+        "last_turn_model_used": last_turn_model,
         "todos": todos_json,
         "suggested_actions": suggested
     });

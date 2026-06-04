@@ -450,12 +450,21 @@ async fn run_compare(
                     .total_duration_ns
                     .map(|ns| ns / 1_000_000)
                     .unwrap_or_else(|| started.elapsed().as_millis() as u64);
+                let (prompt_tokens, completion_tokens) = resp
+                    .usage
+                    .as_ref()
+                    .map(|u| (u.prompt_tokens, u.completion_tokens))
+                    .unwrap_or((0, 0));
                 serde_json::json!({
                 "label": label,
                 "provider": if blind { serde_json::Value::Null } else { serde_json::json!(provider) },
                 "model": if blind { serde_json::Value::Null } else { serde_json::json!(model) },
                 "text": resp.text,
                 "latency_ms": latency_ms,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost_usd": resp.cost_usd,
+                "model_used": resp.model_used,
                 "ok": true
             })
             }

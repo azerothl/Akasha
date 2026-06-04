@@ -21,7 +21,15 @@ import {
   buildMessageWithResearchContext,
   type ChatResearchContext,
 } from "./chatResearchContext";
-import type { ResearchReportDocument } from "./researchReportExport";
+import {
+  buildCookbookPricingLookup,
+  lookupPriceRates,
+  parseUsageFromEventPayload,
+  parseUsageFromTaskStatus,
+  type ModelPriceRates,
+  type ModelUsageStats,
+} from "./modelUsage";
+import { ModelUsageBadge } from "./components/ModelUsageBadge";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -561,6 +569,7 @@ type ChatMessageRow = {
   streaming?: boolean;
   taskId?: string;
   mapVisual?: ChatMapVisual;
+  usage?: ModelUsageStats;
 };
 
 function findLastChatAssistantIndex(messages: ChatMessageRow[], taskId: string): number {
@@ -1562,6 +1571,17 @@ function App() {
   const [chatDeliveryMode, setChatDeliveryMode] = useState<"immediate" | "steering" | "follow_up">("immediate");
   const [memoryHygieneHint, setMemoryHygieneHint] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
+  const [modelPricingLookup, setModelPricingLookup] = useState<Map<string, ModelPriceRates>>(new Map());
+
+  const enrichUsageWithPricing = useCallback(
+    (usage: ModelUsageStats | null | undefined): ModelUsageStats | undefined => {
+      if (!usage) return undefined;
+      const rates = lookupPriceRates(modelPricingLookup, usage.model);
+      return rates ? { ...usage, priceRates: rates } : usage;
+    },
+    [modelPricingLookup],
+  );
+
   const discussResearchReport = useCallback(
     (doc: ResearchReportDocument) => {
       if (!doc.reportMarkdown.trim()) return;
@@ -3932,6 +3952,43 @@ function App() {
   );
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchSystemEndpoint("/api/cookbook/recommendations");
+        if (cancelled || !res.ok) return;
+        const j = JSON.parse(res.text) as {
+          recommendations?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+          suggestions?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+          huggingface_local?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+        };
+        const items = [...(j.recommendations ?? []), ...(j.suggestions ?? []), ...(j.huggingface_local ?? [])];
+        if (!cancelled) setModelPricingLookup(buildCookbookPricingLookup(items));
+      } catch {
+        /* optional pricing data */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchSystemEndpoint]);
+
+  useEffect(() => {
     if (tab !== "memory") return;
     let cancelled = false;
     void (async () => {
@@ -4854,6 +4911,11 @@ function App() {
                 progress?: Array<{ progress_pct?: number; message?: string }>;
                 tokens_used?: number;
                 cost_usd?: number;
+                last_turn_tokens_in?: number;
+                last_turn_tokens_out?: number;
+                last_turn_cost_usd?: number;
+                last_turn_latency_ms?: number;
+                last_turn_model_used?: string;
               };
               const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
               const msg = status?.progress?.slice(-1)[0]?.message ?? "";
@@ -4943,6 +5005,7 @@ function App() {
                   setChatMapByTaskId((prev) => (prev[taskId] === doneMapVis ? prev : { ...prev, [taskId]: doneMapVis }));
                 }
                 if (taskForActiveChat) {
+                  const turnUsage = enrichUsageWithPricing(parseUsageFromTaskStatus(status));
                   let storedMapVisual: ChatMapVisual | undefined;
                   setMessages((prev) => {
                     const idx = findLastChatAssistantIndex(prev, taskId);
@@ -4950,11 +5013,11 @@ function App() {
                       const next = [...prev];
                       const keepMap = next[idx]!.mapVisual ?? doneMapVis ?? chatMapByTaskIdRef.current[taskId] ?? undefined;
                       storedMapVisual = keepMap;
-                      next[idx] = { role: "assistant", text: finalMsg, taskId, mapVisual: keepMap };
+                      next[idx] = { role: "assistant", text: finalMsg, taskId, mapVisual: keepMap, usage: turnUsage };
                       return next;
                     }
                     storedMapVisual = doneMapVis ?? undefined;
-                    return [...prev, { role: "assistant", text: finalMsg, taskId, mapVisual: doneMapVis ?? undefined }];
+                    return [...prev, { role: "assistant", text: finalMsg, taskId, mapVisual: doneMapVis ?? undefined, usage: turnUsage }];
                   });
                   if (storedMapVisual && finalMsg.trim()) {
                     try {
@@ -4997,34 +5060,27 @@ function App() {
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 replyWithTtsRef.current = false;
                 if (taskForActiveChat) {
+                  const turnUsage = enrichUsageWithPricing(parseUsageFromTaskStatus(status));
                   setMessages((prev) => {
                     const idx = findLastChatAssistantIndex(prev, taskId);
                     if (idx >= 0) {
                       const next = [...prev];
                       const MAX_FAILURE_CHAT_CHARS = 2500;
                       const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
-                      const tokensUsed = status?.tokens_used;
-                      const costUsd = status?.cost_usd;
-                      const suffixParts: string[] = [];
-                      if (typeof tokensUsed === "number") suffixParts.push(`Tokens: ${tokensUsed}`);
-                      if (typeof costUsd === "number" && Number.isFinite(costUsd) && Math.abs(costUsd) > 0) suffixParts.push(`Coût: ${costUsd.toFixed(4)} USD`);
-                      const suffix = suffixParts.length > 0 ? `\n\n${suffixParts.join(" · ")}` : "";
-                      const composed = `${baseMsg}${suffix}`;
-                      const finalMsg = composed.length > MAX_FAILURE_CHAT_CHARS ? composed.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…" : composed;
-                      next[idx] = { role: "assistant", text: finalMsg, error: true };
+                      const finalMsg =
+                        baseMsg.length > MAX_FAILURE_CHAT_CHARS
+                          ? baseMsg.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…"
+                          : baseMsg;
+                      next[idx] = { role: "assistant", text: finalMsg, error: true, taskId, usage: turnUsage };
                       return next;
                     }
                     const MAX_FAILURE_CHAT_CHARS = 2500;
                     const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
-                    const tokensUsed = status?.tokens_used;
-                    const costUsd = status?.cost_usd;
-                    const suffixParts: string[] = [];
-                    if (typeof tokensUsed === "number") suffixParts.push(`Tokens: ${tokensUsed}`);
-                    if (typeof costUsd === "number" && Number.isFinite(costUsd) && Math.abs(costUsd) > 0) suffixParts.push(`Coût: ${costUsd.toFixed(4)} USD`);
-                    const suffix = suffixParts.length > 0 ? `\n\n${suffixParts.join(" · ")}` : "";
-                    const composed = `${baseMsg}${suffix}`;
-                    const finalMsg = composed.length > MAX_FAILURE_CHAT_CHARS ? composed.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…" : composed;
-                    return [...prev, { role: "assistant", text: finalMsg, error: true }];
+                    const finalMsg =
+                      baseMsg.length > MAX_FAILURE_CHAT_CHARS
+                        ? baseMsg.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…"
+                        : baseMsg;
+                    return [...prev, { role: "assistant", text: finalMsg, error: true, taskId, usage: turnUsage }];
                   });
                   delete ackTextByTaskRef.current[taskId];
                 }
@@ -5769,8 +5825,17 @@ function App() {
                                                       </>
                                                     );
                                                   })() : null}
-                                                  {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
-                                                    <span className="chat-subagents-event-model">— {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
+                                                  {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") ? (
+                                                    (() => {
+                                                      const usage = enrichUsageWithPricing(parseUsageFromEventPayload(ev.payload));
+                                                      if (usage) {
+                                                        return <ModelUsageBadge usage={usage} compact className="chat-subagents-event-usage" />;
+                                                      }
+                                                      const p = ev.payload as { model_used?: string | null };
+                                                      return p.model_used ? (
+                                                        <span className="chat-subagents-event-model">— {t("tasks.model_used")}: {p.model_used}</span>
+                                                      ) : null;
+                                                    })()
                                                   ) : null}
                                                   {ev.payload && typeof ev.payload === "object" && ev.event_type === "task_decomposed" ? (
                                                     (() => {
