@@ -93,6 +93,18 @@ pub enum MemoryResponse {
     HygienePurge(Result<(u64, u64), String>),
 }
 
+/// Receive a memory-actor response. Safe from Tokio worker threads (uses `block_in_place`).
+#[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+fn recv_memory_response(
+    resp_rx: tokio::sync::oneshot::Receiver<MemoryResponse>,
+) -> Result<MemoryResponse, ()> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(|| resp_rx.blocking_recv().map_err(|_| ()))
+    } else {
+        resp_rx.blocking_recv().map_err(|_| ())
+    }
+}
+
 /// Client handle: Send + Sync, can be used from async code.
 #[derive(Clone)]
 pub struct LongTermMemoryClient {
@@ -115,7 +127,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::Search { query_text, top_k, filter }, resp_tx)).is_err() {
                 return Vec::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Search(entries)) => entries,
                 _ => Vec::new(),
             }
@@ -145,7 +157,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at, explicit_links }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Promote(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -166,7 +178,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::List { limit, offset }, resp_tx)).is_err() {
                 return (Vec::new(), 0);
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::List(pair)) => pair,
                 _ => (Vec::new(), 0),
             }
@@ -186,7 +198,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::Delete { id }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Delete(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -206,7 +218,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::HasDailySummary { date }, resp_tx)).is_err() {
                 return false;
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::HasDailySummary(exists)) => exists,
                 _ => false,
             }
@@ -226,7 +238,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::ForgetByQuery { query }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::ForgetByQuery(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -246,7 +258,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::Stats, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Stats(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -274,7 +286,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::EmitEvent { event_type, payload, entity_id, process_id, session_id, task_id, importance, scope, tags }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::EmitEvent(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -294,7 +306,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::SearchEpisodic { filter, limit }, resp_tx)).is_err() {
                 return Vec::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::SearchEpisodic(events)) => events,
                 _ => Vec::new(),
             }
@@ -314,7 +326,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::GetFactsByEntity { entity_id, limit }, resp_tx)).is_err() {
                 return Vec::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::GetFactsByEntity(facts)) => facts,
                 _ => Vec::new(),
             }
@@ -334,7 +346,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::GetRelatedIds { entry_id, kind, limit }, resp_tx)).is_err() {
                 return Vec::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::GetRelatedIds(ids)) => ids,
                 _ => Vec::new(),
             }
@@ -357,7 +369,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::GetContentsByIds { ids }, resp_tx)).is_err() {
                 return Vec::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::GetContentsByIds(contents)) => contents,
                 _ => Vec::new(),
             }
@@ -380,7 +392,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::GetRelationsForEntries { ids }, resp_tx)).is_err() {
                 return std::collections::HashMap::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::GetRelationsForEntries(map)) => map,
                 _ => std::collections::HashMap::new(),
             }
@@ -400,7 +412,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::RebuildSimilarRelations { max_per_entry }, resp_tx)).is_err() {
                 return Err("memory actor unavailable".to_string());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::RebuildSimilarRelations(r)) => r,
                 _ => Err("memory actor response error".to_string()),
             }
@@ -420,7 +432,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::Gc { retention_days, protect_sources }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Gc(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -439,7 +451,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::RecordRecallBoost { ids }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::RecordRecallBoost(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -458,7 +470,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::RecordRecallDecay { ids }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::RecordRecallDecay(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -477,7 +489,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::Update { id, content }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Update(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -496,7 +508,7 @@ impl LongTermMemoryClient {
             if self.tx.send((MemoryRequest::HygienePurge, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::HygienePurge(r)) => r,
                 _ => Err("no response".into()),
             }
