@@ -28,9 +28,18 @@ pub struct ToolsPolicy {
     /// Optional: domains blocked for web_fetch; takes precedence over allowed_web_domains.
     #[serde(default)]
     pub blocked_web_domains: Vec<String>,
-    /// Optional: enable web_search (requires brave_api_key from vault or BRAVE_API_KEY env).
+    /// Optional: enable web_search (multi-provider; keyless SearXNG + DuckDuckGo if no API keys).
     #[serde(default)]
     pub web_search_enabled: bool,
+    /// Primary provider: `auto` (default), `brave`, `searxng`, `duckduckgo`, `tavily`, `serper`, `google_pse`, or `disabled`.
+    #[serde(default)]
+    pub search_provider: Option<String>,
+    /// Fallback providers after primary (e.g. `["duckduckgo", "searxng"]`). Odysseus-style chain.
+    #[serde(default)]
+    pub search_fallback_chain: Vec<String>,
+    /// SearXNG instance base URL (no API key). Default https://searx.be ; override with SEARXNG_URL env.
+    #[serde(default)]
+    pub searxng_url: Option<String>,
     /// Optional: enable Cloudflare Browser Rendering crawl (`web_crawl` / `web_crawl_status`). See spec/53.
     #[serde(default)]
     pub web_crawl_enabled: bool,
@@ -40,6 +49,14 @@ pub struct ToolsPolicy {
     /// Brave Search API key (set by daemon from vault "brave_api_key"; not in YAML). Takes precedence over BRAVE_API_KEY env.
     #[serde(skip)]
     pub brave_api_key: Option<String>,
+    #[serde(skip)]
+    pub tavily_api_key: Option<String>,
+    #[serde(skip)]
+    pub serper_api_key: Option<String>,
+    #[serde(skip)]
+    pub google_pse_key: Option<String>,
+    #[serde(skip)]
+    pub google_pse_cx: Option<String>,
     /// Cloudflare API token (vault `cloudflare_api_token` or env `CLOUDFLARE_API_TOKEN`). Not serialized in YAML.
     #[serde(skip)]
     pub cloudflare_api_token: Option<String>,
@@ -140,6 +157,19 @@ impl ToolsPolicy {
                 .require_approval
                 .iter()
                 .any(|a| a.trim().to_lowercase() == "write_file")
+    }
+
+    /// Inject search/crawl API keys from the vault (not serialized in YAML).
+    pub fn apply_vault_api_keys<F>(&mut self, get: F)
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        self.brave_api_key = get("brave_api_key");
+        self.tavily_api_key = get("tavily_api_key");
+        self.serper_api_key = get("serper_api_key");
+        self.google_pse_key = get("google_pse_key");
+        self.google_pse_cx = get("google_pse_cx");
+        self.cloudflare_api_token = get("cloudflare_api_token");
     }
 
     /// Load policy from a YAML file. Missing file or empty content returns default (deny-all).
@@ -651,9 +681,12 @@ impl ToolsPolicy {
             "web_search" => {
                 if !self.web_search_enabled {
                     notes.push("operational:web_search_disabled_in_policy".to_string());
-                }
-                if self.brave_api_key.as_deref().unwrap_or("").trim().is_empty() {
-                    notes.push("operational:missing_brave_api_key".to_string());
+                } else if !crate::web_search::any_provider_available(self) {
+                    notes.push("operational:web_search_no_provider".to_string());
+                } else if self.brave_api_key.as_deref().unwrap_or("").trim().is_empty()
+                    && std::env::var("BRAVE_API_KEY").map(|k| k.trim().is_empty()).unwrap_or(true)
+                {
+                    notes.push("operational:web_search_keyless_fallback".to_string());
                 }
             }
             "web_fetch" => {

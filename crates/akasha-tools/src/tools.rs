@@ -1643,102 +1643,15 @@ pub async fn web_fetch(url: &str, policy: &crate::policy::ToolsPolicy) -> Result
     ))
 }
 
-/// Web search via Brave Search API. Uses policy.brave_api_key (from vault) if set, else BRAVE_API_KEY env. Feature "web".
+/// Web search with multi-provider fallback (Brave, SearXNG, DuckDuckGo, Tavily, Serper, Google PSE). Feature "web".
 #[cfg(feature = "web")]
 pub async fn web_search(
     query: &str,
     max_results: u32,
     policy: &crate::policy::ToolsPolicy,
 ) -> Result<(String, ToolResult)> {
-    if !policy.web_search_enabled {
-        return Ok((
-            String::new(),
-            ToolResult {
-                tool: "web_search".to_string(),
-                success: false,
-                summary: "web_search not enabled in tools_policy (web_search_enabled: true)".to_string(),
-                detail: Some(query.to_string()),
-            },
-        ));
-    }
-    let api_key: String = policy
-        .brave_api_key
-        .clone()
-        .or_else(|| std::env::var("BRAVE_API_KEY").ok())
-        .unwrap_or_default();
-    if api_key.is_empty() {
-        return Ok((
-            String::new(),
-            ToolResult {
-                tool: "web_search".to_string(),
-                success: false,
-                summary: "BRAVE_API_KEY not set (vault key 'brave_api_key' or env BRAVE_API_KEY)".to_string(),
-                detail: Some(query.to_string()),
-            },
-        ));
-    }
-    let url = format!(
-        "https://api.search.brave.com/res/v1/web/search?q={}&count={}",
-        urlencoding::encode(query),
-        max_results.min(10).max(1)
-    );
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .context("web_search build client")?;
-    let res = client
-        .get(&url)
-        .header("X-Subscription-Token", api_key)
-        .send()
-        .await
-        .context("web_search send")?;
-    let status = res.status();
-    if !status.is_success() {
-        let body = res.text().await.unwrap_or_default();
-        const PREVIEW_LEN: usize = 200;
-        const DETAIL_LEN: usize = 2000;
-        let body_detail = &body[..body.len().min(DETAIL_LEN)];
-        let summary = if body.is_empty() {
-            format!("{}", status)
-        } else if body.len() > PREVIEW_LEN {
-            format!("{} {}...", status, &body[..PREVIEW_LEN])
-        } else {
-            format!("{} {}", status, &body)
-        };
-        return Ok((
-            String::new(),
-            ToolResult {
-                tool: "web_search".to_string(),
-                success: false,
-                summary,
-                detail: Some(format!("query: {}\nresponse_body_truncated: {}", query, body_detail)),
-            },
-        ));
-    }
-    let json: serde_json::Value = res.json().await.context("web_search json")?;
-    let results: &[serde_json::Value] = json
-        .get("web")
-        .and_then(|w| w.get("results"))
-        .and_then(|r| r.as_array())
-        .map(|v| v.as_slice())
-        .unwrap_or(&[]);
-    let mut lines: Vec<String> = Vec::new();
-    for (i, r) in results.iter().enumerate() {
-        let title = r.get("title").and_then(|t| t.as_str()).unwrap_or("");
-        let url_str = r.get("url").and_then(|u| u.as_str()).unwrap_or("");
-        let desc = r.get("description").and_then(|d| d.as_str()).unwrap_or("");
-        lines.push(format!("{}. {} | {} | {}", i + 1, title, url_str, desc));
-    }
-    let result_text = lines.join("\n");
-    Ok((
-        result_text,
-        ToolResult {
-            tool: "web_search".to_string(),
-            success: true,
-            summary: format!("{} result(s)", results.len()),
-            detail: Some(query.to_string()),
-        },
-    ))
+    let (text, result, _provider) = crate::web_search::web_search_routed(query, max_results, policy).await?;
+    Ok((text, result))
 }
 
 /// Start a Cloudflare Browser Rendering crawl job. Feature "web". See spec/53.
