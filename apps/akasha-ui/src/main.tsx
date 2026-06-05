@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { I18nProvider } from "./useI18n";
+import { NotificationProvider } from "./notifications/NotificationContext";
 import App from "./App";
 import { ResearchPreviewPage } from "./ResearchPreviewPage";
 import "./styles.css";
@@ -22,7 +23,9 @@ if (isResearchPreviewRoute()) {
   root.render(
     <React.StrictMode>
       <I18nProvider>
-        <App />
+        <NotificationProvider>
+          <App />
+        </NotificationProvider>
       </I18nProvider>
     </React.StrictMode>,
   );
