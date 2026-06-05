@@ -4,6 +4,7 @@ import {
   buildModelUsageDisplay,
   estimateCostFromRates,
   parseUsageFromTaskStatus,
+  resolveTaskUsage,
 } from "./modelUsage";
 
 describe("parseUsageFromTaskStatus", () => {
@@ -22,6 +23,33 @@ describe("parseUsageFromTaskStatus", () => {
       completionTokens: 45,
       costUsd: 0.002,
       latencyMs: 1500,
+    });
+  });
+});
+
+describe("resolveTaskUsage", () => {
+  it("falls back to task_completed event when last_turn stats are empty", () => {
+    expect(
+      resolveTaskUsage(
+        { last_turn_tokens_in: 0, last_turn_tokens_out: 0 },
+        [
+          {
+            event_type: "task_completed",
+            payload: {
+              prompt_tokens: 88,
+              completion_tokens: 42,
+              cost_usd: 0.0012,
+              model_used: "ollama/qwen3.5:9b",
+            },
+          },
+        ],
+      ),
+    ).toEqual({
+      model: "ollama/qwen3.5:9b",
+      promptTokens: 88,
+      completionTokens: 42,
+      costUsd: 0.0012,
+      latencyMs: undefined,
     });
   });
 });

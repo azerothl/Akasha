@@ -54,6 +54,41 @@ export function parseUsageFromTaskStatus(status: {
   return { model, promptTokens, completionTokens, costUsd, latencyMs };
 }
 
+type TaskStatusUsageFields = {
+  last_turn_tokens_in?: unknown;
+  last_turn_tokens_out?: unknown;
+  last_turn_cost_usd?: unknown;
+  last_turn_latency_ms?: unknown;
+  last_turn_model_used?: unknown;
+};
+
+type TaskEventUsageLike = {
+  event_type?: string;
+  payload?: unknown;
+};
+
+/** Prefer last-turn stats from GET /api/tasks/:id; fall back to task_completed / task_failed event payload. */
+export function resolveTaskUsage(
+  status: TaskStatusUsageFields,
+  events?: TaskEventUsageLike[],
+): ModelUsageStats | null {
+  const fromStatus = parseUsageFromTaskStatus(status);
+  const hasTurnTokens =
+    (fromStatus?.promptTokens ?? 0) > 0 || (fromStatus?.completionTokens ?? 0) > 0;
+  if (hasTurnTokens || (fromStatus?.costUsd ?? 0) > 0 || (fromStatus?.latencyMs ?? 0) > 0) {
+    return fromStatus;
+  }
+  if (events?.length) {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i]!;
+      if (ev.event_type !== "task_completed" && ev.event_type !== "task_failed") continue;
+      const fromEvent = parseUsageFromEventPayload(ev.payload);
+      if (fromEvent) return fromEvent;
+    }
+  }
+  return fromStatus;
+}
+
 export function parseUsageFromEventPayload(payload: unknown): ModelUsageStats | null {
   if (!payload || typeof payload !== "object") return null;
   const p = payload as Record<string, unknown>;

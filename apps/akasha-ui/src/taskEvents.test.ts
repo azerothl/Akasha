@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { collapseStreamedProgressEvents } from "./taskEvents";
+import {
+  collapseStreamedProgressEvents,
+  isTaskActiveStatus,
+  isTaskTerminalStatus,
+  mergeTaskEvents,
+  normalizeTaskStatus,
+} from "./taskEvents";
 
 describe("collapseStreamedProgressEvents", () => {
   it("keeps only the latest streamed message per task and percent", () => {
@@ -52,5 +58,28 @@ describe("collapseStreamedProgressEvents", () => {
     ];
     const compact = collapseStreamedProgressEvents(events, "root");
     expect(compact).toHaveLength(2);
+  });
+});
+
+describe("task status helpers", () => {
+  it("normalizes status casing", () => {
+    expect(normalizeTaskStatus("Completed")).toBe("completed");
+    expect(isTaskTerminalStatus("Completed")).toBe(true);
+    expect(isTaskActiveStatus("Running")).toBe(true);
+    expect(isTaskActiveStatus("completed")).toBe(false);
+  });
+});
+
+describe("mergeTaskEvents", () => {
+  it("unions events without dropping previous rows", () => {
+    const prev = [{ event_type: "tool_invoked", at: "t1", payload: { tool: "grep" } }];
+    const incoming = [{ event_type: "task_completed", at: "t2", payload: {} }];
+    const merged = mergeTaskEvents(prev, incoming);
+    expect(merged).toHaveLength(2);
+  });
+
+  it("returns previous list when incoming is empty", () => {
+    const prev = [{ event_type: "progress_update", at: "t1" }];
+    expect(mergeTaskEvents(prev, [])).toEqual(prev);
   });
 });

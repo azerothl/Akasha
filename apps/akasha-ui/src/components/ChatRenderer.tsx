@@ -31,6 +31,8 @@ type Props = {
   agentName?: string;
   renderMapVisual?: (m: ChatMessage) => ReactNode;
   renderAskUserChoice?: (choice: string, index: number) => ReactNode;
+  onOpenTaskDetail?: (taskId: string) => void;
+  taskDetailLabel?: string;
 };
 
 export function ChatRenderer({
@@ -42,6 +44,8 @@ export function ChatRenderer({
   agentName = "Akasha",
   renderMapVisual,
   renderAskUserChoice,
+  onOpenTaskDetail,
+  taskDetailLabel = "View task",
 }: Props) {
   return (
     <div className="chat-messages-column">
@@ -99,7 +103,20 @@ export function ChatRenderer({
                 {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}
               </div>
             )}
-            {m.role === "assistant" && m.usage && !m.streaming ? <ModelUsageBadge usage={m.usage} compact /> : null}
+            {m.role === "assistant" && !m.streaming && (m.usage || (m.taskId && onOpenTaskDetail)) ? (
+              <div className="message-footer">
+                {m.usage ? <ModelUsageBadge usage={m.usage} compact /> : null}
+                {m.taskId && onOpenTaskDetail ? (
+                  <button
+                    type="button"
+                    className="chat-message-task-btn"
+                    onClick={() => onOpenTaskDetail(m.taskId!)}
+                  >
+                    {taskDetailLabel}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {renderMapVisual ? renderMapVisual(m) : null}
           </div>
         );
