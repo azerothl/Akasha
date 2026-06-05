@@ -111,6 +111,7 @@ async fn send_message_ack(
     new_session: Option<bool>,
     queue_mode: Option<String>,
     target_task_id: Option<String>,
+    priority: Option<String>,
     port: Option<u16>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
@@ -158,6 +159,12 @@ async fn send_message_ack(
     if let Some(ref tid) = target_task_id {
         if !tid.trim().is_empty() {
             body["target_task_id"] = serde_json::Value::String(tid.trim().to_string());
+        }
+    }
+    if let Some(ref p) = priority {
+        let p = p.trim().to_lowercase();
+        if p == "high" {
+            body["priority"] = serde_json::Value::String("high".to_string());
         }
     }
     let resp = client
@@ -1171,6 +1178,79 @@ async fn create_schedule(
     Ok(json)
 }
 
+/// Create schedule with full body: POST /api/schedules.
+#[tauri::command]
+async fn create_schedule_extended(
+    body: serde_json::Value,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/schedules", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// List event triggers: GET /api/event-triggers.
+#[tauri::command]
+async fn get_event_triggers(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/event-triggers", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// Create event trigger: POST /api/event-triggers.
+#[tauri::command]
+async fn create_event_trigger(
+    body: serde_json::Value,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/event-triggers", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// Delete event trigger: DELETE /api/event-triggers/:id.
+#[tauri::command]
+async fn delete_event_trigger(trigger_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!(
+        "{}/api/event-triggers/{}",
+        daemon_base_url(port),
+        trigger_id
+    );
+    let client = http_client();
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 /// Update schedule: PUT /api/schedules/:id (e.g. channel_context / prompt).
 #[tauri::command]
 async fn put_schedule(
@@ -1945,6 +2025,10 @@ pub fn run() {
             get_schedules,
             get_schedule_by_id,
             create_schedule,
+            create_schedule_extended,
+            get_event_triggers,
+            create_event_trigger,
+            delete_event_trigger,
             put_schedule,
             delete_schedule,
             get_calendar_events,

@@ -10,8 +10,12 @@ import { GeoMapView } from "./GeoMapView";
 import { SystemHealthPanel } from "./SystemHealthPanel";
 import { AppNavigation } from "./components/AppNavigation";
 import { PermissionsBell } from "./components/PermissionsBell";
+import { NotificationCenter } from "./components/NotificationCenter";
+import { AppNotificationsSync } from "./components/AppNotificationsSync";
+import { InfoTip, Tooltip } from "./components/Tooltip";
 import { ChatRenderer } from "./components/ChatRenderer";
 import { ChatCompositionBar } from "./components/ChatCompositionBar";
+import { MonoIcon } from "./components/MonoIcon";
 import { useHashRoute } from "./hooks/useHashRoute";
 import { NAV_ITEMS } from "./navigation/types";
 import { ComparePanel } from "./panels/ComparePanel";
@@ -21,6 +25,7 @@ import {
   buildMessageWithResearchContext,
   type ChatResearchContext,
 } from "./chatResearchContext";
+import type { ResearchReportDocument } from "./researchReportExport";
 import {
   buildCookbookPricingLookup,
   lookupPriceRates,
@@ -30,6 +35,9 @@ import {
   type ModelUsageStats,
 } from "./modelUsage";
 import { ModelUsageBadge } from "./components/ModelUsageBadge";
+import { TaskExecutionSteps } from "./components/TaskExecutionSteps";
+import { CreateTaskDialog } from "./components/CreateTaskDialog";
+import { buildExecutionSteps } from "./tasks/buildExecutionSteps";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -47,6 +55,7 @@ const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
 const TASK_ORCHESTRATION_DEBUG_STORAGE_KEY = "akasha_task_orchestration_debug";
+const TASK_SIDEBAR_STORAGE_KEY = "akasha_task_sidebar_open";
 const CHAT_TIPS_STORAGE_KEY = "akasha_ui_chat_tips";
 const CHAT_PROMPT_CHIPS_STORAGE_KEY = "akasha_ui_prompt_chips";
 const CHAT_BUDDY_STORAGE_KEY = "akasha_ui_buddy";
@@ -55,6 +64,7 @@ const DENSITY_STORAGE_KEY = "akasha_ui_density";
 const CHAT_AGENT_MODE_KEY = "akasha_chat_agent_mode";
 const CHAT_WEB_SEARCH_KEY = "akasha_chat_web_search";
 const CHAT_INCOGNITO_KEY = "akasha_chat_incognito";
+const CHAT_COMPANION_OPEN_KEY = "akasha_companion_open";
 
 export type ChatThreadEntry = {
   id: string;
@@ -1338,6 +1348,7 @@ function App() {
   );
   const { tab, setTab } = useHashRoute("chat");
   const [sidebarNavCollapsed, setSidebarNavCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [uiDensity, setUiDensity] = useState<UiDensity>(() => {
     try {
       const s = localStorage.getItem(DENSITY_STORAGE_KEY);
@@ -1350,7 +1361,20 @@ function App() {
   const [chatAgentMode, setChatAgentMode] = useState(() => localStorage.getItem(CHAT_AGENT_MODE_KEY) !== "0");
   const [chatWebSearch, setChatWebSearch] = useState(() => localStorage.getItem(CHAT_WEB_SEARCH_KEY) === "1");
   const [chatIncognito, setChatIncognito] = useState(() => localStorage.getItem(CHAT_INCOGNITO_KEY) === "1");
-  const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(() => {
+    try {
+      const raw = localStorage.getItem(TASK_SIDEBAR_STORAGE_KEY);
+      if (raw === "0") return false;
+      if (raw === "1") return true;
+    } catch {
+      /* ignore */
+    }
+    return true;
+  });
+  const [createTaskDialogOpen, setCreateTaskDialogOpen] = useState(false);
+  const [eventTriggers, setEventTriggers] = useState<
+    Array<{ id: string; name: string; enabled: boolean; trigger_type: string; last_fired_at?: string | null }>
+  >([]);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [uiMode, setUiMode] = useState<UiMode>(loadSavedUiMode);
   const [showOnboarding, setShowOnboarding] = useState(() => {
@@ -1634,14 +1658,13 @@ function App() {
       return {};
     }
   });
-  /** Tâches : sections pliables (liste / étapes / événements), mémorisées localement. */
+  /** Tâches : sections pliables (étapes / événements), mémorisées localement. */
   const [taskPanelSections, setTaskPanelSections] = useState(() => {
     try {
       const raw = localStorage.getItem("akasha_task_panel_sections");
       if (raw) {
         const j = JSON.parse(raw) as { list?: boolean; steps?: boolean; events?: boolean };
         return {
-          list: j.list !== false,
           steps: j.steps !== false,
           events: j.events !== false,
         };
@@ -1649,7 +1672,7 @@ function App() {
     } catch {
       /* ignore */
     }
-    return { list: true, steps: true, events: true };
+    return { steps: true, events: true };
   });
   const [taskOrchestrationDebugLevel, setTaskOrchestrationDebugLevel] = useState<TaskOrchestrationDebugLevel>(() => {
     try {
@@ -1663,7 +1686,16 @@ function App() {
     }
     return loadSavedUiMode() === "expert" ? "normal" : "minimal";
   });
-  const toggleTaskPanelSection = useCallback((key: "list" | "steps" | "events") => {
+  const setTaskSidebarOpen = useCallback((open: boolean) => {
+    setRightSidebarOpen(open);
+    try {
+      localStorage.setItem(TASK_SIDEBAR_STORAGE_KEY, open ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const toggleTaskPanelSection = useCallback((key: "steps" | "events") => {
     setTaskPanelSections((prev) => {
       const next = { ...prev, [key]: !prev[key] };
       try {
@@ -1775,7 +1807,7 @@ function App() {
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
   /** Fil d'activité des agents : ouvert par défaut pour suivre les étapes (assistant conversationnel). */
-  const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(false);
+  const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
   /** Per-root task: whether the discussion block is collapsed in the sub-agent panel (true = collapsed). */
   const [collapsedRootTasks, setCollapsedRootTasks] = useState<Record<string, boolean>>({});
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
@@ -2196,6 +2228,7 @@ function App() {
   });
   const [tipBannerText, setTipBannerText] = useState<string | null>(null);
   const [tipBannerDismissed, setTipBannerDismissed] = useState(false);
+  const [companionOpen, setCompanionOpen] = useState(() => localStorage.getItem(CHAT_COMPANION_OPEN_KEY) === "1");
 
   const setChatTipsEnabledAndSave = useCallback((next: boolean) => {
     setChatTipsEnabled(next);
@@ -2897,8 +2930,9 @@ function App() {
     fetchDocs();
   }, [tab, fetchDocs]);
 
-  const fetchTasksList = useCallback(async (options?: { silent?: boolean }) => {
+  const fetchTasksList = useCallback(async (options?: { silent?: boolean; selectTaskId?: string }) => {
     const silent = options?.silent === true;
+    const selectTaskId = options?.selectTaskId;
     if (!silent) setTasksLoading(true);
     try {
       const data = await invoke<{ tasks?: Array<{ id?: string; status?: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string }> }>("get_tasks", {
@@ -2916,7 +2950,12 @@ function App() {
         }))
         .filter((t) => t.id);
       setTasksList((prev) => (tasksListsEqual(prev, tasks) ? prev : tasks));
-      setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
+      if (selectTaskId) {
+        const idx = tasks.findIndex((t) => t.id === selectTaskId);
+        if (idx >= 0) setTasksSelected(idx);
+      } else {
+        setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
+      }
       setCached("tasks", tasks);
     } catch {
       setTasksList([]);
@@ -3099,14 +3138,31 @@ function App() {
     );
   }, [tasksList]);
 
-  const taskStepsSummary = useMemo(() => {
-    const total = taskStepsTodos.length;
-    const done = taskStepsTodos.filter((step) => step.status === "done").length;
-    const cancelled = taskStepsTodos.filter((step) => step.status === "cancelled").length;
-    const pending = Math.max(0, total - done - cancelled);
-    const progressPct = total > 0 ? Math.round((done / total) * 100) : 0;
-    return { total, done, cancelled, pending, progressPct };
-  }, [taskStepsTodos]);
+  const taskExecutionView = useMemo(() => {
+    return buildExecutionSteps(tasksEvents, tasksList, selectedTask?.id, taskStepsTodos);
+  }, [tasksEvents, tasksList, selectedTask?.id, taskStepsTodos]);
+
+  const fetchEventTriggers = useCallback(async () => {
+    try {
+      const data = await invoke<{ triggers?: Array<{ id?: string; name?: string; enabled?: boolean; trigger_type?: string; last_fired_at?: string | null }> }>(
+        "get_event_triggers",
+        { port: DAEMON_PORT }
+      );
+      setEventTriggers(
+        (data?.triggers ?? [])
+          .filter((t): t is { id: string; name: string; enabled: boolean; trigger_type: string; last_fired_at?: string | null } => Boolean(t.id))
+          .map((t) => ({
+            id: t.id!,
+            name: t.name ?? t.id!,
+            enabled: t.enabled !== false,
+            trigger_type: t.trigger_type ?? "webhook",
+            last_fired_at: t.last_fired_at,
+          }))
+      );
+    } catch {
+      setEventTriggers([]);
+    }
+  }, []);
 
   const selectedTaskSummary = useMemo(() => {
     if (!selectedTask) return null;
@@ -3468,10 +3524,11 @@ function App() {
       setTasksList(cached);
       setTasksSelected((prev) => (prev >= cached.length && cached.length > 0 ? cached.length - 1 : prev));
       setTasksLoading(false);
-      return;
+    } else {
+      fetchTasksList();
     }
-    fetchTasksList();
-  }, [tab, fetchTasksList]);
+    void fetchEventTriggers();
+  }, [tab, fetchTasksList, fetchEventTriggers]);
 
   const applyChatStreamProgress = useCallback((taskId: string, msg: string) => {
     if (!taskId) return;
@@ -5126,7 +5183,21 @@ function App() {
   handleSendRef.current = handleSend;
 
   return (
-    <div className={`app ui-mode-${uiMode}`}>
+    <div className={`app ui-mode-${uiMode}${mobileSidebarOpen ? " app--sidebar-open" : ""}`}>
+      <AppNotificationsSync
+        routerError={routerError}
+        docError={docError}
+        memoryError={memoryError}
+        missionError={missionError}
+        calendarTaskDetailError={calendarTaskDetailError}
+        scheduleDetailError={scheduleDetailError}
+        pluginStatusError={pluginStatusError}
+        pluginReputationResetError={pluginReputationResetError}
+        agentProfileError={agentProfileError}
+        userProfileError={userProfileError}
+        userRagError={userRagError}
+        projectGraphError={projectGraphError}
+      />
       <a href="#main-content" className="skip-link">Aller au contenu principal</a>
       {updateBannerInfo && (
         <div className="update-banner" role="region" aria-label={t("update.banner_label")}>
@@ -5168,12 +5239,20 @@ function App() {
         </div>
       )}
       <div className="app-body">
-        <aside className="sidebar-left" aria-label="Navigation principale">
+        {mobileSidebarOpen ? (
+          <button
+            type="button"
+            className="sidebar-mobile-backdrop"
+            aria-label={t("common.close")}
+            onClick={() => setMobileSidebarOpen(false)}
+          />
+        ) : null}
+        <aside className={`sidebar-left${mobileSidebarOpen ? " sidebar-left--open" : ""}${sidebarNavCollapsed ? " sidebar-left--collapsed" : ""}`} aria-label="Navigation principale">
           <div className="sidebar-left-top">
             <h1 className="logo">Akasha</h1>
             <p className="tagline">Local-first AI assistant</p>
           </div>
-          <AppNavigation tab={tab} setTab={setTab} t={t} collapsed={sidebarNavCollapsed} onToggleCollapse={() => setSidebarNavCollapsed((c) => !c)} />
+          <AppNavigation tab={tab} setTab={(t) => { setTab(t); setMobileSidebarOpen(false); }} t={t} collapsed={sidebarNavCollapsed} onToggleCollapse={() => setSidebarNavCollapsed((c) => !c)} />
           <div className="sidebar-left-bottom">
             <div className="daemon-status" role="status" aria-live="polite">
               <span
@@ -5196,7 +5275,9 @@ function App() {
                   aria-haspopup="true"
                   title={t("pending_actions.title")}
                 >
-                  <span className="header-pending-actions-icon" aria-hidden>⚠</span>
+                  <span className="header-pending-actions-icon" aria-hidden>
+                    <MonoIcon name="warning" />
+                  </span>
                   <span className="header-pending-actions-badge">{Object.keys(pendingHumanInput).length}</span>
                   <span className="header-pending-actions-label">{t("pending_actions.action_required")}</span>
                 </button>
@@ -5233,30 +5314,48 @@ function App() {
           <div className="container-main-inner">
             <header className="view-header">
               <div className="view-header-main">
-                <h2 className="view-title">{t("tabs." + tab)}</h2>
-                <p className="view-subtitle">{isSimpleMode ? t("settings.ui_mode_hint") : t("chat.follow_tasks")}</p>
+                <h2 className="view-title">
+                  {t("tabs." + tab)}
+                  <InfoTip label={t("tabs." + tab)} content={isSimpleMode ? t("settings.ui_mode_hint") : t("chat.follow_tasks")} />
+                </h2>
               </div>
               <div className="view-header-actions">
-                <PermissionsBell fetchEndpoint={fetchSystemEndpoint} locale={locale} />
-                <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
-                <span
-                  className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
-                  role="status"
-                  aria-live="polite"
-                  title={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
-                >
-                  {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
-                </span>
                 <button
                   type="button"
-                  className="sidebar-right-toggle"
-                  onClick={() => setRightSidebarOpen((o) => !o)}
-                  aria-expanded={rightSidebarOpen}
-                  aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
-                  title={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                  className="sidebar-mobile-toggle"
+                  onClick={() => setMobileSidebarOpen((o) => !o)}
+                  aria-expanded={mobileSidebarOpen}
+                  aria-label={t("nav.toggle_sidebar")}
                 >
-                  {rightSidebarOpen ? "▐" : "▌"}
+                  ☰
                 </button>
+                <NotificationCenter />
+                <PermissionsBell fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+                <Tooltip content={uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}>
+                  <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
+                </Tooltip>
+                <Tooltip content={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}>
+                  <span
+                    className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+                  </span>
+                </Tooltip>
+                {tab !== "tasks" && (
+                  <Tooltip content={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}>
+                    <button
+                      type="button"
+                      className="sidebar-right-toggle"
+                      onClick={() => setRightSidebarOpen((o) => !o)}
+                      aria-expanded={rightSidebarOpen}
+                      aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                    >
+                      {rightSidebarOpen ? "▐" : "▌"}
+                    </button>
+                  </Tooltip>
+                )}
               </div>
             </header>
       <main className="main" id="main-content" tabIndex={-1}>
@@ -5548,26 +5647,20 @@ function App() {
                 {locale === "en" ? "Incognito — memory promotion disabled for this session (UI flag)." : "Incognito — promotion mémoire désactivée pour cette session (indicateur UI)."}
               </p>
             ) : null}
-            <div className="panel-hero chat-panel-hero">
-              <div>
-                <h3 className="panel-hero-title">{t("chat.hero_title")}</h3>
-                <p className="panel-hero-text">{isSimpleMode ? t("chat.hero_simple") : t("chat.hero_expert")}</p>
+            {(messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
+              <div className="chat-panel-toolbar">
+                {messages.length > 0 && (
+                  <button type="button" className="btn-secondary chat-toolbar-btn" onClick={exportChatTranscript}>
+                    {t("chat.export_transcript")}
+                  </button>
+                )}
+                {Object.keys(runningTaskChips).length > 0 && (
+                  <button type="button" className="btn-secondary chat-toolbar-btn" onClick={() => setTab("tasks")}>
+                    {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
+                  </button>
+                )}
               </div>
-              {(messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
-                <div className="panel-hero-aside">
-                  {messages.length > 0 && (
-                    <button type="button" className="panel-hero-action panel-hero-action-secondary" onClick={exportChatTranscript}>
-                      {t("chat.export_transcript")}
-                    </button>
-                  )}
-                  {Object.keys(runningTaskChips).length > 0 && (
-                    <button type="button" className="panel-hero-action" onClick={() => setTab("tasks")}>
-                      {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+            )}
             <div className="chat-area">
               {messages.length === 0 ? (
                 <div className="chat-placeholder">
@@ -6000,15 +6093,39 @@ function App() {
               </div>
             )}
             {companionBubbleText && (
-              <div className="chat-companion-row" role="status" aria-live="polite">
-                <span className="chat-companion-avatar" aria-hidden>
-                  🦆
-                </span>
-                <div className="chat-companion-bubble">
-                  <span className="chat-companion-label">{t("chat.companion_label")}</span>
-                  <span className="chat-companion-text">{companionBubbleText}</span>
-                </div>
-                {chatTipsEnabled && tipBannerText && !tipBannerDismissed && (
+              <div
+                className={`chat-companion-row${companionOpen ? " chat-companion-row--open" : ""}`}
+                role="status"
+                aria-live="polite"
+              >
+                <button
+                  type="button"
+                  className="chat-companion-toggle"
+                  onClick={() => {
+                    setCompanionOpen((open) => {
+                      const next = !open;
+                      try {
+                        localStorage.setItem(CHAT_COMPANION_OPEN_KEY, next ? "1" : "0");
+                      } catch {
+                        /* ignore */
+                      }
+                      return next;
+                    });
+                  }}
+                  aria-expanded={companionOpen}
+                  aria-controls="chat-companion-message"
+                  aria-label={t("chat.companion_label")}
+                  title={t("chat.companion_label")}
+                >
+                  <img src="/akasha-icon.png" alt="" className="chat-companion-icon" width={20} height={20} />
+                </button>
+                {companionOpen ? (
+                  <div id="chat-companion-message" className="chat-companion-bubble">
+                    <span className="chat-companion-label">{t("chat.companion_label")}</span>
+                    <span className="chat-companion-text">{companionBubbleText}</span>
+                  </div>
+                ) : null}
+                {companionOpen && chatTipsEnabled && tipBannerText && !tipBannerDismissed ? (
                   <button
                     type="button"
                     className="chat-companion-dismiss"
@@ -6020,33 +6137,38 @@ function App() {
                   >
                     ×
                   </button>
-                )}
+                ) : null}
               </div>
             )}
+            <div className="chat-footer-tools">
             {Object.keys(runningTaskChips).length > 0 && (
-              <div className="chat-delivery-mode-row">
-                <label htmlFor="chat-delivery-mode" className="chat-delivery-mode-label">
-                  {locale === "en" ? "Delivery" : "Envoi"}
-                </label>
-                <select
-                  id="chat-delivery-mode"
-                  className="chat-delivery-mode-select"
-                  value={chatDeliveryMode}
-                  onChange={(e) =>
-                    setChatDeliveryMode(e.target.value as "immediate" | "steering" | "follow_up")
-                  }
-                  disabled={loading}
-                  title={
-                    locale === "en"
-                      ? "Steering injects mid-task; follow-up runs after the current turn"
-                      : "Steering : injection prioritaire ; follow-up : après le tour en cours"
-                  }
-                >
-                  <option value="immediate">{locale === "en" ? "Immediate" : "Immédiat"}</option>
-                  <option value="steering">Steering</option>
-                  <option value="follow_up">Follow-up</option>
-                </select>
-              </div>
+              <Tooltip
+                content={
+                  locale === "en"
+                    ? "Steering injects mid-task; follow-up runs after the current turn"
+                    : "Steering : injection prioritaire ; follow-up : après le tour en cours"
+                }
+              >
+                <div className="input-group chat-delivery-group" role="group" aria-label={locale === "en" ? "Delivery mode" : "Mode d'envoi"}>
+                  <span className="input-group-addon" id="chat-delivery-mode-label">
+                    {locale === "en" ? "Delivery" : "Envoi"}
+                  </span>
+                  <select
+                    id="chat-delivery-mode"
+                    className="input-group-field chat-delivery-select"
+                    value={chatDeliveryMode}
+                    onChange={(e) =>
+                      setChatDeliveryMode(e.target.value as "immediate" | "steering" | "follow_up")
+                    }
+                    disabled={loading}
+                    aria-labelledby="chat-delivery-mode-label"
+                  >
+                    <option value="immediate">{locale === "en" ? "Immediate" : "Immédiat"}</option>
+                    <option value="steering">Steering</option>
+                    <option value="follow_up">Follow-up</option>
+                  </select>
+                </div>
+              </Tooltip>
             )}
             <ChatCompositionBar
               locale={locale}
@@ -6079,6 +6201,7 @@ function App() {
               }}
               disabled={loading}
             />
+            </div>
             <div className="input-area">
               <input
                 ref={fileInputRef}
@@ -6089,51 +6212,70 @@ function App() {
                 className="sr-only"
                 aria-hidden
               />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Joindre un fichier"
-                title="Joindre une image ou un document"
-              >
-                Joindre
-              </button>
-              {voiceStatus?.stt_configured && (
-                <button
-                  type="button"
-                  className={`chat-voice-btn ${voiceRecording ? "recording" : ""}`}
-                  onClick={handleVoiceMessageToggle}
+              <div className="input-group" role="group" aria-label={locale === "en" ? "Compose message" : "Composer un message"}>
+                <div className="input-group-prepend">
+                  <button
+                    type="button"
+                    className="input-group-btn btn-secondary"
+                    onClick={() => fileInputRef.current?.click()}
+                    aria-label={locale === "en" ? "Attach file" : "Joindre un fichier"}
+                    title={locale === "en" ? "Attach image or document" : "Joindre une image ou un document"}
+                  >
+                    <MonoIcon name="paperclip" />
+                    <span className="input-group-btn-label">{locale === "en" ? "Attach" : "Joindre"}</span>
+                  </button>
+                  {voiceStatus?.stt_configured ? (
+                    <button
+                      type="button"
+                      className={`input-group-btn btn-secondary chat-voice-btn ${voiceRecording ? "recording" : ""}`}
+                      onClick={handleVoiceMessageToggle}
+                      disabled={loading}
+                      aria-label={
+                        voiceRecording
+                          ? locale === "en"
+                            ? "Stop recording and send"
+                            : "Arrêter l'enregistrement et envoyer"
+                          : locale === "en"
+                            ? "Voice message"
+                            : "Message vocal"
+                      }
+                      title={voiceRecording ? (locale === "en" ? "Stop and send" : "Arrêter et envoyer") : locale === "en" ? "Voice message" : "Message vocal"}
+                    >
+                      {voiceRecording ? (
+                        <span className="chat-voice-btn-inner">● {locale === "en" ? "Recording…" : "Enregistrement…"}</span>
+                      ) : (
+                        <MonoIcon name="mic" />
+                      )}
+                    </button>
+                  ) : null}
+                </div>
+                <label htmlFor="chat-input" className="sr-only">
+                  {locale === "en" ? "Your message" : "Votre message"}
+                </label>
+                <input
+                  ref={chatInputRef}
+                  id="chat-input"
+                  type="text"
+                  className="input-group-field"
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSend()}
+                  placeholder={locale === "en" ? "Your message…" : "Votre message…"}
                   disabled={loading}
-                  aria-label={voiceRecording ? "Arrêter l'enregistrement et envoyer" : "Message vocal (enregistrer puis ré-encliquer pour envoyer)"}
-                  title={voiceRecording ? "Arrêter et envoyer" : "Message vocal"}
-                >
-                  {voiceRecording ? (
-                    <span className="chat-voice-btn-inner">● Enregistrement…</span>
-                  ) : (
-                    <span className="chat-voice-btn-inner" aria-hidden>🎤</span>
-                  )}
-                </button>
-              )}
-              <label htmlFor="chat-input" className="sr-only">
-                Votre message
-              </label>
-              <input
-                ref={chatInputRef}
-                id="chat-input"
-                type="text"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSend()}
-                placeholder="Votre message…"
-                disabled={loading}
-                aria-describedby="send-hint"
-              />
-              <button
-                onClick={() => handleSend()}
-                disabled={loading || (!message.trim() && attachments.length === 0)}
-                aria-label="Envoyer le message"
-              >
-                Envoyer
-              </button>
+                  aria-describedby="send-hint"
+                />
+                <div className="input-group-append">
+                  <button
+                    type="button"
+                    className="input-group-btn btn-primary"
+                    onClick={() => handleSend()}
+                    disabled={loading || (!message.trim() && attachments.length === 0)}
+                    aria-label={locale === "en" ? "Send message" : "Envoyer le message"}
+                  >
+                    {locale === "en" ? "Send" : "Envoyer"}
+                  </button>
+                </div>
+              </div>
             </div>
             <p id="send-hint" className="hint sr-only">
               Entrée pour envoyer
@@ -6225,12 +6367,7 @@ function App() {
                 {t("common.loading")}
               </p>
             )}
-            {routerError && (
-              <div className="error-banner" role="alert">
-                {routerError}
-              </div>
-            )}
-            {!routerLoading && !routerError && routerMetrics && (
+            {!routerLoading && routerMetrics && (
               <>
                 <div className="router-metrics-toolbar">
                   <label htmlFor="router-metrics-period" className="router-metrics-period-label">
@@ -6318,13 +6455,7 @@ function App() {
                 {t("common.loading")}
               </p>
             )}
-            {docError && (
-              <div className="error-banner" role="alert">
-                {docError}
-                <p>Assurez-vous que le daemon est démarré (<code>akasha start</code>).</p>
-              </div>
-            )}
-            {!docLoading && !docError && docContent && (
+            {!docLoading && docContent && (
               <>
                 <button
                   type="button"
@@ -6351,16 +6482,34 @@ function App() {
             aria-labelledby="tab-tasks"
             className="panel activity-panel"
           >
-            <h2 className="panel-title">{t("tasks.title")}</h2>
-            <button
-              type="button"
-              className="refresh-btn"
-              onClick={() => void fetchTasksList()}
-              aria-label="Rafraîchir l’activité"
-              disabled={tasksLoading}
-            >
-              Rafraîchir
-            </button>
+            <div className="task-center-toolbar">
+              <h2 className="panel-title task-center-toolbar-title">{t("tasks.title")}</h2>
+              <div className="task-center-toolbar-actions">
+                <Tooltip content={rightSidebarOpen ? t("tasks.hide_task_list") : t("tasks.show_task_list")}>
+                  <button
+                    type="button"
+                    className="task-center-toolbar-btn sidebar-right-toggle"
+                    onClick={() => setTaskSidebarOpen(!rightSidebarOpen)}
+                    aria-expanded={rightSidebarOpen}
+                    aria-label={rightSidebarOpen ? t("tasks.hide_task_list") : t("tasks.show_task_list")}
+                  >
+                    {rightSidebarOpen ? "▐" : "▌"} {rightSidebarOpen ? t("tasks.hide_task_list") : t("tasks.show_task_list")}
+                  </button>
+                </Tooltip>
+                <button type="button" className="task-center-toolbar-btn btn-primary" onClick={() => setCreateTaskDialogOpen(true)}>
+                  + {t("tasks.create_button")}
+                </button>
+                <button
+                  type="button"
+                  className="task-center-toolbar-btn refresh-btn"
+                  onClick={() => void fetchTasksList()}
+                  aria-label={t("sidebar.refresh_tasks")}
+                  disabled={tasksLoading}
+                >
+                  {t("sidebar.refresh_tasks")}
+                </button>
+              </div>
+            </div>
             {!tasksLoading && tasksList.length > 0 && (
               <div className="task-center-summary">
                 <div className="task-center-summary-chips">
@@ -6413,212 +6562,6 @@ function App() {
               <div className="activity-panel-body">
                 <div
                   className={
-                    "activity-tasks-block task-panel-section " +
-                    (taskPanelSections.list ? "task-panel-section--open" : "task-panel-section--closed")
-                  }
-                >
-                  <div className="task-panel-section-head">
-                    <button
-                      type="button"
-                      className="task-panel-section-toggle"
-                      aria-expanded={taskPanelSections.list}
-                      aria-controls="task-panel-body-list"
-                      onClick={() => toggleTaskPanelSection("list")}
-                      aria-label={
-                        (taskPanelSections.list ? t("tasks.section_collapse") : t("tasks.section_expand")) +
-                        ": " +
-                        t("tasks.list_heading")
-                      }
-                    >
-                      <span className="task-panel-chevron" aria-hidden>
-                        {taskPanelSections.list ? "▼" : "▶"}
-                      </span>
-                    </button>
-                    <h3 className="task-panel-section-title" id="task-panel-heading-list">
-                      {t("tasks.list_heading")}
-                    </h3>
-                  </div>
-                  {taskPanelSections.list && (
-                    <div
-                      id="task-panel-body-list"
-                      role="region"
-                      aria-labelledby="task-panel-heading-list"
-                      className="task-panel-section-body"
-                    >
-                      {tasksList.length > 0 && (
-                        <>
-                          <div className="activity-tasks-filters" role="tablist" aria-label={t("tasks.filter_label")}>
-                            <button
-                              type="button"
-                              role="tab"
-                              aria-selected={taskListFilter === "active"}
-                              className={"activity-filter-tab" + (taskListFilter === "active" ? " active" : "")}
-                              onClick={() => setTaskListFilter("active")}
-                            >
-                              {t("tasks.filter_active")}
-                            </button>
-                            <button
-                              type="button"
-                              role="tab"
-                              aria-selected={taskListFilter === "completed"}
-                              className={"activity-filter-tab" + (taskListFilter === "completed" ? " active" : "")}
-                              onClick={() => setTaskListFilter("completed")}
-                            >
-                              {t("tasks.filter_completed")}
-                            </button>
-                          </div>
-                          <div className="activity-tasks-search-wrap">
-                            <input
-                              type="search"
-                              className="activity-tasks-search"
-                              placeholder={t("tasks.search_placeholder")}
-                              value={taskSearchQuery}
-                              onChange={(e) => setTaskSearchQuery(e.target.value)}
-                              aria-label={t("tasks.search_placeholder")}
-                            />
-                          </div>
-                          {taskTreeData.branchIds.size > 0 && (
-                            <div className="task-tree-toolbar" role="group" aria-label={t("tasks.tree_actions")}>
-                              <button
-                                type="button"
-                                className="task-tree-toolbar-btn"
-                                onClick={() => setAllTaskBranchesCollapsed(false)}
-                              >
-                                {t("tasks.expand_all")}
-                              </button>
-                              <button
-                                type="button"
-                                className="task-tree-toolbar-btn"
-                                onClick={() => setAllTaskBranchesCollapsed(true)}
-                              >
-                                {t("tasks.collapse_all")}
-                              </button>
-                            </div>
-                          )}
-                        </>
-                      )}
-                      {tasksList.length === 0 ? (
-                        <p className="empty-state">{t("tasks.empty")}</p>
-                      ) : taskTreeRows.length === 0 ? (
-                        <p className="empty-state">{t("tasks.no_match_filter")}</p>
-                      ) : (
-                        <ul className="activity-task-cards" role="list">
-                          {taskTreeRows.map((row) => {
-                            const task = row.task;
-                            const isSelected = tasksList[tasksSelected]?.id === task.id;
-                            const isAncestor = !isSelected && selectedTaskAncestorIds.has(task.id);
-                            const isActiveRoot = selectedTaskRootId === task.id;
-                            const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
-                            const snippet = runningChip?.message ? trimPreview(runningChip.message, isSimpleMode ? 90 : 140) : trimPreview(taskDisplayLabel(task), 100);
-                            const hierarchyLabel = row.depth > 0 ? t("tasks.subtask_badge") : t("tasks.root_badge");
-                            const childCountLabel = t("tasks.children_count").replace("{{count}}", String(row.visibleChildCount));
-                            const createdLabel = task.created_at ? (() => {
-                              try {
-                                const d = new Date(task.created_at);
-                                return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
-                              } catch {
-                                return task.created_at;
-                              }
-                            })() : null;
-                            return (
-                              <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "") + (isAncestor ? " activity-task-card-ancestor" : "") + (isActiveRoot ? " activity-task-card-active-root" : "") + (row.depth > 0 ? " activity-task-card-child" : " activity-task-card-root") }>
-                                <div
-                                  className={"activity-task-card-inner task-tree-row" + (row.depth > 0 ? " task-tree-row-child" : " task-tree-row-root")}
-                                  role="button"
-                                  tabIndex={0}
-                                  onClick={() => setTasksSelected(tasksList.findIndex((x) => x.id === task.id))}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter" || e.key === " ") {
-                                      e.preventDefault();
-                                      setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
-                                    }
-                                    if (e.key === "ArrowRight" && row.hasChildren && row.isCollapsed) {
-                                      e.preventDefault();
-                                      toggleTaskBranch(task.id);
-                                    }
-                                    if (e.key === "ArrowLeft" && row.hasChildren && !row.isCollapsed) {
-                                      e.preventDefault();
-                                      toggleTaskBranch(task.id);
-                                    }
-                                    const idx = taskTreeRows.findIndex((x) => x.task.id === task.id);
-                                    if (e.key === "ArrowDown" && idx < taskTreeRows.length - 1) {
-                                      const next = taskTreeRows[idx + 1].task;
-                                      setTasksSelected(tasksList.findIndex((x) => x.id === next.id));
-                                    }
-                                    if (e.key === "ArrowUp" && idx > 0) {
-                                      const prev = taskTreeRows[idx - 1].task;
-                                      setTasksSelected(tasksList.findIndex((x) => x.id === prev.id));
-                                    }
-                                  }}
-                                  style={{ marginLeft: `${row.depth * 1.25}rem` }}
-                                >
-                                  <div className="activity-task-card-head">
-                                    <div className="activity-task-card-heading">
-                                      <div className="task-tree-title-row">
-                                        {row.hasChildren ? (
-                                          <button
-                                            type="button"
-                                            className="task-tree-toggle"
-                                            aria-label={(row.isCollapsed ? t("tasks.expand_branch") : t("tasks.collapse_branch")) + ": " + taskDisplayLabel(task)}
-                                            aria-expanded={!row.isCollapsed}
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              toggleTaskBranch(task.id);
-                                            }}
-                                          >
-                                            <span aria-hidden>{row.isCollapsed ? "▶" : "▼"}</span>
-                                          </button>
-                                        ) : (
-                                          <span className="task-tree-toggle-spacer" aria-hidden>
-                                            {row.depth > 0 ? "•" : ""}
-                                          </span>
-                                        )}
-                                        <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
-                                          {taskDisplayLabel(task)}
-                                        </span>
-                                      </div>
-                                      <div className="task-tree-meta-row">
-                                        <span className={"task-tree-kind-badge " + (row.depth > 0 ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
-                                          {hierarchyLabel}
-                                        </span>
-                                        {row.hasChildren && <span className="task-tree-child-count">{childCountLabel}</span>}
-                                      </div>
-                                    </div>
-                                    <span className={"activity-task-status-pill status-" + task.status}>
-                                      {task.status}
-                                    </span>
-                                  </div>
-                                  <p className="activity-task-card-snippet">{snippet}</p>
-                                  {task.status === "running" && runningChip != null && (
-                                    <div className="activity-task-progress">
-                                      <div className="activity-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
-                                      <span className="activity-task-progress-pct">{runningChip.pct ?? 0}%</span>
-                                    </div>
-                                  )}
-                                  <div className="activity-task-meta">
-                                    <span className="activity-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
-                                    {createdLabel && <span className="activity-task-created">{createdLabel}</span>}
-                                    {task.created_at && <span className="activity-task-relative">{formatRelativeTimeLabel(task.created_at, locale)}</span>}
-                                    {task.assigned_agent && <span className="activity-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
-                                  </div>
-                                  <button
-                                    type="button"
-                                    className="activity-task-view-btn"
-                                    onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); }}
-                                  >
-                                    {t("tasks.view_task")}
-                                  </button>
-                                </div>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div
-                  className={
                     "activity-events-block task-steps-section task-panel-section " +
                     (taskPanelSections.steps ? "task-panel-section--open" : "task-panel-section--closed")
                   }
@@ -6651,77 +6594,16 @@ function App() {
                       aria-labelledby="task-panel-heading-steps"
                       className="task-panel-section-body"
                     >
-                      {taskStepsSummary.total > 0 && (
-                        <div className="task-steps-summary">
-                          <div className="task-steps-summary-topline">
-                            <span>{t("tasks.step_done")}: {taskStepsSummary.done}/{taskStepsSummary.total}</span>
-                            <span>{taskStepsSummary.progressPct}%</span>
-                          </div>
-                          <div className="task-steps-summary-bar">
-                            <div className="task-steps-summary-bar-fill" style={{ width: `${taskStepsSummary.progressPct}%` }} />
-                          </div>
-                        </div>
-                      )}
-                      {(() => {
-                        const planEv = tasksEvents.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
-                        let steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> = planEv?.payload && typeof planEv.payload === "object" && Array.isArray((planEv.payload as { steps?: unknown }).steps)
-                          ? (planEv.payload as { steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> }).steps
-                          : [];
-                        if (steps.length === 0) {
-                          const decomposed = tasksEvents.find((e) => e.event_type === "task_decomposed" && e.payload && typeof e.payload === "object" && "agents" in e.payload);
-                          const agents = decomposed?.payload && typeof decomposed.payload === "object" && Array.isArray((decomposed.payload as { agents?: unknown }).agents)
-                            ? (decomposed.payload as { agents: string[] }).agents
-                            : [];
-                          steps = agents.map((agent_type, i) => ({ step_id: `s${i}`, agent_type, intent_preview: "" }));
-                        }
-                        return steps.length > 0 ? (
-                          <div className="chat-subagents-plan task-panel-plan" role="region" aria-label={t("events.plan_proposed")}>
-                            <h4 className="chat-subagents-plan-title">{t("events.plan_proposed")}</h4>
-                            <ol className="chat-subagents-plan-steps">
-                              {steps.map((s, i) => (
-                                <li key={s.step_id ?? i} className="chat-subagents-plan-step">
-                                  {s.agent_type && <span className="chat-subagents-plan-agent agent-kind-pill" data-agent-kind={classifyAgentKind(s.agent_type)}>{s.agent_type}</span>}
-                                  {s.step_id != null && s.step_id !== "" && (
-                                    <span className="chat-subagents-plan-step-id">{s.step_id}</span>
-                                  )}
-                                  <span className="chat-subagents-plan-intent">{s.intent_preview || s.intent || ""}</span>
-                                  {s.acceptance_criteria_preview != null && s.acceptance_criteria_preview.trim() !== "" && (
-                                    <div className="chat-subagents-plan-meta">{s.acceptance_criteria_preview}</div>
-                                  )}
-                                  {Array.isArray(s.deliverables) && s.deliverables.length > 0 && (
-                                    <ul className="chat-subagents-plan-deliverables">
-                                      {s.deliverables.map((d, j) => (
-                                        <li key={j}>{d}</li>
-                                      ))}
-                                    </ul>
-                                  )}
-                                </li>
-                              ))}
-                            </ol>
-                          </div>
-                        ) : null;
-                      })()}
-                      {taskStepsTodos.length === 0 ? (
-                        <p className="empty-state task-steps-empty">{t("tasks.steps_empty")}</p>
-                      ) : (
-                        <ul className="task-steps-list" role="list" aria-label={t("tasks.steps_title")}>
-                          {taskStepsTodos.map((step, idx) => (
-                            <li key={`${step.id ?? idx}-${idx}`} className={`task-step task-step--${step.status}`}>
-                              <span className="task-step-check" aria-hidden>
-                                {step.status === "done" ? "☑" : step.status === "cancelled" ? "⊘" : "☐"}
-                              </span>
-                              <span className="task-step-title">{step.title}</span>
-                              <span className="task-step-badge">
-                                {step.status === "done"
-                                  ? t("tasks.step_done")
-                                  : step.status === "cancelled"
-                                    ? t("tasks.step_cancelled")
-                                    : t("tasks.step_pending")}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
+                      <TaskExecutionSteps
+                        steps={taskExecutionView.steps}
+                        emptyReason={taskExecutionView.emptyReason}
+                        t={t}
+                        classifyAgentKind={classifyAgentKind}
+                        onSelectChildTask={(childTaskId) => {
+                          const idx = tasksList.findIndex((x) => x.id === childTaskId);
+                          if (idx >= 0) setTasksSelected(idx);
+                        }}
+                      />
                     </div>
                   )}
                 </div>
@@ -7539,11 +7421,7 @@ function App() {
                       </div>
                       <div className="calendar-detail-modal-body">
                         {calendarTaskDetailError ? (
-                          <p className="error-inline" role="alert">
-                            {calendarTaskDetailError}
-                            <br />
-                            <small className="muted">Vérifiez que le daemon tourne (port {DAEMON_PORT}).</small>
-                          </p>
+                          <p className="muted">{t("notifications.check_center")}</p>
                         ) : calendarTaskDetail ? (
                           <>
                             {(() => {
@@ -7668,11 +7546,7 @@ function App() {
                       </div>
                       <div className="calendar-detail-modal-body">
                         {scheduleDetailError ? (
-                          <p className="error-inline" role="alert">
-                            Impossible de charger le détail : {scheduleDetailError}
-                            <br />
-                            <small>Vérifiez que le daemon tourne et que l’app est lancée via Tauri (pas uniquement en navigateur).</small>
-                          </p>
+                          <p className="muted">{t("notifications.check_center")}</p>
                         ) : scheduleDetail ? (
                           <>
                             <p><strong>ID (pour supprimer):</strong>{" "}
@@ -7781,18 +7655,13 @@ function App() {
             >
               Rafraîchir
             </button>
-            {memoryError && (
-              <p className="error-inline" role="alert">
-                {memoryError}
-              </p>
-            )}
             {memoryLoading && (
               <p className="panel-loading" aria-busy="true">
                 <span className="panel-loading-spinner" aria-hidden />
                 {t("common.loading")}
               </p>
             )}
-            {!memoryLoading && !memoryError && (
+            {!memoryLoading && (
               <div className="memory-content-wrap">
                 <div className="memory-subtabs" role="tablist" aria-label="Type de mémoire">
                   <button
@@ -8213,24 +8082,13 @@ function App() {
             aria-labelledby="tab-mission"
             className="panel memory-panel"
           >
-            <h2 className="panel-title">{t("mission.title")}</h2>
-            <p className="muted">{t("mission.description")}</p>
-            <p className="muted" style={{ marginTop: "0.35rem" }}>
-              {t("mission.intro_detail")}
-            </p>
+            <h2 className="panel-title">
+              {t("mission.title")}
+              <InfoTip label={t("mission.title")} content={<>{t("mission.description")}<br /><br />{t("mission.intro_detail")}</>} />
+            </h2>
             <button type="button" className="refresh-btn" onClick={() => void fetchMission()} disabled={missionLoading}>
               {missionLoading ? t("common.loading") : t("mission.refresh")}
             </button>
-            {missionError === "unavailable" && (
-              <p className="error-inline" role="alert">
-                {t("mission.unavailable")}
-              </p>
-            )}
-            {missionError && missionError !== "unavailable" && (
-              <p className="error-inline" role="alert">
-                {missionError}
-              </p>
-            )}
             {!missionLoading && mission && missionDraft && (
               <div className="memory-content-wrap mission-panel-body">
                 <nav className="settings-tabs" role="tablist" aria-label={t("mission.title")} style={{ marginBottom: "0.75rem" }}>
@@ -8877,11 +8735,6 @@ function App() {
                         </button>
                       </div>
                     </div>
-                    {pluginStatusError && (
-                      <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
-                        {pluginStatusError}
-                      </p>
-                    )}
                     {!pluginStatusError && pluginStatusList.length === 0 && !pluginStatusLoading && (
                       <p className="settings-doc muted">{t("doctor.no_plugins")}</p>
                     )}
@@ -9032,11 +8885,6 @@ function App() {
                             {pluginReputationResetMessage}
                           </p>
                         )}
-                        {pluginReputationResetError && (
-                          <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
-                            {pluginReputationResetError}
-                          </p>
-                        )}
                       </div>
                     </details>
                   </>
@@ -9073,7 +8921,6 @@ function App() {
             {settingsSection === "agent" && (
               <div className="settings-section-content">
                 <p className="settings-doc muted">{t("settings.agent_profile_desc")}</p>
-                {agentProfileError && <p className="error-inline" role="alert">{agentProfileError}</p>}
                 <div className="settings-agent-template-row">
                   <label htmlFor="agent-profile-template">{t("settings.agent_profile_apply_template")}</label>
                   <select id="agent-profile-template" className="settings-theme-select" value="" onChange={(e) => { const idx = e.target.value ? parseInt(e.target.value, 10) : -1; e.target.value = ""; if (idx >= 0 && idx < AGENT_PROFILE_TEMPLATES.length) { const tpl = AGENT_PROFILE_TEMPLATES[idx]; setAgentProfile((p) => ({ ...p, name: tpl.name, role: tpl.role ?? "", personality: tpl.personality, rules: [...tpl.rules], can_do: [...tpl.can_do], cannot_do: [...tpl.cannot_do] })); } }}>
@@ -9400,7 +9247,6 @@ function App() {
             {settingsSection === "user" && (
               <div className="settings-section-content">
                 <p className="settings-doc muted">{t("settings.user_profile_desc")}</p>
-                {userProfileError && <p className="error-inline" role="alert">{userProfileError}</p>}
                 {userProfileLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
                 {!userProfileLoading && (
                   <>
@@ -9486,9 +9332,6 @@ function App() {
                     <>
                       <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
                       <p className="settings-doc muted">{t("settings.user_rag_desc")}</p>
-                      {userRagError && (
-                        <p className="error-inline" role="alert">{userRagError}</p>
-                      )}
                       <input
                         ref={userRagFileInputRef}
                         type="file"
@@ -9556,9 +9399,6 @@ function App() {
                     <>
                       <h3 className="settings-subtitle">{t("settings.workspace_graph_title")}</h3>
                       <p className="settings-doc muted">{t("settings.workspace_graph_desc")}</p>
-                      {projectGraphError && (
-                        <p className="error-inline" role="alert">{projectGraphError}</p>
-                      )}
                       {projectGraphSuccess && (
                         <p className="settings-doc" role="status">{projectGraphSuccess}</p>
                       )}
@@ -9744,7 +9584,7 @@ function App() {
               <button
                 type="button"
                 className="sidebar-right-close"
-                onClick={() => setRightSidebarOpen(false)}
+                onClick={() => (tab === "tasks" ? setTaskSidebarOpen(false) : setRightSidebarOpen(false))}
                 aria-label={tab === "chat" ? t("sidebar.hide_tasks") : t("sidebar.hide_tasks")}
               >
                 ×
@@ -9874,6 +9714,19 @@ function App() {
               {!tasksLoading && tasksList.length > 0 && taskTreeRows.length === 0 && (
                 <p className="empty-state">{t("tasks.no_match_filter")}</p>
               )}
+              {tab === "tasks" && eventTriggers.length > 0 && (
+                <div className="sidebar-right-triggers">
+                  <h4 className="sidebar-right-triggers-title">{t("tasks.triggers_heading")}</h4>
+                  <ul className="sidebar-right-triggers-list" role="list">
+                    {eventTriggers.map((tr) => (
+                      <li key={tr.id} className={"sidebar-right-trigger-item" + (tr.enabled ? "" : " disabled")}>
+                        <span className="sidebar-right-trigger-name">{tr.name}</span>
+                        <span className="sidebar-right-trigger-type">{t("tasks.trigger_type_" + tr.trigger_type)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {!tasksLoading && taskTreeRows.length > 0 && (
                 <ul className="sidebar-right-task-list" role="list">
                   {taskTreeRows.map((row) => {
@@ -9986,6 +9839,23 @@ function App() {
           </aside>
         )}
       </div>
+      <CreateTaskDialog
+        open={createTaskDialogOpen}
+        onClose={() => setCreateTaskDialogOpen(false)}
+        sessionId={sessionId}
+        t={t}
+        eventTriggersEnabled
+        onImmediateCreated={(taskId) => {
+          void fetchTasksList({ selectTaskId: taskId });
+          setTaskPanelSections((prev) => ({ ...prev, events: true }));
+        }}
+        onScheduleCreated={() => {
+          void fetchEventTriggers();
+        }}
+        onTriggerCreated={() => {
+          void fetchEventTriggers();
+        }}
+      />
     </div>
   );
 }
