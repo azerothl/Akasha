@@ -2,6 +2,7 @@
 
 pub mod autonomous_mission;
 pub mod episodic_memory;
+pub mod event_triggers;
 pub mod facts;
 pub mod log;
 pub mod long_term_memory;
@@ -20,6 +21,9 @@ pub use autonomous_mission::{
     MissionRoleDefinition, MissionStatus,
 };
 pub use episodic_memory::{EpisodicEvent, EpisodicFilter, EpisodicStore};
+pub use event_triggers::{
+    EventTrigger, EventTriggerRun, EventTriggerStore, TriggerExecutionMode, TriggerType,
+};
 pub use facts::{extract_facts_simple, Fact, FactsStore};
 pub use long_term_memory::{
     cosine_similarity, decode_embedding_bytes, importance_score, recency_score,
