@@ -15,6 +15,8 @@ pub mod api_http;
 pub mod api_path_utils;
 pub mod api_security;
 pub mod api_routes_automation;
+pub mod api_routes_event_triggers;
+pub mod event_trigger_engine;
 pub mod api_routes_terminal;
 pub mod api_routes_mcp;
 pub mod api_routes_workspace;

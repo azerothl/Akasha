@@ -1032,6 +1032,70 @@ impl Daemon {
                 });
             }
 
+            // Event triggers: dispatch worker + subscribers + pollers.
+            {
+                let (trigger_fire_tx, trigger_fire_rx) = tokio::sync::mpsc::channel(64);
+                let trigger_dispatch =
+                    crate::event_trigger_engine::TriggerDispatch::new(trigger_fire_tx);
+                let trigger_orch_tx = normal_tx.clone();
+                crate::event_trigger_engine::init_trigger_engine(
+                    crate::event_trigger_engine::TriggerEngineHandles {
+                        store_path: db_path.clone(),
+                        dispatch: trigger_dispatch,
+                        orch_tx: trigger_orch_tx.clone(),
+                        bus: bus.clone(),
+                    },
+                );
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx.clone();
+                    let bus = bus.clone();
+                    async move {
+                        crate::event_trigger_engine::run_trigger_dispatch_worker(
+                            store_path,
+                            orch_tx,
+                            bus,
+                            trigger_fire_rx,
+                        )
+                        .await;
+                    }
+                });
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx.clone();
+                    let bus = bus.clone();
+                    async move {
+                        crate::event_trigger_engine::run_trigger_event_subscriber(
+                            store_path, orch_tx, bus,
+                        )
+                        .await;
+                    }
+                });
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx.clone();
+                    let bus = bus.clone();
+                    async move {
+                        crate::event_trigger_engine::run_filesystem_trigger_poller(
+                            store_path, orch_tx, bus,
+                        )
+                        .await;
+                    }
+                });
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx;
+                    let bus = bus.clone();
+                    let llm_router = llm_router.clone();
+                    async move {
+                        crate::event_trigger_engine::run_model_catalog_poller(
+                            store_path, orch_tx, bus, llm_router,
+                        )
+                        .await;
+                    }
+                });
+            }
+
             // Scheduler: tick, create task_runs, push to orchestrator (normal priority queue).
             tokio::spawn({
                 let store_path = db_path.clone();

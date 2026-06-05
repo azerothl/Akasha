@@ -12508,6 +12508,17 @@ pub async fn handle_api(
         return resp;
     }
 
+    if let Some(resp) = crate::api_routes_event_triggers::handle_event_trigger_routes(
+        method,
+        path_only,
+        body.as_deref(),
+        store_path,
+    )
+    .await
+    {
+        return resp;
+    }
+
     if method == "GET" && path_only == "/api/process/watch/recent" {
         let limit = crate::api_security::parse_query_param(query_str, "limit")
             .and_then(|s| s.parse::<usize>().ok())
