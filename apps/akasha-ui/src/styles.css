@@ -4631,23 +4631,43 @@ a.settings-link-btn.refresh-btn {
   margin: 0.75rem 0;
 }
 
-.create-task-tab {
+.create-task-tab-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
   border: 1px solid var(--akasha-border);
   background: var(--akasha-bg-surface);
   border-radius: var(--akasha-radius-button);
-  padding: 0.35rem 0.6rem;
-  cursor: pointer;
-  font-size: 0.85rem;
+  padding: 0.15rem 0.35rem 0.15rem 0.15rem;
 }
 
-.create-task-tab.active {
+.create-task-tab-wrap.active {
   border-color: var(--akasha-accent);
   background: var(--akasha-bg-surface-hover);
 }
 
-.create-task-tab.disabled {
+.create-task-tab-wrap.disabled {
   opacity: 0.45;
+}
+
+.create-task-tab {
+  border: none;
+  background: transparent;
+  border-radius: var(--akasha-radius-button);
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: inherit;
+}
+
+.create-task-tab-wrap.disabled .create-task-tab {
   cursor: not-allowed;
+}
+
+.create-task-field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 .create-task-field {
@@ -6575,7 +6595,30 @@ a.settings-link-btn.refresh-btn {
 }
 
 .message.assistant .model-usage-badge {
+  margin-top: 0;
+}
+
+.message-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
   margin-top: 0.35rem;
+}
+
+.chat-message-task-btn {
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--akasha-border);
+  background: var(--akasha-bg-surface);
+  color: var(--akasha-text-muted);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.chat-message-task-btn:hover {
+  border-color: var(--akasha-accent);
+  color: var(--akasha-accent);
 }
 
 .model-usage-toggle {
@@ -7703,11 +7746,27 @@ a.settings-link-btn.refresh-btn {
   display: none;
 }
 
+.chat-panel-top {
+  width: 100%;
+  max-width: var(--akasha-chat-max-width);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
 .chat-panel-toolbar {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: var(--akasha-space-sm);
-  margin: var(--akasha-space-sm) var(--akasha-space-md) 0;
+  margin: var(--akasha-space-sm) 0 0;
+}
+
+.chat-panel-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--akasha-space-sm);
+  margin-left: auto;
 }
 
 .chat-toolbar-btn {
@@ -8068,13 +8127,11 @@ a.settings-link-btn.refresh-btn {
   display: flex;
   align-items: flex-start;
   gap: 0.5rem;
-  max-width: var(--akasha-chat-max-width);
-  margin: 0.35rem auto 0;
-  padding: 0 1.25rem;
+  margin: 0.35rem 0 0;
 }
 
-.chat-companion-row:not(.chat-companion-row--open) {
-  margin-bottom: 0.15rem;
+.chat-companion-row--open {
+  margin-bottom: 0.35rem;
 }
 
 .chat-companion-toggle {

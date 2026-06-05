@@ -3,7 +3,13 @@ import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary }
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
-import { collapseStreamedProgressEvents } from "./taskEvents";
+import {
+  collapseStreamedProgressEvents,
+  isTaskActiveStatus,
+  isTaskTerminalStatus,
+  mergeTaskEvents,
+  normalizeTaskStatus,
+} from "./taskEvents";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
 import { GeoMapView } from "./GeoMapView";
@@ -38,6 +44,7 @@ import { ModelUsageBadge } from "./components/ModelUsageBadge";
 import { TaskExecutionSteps } from "./components/TaskExecutionSteps";
 import { CreateTaskDialog } from "./components/CreateTaskDialog";
 import { buildExecutionSteps } from "./tasks/buildExecutionSteps";
+import { pollTaskUntilDone, type PollTaskUntilDoneDeps } from "./tasks/pollTaskUntilDone";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -1749,7 +1756,10 @@ function App() {
   }, [persistCollapsedTaskBranches]);
   const [taskStepsTodos, setTaskStepsTodos] = useState<Array<{ id?: string | null; title: string; status: string }>>([]);
   const selectedTaskIdForTodosRef = useRef<string | null>(null);
+  const tasksEventsTaskIdRef = useRef<string | null>(null);
   const fetchTaskStepsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
+  const fetchTasksEventsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
+  const trackTaskUntilDoneRef = useRef<(taskId: string) => void>(() => {});
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
   /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
   const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
@@ -2942,7 +2952,7 @@ function App() {
       const tasks: Array<TaskListItem> = list
         .map((t) => ({
           id: t.id ?? "",
-          status: t.status ?? "?",
+          status: normalizeTaskStatus(t.status),
           label: t.label,
           created_at: t.created_at,
           parent_task_id: t.parent_task_id,
@@ -2950,6 +2960,18 @@ function App() {
         }))
         .filter((t) => t.id);
       setTasksList((prev) => (tasksListsEqual(prev, tasks) ? prev : tasks));
+      setRunningTaskChips((prev) => {
+        const activeIds = new Set(tasks.filter((t) => isTaskActiveStatus(t.status)).map((t) => t.id));
+        let changed = false;
+        const next = { ...prev };
+        for (const id of Object.keys(next)) {
+          if (!activeIds.has(id)) {
+            delete next[id];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
       if (selectTaskId) {
         const idx = tasks.findIndex((t) => t.id === selectTaskId);
         if (idx >= 0) setTasksSelected(idx);
@@ -2964,12 +2986,24 @@ function App() {
     }
   }, []);
 
+  const openChatTaskDetail = useCallback(
+    (taskId: string) => {
+      void fetchTasksList({ selectTaskId: taskId });
+      setTab("tasks");
+      setTaskPanelSections((prev) => ({ ...prev, events: true }));
+    },
+    [fetchTasksList, setTab],
+  );
+
   const filteredTasksList = useMemo(() => {
     let list = tasksList;
     if (taskListFilter === "active") {
-      list = list.filter((t) => t.status === "pending" || t.status === "running");
+      list = list.filter((t) => isTaskActiveStatus(t.status));
     } else {
-      list = list.filter((t) => t.status === "completed" || t.status === "failed");
+      list = list.filter((t) => {
+        const s = normalizeTaskStatus(t.status);
+        return s === "completed" || s === "failed" || s === "cancelled" || s === "interrupted";
+      });
     }
     const q = taskSearchQuery.trim().toLowerCase();
     if (q) {
@@ -3404,16 +3438,21 @@ function App() {
     try {
       const data = await invoke<unknown>("get_task_events", { taskId, port: DAEMON_PORT });
       const list = normalizeTaskEventsInvokeResponse(data);
-      setTasksEvents(
-        list.map((e) => ({
-          event_type: e.event_type ?? "?",
-          payload: e.payload,
-          at: e.at ?? "",
-          task_id: e.task_id,
-        }))
-      );
+      const mapped = list.map((e) => ({
+        event_type: e.event_type ?? "?",
+        payload: e.payload,
+        at: e.at ?? "",
+        task_id: e.task_id,
+      }));
+      setTasksEvents((prev) => {
+        if (tasksEventsTaskIdRef.current !== taskId) {
+          tasksEventsTaskIdRef.current = taskId;
+          return mapped;
+        }
+        return mergeTaskEvents(prev, mapped);
+      });
     } catch {
-      setTasksEvents([]);
+      /* keep previous events on transient fetch errors */
     }
   }, []);
 
@@ -3439,6 +3478,10 @@ function App() {
   useEffect(() => {
     fetchTaskStepsRef.current = fetchTaskSteps;
   }, [fetchTaskSteps]);
+
+  useEffect(() => {
+    fetchTasksEventsRef.current = fetchTasksEvents;
+  }, [fetchTasksEvents]);
 
   useEffect(() => {
     selectedTaskIdForTodosRef.current = tasksList[tasksSelected]?.id ?? null;
@@ -3547,6 +3590,7 @@ function App() {
           taskId,
           streaming: false,
           mapVisual: cachedMap,
+          usage: next[idx].usage,
         };
         return next;
       });
@@ -3558,7 +3602,7 @@ function App() {
         if (idx < 0) return prev;
         const next = [...prev];
         const cachedMap = next[idx].mapVisual ?? chatMapByTaskIdRef.current[taskId];
-        next[idx] = { role: "assistant", text: msg, taskId, streaming: true, mapVisual: cachedMap };
+        next[idx] = { role: "assistant", text: msg, taskId, streaming: true, mapVisual: cachedMap, usage: next[idx].usage };
         return next;
       });
     }
@@ -3588,6 +3632,21 @@ function App() {
             const streamMsg = typeof p.message === "string" ? p.message : "";
             if (tid && streamMsg) applyChatStreamProgress(tid, streamMsg);
           }
+          if (d.event_type === "task_completed" || d.event_type === "task_failed" || d.event_type === "task_cancelled") {
+            const p = d.payload && typeof d.payload === "object" ? (d.payload as Record<string, unknown>) : null;
+            const tid = p && typeof p.task_id === "string" ? p.task_id : "";
+            if (tid) {
+              setRunningTaskChips((prev) => {
+                if (prev[tid] === undefined) return prev;
+                const next = { ...prev };
+                delete next[tid];
+                return next;
+              });
+              if (selectedTaskIdForTodosRef.current === tid) {
+                void fetchTasksEventsRef.current(tid);
+              }
+            }
+          }
           if (d.event_type === "todo_list_updated") {
             const tid =
               (typeof d.payload?.task_id === "string" && d.payload.task_id) ||
@@ -3615,9 +3674,24 @@ function App() {
 
   useEffect(() => {
     const task = tasksList[tasksSelected];
-    if (task?.id) fetchTasksEvents(task.id);
-    else setTasksEvents([]);
+    if (task?.id) {
+      void fetchTasksEvents(task.id);
+    } else {
+      tasksEventsTaskIdRef.current = null;
+      setTasksEvents([]);
+    }
   }, [tasksList, tasksSelected, fetchTasksEvents]);
+
+  useEffect(() => {
+    if (tab !== "tasks") return;
+    const task = tasksList[tasksSelected];
+    if (!task?.id || !isTaskActiveStatus(task.status)) return;
+    const taskId = task.id;
+    const timer = window.setInterval(() => {
+      void fetchTasksEventsRef.current(taskId);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [tab, tasksList, tasksSelected]);
 
   useEffect(() => {
     if (tab !== "calendar") return;
@@ -4804,6 +4878,57 @@ function App() {
     }
   }, [voiceRecording, sessionId]);
 
+  const pollTaskDeps = useMemo(
+    (): PollTaskUntilDoneDeps => ({
+      daemonPort: DAEMON_PORT,
+      sessionId,
+      sessionIdRef,
+      taskIdToSessionIdRef,
+      ackTextByTaskRef,
+      chatMapByTaskIdRef,
+      humanInputAutoOpenedRef,
+      replyWithTtsRef,
+      selectedTaskIdForTodosRef,
+      fetchTasksEventsRef,
+      chatInputRef,
+      akashaSessionIdKey: AKASHA_SESSION_ID_KEY,
+      normalizeTaskEventsInvokeResponse,
+      extractChatMapVisualFromTaskEvents,
+      extractChatMapVisualFromAssistantText,
+      findLastChatAssistantIndex,
+      chatMapMessageCacheKey,
+      applyChatStreamProgress,
+      fetchTasksList,
+      enrichUsageWithPricing,
+      setRunningTaskChips,
+      setRunningTaskEvents,
+      setTasksEvents,
+      setPendingHumanInput,
+      setHumanInputModalTaskId,
+      setChatMapByTaskId,
+      setMessages,
+      voiceTtsConfigured: !!voiceStatus?.tts_configured,
+    }),
+    [
+      sessionId,
+      applyChatStreamProgress,
+      fetchTasksList,
+      enrichUsageWithPricing,
+      voiceStatus?.tts_configured,
+    ],
+  );
+
+  const trackTaskUntilDone = useCallback(
+    (taskId: string) => {
+      void pollTaskUntilDone(taskId, pollTaskDeps);
+    },
+    [pollTaskDeps],
+  );
+
+  useEffect(() => {
+    trackTaskUntilDoneRef.current = trackTaskUntilDone;
+  }, [trackTaskUntilDone]);
+
   const handleSend = async (overrideMessage?: string, fromVoice?: boolean) => {
     const content = (overrideMessage ?? message).trim();
     const hasContent = content || attachments.length > 0;
@@ -4945,234 +5070,7 @@ function App() {
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
         setSubAgentPanelCollapsed(false);
         void fetchTasksList({ silent: true });
-        const taskId = ack.task_id;
-        const pollUntilDone = async () => {
-          const maxWait = 600;
-          const MIN_INTERVAL = 1500;
-          const MAX_INTERVAL = 5000;
-          let pollIntervalMs = MIN_INTERVAL;
-          let ticksWithoutChange = 0;
-          let lastStatus = "";
-          let lastMsg = "";
-          for (let i = 0; i < maxWait; i++) {
-            await new Promise((r) => setTimeout(r, pollIntervalMs));
-            try {
-              const [raw, eventsPayloadRaw, humanInputData] = await Promise.all([
-                invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
-                invoke<unknown>("get_task_events", { taskId, port: DAEMON_PORT }).catch(() => null),
-                invoke<{ question?: string; context?: string; choices?: string[] }>("get_task_human_input", { taskId, port: DAEMON_PORT }).catch(() => null),
-              ]);
-              const eventsData = { events: normalizeTaskEventsInvokeResponse(eventsPayloadRaw ?? {}) };
-              const status = JSON.parse(raw) as {
-                status?: string;
-                progress?: Array<{ progress_pct?: number; message?: string }>;
-                tokens_used?: number;
-                cost_usd?: number;
-                last_turn_tokens_in?: number;
-                last_turn_tokens_out?: number;
-                last_turn_cost_usd?: number;
-                last_turn_latency_ms?: number;
-                last_turn_model_used?: string;
-              };
-              const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
-              const msg = status?.progress?.slice(-1)[0]?.message ?? "";
-              const currentStatus = status?.status ?? "";
-              if (currentStatus === lastStatus && msg === lastMsg) {
-                ticksWithoutChange++;
-                if (ticksWithoutChange >= 4 && pollIntervalMs < MAX_INTERVAL) {
-                  pollIntervalMs = Math.min(pollIntervalMs + 1500, MAX_INTERVAL);
-                  ticksWithoutChange = 0;
-                }
-              } else {
-                lastStatus = currentStatus;
-                lastMsg = msg;
-                ticksWithoutChange = 0;
-                pollIntervalMs = MIN_INTERVAL;
-              }
-              setRunningTaskChips((prev) => {
-                if (prev[taskId] === undefined) return prev;
-                const cur = prev[taskId]!;
-                if (cur.pct === pct && cur.message === msg) return prev;
-                return { ...prev, [taskId]: { pct, message: msg } };
-              });
-              const events = (eventsData?.events ?? []).map((e) => ({
-                event_type: e.event_type ?? "?",
-                payload: e.payload,
-                at: e.at ?? "",
-                task_id: e.task_id,
-              }));
-              setRunningTaskEvents((prev) => {
-                if (prev[taskId] === undefined) return prev;
-                const oldE = prev[taskId]!;
-                try {
-                  if (JSON.stringify(oldE) === JSON.stringify(events)) return prev;
-                } catch {
-                  /* ignore */
-                }
-                return { ...prev, [taskId]: events };
-              });
-              const chatMapVis =
-                extractChatMapVisualFromTaskEvents(events) ?? extractChatMapVisualFromAssistantText(msg);
-              if (chatMapVis) {
-                chatMapByTaskIdRef.current[taskId] = chatMapVis;
-                setChatMapByTaskId((prev) => (prev[taskId] === chatMapVis ? prev : { ...prev, [taskId]: chatMapVis }));
-              }
-              const taskForActiveChat = taskIdToSessionIdRef.current[taskId] === sessionIdRef.current;
-              if (chatMapVis && taskForActiveChat) {
-                setMessages((prev) => {
-                  const idx = findLastChatAssistantIndex(prev, taskId);
-                  if (idx < 0) return prev;
-                  if (prev[idx]?.mapVisual === chatMapVis) return prev;
-                  const next = [...prev];
-                  next[idx] = { ...next[idx]!, mapVisual: chatMapVis };
-                  return next;
-                });
-              }
-              if (humanInputData?.question) {
-                setPendingHumanInput((prev) => ({ ...prev, [taskId]: { question: humanInputData.question ?? "", context: humanInputData.context ?? "", choices: humanInputData.choices } }));
-                if (!humanInputAutoOpenedRef.current.has(taskId)) {
-                  humanInputAutoOpenedRef.current.add(taskId);
-                  setHumanInputModalTaskId(taskId);
-                }
-              } else {
-                setPendingHumanInput((prev) => {
-                  const next = { ...prev };
-                  delete next[taskId];
-                  return next;
-                });
-                humanInputAutoOpenedRef.current.delete(taskId);
-              }
-              if (status?.status !== "completed" && status?.status !== "failed" && msg) {
-                applyChatStreamProgress(taskId, msg);
-              }
-              if (status?.status === "completed") {
-                setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                humanInputAutoOpenedRef.current.delete(taskId);
-                setHumanInputModalTaskId((c) => (c === taskId ? null : c));
-                const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
-                const doneMapVis =
-                  extractChatMapVisualFromTaskEvents(events) ??
-                  extractChatMapVisualFromAssistantText(finalMsg) ??
-                  chatMapByTaskIdRef.current[taskId] ??
-                  null;
-                if (doneMapVis) {
-                  chatMapByTaskIdRef.current[taskId] = doneMapVis;
-                  setChatMapByTaskId((prev) => (prev[taskId] === doneMapVis ? prev : { ...prev, [taskId]: doneMapVis }));
-                }
-                if (taskForActiveChat) {
-                  const turnUsage = enrichUsageWithPricing(parseUsageFromTaskStatus(status));
-                  let storedMapVisual: ChatMapVisual | undefined;
-                  setMessages((prev) => {
-                    const idx = findLastChatAssistantIndex(prev, taskId);
-                    if (idx >= 0) {
-                      const next = [...prev];
-                      const keepMap = next[idx]!.mapVisual ?? doneMapVis ?? chatMapByTaskIdRef.current[taskId] ?? undefined;
-                      storedMapVisual = keepMap;
-                      next[idx] = { role: "assistant", text: finalMsg, taskId, mapVisual: keepMap, usage: turnUsage };
-                      return next;
-                    }
-                    storedMapVisual = doneMapVis ?? undefined;
-                    return [...prev, { role: "assistant", text: finalMsg, taskId, mapVisual: doneMapVis ?? undefined, usage: turnUsage }];
-                  });
-                  if (storedMapVisual && finalMsg.trim()) {
-                    try {
-                      const sid =
-                        (typeof sessionId === "string" && sessionId.trim()) ||
-                        localStorage.getItem(AKASHA_SESSION_ID_KEY) ||
-                        "";
-                      if (sid) {
-                        localStorage.setItem(
-                          chatMapMessageCacheKey(sid, finalMsg.trim()),
-                          JSON.stringify(storedMapVisual),
-                        );
-                      }
-                    } catch {
-                      /* ignore */
-                    }
-                  }
-                  delete ackTextByTaskRef.current[taskId];
-                }
-                if (replyWithTtsRef.current && voiceStatus?.tts_configured && finalMsg?.trim()) {
-                  replyWithTtsRef.current = false;
-                  invoke<{ data_url?: string }>("voice_tts", { text: finalMsg, port: DAEMON_PORT })
-                    .then((r) => {
-                      const url = r?.data_url;
-                      if (url) {
-                        const audio = new Audio(url);
-                        audio.play().catch(() => {});
-                      }
-                    })
-                    .catch(() => {});
-                }
-                requestAnimationFrame(() => chatInputRef.current?.focus());
-                return;
-              }
-              if (status?.status === "failed") {
-                setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                humanInputAutoOpenedRef.current.delete(taskId);
-                setHumanInputModalTaskId((c) => (c === taskId ? null : c));
-                replyWithTtsRef.current = false;
-                if (taskForActiveChat) {
-                  const turnUsage = enrichUsageWithPricing(parseUsageFromTaskStatus(status));
-                  setMessages((prev) => {
-                    const idx = findLastChatAssistantIndex(prev, taskId);
-                    if (idx >= 0) {
-                      const next = [...prev];
-                      const MAX_FAILURE_CHAT_CHARS = 2500;
-                      const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
-                      const finalMsg =
-                        baseMsg.length > MAX_FAILURE_CHAT_CHARS
-                          ? baseMsg.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…"
-                          : baseMsg;
-                      next[idx] = { role: "assistant", text: finalMsg, error: true, taskId, usage: turnUsage };
-                      return next;
-                    }
-                    const MAX_FAILURE_CHAT_CHARS = 2500;
-                    const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
-                    const finalMsg =
-                      baseMsg.length > MAX_FAILURE_CHAT_CHARS
-                        ? baseMsg.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…"
-                        : baseMsg;
-                    return [...prev, { role: "assistant", text: finalMsg, error: true, taskId, usage: turnUsage }];
-                  });
-                  delete ackTextByTaskRef.current[taskId];
-                }
-                requestAnimationFrame(() => chatInputRef.current?.focus());
-                return;
-              }
-            } catch {
-              /* ignore */
-            }
-          }
-          setRunningTaskChips((prev) => {
-            const next = { ...prev };
-            delete next[taskId];
-            return next;
-          });
-          setRunningTaskEvents((prev) => {
-            const next = { ...prev };
-            delete next[taskId];
-            return next;
-          });
-          if (taskIdToSessionIdRef.current[taskId] === sessionIdRef.current) {
-            setMessages((prev) => {
-              const idx = findLastChatAssistantIndex(prev, taskId);
-              if (idx >= 0) {
-                const next = [...prev];
-                next[idx] = { role: "assistant", text: "Délai dépassé. Consultez Tâches.", taskId };
-                return next;
-              }
-              return [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches.", taskId }];
-            });
-            delete ackTextByTaskRef.current[taskId];
-          }
-          requestAnimationFrame(() => chatInputRef.current?.focus());
-        };
-        pollUntilDone();
+        trackTaskUntilDone(ack.task_id);
       }
     } catch (err) {
       setLoading(false);
@@ -5647,18 +5545,66 @@ function App() {
                 {locale === "en" ? "Incognito — memory promotion disabled for this session (UI flag)." : "Incognito — promotion mémoire désactivée pour cette session (indicateur UI)."}
               </p>
             ) : null}
-            {(messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
-              <div className="chat-panel-toolbar">
-                {messages.length > 0 && (
-                  <button type="button" className="btn-secondary chat-toolbar-btn" onClick={exportChatTranscript}>
-                    {t("chat.export_transcript")}
-                  </button>
-                )}
-                {Object.keys(runningTaskChips).length > 0 && (
-                  <button type="button" className="btn-secondary chat-toolbar-btn" onClick={() => setTab("tasks")}>
-                    {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
-                  </button>
-                )}
+            {(companionBubbleText || messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
+              <div className="chat-panel-top">
+                <div className="chat-panel-toolbar">
+                  {companionBubbleText ? (
+                    <button
+                      type="button"
+                      className="chat-companion-toggle"
+                      onClick={() => {
+                        setCompanionOpen((open) => {
+                          const next = !open;
+                          try {
+                            localStorage.setItem(CHAT_COMPANION_OPEN_KEY, next ? "1" : "0");
+                          } catch {
+                            /* ignore */
+                          }
+                          return next;
+                        });
+                      }}
+                      aria-expanded={companionOpen}
+                      aria-controls="chat-companion-message"
+                      aria-label={t("chat.companion_label")}
+                      title={t("chat.companion_label")}
+                    >
+                      <img src="/akasha-icon.png" alt="" className="chat-companion-icon" width={20} height={20} />
+                    </button>
+                  ) : null}
+                  <div className="chat-panel-toolbar-actions">
+                    {messages.length > 0 && (
+                      <button type="button" className="btn-secondary chat-toolbar-btn" onClick={exportChatTranscript}>
+                        {t("chat.export_transcript")}
+                      </button>
+                    )}
+                    {Object.keys(runningTaskChips).length > 0 && (
+                      <button type="button" className="btn-secondary chat-toolbar-btn" onClick={() => setTab("tasks")}>
+                        {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {companionOpen && companionBubbleText ? (
+                  <div className="chat-companion-row chat-companion-row--open" role="status" aria-live="polite">
+                    <div id="chat-companion-message" className="chat-companion-bubble">
+                      <span className="chat-companion-label">{t("chat.companion_label")}</span>
+                      <span className="chat-companion-text">{companionBubbleText}</span>
+                    </div>
+                    {chatTipsEnabled && tipBannerText && !tipBannerDismissed ? (
+                      <button
+                        type="button"
+                        className="chat-companion-dismiss"
+                        onClick={() => {
+                          setTipBannerDismissed(true);
+                          setTipBannerText(null);
+                        }}
+                        aria-label={t("chat.tip_dismiss")}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             )}
             <div className="chat-area">
@@ -5680,6 +5626,8 @@ function App() {
                   userAvatar={userAvatar}
                   agentAvatar={agentProfile.avatar}
                   agentName={agentProfile.name || "Akasha"}
+                  onOpenTaskDetail={openChatTaskDetail}
+                  taskDetailLabel={t("chat.view_task_detail")}
                   renderAskUserChoice={(choice, j) => {
                     const pendingTaskIdForReply = Object.keys(pendingHumanInput)[0] ?? null;
                     return pendingTaskIdForReply ? (
@@ -6090,54 +6038,6 @@ function App() {
                     {label}
                   </button>
                 ))}
-              </div>
-            )}
-            {companionBubbleText && (
-              <div
-                className={`chat-companion-row${companionOpen ? " chat-companion-row--open" : ""}`}
-                role="status"
-                aria-live="polite"
-              >
-                <button
-                  type="button"
-                  className="chat-companion-toggle"
-                  onClick={() => {
-                    setCompanionOpen((open) => {
-                      const next = !open;
-                      try {
-                        localStorage.setItem(CHAT_COMPANION_OPEN_KEY, next ? "1" : "0");
-                      } catch {
-                        /* ignore */
-                      }
-                      return next;
-                    });
-                  }}
-                  aria-expanded={companionOpen}
-                  aria-controls="chat-companion-message"
-                  aria-label={t("chat.companion_label")}
-                  title={t("chat.companion_label")}
-                >
-                  <img src="/akasha-icon.png" alt="" className="chat-companion-icon" width={20} height={20} />
-                </button>
-                {companionOpen ? (
-                  <div id="chat-companion-message" className="chat-companion-bubble">
-                    <span className="chat-companion-label">{t("chat.companion_label")}</span>
-                    <span className="chat-companion-text">{companionBubbleText}</span>
-                  </div>
-                ) : null}
-                {companionOpen && chatTipsEnabled && tipBannerText && !tipBannerDismissed ? (
-                  <button
-                    type="button"
-                    className="chat-companion-dismiss"
-                    onClick={() => {
-                      setTipBannerDismissed(true);
-                      setTipBannerText(null);
-                    }}
-                    aria-label={t("chat.tip_dismiss")}
-                  >
-                    ×
-                  </button>
-                ) : null}
               </div>
             )}
             <div className="chat-footer-tools">
@@ -6702,7 +6602,7 @@ function App() {
                     )}
                     {tasksList.length > 0 && tasksList[tasksSelected] && (() => {
                       const sel = tasksList[tasksSelected];
-                      const canCancel = sel.status === "pending" || sel.status === "running";
+                      const canCancel = isTaskActiveStatus(sel.status);
                       const canRetry = sel.status === "failed";
                       return (canCancel || canRetry) ? (
                         <div className="task-actions-row" role="group" aria-label="Actions sur la tâche">
@@ -9846,6 +9746,10 @@ function App() {
         t={t}
         eventTriggersEnabled
         onImmediateCreated={(taskId) => {
+          taskIdToSessionIdRef.current[taskId] = sessionId;
+          setRunningTaskChips((prev) => ({ ...prev, [taskId]: { pct: 0, message: "en cours…" } }));
+          setRunningTaskEvents((prev) => (prev[taskId] ? prev : { ...prev, [taskId]: [] }));
+          trackTaskUntilDone(taskId);
           void fetchTasksList({ selectTaskId: taskId });
           setTaskPanelSections((prev) => ({ ...prev, events: true }));
         }}
