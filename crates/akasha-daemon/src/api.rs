@@ -791,23 +791,33 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         root_events
     };
 
-    let child_ids: Vec<Uuid> = list
-        .iter()
-        .filter(|e| e.event_type == "sub_agent_spawned")
-        .filter_map(|e| {
-            e.payload
-                .as_ref()
-                .and_then(|p| p.get("task_id"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())
-        })
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let mut child_ids: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
+    if let Ok(store) = TaskStore::open(store_path) {
+        if let Ok(children) = store.get_children(id) {
+            for child in children {
+                child_ids.insert(child.id);
+            }
+        }
+    }
+    for entry in &list {
+        if entry.event_type != "sub_agent_spawned" {
+            continue;
+        }
+        let Some(payload) = entry.payload.as_ref() else {
+            continue;
+        };
+        for key in ["task_id", "child_task_id", "subtask_id"] {
+            if let Some(s) = payload.get(key).and_then(|v| v.as_str()) {
+                if let Ok(child_id) = Uuid::parse_str(s) {
+                    child_ids.insert(child_id);
+                }
+            }
+        }
+    }
     if !child_ids.is_empty() {
         let g = events.read().await;
-        for child_id in child_ids {
-            if let Some(q) = g.get(&child_id) {
+        for child_id in &child_ids {
+            if let Some(q) = g.get(child_id) {
                 list.extend(q.iter().map(|e| {
                     let mut e = e.clone();
                     e.task_id = Some(child_id.to_string());
@@ -817,18 +827,7 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         }
         drop(g);
         if let Ok(store) = TaskStore::open(store_path) {
-            for child_id in list
-                .iter()
-                .filter(|e| e.event_type == "sub_agent_spawned")
-                .filter_map(|e| {
-                    e.payload
-                        .as_ref()
-                        .and_then(|p| p.get("task_id"))
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| Uuid::parse_str(s).ok())
-                })
-                .collect::<std::collections::BTreeSet<_>>()
-            {
+            for child_id in child_ids {
                 if let Ok(persisted) = store.get_events(child_id) {
                     list.extend(persisted.into_iter().map(|e| TaskEventEntry {
                         schema_version: 1,
