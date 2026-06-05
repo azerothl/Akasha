@@ -1,4 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { InfoTip } from "../components/Tooltip";
+import { useNotifyOnMessage } from "../notifications/useNotifyOnMessage";
 import { useI18n } from "../useI18n";
 import {
   DEFAULT_COOKBOOK_FILTERS,
@@ -262,6 +264,8 @@ export function CookbookPanel({ fetchEndpoint, locale }: Props) {
   const [routeMsg, setRouteMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  useNotifyOnMessage(err, "error", t("tabs.cookbook"));
+
   const loadData = useCallback(async () => {
     const res = await fetchEndpoint("/api/cookbook/recommendations");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -366,12 +370,17 @@ export function CookbookPanel({ fetchEndpoint, locale }: Props) {
 
   return (
     <section className="workspace-panel cookbook-panel">
-      <p className="panel-hero-text muted">
-        {en
-          ? "Model matrix — sorted by hardware fit. Local Ollama/Rbitnet status shown when reachable."
-          : "Matrice de modèles — tri par compatibilité. Statut Ollama/Rbitnet si joignables."}
-      </p>
-      {err ? <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err">{err}</p> : null}
+      <h3 className="cookbook-panel-heading">
+        {t("cookbook.matrix_title")}
+        <InfoTip
+          label={t("cookbook.matrix_title")}
+          content={
+            en
+              ? "Model matrix — sorted by hardware fit. Local Ollama/Rbitnet status shown when reachable."
+              : "Matrice de modèles — tri par compatibilité. Statut Ollama/Rbitnet si joignables."
+          }
+        />
+      </h3>
       {routeMsg ? <p className="cookbook-route-msg muted">{routeMsg}</p> : null}
       {hardware ? (
         <dl className="cookbook-hardware-dl">

@@ -1,5 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
 import { ModelUsageBadge } from "../components/ModelUsageBadge";
+import { InfoTip } from "../components/Tooltip";
+import { useNotifyOnMessage } from "../notifications/useNotifyOnMessage";
 import {
   buildCookbookPricingLookup,
   lookupPriceRates,
@@ -120,6 +122,8 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels }: Props) {
   const [results, setResults] = useState<CompareResult[]>([]);
   const [synthesis, setSynthesis] = useState("");
   const [pricingLookup, setPricingLookup] = useState<Map<string, ModelPriceRates>>(new Map());
+
+  useNotifyOnMessage(routerLoadError, "error", en ? "Compare" : "Comparer");
 
   const compareUsage = useCallback(
     (r: CompareResult): ModelUsageStats | undefined => {
@@ -290,14 +294,18 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels }: Props) {
   return (
     <section className="workspace-panel compare-panel">
       <div className="compare-form">
-        <p className="panel-hero-text muted">
-          {en
-            ? "Send one prompt to several models side by side. Models are loaded from llm_router.yaml."
-            : "Envoyez un prompt à plusieurs modèles côte à côte. Les modèles proviennent de llm_router.yaml."}
-        </p>
-
         <label className="settings-field compare-prompt-field">
-          <span>{en ? "Prompt" : "Prompt"}</span>
+          <span>
+            {en ? "Prompt" : "Prompt"}
+            <InfoTip
+              label={en ? "Compare help" : "Aide comparer"}
+              content={
+                en
+                  ? "Send one prompt to several models side by side. Models are loaded from llm_router.yaml."
+                  : "Envoyez un prompt à plusieurs modèles côte à côte. Les modèles proviennent de llm_router.yaml."
+              }
+            />
+          </span>
           <textarea
             className="compare-prompt-input"
             value={prompt}
@@ -309,12 +317,6 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels }: Props) {
 
         <fieldset className="compare-models-field" disabled={loading || !routerModels}>
           <legend>{en ? "Models to compare" : "Modèles à comparer"}</legend>
-          {routerLoadError ? (
-            <p className="compare-models-hint compare-models-error" role="alert">
-              {en ? "Could not load router models:" : "Impossible de charger les modèles du routeur :"}{" "}
-              {routerLoadError}
-            </p>
-          ) : null}
           {!routerModels && !routerLoadError ? (
             <p className="compare-models-hint muted">{en ? "Loading models…" : "Chargement des modèles…"}</p>
           ) : null}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useNotifyOnMessage } from "./notifications/useNotifyOnMessage";
 
 type LocaleId = "fr" | "en";
 
@@ -38,6 +39,8 @@ export function PermissionsQueuePanel({ fetchEndpoint, locale, decisionSource = 
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  useNotifyOnMessage(err, "error", locale === "en" ? "Permissions" : "Permissions");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -89,7 +92,6 @@ export function PermissionsQueuePanel({ fetchEndpoint, locale, decisionSource = 
 
   return (
     <div className="permissions-queue-panel">
-      {err ? <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err">{err}</p> : null}
       {items.length === 0 ? (
         <p className="muted">
           {locale === "en" ? "No pending permission requests." : "Aucune demande d’approbation en attente."}

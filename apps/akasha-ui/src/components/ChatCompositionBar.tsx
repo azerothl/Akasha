@@ -1,3 +1,5 @@
+import { Tooltip } from "./Tooltip";
+
 type Props = {
   locale: "fr" | "en";
   agentMode: boolean;
@@ -21,34 +23,37 @@ export function ChatCompositionBar({
 }: Props) {
   const en = locale === "en";
   return (
-    <div className="chat-composition-bar" role="toolbar" aria-label={en ? "Chat options" : "Options de chat"}>
-      <button
-        type="button"
-        className={`chat-composition-toggle ${agentMode ? "active" : ""}`}
-        onClick={() => onAgentModeChange(!agentMode)}
-        disabled={disabled}
-        title={en ? "Agent mode (tools enabled)" : "Mode agent (outils activés)"}
-      >
-        {agentMode ? (en ? "Agent" : "Agent") : en ? "Chat" : "Chat"}
-      </button>
-      <button
-        type="button"
-        className={`chat-composition-toggle ${webSearchEnabled ? "active" : ""}`}
-        onClick={() => onWebSearchChange(!webSearchEnabled)}
-        disabled={disabled}
-        title={en ? "Prefer web search in replies" : "Privilégier la recherche web"}
-      >
-        {en ? "Web" : "Web"}
-      </button>
-      <button
-        type="button"
-        className={`chat-composition-toggle ${incognito ? "active" : ""}`}
-        onClick={() => onIncognitoChange(!incognito)}
-        disabled={disabled}
-        title={en ? "Incognito — skip memory promotion for this session" : "Incognito — sans promotion mémoire pour cette session"}
-      >
-        {en ? "Incognito" : "Incognito"}
-      </button>
+    <div className="btn-group chat-composition-bar" role="toolbar" aria-label={en ? "Chat options" : "Options de chat"}>
+      <Tooltip content={en ? "Agent mode (tools enabled)" : "Mode agent (outils activés)"}>
+        <button
+          type="button"
+          className={`btn-group-item ${agentMode ? "active" : ""}`}
+          onClick={() => onAgentModeChange(!agentMode)}
+          disabled={disabled}
+        >
+          {agentMode ? (en ? "Agent" : "Agent") : en ? "Chat" : "Chat"}
+        </button>
+      </Tooltip>
+      <Tooltip content={en ? "Prefer web search in replies" : "Privilégier la recherche web"}>
+        <button
+          type="button"
+          className={`btn-group-item ${webSearchEnabled ? "active" : ""}`}
+          onClick={() => onWebSearchChange(!webSearchEnabled)}
+          disabled={disabled}
+        >
+          {en ? "Web" : "Web"}
+        </button>
+      </Tooltip>
+      <Tooltip content={en ? "Incognito — skip memory promotion for this session" : "Incognito — sans promotion mémoire pour cette session"}>
+        <button
+          type="button"
+          className={`btn-group-item ${incognito ? "active" : ""}`}
+          onClick={() => onIncognitoChange(!incognito)}
+          disabled={disabled}
+        >
+          {en ? "Incognito" : "Incognito"}
+        </button>
+      </Tooltip>
     </div>
   );
 }

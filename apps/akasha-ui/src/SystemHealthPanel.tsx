@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNotifyOnMessage } from "./notifications/useNotifyOnMessage";
 import { PermissionsQueuePanel } from "./PermissionsQueuePanel";
 
 type LocaleId = "fr" | "en";
@@ -244,6 +245,8 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, e
   const [permissionsJson, setPermissionsJson] = useState<string>("");
   const [err, setErr] = useState<string>("");
 
+  useNotifyOnMessage(err || null, "error", labels.title);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -350,7 +353,6 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, e
           {labels.docsMcp}
         </a>
       </p>
-      {err ? <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err">{err}</p> : null}
 
       <HealthCard
         title={labels.opsHeading}

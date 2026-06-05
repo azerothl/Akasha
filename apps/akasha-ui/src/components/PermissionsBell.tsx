@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { PermissionsQueuePanel, type PermissionQueueItem } from "../PermissionsQueuePanel";
+import { MonoIcon } from "./MonoIcon";
 
 type Props = {
   fetchEndpoint: (path: string, init?: RequestInit) => Promise<{ ok: boolean; status: number; text: string }>;
@@ -53,7 +54,7 @@ export function PermissionsBell({ fetchEndpoint, locale, onOpenChange }: Props) 
         aria-haspopup="dialog"
         title={locale === "en" ? "Pending tool approvals" : "Approbations d’outils en attente"}
       >
-        <span aria-hidden>🔐</span>
+        <MonoIcon name="lock" />
         {pending > 0 ? <span className="permissions-bell-badge">{pending}</span> : null}
       </button>
       {open ? (

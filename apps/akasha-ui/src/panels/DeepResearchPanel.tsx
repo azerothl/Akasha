@@ -18,6 +18,8 @@ import {
   saveResearchReportTheme,
   type ResearchReportTheme,
 } from "../researchReportThemes";
+import { InfoTip } from "../components/Tooltip";
+import { useNotifyOnMessage } from "../notifications/useNotifyOnMessage";
 import { useI18n } from "../useI18n";
 
 const LazyMarkdownContent = lazy(() => import("../MarkdownContent").then((m) => ({ default: m.default })));
@@ -195,6 +197,16 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   const [err, setErr] = useState<string | null>(null);
   const [apiReady, setApiReady] = useState<boolean | null>(null);
   const [reportTheme, setReportTheme] = useState<ResearchReportTheme>(() => loadResearchReportTheme());
+  const [historyOpen, setHistoryOpen] = useState(() => {
+    try {
+      const raw = localStorage.getItem("akasha_research_history_open");
+      if (raw === "0") return false;
+      if (raw === "1") return true;
+    } catch {
+      /* ignore */
+    }
+    return loadHistory().length > 0;
+  });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const serverRunIdRef = useRef<string | null>(null);
   const autoOpenedReportIdsRef = useRef<Set<string>>(new Set());
@@ -532,59 +544,103 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   const branches = inDraft ? [] : (selected?.branches ?? []);
   const reportReady = !inDraft && Boolean(report.trim() && !loading);
 
-  return (
-    <section className="workspace-panel research-panel">
-      <div className="research-layout">
-        <aside className="research-history" aria-label={en ? "Research history" : "Historique des recherches"}>
-          <div className="research-history-head">
-            <h3>{en ? "Past research" : "Recherches passées"}</h3>
-            <span className="muted">{history.length}</span>
-          </div>
-          {history.length === 0 ? (
-            <p className="muted research-history-empty">
-              {en ? "Completed runs appear here." : "Les recherches terminées apparaissent ici."}
-            </p>
-          ) : (
-            <ul className="research-history-list">
-              {history.map((h) => (
-                <li key={h.id}>
-                  <button
-                    type="button"
-                    className={`research-history-item ${!inDraft && selectedId === h.id ? "active" : ""} research-history-item-${h.status}`}
-                    onClick={() => selectHistoryRun(h)}
-                  >
-                    <span className="research-history-title">
-                      {h.reportMeta?.report_title?.trim() || h.topic}
-                    </span>
-                    <span className="research-history-meta">
-                      {formatWhen(h.updatedAt, locale)}
-                      {h.reportMeta
-                        ? ` · ${h.reportMeta.rounds}/${h.maxRounds} ${en ? "rounds" : "tours"} · ${h.reportMeta.word_count} ${en ? "words" : "mots"}`
-                        : ` · max ${h.maxRounds} ${en ? "rounds" : "tours"}`}
-                      {h.status === "running" ? (en ? " · running" : " · en cours") : null}
-                      {h.status === "error" ? (en ? " · error" : " · erreur") : null}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="research-history-delete"
-                    aria-label={en ? "Delete" : "Supprimer"}
-                    onClick={() => deleteRun(h.id)}
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </aside>
+  useNotifyOnMessage(err, "error", t("tabs.research"));
+  useNotifyOnMessage(
+    !inDraft && selected?.error && !loading ? selected.error : null,
+    "error",
+    t("tabs.research"),
+  );
+  useNotifyOnMessage(apiReady === false ? daemonOutdatedMsg : null, "warning", t("tabs.research"));
 
-        <div className="research-main">
-          <header className="research-main-head">
-            <div className="research-main-head-actions">
+  const toggleHistory = (open: boolean) => {
+    setHistoryOpen(open);
+    try {
+      localStorage.setItem("akasha_research_history_open", open ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const historyList = (
+    <>
+      {history.length === 0 ? (
+        <p className="muted research-history-empty">{t("research.history_empty")}</p>
+      ) : (
+        <ul className="research-history-list">
+          {history.map((h) => (
+            <li key={h.id}>
               <button
                 type="button"
-                className="panel-hero-action research-new-btn-main"
+                className={`research-history-item ${!inDraft && selectedId === h.id ? "active" : ""} research-history-item-${h.status}`}
+                onClick={() => selectHistoryRun(h)}
+              >
+                <span className="research-history-title">
+                  {h.reportMeta?.report_title?.trim() || h.topic}
+                </span>
+                <span className="research-history-meta">
+                  {formatWhen(h.updatedAt, locale)}
+                  {h.reportMeta
+                    ? ` · ${h.reportMeta.rounds}/${h.maxRounds} ${en ? "rounds" : "tours"} · ${h.reportMeta.word_count} ${en ? "words" : "mots"}`
+                    : ` · max ${h.maxRounds} ${en ? "rounds" : "tours"}`}
+                  {h.status === "running" ? (en ? " · running" : " · en cours") : null}
+                  {h.status === "error" ? (en ? " · error" : " · erreur") : null}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="research-history-delete"
+                aria-label={en ? "Delete" : "Supprimer"}
+                onClick={() => deleteRun(h.id)}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+
+  return (
+    <section className="workspace-panel research-panel">
+      <div className={`research-layout${historyOpen ? " research-layout--history-open" : ""}`}>
+        {historyOpen ? (
+          <aside className="research-history-col" aria-label={t("research.history_title")}>
+            <div className="research-history-head">
+              <h3>{t("research.history_title")}</h3>
+              <button
+                type="button"
+                className="research-history-toggle btn-secondary"
+                onClick={() => toggleHistory(false)}
+                aria-label={t("research.hide_history")}
+                title={t("research.hide_history")}
+              >
+                ◀
+              </button>
+            </div>
+            <div className="research-history-col-body">{historyList}</div>
+          </aside>
+        ) : null}
+
+        <div className="research-content">
+          <header className="research-main-head">
+            <div className="research-main-head-actions">
+              {!historyOpen ? (
+                <button
+                  type="button"
+                  className="btn-secondary research-history-show-btn"
+                  onClick={() => toggleHistory(true)}
+                  aria-label={t("research.show_history")}
+                >
+                  {t("research.show_history")}
+                  {history.length > 0 ? (
+                    <span className="research-history-fold-count">{history.length}</span>
+                  ) : null}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="btn-primary research-new-btn-main"
                 onClick={startNewResearch}
                 disabled={loading}
               >
@@ -598,21 +654,21 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
                 >
                   <button
                     type="button"
-                    className="panel-hero-action panel-hero-action-secondary"
+                    className="btn-secondary"
                     onClick={onOpenReportWindow}
                   >
                     {t("research.report.reopen")}
                   </button>
                   <button
                     type="button"
-                    className="panel-hero-action panel-hero-action-secondary"
+                    className="btn-secondary"
                     onClick={onExportHtml}
                   >
                     {t("research.report.export_html")}
                   </button>
                   <button
                     type="button"
-                    className="panel-hero-action panel-hero-action-secondary"
+                    className="btn-secondary"
                     onClick={onExportPdf}
                   >
                     {t("research.report.export_pdf")}
@@ -620,7 +676,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
                   {onDiscussReport && reportDoc ? (
                     <button
                       type="button"
-                      className="panel-hero-action panel-hero-action-secondary"
+                      className="btn-secondary"
                       onClick={() => onDiscussReport(reportDoc)}
                     >
                       {en ? "Discuss in chat" : "Discuter dans le chat"}
@@ -653,15 +709,8 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
               ) : null}
             </div>
           </header>
-          {apiReady === false ? (
-            <div className="research-api-banner" role="alert">
-              {daemonOutdatedMsg}
-            </div>
-          ) : null}
           {!inDraft && selected?.searchDegraded ? (
-            <div className="research-api-banner research-degraded-banner" role="status">
-              {t("research.search_degraded")}
-            </div>
+            <p className="research-degraded-hint muted" role="status">{t("research.search_degraded")}</p>
           ) : null}
           {loading ? (
             <p className="research-slow-hint muted">
@@ -671,7 +720,6 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
               ) : null}
             </p>
           ) : null}
-          <p className="panel-hero-text muted">{t("research.hero")}</p>
 
           <ResearchStarViz
             branches={branches}
@@ -715,7 +763,10 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
           ) : null}
 
           <label className="settings-field">
-            <span>{t("research.topic_label")}</span>
+            <span>
+              {t("research.topic_label")}
+              <InfoTip label={t("research.topic_label")} content={t("research.hero")} />
+            </span>
             <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3} disabled={loading} />
           </label>
           <label className="settings-field research-max-rounds-field">
@@ -764,15 +815,11 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
                   : "Lancer la recherche"}
             </button>
             {loading ? (
-              <button type="button" className="panel-hero-action panel-hero-action-secondary" onClick={() => void cancelRun()}>
+              <button type="button" className="btn-secondary" onClick={() => void cancelRun()}>
                 {en ? "Cancel" : "Annuler"}
               </button>
             ) : null}
           </div>
-          {err ? <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err">{err}</p> : null}
-          {!inDraft && selected?.error && !loading ? (
-            <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err">{selected.error}</p>
-          ) : null}
         </div>
       </div>
     </section>
