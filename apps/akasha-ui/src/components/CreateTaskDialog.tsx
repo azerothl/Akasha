@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { InfoTip } from "./Tooltip";
 
 const DAEMON_PORT = 3876;
 
@@ -15,6 +16,21 @@ export type CreateTaskDialogProps = {
 };
 
 type TabId = "immediate" | "recurring" | "oneshot" | "trigger";
+
+function CreateTaskFieldLabel({
+  label,
+  tip,
+}: {
+  label: string;
+  tip: ReactNode;
+}) {
+  return (
+    <span className="create-task-field-label">
+      <span>{label}</span>
+      <InfoTip label={label} content={tip} />
+    </span>
+  );
+}
 
 export function CreateTaskDialog({
   open,
@@ -160,11 +176,11 @@ export function CreateTaskDialog({
 
   if (!open) return null;
 
-  const tabs: { id: TabId; label: string; disabled?: boolean }[] = [
-    { id: "immediate", label: t("tasks.create_tab_immediate") },
-    { id: "recurring", label: t("tasks.create_tab_recurring") },
-    { id: "oneshot", label: t("tasks.create_tab_oneshot") },
-    { id: "trigger", label: t("tasks.create_tab_trigger"), disabled: !eventTriggersEnabled },
+  const tabs: { id: TabId; label: string; tip: string; disabled?: boolean }[] = [
+    { id: "immediate", label: t("tasks.create_tab_immediate"), tip: t("tasks.create_tip_tab_immediate") },
+    { id: "recurring", label: t("tasks.create_tab_recurring"), tip: t("tasks.create_tip_tab_recurring") },
+    { id: "oneshot", label: t("tasks.create_tab_oneshot"), tip: t("tasks.create_tip_tab_oneshot") },
+    { id: "trigger", label: t("tasks.create_tab_trigger"), tip: t("tasks.create_tip_tab_trigger"), disabled: !eventTriggersEnabled },
   ];
 
   return (
@@ -173,17 +189,22 @@ export function CreateTaskDialog({
         <h2 id="create-task-title">{t("tasks.create_title")}</h2>
         <div className="create-task-tabs" role="tablist">
           {tabs.map((item) => (
-            <button
+            <div
               key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === item.id}
-              className={"create-task-tab" + (tab === item.id ? " active" : "") + (item.disabled ? " disabled" : "")}
-              disabled={item.disabled}
-              onClick={() => !item.disabled && setTab(item.id)}
+              className={"create-task-tab-wrap" + (tab === item.id ? " active" : "") + (item.disabled ? " disabled" : "")}
             >
-              {item.label}
-            </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === item.id}
+                className="create-task-tab"
+                disabled={item.disabled}
+                onClick={() => !item.disabled && setTab(item.id)}
+              >
+                {item.label}
+              </button>
+              <InfoTip label={item.label} content={item.tip} />
+            </div>
           ))}
         </div>
 
@@ -191,11 +212,11 @@ export function CreateTaskDialog({
           {tab === "immediate" && (
             <>
               <label className="create-task-field">
-                <span>{t("tasks.create_message_label")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_message_label")} tip={t("tasks.create_tip_message")} />
                 <textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={4} />
               </label>
               <label className="create-task-field">
-                <span>{t("tasks.create_priority_label")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_priority_label")} tip={t("tasks.create_tip_priority")} />
                 <select value={priority} onChange={(e) => setPriority(e.target.value as "normal" | "high")}>
                   <option value="normal">{t("tasks.create_priority_normal")}</option>
                   <option value="high">{t("tasks.create_priority_high")}</option>
@@ -207,19 +228,19 @@ export function CreateTaskDialog({
           {tab === "recurring" && (
             <>
               <label className="create-task-field">
-                <span>{t("tasks.create_schedule_name")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_schedule_name")} tip={t("tasks.create_tip_schedule_name")} />
                 <input type="text" value={scheduleName} onChange={(e) => setScheduleName(e.target.value)} />
               </label>
               <label className="create-task-field">
-                <span>{t("tasks.create_schedule_prompt")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_schedule_prompt")} tip={t("tasks.create_tip_schedule_prompt")} />
                 <textarea value={schedulePrompt} onChange={(e) => setSchedulePrompt(e.target.value)} rows={3} />
               </label>
               <label className="create-task-field">
-                <span>{t("tasks.create_interval_label")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_interval_label")} tip={t("tasks.create_tip_interval")} />
                 <input type="number" min={60} value={intervalSeconds} onChange={(e) => setIntervalSeconds(e.target.value)} />
               </label>
               <label className="create-task-field">
-                <span>{t("tasks.create_rrule_label")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_rrule_label")} tip={t("tasks.create_tip_rrule")} />
                 <input type="text" value={rrule} onChange={(e) => setRrule(e.target.value)} placeholder="FREQ=DAILY;BYHOUR=9" />
               </label>
             </>
@@ -228,15 +249,15 @@ export function CreateTaskDialog({
           {tab === "oneshot" && (
             <>
               <label className="create-task-field">
-                <span>{t("tasks.create_schedule_name")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_schedule_name")} tip={t("tasks.create_tip_schedule_name")} />
                 <input type="text" value={scheduleName} onChange={(e) => setScheduleName(e.target.value)} />
               </label>
               <label className="create-task-field">
-                <span>{t("tasks.create_schedule_prompt")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_schedule_prompt")} tip={t("tasks.create_tip_schedule_prompt")} />
                 <textarea value={schedulePrompt} onChange={(e) => setSchedulePrompt(e.target.value)} rows={3} />
               </label>
               <label className="create-task-field">
-                <span>{t("tasks.create_oneshot_at")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_oneshot_at")} tip={t("tasks.create_tip_oneshot_at")} />
                 <input type="datetime-local" value={oneShotAt} onChange={(e) => setOneShotAt(e.target.value)} />
               </label>
             </>
@@ -245,11 +266,11 @@ export function CreateTaskDialog({
           {tab === "trigger" && (
             <>
               <label className="create-task-field">
-                <span>{t("tasks.create_trigger_name")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_trigger_name")} tip={t("tasks.create_tip_trigger_name")} />
                 <input type="text" value={triggerName} onChange={(e) => setTriggerName(e.target.value)} />
               </label>
               <label className="create-task-field">
-                <span>{t("tasks.create_trigger_type")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_trigger_type")} tip={t("tasks.create_tip_trigger_type")} />
                 <select value={triggerType} onChange={(e) => setTriggerType(e.target.value)}>
                   <option value="webhook">{t("tasks.trigger_type_webhook")}</option>
                   <option value="task_failed">{t("tasks.trigger_type_task_failed")}</option>
@@ -259,11 +280,11 @@ export function CreateTaskDialog({
                 </select>
               </label>
               <label className="create-task-field">
-                <span>{t("tasks.create_trigger_filter")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_trigger_filter")} tip={t("tasks.create_tip_trigger_filter")} />
                 <textarea value={triggerFilter} onChange={(e) => setTriggerFilter(e.target.value)} rows={2} />
               </label>
               <label className="create-task-field">
-                <span>{t("tasks.create_trigger_prompt")}</span>
+                <CreateTaskFieldLabel label={t("tasks.create_trigger_prompt")} tip={t("tasks.create_tip_trigger_prompt")} />
                 <textarea value={triggerPrompt} onChange={(e) => setTriggerPrompt(e.target.value)} rows={3} />
               </label>
             </>
