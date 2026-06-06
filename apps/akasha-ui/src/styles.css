@@ -5292,6 +5292,39 @@ a.settings-link-btn.refresh-btn {
   border-bottom: 1px solid var(--akasha-border);
   padding-bottom: 0.25rem;
 }
+
+.calendar-wakeups-panel { margin-top: 0.5rem; }
+.calendar-wakeups-hint { margin-bottom: 0.75rem; font-size: 0.875rem; }
+.calendar-wakeup-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  margin-bottom: 1rem;
+}
+.calendar-wakeup-field { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8125rem; }
+.calendar-wakeup-field-grow { flex: 1; min-width: 12rem; }
+.calendar-wakeup-field input {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.875rem;
+  background: var(--akasha-bg-surface);
+  border: 1px solid var(--akasha-border);
+  border-radius: 6px;
+  color: var(--akasha-text);
+}
+.calendar-wakeup-list { list-style: none; padding: 0; margin: 0; }
+.calendar-wakeup-item {
+  border: 1px solid var(--akasha-border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--akasha-bg-surface);
+}
+.calendar-wakeup-meta { display: flex; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; }
+.calendar-wakeup-status { font-size: 0.75rem; text-transform: uppercase; color: var(--akasha-text-dim); }
+.calendar-wakeup-message { margin: 0 0 0.5rem; font-size: 0.875rem; }
+.calendar-wakeup-delete { font-size: 0.8125rem; }
+.calendar-wakeup-item--fired { opacity: 0.65; }
 .calendar-subtabs button {
   padding: 0.4rem 0.75rem;
   font-size: 0.875rem;

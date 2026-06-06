@@ -143,6 +143,7 @@ const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
     "schedule_task",
     "list_scheduled_tasks",
     "cancel_scheduled_task",
+    "wake_in",
     "budget_status",
         "workspace_graph_search",
         "user_rag_search",

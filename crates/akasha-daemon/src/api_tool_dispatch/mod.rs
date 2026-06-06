@@ -20,6 +20,8 @@ pub struct ToolCallContext<'a> {
     pub workspace_store: Option<&'a TaskWorkspaceStore>,
     pub browser_registry: Option<&'a crate::browser::BrowserSessionRegistry>,
     pub workspace_root: Option<&'a std::path::Path>,
+    /// Conversation session for session-scoped tools (e.g. wake_in).
+    pub session_id: Option<&'a str>,
 }
 
 pub async fn execute_tool_call(
@@ -43,6 +45,7 @@ pub async fn execute_tool_call(
         ctx.workspace_store,
         ctx.browser_registry,
         ctx.workspace_root,
+        ctx.session_id,
     )
     .await
 }

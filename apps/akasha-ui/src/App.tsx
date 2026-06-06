@@ -1864,8 +1864,13 @@ function App() {
   const [calendarGridEvents, setCalendarGridEvents] = useState<CalendarGridEvent[]>([]);
   const [calendarGridDate, setCalendarGridDate] = useState(() => new Date());
   const [calendarCellDetail, setCalendarCellDetail] = useState<{ slotKey: string; slotLabel: string; events: CalendarGridEvent[] } | null>(null);
-  type CalendarSubTab = "grid" | "recent" | "schedules";
+  type CalendarSubTab = "grid" | "recent" | "schedules" | "wakeups";
   const [calendarSubTab, setCalendarSubTab] = useState<CalendarSubTab>("grid");
+  type WakeupRow = { id: string; session_id: string; fire_at: string; message: string; status: string; created_at?: string };
+  const [wakeups, setWakeups] = useState<WakeupRow[]>([]);
+  const [wakeupFormMinutes, setWakeupFormMinutes] = useState("60");
+  const [wakeupFormMessage, setWakeupFormMessage] = useState("");
+  const [wakeupSaving, setWakeupSaving] = useState(false);
   const calendarEventLabel = (ev: { label?: string; task_id: string }) => (ev.label && ev.label.trim()) ? ev.label : `Tâche …${ev.task_id.slice(-8)}`;
   const calendarGetParentKey = (ev: CalendarGridEvent) => ev.schedule_id ?? `task_${ev.task_id}`;
   const calendarGetEventStatusClass = (status: string) => {
@@ -3526,6 +3531,17 @@ function App() {
     }
   }, []);
 
+  const fetchWakeups = useCallback(async () => {
+    try {
+      const res = await fetch(e2eDaemonHttpUrl("/api/wakeups"));
+      if (!res.ok) throw new Error(String(res.status));
+      const data = (await res.json()) as { wakeups?: WakeupRow[] };
+      setWakeups(data.wakeups ?? []);
+    } catch {
+      setWakeups([]);
+    }
+  }, []);
+
   const fetchCalendarGridEvents = useCallback(async () => {
     const d = calendarGridDate;
     let from: Date;
@@ -3560,6 +3576,10 @@ function App() {
   useEffect(() => {
     if (tab === "calendar") fetchCalendarGridEvents();
   }, [tab, fetchCalendarGridEvents]);
+
+  useEffect(() => {
+    if (tab === "calendar" && calendarSubTab === "wakeups") void fetchWakeups();
+  }, [tab, calendarSubTab, fetchWakeups]);
 
   useEffect(() => {
     if (tab !== "tasks") return;
@@ -6874,6 +6894,15 @@ function App() {
               >
                 {t("calendar.recurring")}
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={calendarSubTab === "wakeups"}
+                className={calendarSubTab === "wakeups" ? "active" : ""}
+                onClick={() => setCalendarSubTab("wakeups")}
+              >
+                Rappels agent
+              </button>
             </div>
             <button
               type="button"
@@ -7312,6 +7341,104 @@ function App() {
                       ))}
                     </ul>
                   </>
+                )}
+              </div>
+            )}
+            {!calendarLoading && calendarSubTab === "wakeups" && (
+              <div className="calendar-wakeups-panel">
+                <h3>Rappels agent (wakeups)</h3>
+                <p className="calendar-wakeups-hint muted">
+                  Messages programmés que l&apos;agent enverra dans la session courante à l&apos;heure prévue.
+                </p>
+                <form
+                  className="calendar-wakeup-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void (async () => {
+                      const minutes = parseInt(wakeupFormMinutes, 10);
+                      if (!sessionId || !wakeupFormMessage.trim() || !Number.isFinite(minutes) || minutes <= 0) return;
+                      setWakeupSaving(true);
+                      try {
+                        const fire_at = new Date(Date.now() + minutes * 60_000).toISOString();
+                        const res = await fetch(e2eDaemonHttpUrl("/api/wakeups"), {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            session_id: sessionId,
+                            message: wakeupFormMessage.trim(),
+                            fire_at,
+                          }),
+                        });
+                        if (res.ok) {
+                          setWakeupFormMessage("");
+                          await fetchWakeups();
+                        }
+                      } finally {
+                        setWakeupSaving(false);
+                      }
+                    })();
+                  }}
+                >
+                  <label className="calendar-wakeup-field">
+                    <span>Dans (minutes)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={525600}
+                      value={wakeupFormMinutes}
+                      onChange={(e) => setWakeupFormMinutes(e.target.value)}
+                      disabled={wakeupSaving}
+                    />
+                  </label>
+                  <label className="calendar-wakeup-field calendar-wakeup-field-grow">
+                    <span>Message</span>
+                    <input
+                      type="text"
+                      value={wakeupFormMessage}
+                      onChange={(e) => setWakeupFormMessage(e.target.value)}
+                      placeholder="Ex. Relancer la revue du PR"
+                      disabled={wakeupSaving}
+                    />
+                  </label>
+                  <button type="submit" className="refresh-btn" disabled={wakeupSaving || !sessionId}>
+                    {wakeupSaving ? "…" : "Programmer"}
+                  </button>
+                </form>
+                {!sessionId && (
+                  <p className="muted">Ouvrez ou démarrez une session de chat pour créer un rappel.</p>
+                )}
+                {wakeups.length === 0 ? (
+                  <p className="empty-state">Aucun rappel programmé.</p>
+                ) : (
+                  <ul className="calendar-wakeup-list" role="list">
+                    {wakeups.map((w) => (
+                      <li key={w.id} className={`calendar-wakeup-item calendar-wakeup-item--${w.status}`}>
+                        <div className="calendar-wakeup-meta">
+                          <strong>{new Date(w.fire_at).toLocaleString()}</strong>
+                          <span className="calendar-wakeup-status">{w.status}</span>
+                        </div>
+                        <p className="calendar-wakeup-message">{w.message}</p>
+                        {w.status === "pending" && (
+                          <button
+                            type="button"
+                            className="calendar-wakeup-delete"
+                            onClick={() => {
+                              void (async () => {
+                                try {
+                                  await fetch(e2eDaemonHttpUrl(`/api/wakeups/${encodeURIComponent(w.id)}`), { method: "DELETE" });
+                                  await fetchWakeups();
+                                } catch {
+                                  /* ignore */
+                                }
+                              })();
+                            }}
+                          >
+                            {t("settings.delete")}
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </div>
             )}

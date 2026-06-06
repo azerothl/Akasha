@@ -1742,6 +1742,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("schedule_task", "schedule_task <cron> <prompt> [title] — créer une tâche planifiée active."),
     ("list_scheduled_tasks", "list_scheduled_tasks [limit] — lister les schedules actifs."),
     ("cancel_scheduled_task", "cancel_scheduled_task <schedule_id> — supprimer un schedule par UUID."),
+    ("wake_in", "wake_in <minutes> <message> — programmer un rappel agent unique dans la session courante (plus léger que schedule_task)."),
     ("budget_status", "budget_status [session_id] — état budget (usage tokens/coût, seuil, auto-concise)."),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
     ("browser", "browser navigate <url> — navigate (http/https; domain allowed). browser snapshot — texte + liens. browser screenshot | browser click <css> | browser fill <css> <texte> | browser wait <css_selector|ms> — automation Playwright (spec 39)."),
@@ -3682,6 +3683,7 @@ async fn execute_tool_call(
     workspace_store: Option<&TaskWorkspaceStore>,
     browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
     workspace_root: Option<&std::path::Path>,
+    session_id: Option<&str>,
 ) -> (bool, String, Option<String>) {
     crate::api_tool_dispatch::execute_tool_call(
         crate::api_tool_dispatch::ToolCallContext {
@@ -3696,6 +3698,7 @@ async fn execute_tool_call(
             workspace_store,
             browser_registry,
             workspace_root,
+            session_id,
         },
         executor,
         tool_name,
@@ -3719,6 +3722,7 @@ pub(crate) async fn execute_tool_call_impl(
     workspace_store: Option<&TaskWorkspaceStore>,
     browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
     workspace_root: Option<&std::path::Path>,
+    session_id: Option<&str>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
     let is_studio_workspace =
@@ -4982,6 +4986,63 @@ pub(crate) async fn execute_tool_call_impl(
                     "[cancel_scheduled_task] usage: cancel_scheduled_task <schedule_id>".to_string(),
                     None,
                 ),
+            }
+        }
+        "wake_in" => {
+            let minutes = args
+                .get(0)
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|&m| m > 0 && m <= 525_600);
+            let message = if args.len() > 1 {
+                args[1..].join(" ")
+            } else {
+                String::new()
+            };
+            let message = message.trim().to_string();
+            if minutes.is_none() || message.is_empty() {
+                return (
+                    false,
+                    "[wake_in] usage: wake_in <minutes> <message>".to_string(),
+                    None,
+                );
+            }
+            let minutes = minutes.unwrap();
+            match store_path {
+                Some(path) => {
+                    use akasha_store::platform_extras::{Wakeup, WakeupStore};
+                    let sid = session_id
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("task:{}", task_id));
+                    let fire_at =
+                        chrono::Utc::now() + chrono::Duration::minutes(minutes);
+                    let w = Wakeup {
+                        id: Uuid::new_v4(),
+                        session_id: sid,
+                        fire_at,
+                        message: message.clone(),
+                        status: "pending".into(),
+                        created_by_task_id: Some(task_id),
+                        rrule: None,
+                        created_at: chrono::Utc::now(),
+                    };
+                    match WakeupStore::open(path) {
+                        Ok(store) => match store.insert(&w) {
+                            Ok(()) => (
+                                true,
+                                format!(
+                                    "[wake_in] scheduled wakeup {} in {} min (at {})",
+                                    w.id,
+                                    minutes,
+                                    fire_at.to_rfc3339()
+                                ),
+                                None,
+                            ),
+                            Err(e) => (false, format!("[wake_in] {}", e), None),
+                        },
+                        Err(e) => (false, format!("[wake_in] store error: {}", e), None),
+                    }
+                }
+                None => (false, "[wake_in] store not available".to_string(), None),
             }
         }
         "budget_status" => {
@@ -8234,6 +8295,7 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                     workspace_store,
                     browser_registry,
                     Some(tool_disk_root),
+                    None,
                 )
                 .await;
                 let write_like = matches!(
@@ -8380,6 +8442,7 @@ The compiler output already signals what is wrong: apply a minimal fix with `TOO
                     workspace_store,
                     browser_registry,
                     Some(tool_disk_root),
+                    None,
                 )
                 .await;
                 if ok {
@@ -8453,6 +8516,7 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                     workspace_store,
                                     browser_registry,
                                     Some(tool_disk_root),
+                                    None,
                                 )
                                 .await;
                                 if success
@@ -11067,6 +11131,7 @@ pub(crate) async fn run_message_via_llm(
                                         workspace_store.as_ref(),
                                         browser_registry.as_ref(),
                                         Some(tool_disk_workspace_root.as_path()),
+                                        Some(session_id.as_str()),
                                     )
                                     .await;
                                     (s, r, None)
@@ -11117,6 +11182,7 @@ pub(crate) async fn run_message_via_llm(
                                     workspace_store.as_ref(),
                                     browser_registry.as_ref(),
                                     Some(tool_disk_workspace_root.as_path()),
+                                    Some(session_id.as_str()),
                                 )
                                 .await
                             };
@@ -12743,6 +12809,7 @@ pub async fn handle_api(
             store_path,
             data_dir,
             user_rag_store,
+            plugin_registry: Some(plugin_registry),
         },
     )
     .await
