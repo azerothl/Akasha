@@ -9229,7 +9229,7 @@ pub(crate) async fn run_message_via_llm(
             Some(user_identity_prefix)
         },
         task_outcomes_limit: if code_studio_disk_task { 6 } else { 8 },
-        task_outcomes_scope_session: code_studio_disk_task,
+        task_outcomes_scope_session: code_studio_disk_task || !turns_empty,
         include_preference_and_personality_episodic: !code_studio_disk_task,
         ..Default::default()
     };

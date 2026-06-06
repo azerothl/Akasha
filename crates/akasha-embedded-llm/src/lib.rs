@@ -7,7 +7,16 @@
 mod baguettotron;
 
 use once_cell::sync::Lazy;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+/// Single-flight inference: Candle/Baguettotron pipelines are not safe for concurrent `run()`.
+static INFERENCE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+fn acquire_inference_lock() -> Result<std::sync::MutexGuard<'static, ()>> {
+    INFERENCE_MUTEX
+        .lock()
+        .map_err(|e| EmbeddedLlmError::Inference(format!("inference lock poisoned: {e}")))
+}
 
 /// Result type for embedded LLM operations.
 pub type Result<T> = std::result::Result<T, EmbeddedLlmError>;
@@ -75,6 +84,7 @@ impl EmbeddedLlm {
     where
         F: FnMut(&str),
     {
+        let _guard = acquire_inference_lock()?;
         #[cfg(all(feature = "baguettotron", not(feature = "candle")))]
         if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
             return baguettotron::complete_stream(prompt, max_tokens, temperature, on_chunk);
@@ -112,6 +122,7 @@ impl EmbeddedLlm {
         max_tokens: Option<usize>,
         temperature: Option<f64>,
     ) -> Result<String> {
+        let _guard = acquire_inference_lock()?;
         #[cfg(all(feature = "baguettotron", not(feature = "candle")))]
         if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
             return baguettotron::complete(prompt, max_tokens, temperature);

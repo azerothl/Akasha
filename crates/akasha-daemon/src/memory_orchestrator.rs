@@ -252,14 +252,12 @@ pub async fn recall_context(
         let mut retrieval_candidates = 0u64;
         let mut retrieval_used = 0u64;
 
-        // Semantic retriever: main message with optional session / task filter
+        // Semantic retriever: main message with optional session / task filter.
+        // When filter_by_session is set (follow-up turn), scope to the session — not the new task_id.
         let recall_filter = if params.filter_by_session {
             Some(MemorySearchFilter {
                 session_id: Some(params.session_id.clone()),
-                process_id: params
-                    .task_id
-                    .clone()
-                    .or(params.process_id.clone()),
+                process_id: None,
                 entity_id: params.entity_id.clone(),
                 include_global: true,
                 ..Default::default()
@@ -392,7 +390,11 @@ pub async fn recall_context(
         if params.episodic_limit > 0 {
             let ep_filter = EpisodicFilter {
                 session_id: Some(params.session_id.clone()),
-                task_id: params.task_id.clone(),
+                task_id: if params.filter_by_session {
+                    None
+                } else {
+                    params.task_id.clone()
+                },
                 ..Default::default()
             };
             let events = client.search_episodic(ep_filter, params.episodic_limit);
@@ -472,7 +474,11 @@ pub async fn recall_context(
         if params.task_outcomes_limit > 0 {
             let outcome_filter = EpisodicFilter {
                 event_type: Some("task_outcome".to_string()),
-                task_id: params.task_id.clone(),
+                task_id: if params.task_outcomes_scope_session {
+                    None
+                } else {
+                    params.task_id.clone()
+                },
                 session_id: if params.task_outcomes_scope_session {
                     Some(params.session_id.clone())
                 } else {
