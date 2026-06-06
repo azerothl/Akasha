@@ -65,8 +65,8 @@ pub fn index_document_sync(data_dir: &Path, doc_id: &str) -> anyhow::Result<()> 
     let text = extract_text_from_bytes(&meta.name, &meta.mime_type, &bytes)?;
     let chunks = chunk_text(&text);
     if chunks.is_empty() {
-        store.set_index_status(doc_id, "ready", Some(chrono::Utc::now()), None)?;
         store.save_chunk_embeddings(doc_id, Vec::new())?;
+        store.set_index_status(doc_id, "ready", Some(chrono::Utc::now()), None)?;
         return Ok(());
     }
 

@@ -107,20 +107,36 @@ fn composite_score(
         + weights.confidence * confidence.clamp(0.0, 1.0)
 }
 
+use std::sync::OnceLock;
+
+struct TemporalDecayConfig {
+    lambda: f32,
+    floor: f32,
+}
+
+static TEMPORAL_DECAY_CONFIG: OnceLock<TemporalDecayConfig> = OnceLock::new();
+
+fn temporal_decay_config() -> &'static TemporalDecayConfig {
+    TEMPORAL_DECAY_CONFIG.get_or_init(|| {
+        let lambda = std::env::var("AKASHA_MEMORY_TEMPORAL_DECAY_LAMBDA")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        let floor = std::env::var("AKASHA_MEMORY_TEMPORAL_DECAY_FLOOR")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.7);
+        TemporalDecayConfig { lambda, floor }
+    })
+}
+
 fn temporal_decay_multiplier(created_at: &DateTime<Utc>) -> f32 {
-    let lambda = std::env::var("AKASHA_MEMORY_TEMPORAL_DECAY_LAMBDA")
-        .ok()
-        .and_then(|s| s.parse::<f32>().ok())
-        .unwrap_or(0.0);
-    if lambda <= 0.0 {
+    let config = temporal_decay_config();
+    if config.lambda <= 0.0 {
         return 1.0;
     }
-    let floor = std::env::var("AKASHA_MEMORY_TEMPORAL_DECAY_FLOOR")
-        .ok()
-        .and_then(|s| s.parse::<f32>().ok())
-        .unwrap_or(0.7);
     let days = (Utc::now() - *created_at).num_days().max(0) as f32;
-    (f32::exp(-lambda * days)).max(floor)
+    (f32::exp(-config.lambda * days)).max(config.floor)
 }
 
 fn adaptive_k_cutoff(scores: &[f32], top_k: usize) -> usize {
@@ -141,7 +157,7 @@ fn memory_adaptive_k_enabled() -> bool {
     std::env::var("AKASHA_MEMORY_ADAPTIVE_K")
         .ok()
         .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// Hybrid search: keyword + embedding lists, optional RRF, composite re-rank.

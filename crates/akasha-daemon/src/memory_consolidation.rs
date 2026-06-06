@@ -47,7 +47,7 @@ fn word_jaccard(a: &str, b: &str) -> f32 {
         return 0.0;
     }
     let inter = wa.intersection(&wb).count() as f32;
-    let union = wa.len().max(wb.len()) as f32;
+    let union = wa.union(&wb).count() as f32;
     inter / union
 }
 

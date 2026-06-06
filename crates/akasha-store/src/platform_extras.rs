@@ -106,19 +106,24 @@ impl WakeupStore {
         )?;
         let rows = stmt.query_map(params![before.to_rfc3339()], |row| {
             Ok(Wakeup {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
+                id: Uuid::parse_str(&row.get::<_, String>(0)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?,
                 session_id: row.get(1)?,
-                fire_at: row.get::<_, String>(2)?.parse().unwrap_or_else(|_| Utc::now()),
+                fire_at: row.get::<_, String>(2)?
+                    .parse()
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e)))?,
                 message: row.get(3)?,
                 status: row.get(4)?,
                 created_by_task_id: row
                     .get::<_, Option<String>>(5)?
                     .and_then(|s| Uuid::parse_str(&s).ok()),
                 rrule: row.get(6)?,
-                created_at: row.get::<_, String>(7)?.parse().unwrap_or_else(|_| Utc::now()),
+                created_at: row.get::<_, String>(7)?
+                    .parse()
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e)))?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn list_all(&self) -> anyhow::Result<Vec<Wakeup>> {
@@ -128,19 +133,24 @@ impl WakeupStore {
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Wakeup {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
+                id: Uuid::parse_str(&row.get::<_, String>(0)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?,
                 session_id: row.get(1)?,
-                fire_at: row.get::<_, String>(2)?.parse().unwrap_or_else(|_| Utc::now()),
+                fire_at: row.get::<_, String>(2)?
+                    .parse()
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e)))?,
                 message: row.get(3)?,
                 status: row.get(4)?,
                 created_by_task_id: row
                     .get::<_, Option<String>>(5)?
                     .and_then(|s| Uuid::parse_str(&s).ok()),
                 rrule: row.get(6)?,
-                created_at: row.get::<_, String>(7)?.parse().unwrap_or_else(|_| Utc::now()),
+                created_at: row.get::<_, String>(7)?
+                    .parse()
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e)))?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn mark_fired(&self, id: &Uuid) -> anyhow::Result<()> {
@@ -241,7 +251,7 @@ impl ContactStore {
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![q, limit as i64], row_to_contact)?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn list(&self, limit: usize) -> anyhow::Result<Vec<Contact>> {
@@ -250,7 +260,7 @@ impl ContactStore {
              FROM contacts ORDER BY display_name LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], row_to_contact)?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 
@@ -266,7 +276,8 @@ fn row_to_contact(row: &rusqlite::Row<'_>) -> rusqlite::Result<Contact> {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::json!({}));
     Ok(Contact {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
+        id: Uuid::parse_str(&row.get::<_, String>(0)?)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?,
         display_name: row.get(1)?,
         identifiers,
         notes: row.get(3)?,
@@ -274,11 +285,11 @@ fn row_to_contact(row: &rusqlite::Row<'_>) -> rusqlite::Result<Contact> {
         created_at: row
             .get::<_, String>(5)?
             .parse()
-            .unwrap_or_else(|_| Utc::now()),
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e)))?,
         updated_at: row
             .get::<_, String>(6)?
             .parse()
-            .unwrap_or_else(|_| Utc::now()),
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e)))?,
     })
 }
 
@@ -330,7 +341,8 @@ impl NotificationStore {
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             Ok(NotificationRow {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
+                id: Uuid::parse_str(&row.get::<_, String>(0)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?,
                 type_: row.get(1)?,
                 title: row.get(2)?,
                 body: row.get(3)?,
@@ -341,10 +353,10 @@ impl NotificationStore {
                 created_at: row
                     .get::<_, String>(6)?
                     .parse()
-                    .unwrap_or_else(|_| Utc::now()),
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e)))?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn mark_read(&self, id: &Uuid) -> anyhow::Result<bool> {
@@ -426,17 +438,15 @@ impl ConversationArchiveStore {
                 archived_at: row
                     .get::<_, String>(4)?
                     .parse()
-                    .unwrap_or_else(|_| Utc::now()),
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?,
             })
         };
         let rows: Vec<ArchivedTurn> = if let Some(s) = sid {
             stmt.query_map(params![s, q, limit as i64], map_row)?
-                .filter_map(|r| r.ok())
-                .collect()
+                .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             stmt.query_map(params![q, limit as i64], map_row)?
-                .filter_map(|r| r.ok())
-                .collect()
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
         Ok(rows)
     }

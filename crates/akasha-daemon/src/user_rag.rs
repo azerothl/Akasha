@@ -219,7 +219,7 @@ impl UserRagStore {
     ) -> anyhow::Result<()> {
         let mut manifest = self.load_manifest()?;
         let Some(doc) = manifest.documents.iter_mut().find(|d| d.id == id) else {
-            anyhow::bail!("document not found");
+            anyhow::bail!("document not found: {id}");
         };
         doc.index_status = status.to_string();
         doc.indexed_at = indexed_at.map(|t| t.to_rfc3339());
