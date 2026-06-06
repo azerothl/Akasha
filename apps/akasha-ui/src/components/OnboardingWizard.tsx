@@ -69,8 +69,8 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
 
   const steps =
     locale === "en"
-      ? ["Welcome", "Health check", "Provider hint", "Your name", "Ready"]
-      : ["Bienvenue", "Diagnostic", "Conseil provider", "Votre prénom", "Prêt"];
+      ? ["Welcome", "Health check", "LLM provider", "Channels", "Your name", "Ready"]
+      : ["Bienvenue", "Diagnostic", "Provider LLM", "Canaux", "Votre prénom", "Prêt"];
 
   return (
     <div className="human-input-overlay onboarding-overlay" role="dialog" aria-modal="true">
@@ -110,17 +110,31 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
           <>
             <p>
               {locale === "en"
-                ? "Tip: configure your preferred LLM provider in Settings > System when setup is done."
-                : "Conseil : configurez votre provider LLM préféré dans Réglages > Système une fois la configuration terminée."}
+                ? "Choose your LLM provider in Settings > System after setup: Ollama (local), OpenAI, OpenRouter, or the embedded model."
+                : "Choisissez votre provider LLM dans Réglages > Système après la configuration : Ollama (local), OpenAI, OpenRouter, ou le modèle embarqué."}
             </p>
             <p className="muted">
               {locale === "en"
-                ? "Optional services (Ollama, external APIs, plugin connectors) can be installed later."
-                : "Les services optionnels (Ollama, APIs externes, connecteurs plugins) peuvent être installés plus tard."}
+                ? "Edit ~/akasha/llm_router.yaml or use the UI provider picker. External APIs need keys in the vault."
+                : "Éditez ~/akasha/llm_router.yaml ou utilisez le sélecteur UI. Les APIs externes nécessitent des clés dans le vault."}
             </p>
           </>
         )}
         {step === 3 && (
+          <>
+            <p>
+              {locale === "en"
+                ? "Optional messaging channels: Telegram, Slack, Discord, Teams, and Matrix (sidecar plugin)."
+                : "Canaux de messagerie optionnels : Telegram, Slack, Discord, Teams et Matrix (plugin sidecar)."}
+            </p>
+            <p className="muted">
+              {locale === "en"
+                ? "Configure connectors in Settings or connectors.env. Matrix requires MATRIX_HOMESERVER_URL + access token and the matrix-channel sidecar."
+                : "Configurez les connecteurs dans Réglages ou connectors.env. Matrix nécessite MATRIX_HOMESERVER_URL + token et le sidecar matrix-channel."}
+            </p>
+          </>
+        )}
+        {step === 4 && (
           <>
             <label htmlFor="wizard-how-to-call">
               {locale === "en" ? "How should Akasha call you?" : "Comment Akasha doit-il vous appeler ?"}
@@ -134,11 +148,11 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
             />
           </>
         )}
-        {step === 4 && (
+        {step === 5 && (
           <p>
             {locale === "en"
-              ? "Setup complete. You can adjust providers and memory in Settings."
-              : "Configuration terminée. Ajustez les providers et la mémoire dans Réglages."}
+              ? "Setup complete. Adjust providers, channels, and memory in Settings."
+              : "Configuration terminée. Ajustez les providers, canaux et la mémoire dans Réglages."}
           </p>
         )}
         <div className="onboarding-actions onboarding-wizard-actions">

@@ -17,11 +17,13 @@ import { AppNavigation } from "./components/AppNavigation";
 import { PermissionsBell } from "./components/PermissionsBell";
 import { SteeringQueueBell } from "./components/SteeringQueueBell";
 import { OnboardingWizard, readSetupWizardPending } from "./components/OnboardingWizard";
+import { UserRagPanel } from "./components/UserRagPanel";
 import { PluginCatalogPanel } from "./components/PluginCatalogPanel";
 import { OpenClawMigrationPanel } from "./components/OpenClawMigrationPanel";
 import { AgentIdentityPanel } from "./components/AgentIdentityPanel";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { AppNotificationsSync } from "./components/AppNotificationsSync";
+import { useNotify } from "./notifications/useNotifyOnMessage";
 import { InfoTip, Tooltip } from "./components/Tooltip";
 import { ChatRenderer } from "./components/ChatRenderer";
 import { ChatCompositionBar } from "./components/ChatCompositionBar";
@@ -87,6 +89,8 @@ export type ChatThreadEntry = {
   updatedAt: string;
   pendingTitle?: boolean;
   lastSnippet?: string;
+  /** Optional session folder label for sidebar grouping (localStorage only). */
+  folder?: string;
 };
 
 function loadChatThreadsInitial(): ChatThreadEntry[] {
@@ -2138,6 +2142,7 @@ function App() {
   });
   const [chatThreads, setChatThreads] = useState<ChatThreadEntry[]>(() => loadChatThreadsInitial());
   const [chatThreadSearch, setChatThreadSearch] = useState("");
+  const [chatThreadFolderFilter, setChatThreadFolderFilter] = useState("");
   const [handoffDialogOpen, setHandoffDialogOpen] = useState(false);
   const [handoffTargetModel, setHandoffTargetModel] = useState("");
   const [handoffTargetProvider, setHandoffTargetProvider] = useState("");
@@ -2148,9 +2153,6 @@ function App() {
   const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string; index_status?: string; indexed_at?: string | null; index_error?: string | null }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
-  const [userRagQuery, setUserRagQuery] = useState("");
-  const [userRagSearchBusy, setUserRagSearchBusy] = useState(false);
-  const [userRagSearchText, setUserRagSearchText] = useState("");
   const [dataSourcesSubTab, setDataSourcesSubTab] = useState<"rag" | "project_graph">("rag");
   type ProjectWorkspaceRow = {
     id: string;
@@ -2171,7 +2173,6 @@ function App() {
   const [newProjectWsPath, setNewProjectWsPath] = useState("");
   const [projectWsBusyId, setProjectWsBusyId] = useState<string | null>(null);
   const [newProjectWsSubmitting, setNewProjectWsSubmitting] = useState(false);
-  const userRagFileInputRef = useRef<HTMLInputElement>(null);
   const agentAvatarFileInputRef = useRef<HTMLInputElement>(null);
   const userAvatarFileInputRef = useRef<HTMLInputElement>(null);
   /** Agent profile (name, role, gender, avatar, personality, rules, can_do, cannot_do, traits_override, preferred_mode) for Settings panel. */
@@ -2230,6 +2231,8 @@ function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
   const [systemSubTab, setSystemSubTab] = useState<"general" | "plugins" | "health">("general");
   const [pluginTableBusyId, setPluginTableBusyId] = useState<string | null>(null);
+  const [skillsCatalogText, setSkillsCatalogText] = useState<string | null>(null);
+  const [skillsCatalogLoading, setSkillsCatalogLoading] = useState(false);
   const [agentProfileSubTab, setAgentProfileSubTab] = useState<AgentProfileSubTab>("identity");
   const [rulesDraft, setRulesDraft] = useState("");
   const [canDoDraft, setCanDoDraft] = useState("");
@@ -2680,16 +2683,39 @@ function App() {
     [t],
   );
 
+  const chatThreadFolders = useMemo(() => {
+    const folders = new Set<string>();
+    for (const th of chatThreads) {
+      const f = th.folder?.trim();
+      if (f) folders.add(f);
+    }
+    return [...folders].sort((a, b) => a.localeCompare(b));
+  }, [chatThreads]);
+
+  const setActiveThreadFolder = useCallback((folder: string) => {
+    const sid = sessionIdRef.current?.trim();
+    if (!sid) return;
+    const trimmed = folder.trim();
+    setChatThreads((prev) =>
+      prev.map((th) =>
+        th.id === sid ? { ...th, folder: trimmed || undefined, updatedAt: new Date().toISOString() } : th,
+      ),
+    );
+  }, []);
+
   const filteredChatThreads = useMemo(() => {
     const q = chatThreadSearch.trim().toLowerCase();
+    const folderQ = chatThreadFolderFilter.trim().toLowerCase();
     const base = [...chatThreads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    if (!q) return base;
     return base.filter((th) => {
+      if (folderQ && (th.folder ?? "").trim().toLowerCase() !== folderQ) return false;
+      if (!q) return true;
       const label = chatThreadLabel(th).toLowerCase();
       const snippet = (th.lastSnippet ?? "").toLowerCase();
-      return label.includes(q) || snippet.includes(q) || th.id.toLowerCase().includes(q);
+      const folder = (th.folder ?? "").toLowerCase();
+      return label.includes(q) || snippet.includes(q) || th.id.toLowerCase().includes(q) || folder.includes(q);
     });
-  }, [chatThreads, chatThreadLabel, chatThreadSearch]);
+  }, [chatThreads, chatThreadLabel, chatThreadSearch, chatThreadFolderFilter]);
 
   const createChatThread = useCallback(() => {
     const id = crypto.randomUUID();
@@ -4195,6 +4221,91 @@ function App() {
     [fetchSystemEndpoint],
   );
 
+  const notify = useNotify();
+  const [resumeBriefBusy, setResumeBriefBusy] = useState(false);
+
+  const handleResumeBrief = useCallback(async () => {
+    const sid = sessionId?.trim();
+    if (!sid) {
+      notify({
+        level: "warning",
+        title: locale === "en" ? "No active session" : "Aucune session active",
+        source: "resume",
+      });
+      return;
+    }
+    setResumeBriefBusy(true);
+    try {
+      const q = new URLSearchParams({ session_id: sid });
+      const res = await fetchSystemEndpoint(`/api/session/resume-brief?${q.toString()}`);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+      }
+      let summary = res.text;
+      try {
+        const j = JSON.parse(res.text) as {
+          short_term_turn_count?: number;
+          compaction_count?: number;
+          session_state?: { goals?: unknown; constraints?: unknown };
+        };
+        const turns = j.short_term_turn_count ?? 0;
+        const comp = j.compaction_count ?? 0;
+        summary =
+          locale === "en"
+            ? `Session resume: ${turns} turn(s), ${comp} compaction(s).`
+            : `Reprise session : ${turns} tour(s), ${comp} compaction(s).`;
+        const st = j.session_state;
+        if (st && (st.goals != null || st.constraints != null)) {
+          summary += `\n\n${JSON.stringify({ goals: st.goals, constraints: st.constraints }, null, 2)}`;
+        }
+      } catch {
+        /* keep raw text */
+      }
+      if (tab === "chat") {
+        setMessages((prev) => [...prev, { role: "system", text: summary }]);
+      } else {
+        notify({
+          level: "info",
+          title: locale === "en" ? "Session brief" : "Brief session",
+          detail: summary.slice(0, 600),
+          source: "resume",
+        });
+      }
+    } catch (e) {
+      notify({
+        level: "error",
+        title: locale === "en" ? "Resume failed" : "Échec reprise",
+        detail: String(e),
+        source: "resume",
+      });
+    } finally {
+      setResumeBriefBusy(false);
+    }
+  }, [sessionId, fetchSystemEndpoint, locale, notify, tab]);
+
+  const loadInstalledSkills = useCallback(async () => {
+    setSkillsCatalogLoading(true);
+    setSkillsCatalogText(null);
+    try {
+      const res = await fetchSystemEndpoint("/api/skills");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const list = JSON.parse(res.text) as Array<{ name?: string; description?: string }>;
+      if (!Array.isArray(list) || list.length === 0) {
+        setSkillsCatalogText(locale === "en" ? "No skills installed." : "Aucun skill installé.");
+      } else {
+        setSkillsCatalogText(
+          list
+            .map((s) => `• ${s.name ?? "?"}${s.description ? ` — ${s.description}` : ""}`)
+            .join("\n"),
+        );
+      }
+    } catch (e) {
+      setSkillsCatalogText(String(e));
+    } finally {
+      setSkillsCatalogLoading(false);
+    }
+  }, [fetchSystemEndpoint, locale]);
+
   const loadHandoffModels = useCallback(async () => {
     try {
       const providers = await invoke<Record<string, string[]>>("get_router_models", { port: DAEMON_PORT });
@@ -5389,6 +5500,15 @@ function App() {
                 <span>{t("sidebar.daemon_disconnected")} <code>akasha start</code></span>
               )}
             </div>
+            <button
+              type="button"
+              className="btn-secondary sidebar-resume-btn"
+              disabled={!health?.ok || resumeBriefBusy || !sessionId?.trim()}
+              onClick={() => void handleResumeBrief()}
+              title={locale === "en" ? "Fetch session resume brief from daemon" : "Charger le brief de reprise depuis le daemon"}
+            >
+              {resumeBriefBusy ? "…" : locale === "en" ? "Resume" : "Reprendre"}
+            </button>
             {Object.keys(pendingHumanInput).length > 0 && (
               <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label={t("pending_actions.region_label")}>
                 <button
@@ -6464,7 +6584,9 @@ function App() {
               </div>
             </div>
             <p id="send-hint" className="hint sr-only">
-              Entrée pour envoyer
+              {locale === "en"
+                ? "Enter to send (steering when a task is running; Alt+Enter for follow-up)"
+                : "Entrée pour envoyer (steering si tâche active ; Alt+Entrée pour follow-up)"}
             </p>
           </section>
         )}
@@ -9158,6 +9280,47 @@ function App() {
 
                 {systemSubTab === "plugins" && (
                   <>
+                    <section className="settings-card">
+                      <h4>{locale === "en" ? "Skills catalog" : "Catalogue skills"}</h4>
+                      <p className="settings-doc muted">
+                        {locale === "en"
+                          ? "Browse community skills or list locally installed skills from the daemon."
+                          : "Parcourir le catalogue communautaire ou lister les skills installés via le daemon."}
+                      </p>
+                      <div className="settings-row-actions">
+                        <a
+                          className="btn-secondary"
+                          href="https://azerothl.github.io/Akasha_app/skills.html"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {locale === "en" ? "Open gallery" : "Ouvrir la galerie"}
+                        </a>
+                        <a
+                          className="btn-secondary"
+                          href="https://github.com/azerothl/Akasha_skills"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          GitHub
+                        </a>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={skillsCatalogLoading}
+                          onClick={() => void loadInstalledSkills()}
+                        >
+                          {skillsCatalogLoading
+                            ? t("common.loading")
+                            : locale === "en"
+                              ? "List installed"
+                              : "Lister installés"}
+                        </button>
+                      </div>
+                      {skillsCatalogText ? (
+                        <pre className="onboarding-doctor-output">{skillsCatalogText}</pre>
+                      ) : null}
+                    </section>
                     <PluginCatalogPanel
                       fetchEndpoint={fetchSystemEndpoint}
                       requestEndpoint={requestSystemEndpoint}
@@ -9782,106 +9945,18 @@ function App() {
                 </div>
                 <div className="settings-data-scroll">
                   {dataSourcesSubTab === "rag" && (
-                    <>
-                      <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
-                      <p className="settings-doc muted">{t("settings.user_rag_desc")}</p>
-                      <input
-                        ref={userRagFileInputRef}
-                        type="file"
-                        accept=".txt,.md,.csv,.json,text/*"
-                        className="sr-only"
-                        aria-hidden
-                        onChange={async (e) => {
-                          const file = e.target.files?.[0];
-                          if (!file) return;
-                          try {
-                            const { content_base64, mime_type } = await readFileAsBase64(file);
-                            await invoke("add_user_rag_document", {
-                              name: file.name,
-                              content_base64: content_base64,
-                              mime_type: mime_type,
-                              port: DAEMON_PORT,
-                            });
-                            fetchUserRagDocuments();
-                          } catch (err) {
-                            setUserRagError(String(err));
-                          }
-                          e.target.value = "";
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="refresh-btn"
-                        onClick={() => userRagFileInputRef.current?.click()}
-                        disabled={userRagLoading}
-                      >
-                        {t("settings.add_document")}
-                      </button>
-                      <div className="sidebar-right-search-wrap">
-                        <input
-                          type="search"
-                          className="sidebar-right-search"
-                          placeholder={locale === "en" ? "Test memory search..." : "Tester une recherche mémoire..."}
-                          value={userRagQuery}
-                          onChange={(e) => setUserRagQuery(e.target.value)}
-                        />
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          disabled={userRagSearchBusy || !userRagQuery.trim()}
-                          onClick={async () => {
-                            setUserRagSearchBusy(true);
-                            setUserRagSearchText("");
-                            try {
-                              let res = await fetchSystemEndpoint(`/api/user-rag/retrieve?q=${encodeURIComponent(userRagQuery.trim())}&top_k=5`);
-                              if (!res.ok) {
-                                res = await fetchSystemEndpoint(`/api/memory/search?q=${encodeURIComponent(userRagQuery.trim())}&top_k=5`);
-                              }
-                              setUserRagSearchText(res.text || `HTTP ${res.status}`);
-                            } catch (e) {
-                              setUserRagSearchText(String(e));
-                            } finally {
-                              setUserRagSearchBusy(false);
-                            }
-                          }}
-                        >
-                          {userRagSearchBusy ? "…" : locale === "en" ? "Test search" : "Tester"}
-                        </button>
-                      </div>
-                      {userRagSearchText ? <pre className="onboarding-doctor-output">{userRagSearchText}</pre> : null}
-                      {userRagLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
-                      {!userRagLoading && userRagDocuments.length === 0 && (
-                        <p className="empty-state">{t("settings.no_documents")}</p>
-                      )}
-                      {!userRagLoading && userRagDocuments.length > 0 && (
-                        <ul className="settings-doc-list" role="list">
-                          {userRagDocuments.map((d) => (
-                            <li key={d.id} className="settings-doc-item">
-                              <span className="settings-doc-name">{d.name}</span>
-                              <span className="settings-doc-meta">
-                                {d.added_at.slice(0, 10)}
-                                {d.index_status ? ` · ${d.index_status}` : ""}
-                              </span>
-                              <button
-                                type="button"
-                                className="settings-doc-delete"
-                                aria-label={`Supprimer ${d.name}`}
-                                onClick={async () => {
-                                  try {
-                                    await invoke("delete_user_rag_document", { id: d.id, port: DAEMON_PORT });
-                                    fetchUserRagDocuments();
-                                  } catch (err) {
-                                    setUserRagError(String(err));
-                                  }
-                                }}
-                              >
-                                {t("settings.delete")}
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </>
+                    <UserRagPanel
+                      t={t}
+                      locale={locale}
+                      daemonPort={DAEMON_PORT}
+                      documents={userRagDocuments}
+                      loading={userRagLoading}
+                      error={userRagError}
+                      onError={setUserRagError}
+                      onRefresh={fetchUserRagDocuments}
+                      fetchEndpoint={fetchSystemEndpoint}
+                      readFileAsBase64={readFileAsBase64}
+                    />
                   )}
                   {dataSourcesSubTab === "project_graph" && (
                     <>
@@ -10094,6 +10169,41 @@ function App() {
                       aria-label={locale === "en" ? "Search sessions" : "Rechercher une session"}
                     />
                   </div>
+                  {chatThreadFolders.length > 0 ? (
+                    <div className="sidebar-right-filters" role="tablist" aria-label={locale === "en" ? "Session folders" : "Dossiers de session"}>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={!chatThreadFolderFilter}
+                        className={!chatThreadFolderFilter ? "selected" : ""}
+                        onClick={() => setChatThreadFolderFilter("")}
+                      >
+                        {locale === "en" ? "All" : "Tous"}
+                      </button>
+                      {chatThreadFolders.map((f) => (
+                        <button
+                          key={f}
+                          type="button"
+                          role="tab"
+                          aria-selected={chatThreadFolderFilter === f}
+                          className={chatThreadFolderFilter === f ? "selected" : ""}
+                          onClick={() => setChatThreadFolderFilter(f)}
+                        >
+                          {f}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="sidebar-right-search-wrap">
+                    <input
+                      type="text"
+                      className="sidebar-right-search"
+                      placeholder={locale === "en" ? "Folder for active session" : "Dossier pour la session active"}
+                      value={chatThreads.find((th) => th.id === sessionId)?.folder ?? ""}
+                      onChange={(e) => setActiveThreadFolder(e.target.value)}
+                      aria-label={locale === "en" ? "Session folder" : "Dossier de session"}
+                    />
+                  </div>
                   {filteredChatThreads.length === 0 ? (
                     <p className="empty-state">{t("chat.threads_empty")}</p>
                   ) : (
@@ -10121,6 +10231,9 @@ function App() {
                                   </span>
                                 </div>
                                 <div className="sidebar-right-task-meta">
+                                  {th.folder?.trim() ? (
+                                    <span className="sidebar-right-task-folder">{th.folder.trim()}</span>
+                                  ) : null}
                                   <span className="sidebar-right-task-relative">{formatRelativeTimeLabel(th.updatedAt, locale)}</span>
                                 </div>
                               </div>

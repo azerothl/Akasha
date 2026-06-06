@@ -243,6 +243,8 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, e
   const [terminalJson, setTerminalJson] = useState<string>("");
   const [lifecycleJson, setLifecycleJson] = useState<string>("");
   const [permissionsJson, setPermissionsJson] = useState<string>("");
+  const [doctorJson, setDoctorJson] = useState<string>("");
+  const [browserHint, setBrowserHint] = useState<string | null>(null);
   const [err, setErr] = useState<string>("");
 
   useNotifyOnMessage(err || null, "error", labels.title);
@@ -278,6 +280,10 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, e
         if (!cancelled) {
           setPermissionsJson(pq.ok ? pq.text : `${labels.loadError}: permissions/queue HTTP ${pq.status}`);
         }
+        const dr = await fetchEndpoint("/api/doctor");
+        if (!cancelled) {
+          setDoctorJson(dr.ok ? dr.text : `${labels.loadError}: doctor HTTP ${dr.status}`);
+        }
         const sc = await fetchEndpoint("/api/schedules");
         const runs = await fetchEndpoint("/api/task_runs");
         const pw = await fetchEndpoint("/api/process/watch/recent?limit=20");
@@ -308,6 +314,38 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, e
       cancelled = true;
     };
   }, [sessionId, fetchEndpoint, labels.loadError, labels.noSession]);
+
+  useEffect(() => {
+    const tools = tryParseJson(toolsJson) as { browser_enabled?: boolean } | null;
+    const resume = tryParseJson(resumeJson) as { tools_policy_brief?: { browser_enabled?: boolean } } | null;
+    const doctor = tryParseJson(doctorJson) as {
+      playwright?: {
+        runner_found?: boolean;
+        node_modules_playwright?: boolean;
+        auto_install_disabled?: boolean;
+      };
+    } | null;
+    const browserEnabled =
+      tools?.browser_enabled === true || resume?.tools_policy_brief?.browser_enabled === true;
+    if (!browserEnabled) {
+      setBrowserHint(null);
+      return;
+    }
+    const pw = doctor?.playwright;
+    if (pw?.node_modules_playwright === true) {
+      setBrowserHint(null);
+      return;
+    }
+    if (pw?.runner_found === true && pw?.auto_install_disabled !== true) {
+      setBrowserHint(null);
+      return;
+    }
+    setBrowserHint(
+      locale === "en"
+        ? "Browser tool is enabled but Playwright/Chromium is not ready. Run akasha doctor, then npm install + npx playwright install chromium in playwright-runner (or set AKASHA_PLAYWRIGHT_AUTO_INSTALL)."
+        : "L’outil navigateur est activé mais Playwright/Chromium n’est pas prêt. Lancez akasha doctor, puis npm install + npx playwright install chromium dans playwright-runner (ou AKASHA_PLAYWRIGHT_AUTO_INSTALL).",
+    );
+  }, [toolsJson, resumeJson, doctorJson, locale]);
 
   const toolsLines = useMemo(
     () => summarizeTools(toolsJson, labels.summaryUnavailable, locale),
@@ -353,6 +391,12 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, e
           {labels.docsMcp}
         </a>
       </p>
+
+      {browserHint ? (
+        <p className="settings-doc banner banner-warning" role="status">
+          {browserHint}
+        </p>
+      ) : null}
 
       <HealthCard
         title={labels.opsHeading}

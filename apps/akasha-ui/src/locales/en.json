@@ -488,6 +488,8 @@
   "settings.plugins_status_disabled_reputation": "disabled (reputation)",
   "settings.user_rag_title": "My documents (user RAG)",
   "settings.user_rag_desc": "Documents added here are indexed and used by agents to answer your questions. Supported formats: text (.txt, .md, .csv, .json).",
+  "settings.user_rag_search_placeholder": "Test knowledge base search…",
+  "settings.user_rag_test_search": "Test search",
   "settings.workspace_graph_title": "Workspace knowledge graph",
   "settings.workspace_graph_desc": "Register one or more project folders (Rust AST via tree-sitter, Markdown headings, plain text metadata). Each workspace writes graph.json, GRAPH_REPORT.md, and graph.html under workspace_graph/out/<id>/. No code is sent to an LLM for this pass.",
   "settings.workspace_graph_root": "Project root path",

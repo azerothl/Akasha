@@ -10,6 +10,7 @@ type EndpointResult = { ok: boolean; status: number; text: string };
 
 export function OpenClawMigrationPanel({ locale, disabled }: Props) {
   const [sourceDir, setSourceDir] = useState("");
+  const [importMemory, setImportMemory] = useState(false);
   const [busy, setBusy] = useState<null | "preview" | "apply">(null);
   const [result, setResult] = useState<string>("");
 
@@ -22,10 +23,14 @@ export function OpenClawMigrationPanel({ locale, disabled }: Props) {
     setBusy(path.endsWith("/preview") ? "preview" : "apply");
     setResult("");
     try {
+      const body: { source_dir: string; import_memory?: boolean } = { source_dir: trimmed };
+      if (path.endsWith("/apply") && importMemory) {
+        body.import_memory = true;
+      }
       const res = await invoke<EndpointResult>("daemon_request", {
         method: "POST",
         path,
-        body: JSON.stringify({ source_dir: trimmed }),
+        body: JSON.stringify(body),
         port: 3876,
       });
       setResult(res.text || `${res.status}`);
@@ -54,6 +59,15 @@ export function OpenClawMigrationPanel({ locale, disabled }: Props) {
           placeholder={locale === "en" ? "C:\\path\\to\\openclaw" : "C:\\chemin\\vers\\openclaw"}
           disabled={disabled || !!busy}
         />
+      </label>
+      <label className="field-inline" style={{ marginBottom: "0.75rem" }}>
+        <input
+          type="checkbox"
+          checked={importMemory}
+          onChange={(e) => setImportMemory(e.target.checked)}
+          disabled={disabled || !!busy}
+        />
+        <span>{locale === "en" ? "Import memory" : "Importer la mémoire"}</span>
       </label>
       <div className="settings-row-actions">
         <button

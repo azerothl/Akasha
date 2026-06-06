@@ -488,6 +488,8 @@
   "settings.plugins_status_disabled_reputation": "désactivé (réputation)",
   "settings.user_rag_title": "Mes documents (RAG utilisateur)",
   "settings.user_rag_desc": "Les documents ajoutés ici sont indexés et utilisés par les agents pour répondre à vos questions. Formats supportés : texte (.txt, .md, .csv, .json).",
+  "settings.user_rag_search_placeholder": "Tester une recherche base de connaissances…",
+  "settings.user_rag_test_search": "Tester",
   "settings.workspace_graph_title": "Graphe de connaissances (projet)",
   "settings.workspace_graph_desc": "Enregistrer un ou plusieurs dossiers de projet (AST Rust via tree-sitter, titres Markdown, fichiers texte). Chaque espace produit graph.json, GRAPH_REPORT.md et graph.html sous workspace_graph/out/<id>/. Aucun code n'est envoyé au LLM pour cette passe.",
   "settings.workspace_graph_root": "Chemin racine du projet",
