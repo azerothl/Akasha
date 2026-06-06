@@ -32,6 +32,7 @@ const MCP_STATUS_KEY: &str = "GET|/api/mcp/status|";
 const DOCTOR_KEY: &str = "GET|/api/doctor|";
 const RECALL_METRICS_KEY: &str = "GET|/api/memory/recall-metrics|";
 const LIFECYCLE_HOOKS_KEY: &str = "GET|/api/lifecycle/hooks|";
+const PLUGINS_KEY: &str = "GET|/api/plugins|";
 const PLUGINS_METRICS_KEY: &str = "GET|/api/plugins/metrics|";
 const PROCESS_WATCH_RECENT_KEY: &str = "GET|/api/process/watch/recent|";
 
@@ -92,6 +93,32 @@ pub fn cache_get_lifecycle_hooks() -> Option<String> {
 
 pub fn cache_put_lifecycle_hooks(body: &str) {
     put(LIFECYCLE_HOOKS_KEY, body);
+}
+
+pub fn cache_get_plugins() -> Option<String> {
+    get(PLUGINS_KEY)
+}
+
+pub fn cache_put_plugins(body: &str) {
+    put(PLUGINS_KEY, body);
+}
+
+pub fn invalidate_plugins() {
+    if let Ok(mut g) = cache().lock() {
+        g.pop(PLUGINS_KEY);
+    }
+}
+
+pub fn invalidate_mcp_status() {
+    if let Ok(mut g) = cache().lock() {
+        g.pop(MCP_STATUS_KEY);
+    }
+}
+
+pub fn invalidate_lifecycle_hooks() {
+    if let Ok(mut g) = cache().lock() {
+        g.pop(LIFECYCLE_HOOKS_KEY);
+    }
 }
 
 pub fn cache_get_plugins_metrics() -> Option<String> {

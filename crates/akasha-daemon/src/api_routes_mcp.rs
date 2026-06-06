@@ -111,21 +111,7 @@ data: {}\n\n",
             Ok(v) => v,
             Err(_) => return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#)),
         };
-        let provider = v
-            .get("provider")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("unknown")
-            .to_string();
-        let status = v
-            .get("status")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("configured")
-            .to_string();
-        match crate::mcp_runtime::oauth_put(data_dir, provider, status).await {
+        match crate::mcp_runtime::oauth_put(data_dir, &v).await {
             Ok(j) => return Some(json_response("200 OK", &j.to_string())),
             Err(e) => {
                 return Some(json_response(
