@@ -5,6 +5,13 @@ import { preprocessMessagePaths } from "../preprocessMessagePaths";
 import type { ModelUsageStats } from "../modelUsage";
 import { redactDisplaySecrets } from "../utils/redactDisplay";
 
+function blurSecrets(text: string): string {
+  return text
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "sk-••••••••")
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{10,}\b/gi, "Bearer ••••••••")
+    .replace(/\bAKASHA_[A-Z0-9_]{4,}\b/g, "AKASHA_••••");
+}
+
 const LazyMarkdownContent = lazy(() => import("../MarkdownContent").then((m) => ({ default: m.default })));
 
 export type ChatMessage = {
@@ -100,7 +107,9 @@ export function ChatRenderer({
                   <LazyMarkdownContent onPathClick={onPathClick}>
                     {preprocessMessagePaths(
                       preprocessDataUrlImages(
-                        m.role === "assistant" ? redactDisplaySecrets(m.text) : m.text,
+                        m.role === "assistant"
+                          ? blurSecrets(redactDisplaySecrets(m.text))
+                          : blurSecrets(m.text),
                       ),
                     )}
                   </LazyMarkdownContent>

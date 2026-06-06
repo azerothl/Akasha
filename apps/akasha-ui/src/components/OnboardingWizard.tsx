@@ -69,8 +69,8 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
 
   const steps =
     locale === "en"
-      ? ["Welcome", "Health check", "Your name", "Ready"]
-      : ["Bienvenue", "Diagnostic", "Votre prénom", "Prêt"];
+      ? ["Welcome", "Health check", "Provider hint", "Your name", "Ready"]
+      : ["Bienvenue", "Diagnostic", "Conseil provider", "Votre prénom", "Prêt"];
 
   return (
     <div className="human-input-overlay onboarding-overlay" role="dialog" aria-modal="true">
@@ -108,6 +108,20 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
         )}
         {step === 2 && (
           <>
+            <p>
+              {locale === "en"
+                ? "Tip: configure your preferred LLM provider in Settings > System when setup is done."
+                : "Conseil : configurez votre provider LLM préféré dans Réglages > Système une fois la configuration terminée."}
+            </p>
+            <p className="muted">
+              {locale === "en"
+                ? "Optional services (Ollama, external APIs, plugin connectors) can be installed later."
+                : "Les services optionnels (Ollama, APIs externes, connecteurs plugins) peuvent être installés plus tard."}
+            </p>
+          </>
+        )}
+        {step === 3 && (
+          <>
             <label htmlFor="wizard-how-to-call">
               {locale === "en" ? "How should Akasha call you?" : "Comment Akasha doit-il vous appeler ?"}
             </label>
@@ -120,7 +134,7 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
             />
           </>
         )}
-        {step === 3 && (
+        {step === 4 && (
           <p>
             {locale === "en"
               ? "Setup complete. You can adjust providers and memory in Settings."

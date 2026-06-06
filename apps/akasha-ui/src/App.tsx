@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type MutableRefObject, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./chatTranscriptExport";
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
@@ -6,7 +6,6 @@ import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "rela
 import {
   collapseStreamedProgressEvents,
   isTaskActiveStatus,
-  isTaskTerminalStatus,
   mergeTaskEvents,
   normalizeTaskStatus,
 } from "./taskEvents";
@@ -19,6 +18,8 @@ import { PermissionsBell } from "./components/PermissionsBell";
 import { SteeringQueueBell } from "./components/SteeringQueueBell";
 import { OnboardingWizard, readSetupWizardPending } from "./components/OnboardingWizard";
 import { PluginCatalogPanel } from "./components/PluginCatalogPanel";
+import { OpenClawMigrationPanel } from "./components/OpenClawMigrationPanel";
+import { AgentIdentityPanel } from "./components/AgentIdentityPanel";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { AppNotificationsSync } from "./components/AppNotificationsSync";
 import { InfoTip, Tooltip } from "./components/Tooltip";
@@ -39,7 +40,6 @@ import {
   buildCookbookPricingLookup,
   lookupPriceRates,
   parseUsageFromEventPayload,
-  parseUsageFromTaskStatus,
   type ModelPriceRates,
   type ModelUsageStats,
 } from "./modelUsage";
@@ -86,6 +86,7 @@ export type ChatThreadEntry = {
   createdAt: string;
   updatedAt: string;
   pendingTitle?: boolean;
+  lastSnippet?: string;
 };
 
 function loadChatThreadsInitial(): ChatThreadEntry[] {
@@ -1605,6 +1606,10 @@ function App() {
     hyde?: boolean;
     rrf?: boolean;
     rollup_days?: number;
+    semantic_top_k?: number;
+    graph_expand_hops?: number;
+    user_rag_top_k?: number;
+    workspace_graph_top_k?: number;
   };
   const [memoryAdvancedSettings, setMemoryAdvancedSettings] = useState<MemoryAdvancedSettings | null>(null);
   const [memoryAdvancedSaving, setMemoryAdvancedSaving] = useState(false);
@@ -2132,9 +2137,20 @@ function App() {
     }
   });
   const [chatThreads, setChatThreads] = useState<ChatThreadEntry[]>(() => loadChatThreadsInitial());
+  const [chatThreadSearch, setChatThreadSearch] = useState("");
+  const [handoffDialogOpen, setHandoffDialogOpen] = useState(false);
+  const [handoffTargetModel, setHandoffTargetModel] = useState("");
+  const [handoffTargetProvider, setHandoffTargetProvider] = useState("");
+  const [handoffTaskId, setHandoffTaskId] = useState("");
+  const [handoffModels, setHandoffModels] = useState<Array<{ provider: string; model: string }>>([]);
+  const [handoffBusy, setHandoffBusy] = useState(false);
+  const [handoffStatus, setHandoffStatus] = useState<string | null>(null);
   const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string; index_status?: string; indexed_at?: string | null; index_error?: string | null }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
+  const [userRagQuery, setUserRagQuery] = useState("");
+  const [userRagSearchBusy, setUserRagSearchBusy] = useState(false);
+  const [userRagSearchText, setUserRagSearchText] = useState("");
   const [dataSourcesSubTab, setDataSourcesSubTab] = useState<"rag" | "project_graph">("rag");
   type ProjectWorkspaceRow = {
     id: string;
@@ -2663,6 +2679,17 @@ function App() {
     },
     [t],
   );
+
+  const filteredChatThreads = useMemo(() => {
+    const q = chatThreadSearch.trim().toLowerCase();
+    const base = [...chatThreads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    if (!q) return base;
+    return base.filter((th) => {
+      const label = chatThreadLabel(th).toLowerCase();
+      const snippet = (th.lastSnippet ?? "").toLowerCase();
+      return label.includes(q) || snippet.includes(q) || th.id.toLowerCase().includes(q);
+    });
+  }, [chatThreads, chatThreadLabel, chatThreadSearch]);
 
   const createChatThread = useCallback(() => {
     const id = crypto.randomUUID();
@@ -3675,14 +3702,25 @@ function App() {
       es = new EventSource(url);
       es.onopen = () => stopPollFallback();
       es.onmessage = (msgEv) => {
-        void fetchTasksList({ silent: true });
-        fetchPendingHumanInput();
         try {
           const d = JSON.parse(msgEv.data) as {
             event_type?: string;
             payload?: { task_id?: string; message?: string; text?: string } | Record<string, unknown>;
             correlation_id?: string | null;
           };
+          const shouldRefreshTaskList =
+            d.event_type === "task_completed" ||
+            d.event_type === "task_failed" ||
+            d.event_type === "task_cancelled" ||
+            d.event_type === "user_steering_queued" ||
+            d.event_type === "user_follow_up_queued" ||
+            d.event_type === "user_steering_applied" ||
+            d.event_type === "user_follow_up_applied" ||
+            d.event_type === "todo_list_updated";
+          if (shouldRefreshTaskList) void fetchTasksList({ silent: true });
+          if (d.event_type === "task_completed" || d.event_type === "task_failed" || d.event_type === "task_cancelled") {
+            void fetchPendingHumanInput();
+          }
           if (d.event_type === "progress_update" && d.payload && typeof d.payload === "object") {
             const p = d.payload as Record<string, unknown>;
             const tid = typeof p.task_id === "string" ? p.task_id : "";
@@ -4156,6 +4194,45 @@ function App() {
     async (method: string, path: string, body?: string) => fetchSystemEndpoint(path, { method, body }),
     [fetchSystemEndpoint],
   );
+
+  const loadHandoffModels = useCallback(async () => {
+    try {
+      const providers = await invoke<Record<string, string[]>>("get_router_models", { port: DAEMON_PORT });
+      const rows: Array<{ provider: string; model: string }> = [];
+      for (const [provider, models] of Object.entries(providers ?? {})) {
+        for (const model of models ?? []) rows.push({ provider, model });
+      }
+      setHandoffModels(rows);
+    } catch (e) {
+      setHandoffStatus(String(e));
+      setHandoffModels([]);
+    }
+  }, []);
+
+  const submitSessionHandoff = useCallback(async () => {
+    const sid = sessionId?.trim();
+    if (!sid) {
+      setHandoffStatus(locale === "en" ? "No active session." : "Aucune session active.");
+      return;
+    }
+    setHandoffBusy(true);
+    setHandoffStatus(null);
+    try {
+      const body = JSON.stringify({
+        session_id: sid,
+        target_model: handoffTargetModel || undefined,
+        target_provider: handoffTargetProvider || undefined,
+        task_id: handoffTaskId.trim() || undefined,
+      });
+      const res = await requestSystemEndpoint("POST", "/api/session/handoff", body);
+      if (!res.ok) throw new Error(res.text || `HTTP ${res.status}`);
+      setHandoffStatus(locale === "en" ? "Handoff sent." : "Handoff envoyé.");
+    } catch (e) {
+      setHandoffStatus(String(e));
+    } finally {
+      setHandoffBusy(false);
+    }
+  }, [handoffTargetModel, handoffTargetProvider, handoffTaskId, locale, requestSystemEndpoint, sessionId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -5020,8 +5097,8 @@ function App() {
   const pollTaskDeps = useMemo(
     (): PollTaskUntilDoneDeps => ({
       daemonPort: DAEMON_PORT,
-      sessionId,
-      sessionIdRef,
+      sessionId: sessionId ?? "",
+      sessionIdRef: sessionIdRef as unknown as MutableRefObject<string>,
       taskIdToSessionIdRef,
       ackTextByTaskRef,
       chatMapByTaskIdRef,
@@ -5029,12 +5106,12 @@ function App() {
       replyWithTtsRef,
       selectedTaskIdForTodosRef,
       fetchTasksEventsRef,
-      chatInputRef,
+      chatInputRef: chatInputRef as unknown as MutableRefObject<HTMLTextAreaElement | null>,
       akashaSessionIdKey: AKASHA_SESSION_ID_KEY,
       normalizeTaskEventsInvokeResponse,
       extractChatMapVisualFromTaskEvents,
       extractChatMapVisualFromAssistantText,
-      findLastChatAssistantIndex,
+      findLastChatAssistantIndex: findLastChatAssistantIndex as PollTaskUntilDoneDeps["findLastChatAssistantIndex"],
       chatMapMessageCacheKey,
       applyChatStreamProgress,
       fetchTasksList,
@@ -5045,7 +5122,7 @@ function App() {
       setPendingHumanInput,
       setHumanInputModalTaskId,
       setChatMapByTaskId,
-      setMessages,
+      setMessages: setMessages as PollTaskUntilDoneDeps["setMessages"],
       voiceTtsConfigured: !!voiceStatus?.tts_configured,
     }),
     [
@@ -5084,6 +5161,15 @@ function App() {
       const cleaned = prev.filter((m) => !(m.role === "assistant" && m.streaming));
       return [...cleaned, { role: "user", text: userMessage }];
     });
+    if (sessionId) {
+      setChatThreads((prev) =>
+        prev.map((th) =>
+          th.id === sessionId
+            ? { ...th, lastSnippet: userMessage.slice(0, 140), updatedAt: new Date().toISOString() }
+            : th,
+        ),
+      );
+    }
     if (overrideMessage === undefined) setMessage("");
     chatInputRef.current?.focus();
 
@@ -5487,6 +5573,56 @@ function App() {
             </div>
           </div>
         )}
+        {handoffDialogOpen && (
+          <div className="human-input-overlay" role="dialog" aria-modal="true">
+            <div className="human-input-modal">
+              <h2>{locale === "en" ? "Resume with another model" : "Reprendre avec un autre modèle"}</h2>
+              <label>
+                {locale === "en" ? "Provider" : "Provider"}
+                <input
+                  className="settings-input"
+                  value={handoffTargetProvider}
+                  onChange={(e) => setHandoffTargetProvider(e.target.value)}
+                  placeholder={locale === "en" ? "optional" : "optionnel"}
+                />
+              </label>
+              <label>
+                {locale === "en" ? "Model" : "Modèle"}
+                <input
+                  className="settings-input"
+                  list="handoff-models"
+                  value={handoffTargetModel}
+                  onChange={(e) => setHandoffTargetModel(e.target.value)}
+                  placeholder="provider/model"
+                />
+                <datalist id="handoff-models">
+                  {handoffModels.map((row) => (
+                    <option key={`${row.provider}:${row.model}`} value={row.model}>
+                      {row.provider}
+                    </option>
+                  ))}
+                </datalist>
+              </label>
+              <label>
+                task_id ({locale === "en" ? "optional" : "optionnel"})
+                <input
+                  className="settings-input"
+                  value={handoffTaskId}
+                  onChange={(e) => setHandoffTaskId(e.target.value)}
+                />
+              </label>
+              <div className="onboarding-actions">
+                <button type="button" className="btn-secondary" onClick={() => setHandoffDialogOpen(false)}>
+                  {locale === "en" ? "Close" : "Fermer"}
+                </button>
+                <button type="button" className="btn-primary" disabled={handoffBusy} onClick={() => void submitSessionHandoff()}>
+                  {handoffBusy ? "…" : locale === "en" ? "Send handoff" : "Envoyer le handoff"}
+                </button>
+              </div>
+              {handoffStatus ? <p className="muted">{handoffStatus}</p> : null}
+            </div>
+          </div>
+        )}
         {/* Device bridge: agent requested device access (camera, mic, etc.) */}
         {devicePendingRequest && (
           <div className="human-input-overlay" role="dialog" aria-labelledby="device-request-title" aria-modal="true">
@@ -5700,6 +5836,17 @@ function App() {
                     </button>
                   ) : null}
                   <div className="chat-panel-toolbar-actions">
+                    <button
+                      type="button"
+                      className="btn-secondary chat-toolbar-btn"
+                      onClick={() => {
+                        setHandoffDialogOpen(true);
+                        setHandoffStatus(null);
+                        void loadHandoffModels();
+                      }}
+                    >
+                      {locale === "en" ? "Resume with another model" : "Reprendre avec un autre modèle"}
+                    </button>
                     {messages.length > 0 && (
                       <button type="button" className="btn-secondary chat-toolbar-btn" onClick={exportChatTranscript}>
                         {t("chat.export_transcript")}
@@ -6287,7 +6434,18 @@ function App() {
                   className="input-group-field"
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleSend()}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" || e.shiftKey) return;
+                    e.preventDefault();
+                    if (e.altKey) {
+                      setChatDeliveryMode("follow_up");
+                    } else if (runningTaskChips && Object.keys(runningTaskChips).length > 0) {
+                      setChatDeliveryMode("steering");
+                    } else {
+                      setChatDeliveryMode("immediate");
+                    }
+                    void handleSend();
+                  }}
                   placeholder={locale === "en" ? "Your message…" : "Votre message…"}
                   disabled={loading}
                   aria-describedby="send-hint"
@@ -7837,6 +7995,70 @@ function App() {
                       }
                     />
                   </label>
+                  <label className="memory-advanced-rollup">
+                    <span>semantic_top_k</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.semantic_top_k ?? 8}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          semantic_top_k: Math.max(1, parseInt(e.target.value, 10) || 1),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>graph_expand_hops</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={8}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.graph_expand_hops ?? 2}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          graph_expand_hops: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>user_rag_top_k</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={50}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.user_rag_top_k ?? 6}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          user_rag_top_k: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>workspace_graph_top_k</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={50}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.workspace_graph_top_k ?? 6}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          workspace_graph_top_k: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
                   <button
                     type="button"
                     className="btn-secondary"
@@ -8911,23 +9133,27 @@ function App() {
                 </div>
 
                 {systemSubTab === "general" && (
-                  <dl className="settings-list">
-                    <dt>{t("settings.daemon_port")}</dt>
-                    <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
-                    <dt>{t("settings.data_dir")}</dt>
-                    <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
-                    <dt>{t("settings.documentation")}</dt>
-                    <dd>
-                      <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
-                        {t("settings.open_docs_tab")}
-                      </button>
-                      <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
-                    </dd>
-                    <dt>{t("settings.utility_model")}</dt>
-                    <dd>
-                      <p className="settings-doc muted">{t("settings.utility_model_hint")}</p>
-                    </dd>
-                  </dl>
+                  <>
+                    <dl className="settings-list">
+                      <dt>{t("settings.daemon_port")}</dt>
+                      <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
+                      <dt>{t("settings.data_dir")}</dt>
+                      <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
+                      <dt>{t("settings.documentation")}</dt>
+                      <dd>
+                        <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
+                          {t("settings.open_docs_tab")}
+                        </button>
+                        <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
+                      </dd>
+                      <dt>{t("settings.utility_model")}</dt>
+                      <dd>
+                        <p className="settings-doc muted">{t("settings.utility_model_hint")}</p>
+                      </dd>
+                    </dl>
+                    <OpenClawMigrationPanel locale={locale} />
+                    <AgentIdentityPanel locale={locale} fetchEndpoint={requestSystemEndpoint} />
+                  </>
                 )}
 
                 {systemSubTab === "plugins" && (
@@ -9591,6 +9817,38 @@ function App() {
                       >
                         {t("settings.add_document")}
                       </button>
+                      <div className="sidebar-right-search-wrap">
+                        <input
+                          type="search"
+                          className="sidebar-right-search"
+                          placeholder={locale === "en" ? "Test memory search..." : "Tester une recherche mémoire..."}
+                          value={userRagQuery}
+                          onChange={(e) => setUserRagQuery(e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={userRagSearchBusy || !userRagQuery.trim()}
+                          onClick={async () => {
+                            setUserRagSearchBusy(true);
+                            setUserRagSearchText("");
+                            try {
+                              let res = await fetchSystemEndpoint(`/api/user-rag/retrieve?q=${encodeURIComponent(userRagQuery.trim())}&top_k=5`);
+                              if (!res.ok) {
+                                res = await fetchSystemEndpoint(`/api/memory/search?q=${encodeURIComponent(userRagQuery.trim())}&top_k=5`);
+                              }
+                              setUserRagSearchText(res.text || `HTTP ${res.status}`);
+                            } catch (e) {
+                              setUserRagSearchText(String(e));
+                            } finally {
+                              setUserRagSearchBusy(false);
+                            }
+                          }}
+                        >
+                          {userRagSearchBusy ? "…" : locale === "en" ? "Test search" : "Tester"}
+                        </button>
+                      </div>
+                      {userRagSearchText ? <pre className="onboarding-doctor-output">{userRagSearchText}</pre> : null}
                       {userRagLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
                       {!userRagLoading && userRagDocuments.length === 0 && (
                         <p className="empty-state">{t("settings.no_documents")}</p>
@@ -9826,12 +10084,21 @@ function App() {
                   <button type="button" className="refresh-btn sidebar-right-refresh" onClick={createChatThread}>
                     {t("chat.new_thread")}
                   </button>
-                  {[...chatThreads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).length === 0 ? (
+                  <div className="sidebar-right-search-wrap">
+                    <input
+                      type="search"
+                      className="sidebar-right-search"
+                      placeholder={locale === "en" ? "Search sessions..." : "Rechercher une session..."}
+                      value={chatThreadSearch}
+                      onChange={(e) => setChatThreadSearch(e.target.value)}
+                      aria-label={locale === "en" ? "Search sessions" : "Rechercher une session"}
+                    />
+                  </div>
+                  {filteredChatThreads.length === 0 ? (
                     <p className="empty-state">{t("chat.threads_empty")}</p>
                   ) : (
                     <ul className="sidebar-right-task-list" role="list">
-                      {[...chatThreads]
-                        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                      {filteredChatThreads
                         .map((th) => {
                           const active = sessionId === th.id;
                           return (
@@ -10072,11 +10339,11 @@ function App() {
       <CreateTaskDialog
         open={createTaskDialogOpen}
         onClose={() => setCreateTaskDialogOpen(false)}
-        sessionId={sessionId}
+        sessionId={sessionId ?? ""}
         t={t}
         eventTriggersEnabled
         onImmediateCreated={(taskId) => {
-          taskIdToSessionIdRef.current[taskId] = sessionId;
+          taskIdToSessionIdRef.current[taskId] = sessionId ?? "";
           setRunningTaskChips((prev) => ({ ...prev, [taskId]: { pct: 0, message: "en cours…" } }));
           setRunningTaskEvents((prev) => (prev[taskId] ? prev : { ...prev, [taskId]: [] }));
           trackTaskUntilDone(taskId);
