@@ -4,13 +4,13 @@ use crate::agent_profiles::{AgentProfileDef, AgentProfilesStore};
 use crate::dashboards::DashboardStore;
 use crate::user_rag::SharedUserRagStore;
 use crate::user_rag_indexer;
-use std::sync::Arc;
 use akasha_store::platform_extras::{
     Contact, ContactStore, ConversationArchiveStore, NotificationRow, NotificationStore, Wakeup,
     WakeupStore,
 };
 use chrono::Utc;
 use std::path::Path;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::api_http::json_response;
@@ -30,7 +30,8 @@ pub async fn try_handle(
     ctx: &KinbotRouteCtx<'_>,
 ) -> Option<String> {
     // User RAG status
-    if method == "GET" && path.starts_with("/api/user-rag/documents/") && path.ends_with("/status") {
+    if method == "GET" && path.starts_with("/api/user-rag/documents/") && path.ends_with("/status")
+    {
         let id = path
             .trim_start_matches("/api/user-rag/documents/")
             .trim_end_matches("/status")
@@ -82,7 +83,10 @@ pub async fn try_handle(
         };
         let store = WakeupStore::open(ctx.store_path).ok()?;
         store.insert(&w).ok()?;
-        return Some(json_response("200 OK", &serde_json::json!({ "id": w.id }).to_string()));
+        return Some(json_response(
+            "200 OK",
+            &serde_json::json!({ "id": w.id }).to_string(),
+        ));
     }
     if method == "DELETE" && path.starts_with("/api/wakeups/") {
         let id = path.trim_start_matches("/api/wakeups/").trim();
@@ -115,7 +119,10 @@ pub async fn try_handle(
         let c = Contact {
             id: Uuid::new_v4(),
             display_name: j.get("display_name")?.as_str()?.to_string(),
-            identifiers: j.get("identifiers").cloned().unwrap_or(serde_json::json!({})),
+            identifiers: j
+                .get("identifiers")
+                .cloned()
+                .unwrap_or(serde_json::json!({})),
             notes: j
                 .get("notes")
                 .and_then(|v| v.as_str())
@@ -129,7 +136,10 @@ pub async fn try_handle(
             updated_at: Utc::now(),
         };
         ContactStore::open(ctx.store_path).ok()?.insert(&c).ok()?;
-        return Some(json_response("200 OK", &serde_json::to_string(&c).unwrap_or_default()));
+        return Some(json_response(
+            "200 OK",
+            &serde_json::to_string(&c).unwrap_or_default(),
+        ));
     }
     if method == "PUT" && path.starts_with("/api/contacts/") {
         let id = path.trim_start_matches("/api/contacts/").trim();
@@ -150,12 +160,18 @@ pub async fn try_handle(
         }
         c.updated_at = Utc::now();
         ContactStore::open(ctx.store_path).ok()?.update(&c).ok()?;
-        return Some(json_response("200 OK", &serde_json::to_string(&c).unwrap_or_default()));
+        return Some(json_response(
+            "200 OK",
+            &serde_json::to_string(&c).unwrap_or_default(),
+        ));
     }
     if method == "DELETE" && path.starts_with("/api/contacts/") {
         let id = path.trim_start_matches("/api/contacts/").trim();
         let uid = Uuid::parse_str(id).ok()?;
-        let ok = ContactStore::open(ctx.store_path).ok()?.delete(&uid).unwrap_or(false);
+        let ok = ContactStore::open(ctx.store_path)
+            .ok()?
+            .delete(&uid)
+            .unwrap_or(false);
         return Some(if ok {
             json_response("200 OK", r#"{"ok":true}"#)
         } else {
@@ -165,7 +181,7 @@ pub async fn try_handle(
 
     // Notifications
     if method == "GET" && path.starts_with("/api/notifications") {
-        let unread = path.contains("unread=1");
+        let unread = query_flag_enabled(query_str, "unread");
         let store = NotificationStore::open(ctx.store_path).ok()?;
         let list = store.list(unread, 100).unwrap_or_default();
         return Some(json_response(
@@ -174,7 +190,10 @@ pub async fn try_handle(
         ));
     }
     if method == "POST" && path.ends_with("/read-all") && path.starts_with("/api/notifications") {
-        NotificationStore::open(ctx.store_path).ok()?.mark_all_read().ok()?;
+        NotificationStore::open(ctx.store_path)
+            .ok()?
+            .mark_all_read()
+            .ok()?;
         return Some(json_response("200 OK", r#"{"ok":true}"#));
     }
     if method == "POST" && path.contains("/api/notifications/") && path.ends_with("/read") {
@@ -207,7 +226,12 @@ pub async fn try_handle(
         let id = path.trim_start_matches("/api/agent-profiles/").trim();
         let store = AgentProfilesStore::new(ctx.data_dir);
         match store.get(id).ok().flatten() {
-            Some(p) => return Some(json_response("200 OK", &serde_json::to_string(&p).unwrap_or_default())),
+            Some(p) => {
+                return Some(json_response(
+                    "200 OK",
+                    &serde_json::to_string(&p).unwrap_or_default(),
+                ))
+            }
             None => return Some(json_response("404 Not Found", r#"{"error":"not_found"}"#)),
         }
     }
@@ -215,11 +239,16 @@ pub async fn try_handle(
         let j = parse_json(body)?;
         let p: AgentProfileDef = serde_json::from_value(j).ok()?;
         AgentProfilesStore::new(ctx.data_dir).upsert(&p).ok()?;
-        return Some(json_response("200 OK", &serde_json::to_string(&p).unwrap_or_default()));
+        return Some(json_response(
+            "200 OK",
+            &serde_json::to_string(&p).unwrap_or_default(),
+        ));
     }
     if method == "DELETE" && path.starts_with("/api/agent-profiles/") {
         let id = path.trim_start_matches("/api/agent-profiles/").trim();
-        let ok = AgentProfilesStore::new(ctx.data_dir).delete(id).unwrap_or(false);
+        let ok = AgentProfilesStore::new(ctx.data_dir)
+            .delete(id)
+            .unwrap_or(false);
         return Some(if ok {
             json_response("200 OK", r#"{"ok":true}"#)
         } else {
@@ -240,6 +269,12 @@ pub async fn try_handle(
             .trim_start_matches("/api/dashboards/")
             .trim_end_matches("/html")
             .trim();
+        if !is_valid_dashboard_id(id) {
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid_dashboard_id"}"#,
+            ));
+        }
         match DashboardStore::new(ctx.data_dir).read_html(id) {
             Ok(html) => {
                 let body = serde_json::json!({ "html": html }).to_string();
@@ -255,10 +290,27 @@ pub async fn try_handle(
             .and_then(|v| v.as_str())
             .map(String::from)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let title = j.get("title").and_then(|v| v.as_str()).unwrap_or("Dashboard");
-        let html = j.get("html").and_then(|v| v.as_str()).unwrap_or("<html></html>");
+        if !is_valid_dashboard_id(&id) {
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid_dashboard_id"}"#,
+            ));
+        }
+        let title = j
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Dashboard");
+        let html = j
+            .get("html")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<html></html>");
         match DashboardStore::new(ctx.data_dir).create(&id, title, html) {
-            Ok(m) => return Some(json_response("200 OK", &serde_json::to_string(&m).unwrap_or_default())),
+            Ok(m) => {
+                return Some(json_response(
+                    "200 OK",
+                    &serde_json::to_string(&m).unwrap_or_default(),
+                ))
+            }
             Err(e) => {
                 return Some(json_response(
                     "400 Bad Request",
@@ -269,7 +321,15 @@ pub async fn try_handle(
     }
     if method == "DELETE" && path.starts_with("/api/dashboards/") {
         let id = path.trim_start_matches("/api/dashboards/").trim();
-        let ok = DashboardStore::new(ctx.data_dir).delete(id).unwrap_or(false);
+        if !is_valid_dashboard_id(id) {
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid_dashboard_id"}"#,
+            ));
+        }
+        let ok = DashboardStore::new(ctx.data_dir)
+            .delete(id)
+            .unwrap_or(false);
         return Some(if ok {
             json_response("200 OK", r#"{"ok":true}"#)
         } else {
@@ -285,9 +345,7 @@ pub async fn try_handle(
             .and_then(|qs| parse_query(qs, "q"))
             .unwrap_or_default();
         let store = ConversationArchiveStore::open(ctx.store_path).ok()?;
-        let rows = store
-            .search(session_id, &q, 20)
-            .unwrap_or_default();
+        let rows = store.search(session_id, &q, 20).unwrap_or_default();
         return Some(json_response(
             "200 OK",
             &serde_json::json!({ "results": rows }).to_string(),
@@ -336,7 +394,13 @@ pub fn spawn_user_rag_index(data_dir: std::path::PathBuf, doc_id: String) {
     user_rag_indexer::spawn_index_document(data_dir, doc_id);
 }
 
-pub fn insert_notification(store_path: &Path, type_: &str, title: &str, body: &str, task_id: Option<Uuid>) {
+pub fn insert_notification(
+    store_path: &Path,
+    type_: &str,
+    title: &str,
+    body: &str,
+    task_id: Option<Uuid>,
+) {
     if let Ok(store) = NotificationStore::open(store_path) {
         let _ = store.insert(&NotificationRow {
             id: Uuid::new_v4(),
@@ -368,4 +432,35 @@ fn parse_query(qs: &str, key: &str) -> Option<String> {
             None
         }
     })
+}
+
+fn query_flag_enabled(query_str: Option<&str>, key: &str) -> bool {
+    matches!(
+        query_str.and_then(|qs| parse_query(qs, key)).as_deref(),
+        Some("1")
+    )
+}
+
+fn is_valid_dashboard_id(id: &str) -> bool {
+    !id.contains("..") && !id.contains('/') && !id.contains('\\')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_valid_dashboard_id, query_flag_enabled};
+
+    #[test]
+    fn unread_filter_reads_query_string() {
+        assert!(query_flag_enabled(Some("unread=1"), "unread"));
+        assert!(!query_flag_enabled(Some("unread=0"), "unread"));
+        assert!(!query_flag_enabled(None, "unread"));
+    }
+
+    #[test]
+    fn dashboard_ids_reject_path_traversal_segments() {
+        assert!(is_valid_dashboard_id("dashboard-1"));
+        assert!(!is_valid_dashboard_id("../secrets"));
+        assert!(!is_valid_dashboard_id("nested/path"));
+        assert!(!is_valid_dashboard_id(r"nested\path"));
+    }
 }

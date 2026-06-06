@@ -135,7 +135,7 @@ fn fuse_semantic_search(
     if queries.len() == 1 {
         return client.search(queries[0].clone(), top_k, filter);
     }
-    let per_query_k = (top_k * 2).clamp(top_k, 20);
+    let per_query_k = per_query_top_k(top_k);
     let mut lists: Vec<Vec<(String, f32)>> = Vec::new();
     let mut id_to_content: HashMap<String, String> = HashMap::new();
     for query in queries {
@@ -170,6 +170,10 @@ fn fuse_semantic_search(
         .collect()
 }
 
+fn per_query_top_k(top_k: usize) -> usize {
+    top_k.max(top_k.saturating_mul(2).min(20))
+}
+
 /// Fused memory context: sections to inject into the prompt.
 #[derive(Default)]
 pub struct FusedMemoryContext {
@@ -197,7 +201,9 @@ impl FusedMemoryContext {
             out.push_str("\n");
         }
         if !self.project_block.is_empty() {
-            out.push_str("[Projet en cours — utilise ce contexte pour reprendre ou poursuivre le projet]\n");
+            out.push_str(
+                "[Projet en cours — utilise ce contexte pour reprendre ou poursuivre le projet]\n",
+            );
             out.push_str(&self.project_block);
             out.push_str("\n");
         }
@@ -267,10 +273,7 @@ pub async fn recall_context(
             || params.entity_id.is_some()
         {
             Some(MemorySearchFilter {
-                process_id: params
-                    .task_id
-                    .clone()
-                    .or(params.process_id.clone()),
+                process_id: params.task_id.clone().or(params.process_id.clone()),
                 entity_id: params.entity_id.clone(),
                 include_global: true,
                 ..Default::default()
@@ -300,7 +303,8 @@ pub async fn recall_context(
                 MEMORY_RECALL_SEMANTIC_HITS.fetch_add(1, Ordering::Relaxed);
             }
         }
-        let result_ids: std::collections::HashSet<String> = results.iter().map(|(id, _)| id.clone()).collect();
+        let result_ids: std::collections::HashSet<String> =
+            results.iter().map(|(id, _)| id.clone()).collect();
         for (_, content) in &results {
             ctx.long_term_block.push_str("- ");
             ctx.long_term_block.push_str(&content.replace('\n', " "));
@@ -318,7 +322,8 @@ pub async fn recall_context(
             0
         };
         if graph_hops > 0 && !results.is_empty() {
-            let mut frontier: Vec<String> = results.iter().take(3).map(|(id, _)| id.clone()).collect();
+            let mut frontier: Vec<String> =
+                results.iter().take(3).map(|(id, _)| id.clone()).collect();
             let mut seen = result_ids.clone();
             let mut related_ids: Vec<String> = Vec::new();
             for _hop in 0..graph_hops.min(2) {
@@ -334,7 +339,8 @@ pub async fn recall_context(
                 }
                 frontier = next_frontier;
             }
-            let related_ids: Vec<String> = related_ids.into_iter().take(MAX_RELATED_ENTRIES).collect();
+            let related_ids: Vec<String> =
+                related_ids.into_iter().take(MAX_RELATED_ENTRIES).collect();
             if !related_ids.is_empty() {
                 let contents = client.get_contents_by_ids(related_ids.clone());
                 let mut added_chars = 0usize;
@@ -375,14 +381,17 @@ pub async fn recall_context(
             .cloned();
         if params.facts_limit > 0 {
             if let Some(eid) = entity_for_facts {
-            let facts = client.get_facts_by_entity(eid, params.facts_limit);
-            retrieval_candidates += facts.len() as u64;
-            for f in &facts {
-                ctx.facts_block.push_str(&format!("{} --{}--> {}\n", f.subject, f.predicate, f.object));
-            }
-            if !facts.is_empty() {
-                retrieval_used += facts.len() as u64;
-            }
+                let facts = client.get_facts_by_entity(eid, params.facts_limit);
+                retrieval_candidates += facts.len() as u64;
+                for f in &facts {
+                    ctx.facts_block.push_str(&format!(
+                        "{} --{}--> {}\n",
+                        f.subject, f.predicate, f.object
+                    ));
+                }
+                if !facts.is_empty() {
+                    retrieval_used += facts.len() as u64;
+                }
             }
         }
 
@@ -404,7 +413,11 @@ pub async fn recall_context(
                 if e.event_type == "task_outcome" {
                     continue;
                 }
-                ctx.episodic_block.push_str(&format!("{}: {}\n", e.event_type, e.payload.replace('\n', " ")));
+                ctx.episodic_block.push_str(&format!(
+                    "{}: {}\n",
+                    e.event_type,
+                    e.payload.replace('\n', " ")
+                ));
             }
             if !ctx.episodic_block.is_empty() {
                 retrieval_used += events
@@ -421,10 +434,15 @@ pub async fn recall_context(
             }
         }
         if params.is_first_message {
-            let user_results = client.search("nom prénom utilisateur user name identité".to_string(), 3, None);
+            let user_results = client.search(
+                "nom prénom utilisateur user name identité".to_string(),
+                3,
+                None,
+            );
             for (_, content) in &user_results {
                 ctx.user_identity_block.push_str("- ");
-                ctx.user_identity_block.push_str(&content.replace('\n', " "));
+                ctx.user_identity_block
+                    .push_str(&content.replace('\n', " "));
                 ctx.user_identity_block.push_str("\n");
             }
         }
@@ -442,8 +460,10 @@ pub async fn recall_context(
             };
             let prefs = client.search_episodic(pref_filter, 5);
             for e in &prefs {
-                ctx.policy_block
-                    .push_str(&format!("Préférence enregistrée: {}\n", e.payload.replace('\n', " ")));
+                ctx.policy_block.push_str(&format!(
+                    "Préférence enregistrée: {}\n",
+                    e.payload.replace('\n', " ")
+                ));
             }
 
             // Phase 3: Personality memory — structured preferences (preferred_tone, technical_depth_preference, etc.)
@@ -457,14 +477,23 @@ pub async fn recall_context(
                 ctx.personality_memory_block.push_str("- ");
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&e.payload) {
                     if let Some(k) = v.get("key").and_then(|x| x.as_str()) {
-                        let val_str = v.get("value").map(|x| x.to_string()).unwrap_or_else(|| "".to_string());
-                        ctx.personality_memory_block.push_str(&format!("{}: {}\n", k, val_str.trim_matches('"')));
+                        let val_str = v
+                            .get("value")
+                            .map(|x| x.to_string())
+                            .unwrap_or_else(|| "".to_string());
+                        ctx.personality_memory_block.push_str(&format!(
+                            "{}: {}\n",
+                            k,
+                            val_str.trim_matches('"')
+                        ));
                     } else {
-                        ctx.personality_memory_block.push_str(&e.payload.replace('\n', " "));
+                        ctx.personality_memory_block
+                            .push_str(&e.payload.replace('\n', " "));
                         ctx.personality_memory_block.push_str("\n");
                     }
                 } else {
-                    ctx.personality_memory_block.push_str(&e.payload.replace('\n', " "));
+                    ctx.personality_memory_block
+                        .push_str(&e.payload.replace('\n', " "));
                     ctx.personality_memory_block.push_str("\n");
                 }
             }
@@ -491,7 +520,10 @@ pub async fn recall_context(
             for e in &outcome_events {
                 ctx.recent_outcomes_block.push_str("- ");
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&e.payload) {
-                    let req = v.get("initial_message_preview").and_then(|x| x.as_str()).unwrap_or("");
+                    let req = v
+                        .get("initial_message_preview")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
                     let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
                     let summary = v
                         .get("summary_preview")
@@ -503,7 +535,8 @@ pub async fn recall_context(
                         req, status, summary
                     ));
                 } else {
-                    ctx.recent_outcomes_block.push_str(&e.payload.replace('\n', " "));
+                    ctx.recent_outcomes_block
+                        .push_str(&e.payload.replace('\n', " "));
                     ctx.recent_outcomes_block.push_str("\n");
                 }
             }
@@ -523,4 +556,16 @@ pub async fn recall_context(
     .await;
 
     result.unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::per_query_top_k;
+
+    #[test]
+    fn per_query_top_k_does_not_panic_above_cap() {
+        assert_eq!(per_query_top_k(5), 10);
+        assert_eq!(per_query_top_k(20), 20);
+        assert_eq!(per_query_top_k(21), 21);
+    }
 }

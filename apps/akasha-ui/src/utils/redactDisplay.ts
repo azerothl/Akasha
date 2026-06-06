@@ -30,8 +30,10 @@ export function redactDisplaySecrets(text: string): string {
   for (const pattern of SECRET_PATTERNS) {
     out = out.replace(pattern, (match, ...groups) => {
       if (typeof groups[0] === "string" && groups[0].length >= 16) {
-        const prefix = match.slice(0, match.indexOf(groups[0]));
-        return `${prefix}${REDACTED}`;
+        const secret = groups[0];
+        const start = match.indexOf(secret);
+        const end = start + secret.length;
+        return `${match.slice(0, start)}${REDACTED}${match.slice(end)}`;
       }
       return REDACTED;
     });
