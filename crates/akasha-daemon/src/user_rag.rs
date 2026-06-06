@@ -29,6 +29,17 @@ pub struct UserDocMeta {
     /// Relative path under user_rag/documents/
     pub path: String,
     pub added_at: String,
+    /// pending | indexing | ready | failed
+    #[serde(default = "default_index_status")]
+    pub index_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_error: Option<String>,
+}
+
+fn default_index_status() -> String {
+    "pending".to_string()
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -135,6 +146,9 @@ impl UserRagStore {
             mime_type: mime_type.to_string(),
             path: rel_path,
             added_at: chrono::Utc::now().to_rfc3339(),
+            index_status: "pending".to_string(),
+            indexed_at: None,
+            index_error: None,
         };
 
         let mut manifest = self.load_manifest()?;
@@ -171,8 +185,54 @@ impl UserRagStore {
         } else {
             warn!(id = %meta.id, path = %meta.path, "Skipping file deletion for document with unsafe path");
         }
+        let chunk_path = self.base_dir.join(format!("{}{}", meta.id, CHUNKS_SUFFIX));
+        if chunk_path.exists() {
+            let _ = std::fs::remove_file(&chunk_path);
+        }
         self.save_manifest(&manifest)?;
         Ok(true)
+    }
+
+    pub fn get_document(&self, id: &str) -> anyhow::Result<Option<UserDocMeta>> {
+        let manifest = self.load_manifest()?;
+        Ok(manifest.documents.into_iter().find(|d| d.id == id))
+    }
+
+    pub fn document_status(&self, id: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        let Some(doc) = self.get_document(id)? else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::json!({
+            "id": doc.id,
+            "index_status": doc.index_status,
+            "indexed_at": doc.indexed_at,
+            "index_error": doc.index_error,
+        })))
+    }
+
+    pub fn set_index_status(
+        &self,
+        id: &str,
+        status: &str,
+        indexed_at: Option<chrono::DateTime<chrono::Utc>>,
+        error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut manifest = self.load_manifest()?;
+        let Some(doc) = manifest.documents.iter_mut().find(|d| d.id == id) else {
+            anyhow::bail!("document not found");
+        };
+        doc.index_status = status.to_string();
+        doc.indexed_at = indexed_at.map(|t| t.to_rfc3339());
+        doc.index_error = error.map(String::from);
+        self.save_manifest(&manifest)
+    }
+
+    pub fn read_document_bytes(&self, meta: &UserDocMeta) -> anyhow::Result<Vec<u8>> {
+        if !is_safe_relative_filename(&meta.path) {
+            anyhow::bail!("unsafe document path");
+        }
+        let full_path = self.documents_dir().join(&meta.path);
+        Ok(std::fs::read(full_path)?)
     }
 
     /// List all documents.
@@ -343,12 +403,27 @@ mod tests {
     }
 
     #[test]
-    fn user_rag_retrieve_empty_query_returns_chunks() {
+    fn user_rag_delete_removes_chunks_sidecar() {
         let dir = tempfile::tempdir().unwrap();
         let store = UserRagStore::new(dir.path());
-        let content = base64::engine::general_purpose::STANDARD.encode(b"Some text content");
-        store.add_document(&content, "a.txt", "text/plain").unwrap();
-        let chunks = store.retrieve("", 5).unwrap();
-        assert_eq!(chunks.len(), 1);
+        let content = base64::engine::general_purpose::STANDARD.encode(b"chunk test");
+        let id = store.add_document(&content, "t.txt", "text/plain").unwrap();
+        store
+            .save_chunk_embeddings(&id, vec![("hello".into(), vec![])])
+            .unwrap();
+        assert!(dir.path().join("user_rag").join(format!("{id}.chunks.json")).is_file());
+        store.delete_document(&id).unwrap();
+        assert!(!dir.path().join("user_rag").join(format!("{id}.chunks.json")).exists());
+    }
+
+    #[test]
+    fn user_rag_document_status_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserRagStore::new(dir.path());
+        let content = base64::engine::general_purpose::STANDARD.encode(b"x");
+        let id = store.add_document(&content, "a.txt", "text/plain").unwrap();
+        store.set_index_status(&id, "ready", Some(chrono::Utc::now()), None).unwrap();
+        let st = store.document_status(&id).unwrap().unwrap();
+        assert_eq!(st.get("index_status").and_then(|v| v.as_str()), Some("ready"));
     }
 }

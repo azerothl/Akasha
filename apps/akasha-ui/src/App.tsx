@@ -2115,7 +2115,7 @@ function App() {
     }
   });
   const [chatThreads, setChatThreads] = useState<ChatThreadEntry[]>(() => loadChatThreadsInitial());
-  const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
+  const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string; index_status?: string; indexed_at?: string | null; index_error?: string | null }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
   const [dataSourcesSubTab, setDataSourcesSubTab] = useState<"rag" | "project_graph">("rag");
@@ -9292,7 +9292,10 @@ function App() {
                           {userRagDocuments.map((d) => (
                             <li key={d.id} className="settings-doc-item">
                               <span className="settings-doc-name">{d.name}</span>
-                              <span className="settings-doc-meta">{d.added_at.slice(0, 10)}</span>
+                              <span className="settings-doc-meta">
+                                {d.added_at.slice(0, 10)}
+                                {d.index_status ? ` · ${d.index_status}` : ""}
+                              </span>
                               <button
                                 type="button"
                                 className="settings-doc-delete"
