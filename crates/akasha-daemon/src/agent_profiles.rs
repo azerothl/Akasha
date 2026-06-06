@@ -39,6 +39,10 @@ impl AgentProfilesStore {
         self.dir.join(format!("{id}.yaml"))
     }
 
+    fn is_valid_id(id: &str) -> bool {
+        !id.contains("..") && !id.contains('/') && !id.contains('\\')
+    }
+
     pub fn ensure_defaults(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         let defaults = [
@@ -98,6 +102,9 @@ impl AgentProfilesStore {
     }
 
     pub fn get(&self, id: &str) -> anyhow::Result<Option<AgentProfileDef>> {
+        if !Self::is_valid_id(id) {
+            return Ok(None);
+        }
         let p = self.path_for(id);
         if !p.is_file() {
             return Ok(None);
@@ -107,13 +114,18 @@ impl AgentProfilesStore {
     }
 
     pub fn upsert(&self, profile: &AgentProfileDef) -> anyhow::Result<()> {
+        if !Self::is_valid_id(&profile.id) {
+            anyhow::bail!("invalid agent profile id");
+        }
         std::fs::create_dir_all(&self.dir)?;
         let yaml = serde_yaml::to_string(profile)?;
-        std::fs::write(self.path_for(&profile.id), yaml)
-            .map_err(|e| anyhow::anyhow!(e))
+        std::fs::write(self.path_for(&profile.id), yaml).map_err(|e| anyhow::anyhow!(e))
     }
 
     pub fn delete(&self, id: &str) -> anyhow::Result<bool> {
+        if !Self::is_valid_id(id) {
+            return Ok(false);
+        }
         if id == "assistant" {
             anyhow::bail!("cannot delete default assistant profile");
         }

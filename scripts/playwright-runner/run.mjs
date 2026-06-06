@@ -114,7 +114,7 @@ async function handleSnapshot() {
     });
     send({ ok: true, result: { text: text.slice(0, 100000), links } });
   } catch (e) {
-    send({ ok: false, error: formatPlaywrightError(e, 'click', params.timeout_secs ?? 30) });
+    send({ ok: false, error: formatPlaywrightError(e, 'snapshot', 30) });
   }
 }
 
@@ -133,7 +133,7 @@ async function handleClick(params) {
     await page.click(sel, { timeout });
     send({ ok: true, result: { clicked: true, selector: sel } });
   } catch (e) {
-    send({ ok: false, error: formatPlaywrightError(e, 'fill', params.timeout_secs ?? 30) });
+    send({ ok: false, error: formatPlaywrightError(e, 'click', params.timeout_secs ?? 30) });
   }
 }
 
@@ -153,7 +153,7 @@ async function handleFill(params) {
     await page.fill(sel, value, { timeout });
     send({ ok: true, result: { filled: true, selector: sel } });
   } catch (e) {
-    send({ ok: false, error: formatPlaywrightError(e, 'wait', params.timeout_secs ?? 30) });
+    send({ ok: false, error: formatPlaywrightError(e, 'fill', params.timeout_secs ?? 30) });
   }
 }
 
