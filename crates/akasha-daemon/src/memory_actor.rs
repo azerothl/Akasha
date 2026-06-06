@@ -96,16 +96,16 @@ pub enum MemoryResponse {
     LtRollup(Result<u64, String>),
 }
 
-/// Receive a memory-actor response. Safe from Tokio worker threads (uses `block_in_place`).
+/// Receive a memory-actor response from the dedicated memory thread.
+///
+/// Must run on a blocking thread (`spawn_blocking` or the memory actor's OS thread).
+/// Do not use `block_in_place` here: `try_current()` is also set inside `spawn_blocking`,
+/// and calling `block_in_place` from the blocking pool can stall the runtime under load.
 #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
 fn recv_memory_response(
     resp_rx: tokio::sync::oneshot::Receiver<MemoryResponse>,
 ) -> Result<MemoryResponse, ()> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| resp_rx.blocking_recv().map_err(|_| ()))
-    } else {
-        resp_rx.blocking_recv().map_err(|_| ())
-    }
+    resp_rx.blocking_recv().map_err(|_| ())
 }
 
 /// Client handle: Send + Sync, can be used from async code.

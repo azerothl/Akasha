@@ -2,6 +2,7 @@
 
 use akasha_llm::{CompletionRequest, LLMRouter};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub fn memory_multi_query_enabled() -> bool {
     std::env::var("AKASHA_MEMORY_MULTI_QUERY")
@@ -24,6 +25,10 @@ pub fn advanced_settings_snapshot() -> serde_json::Value {
         "hyde": memory_hyde_enabled(),
         "rrf": akasha_store::memory_rrf_enabled(),
         "rollup_days": crate::memory_hierarchical::memory_rollup_days(),
+        "semantic_top_k": std::env::var("AKASHA_MEMORY_SEMANTIC_TOP_K").ok().and_then(|s| s.parse::<usize>().ok()),
+        "graph_expand_hops": std::env::var("AKASHA_MEMORY_GRAPH_EXPAND_HOPS").ok().and_then(|s| s.parse::<u8>().ok()),
+        "user_rag_top_k": std::env::var("AKASHA_MEMORY_USER_RAG_TOP_K").ok().and_then(|s| s.parse::<usize>().ok()),
+        "workspace_graph_top_k": std::env::var("AKASHA_MEMORY_WORKSPACE_GRAPH_TOP_K").ok().and_then(|s| s.parse::<usize>().ok()),
     })
 }
 
@@ -40,6 +45,18 @@ pub fn apply_advanced_settings(body: &serde_json::Value) {
     }
     if let Some(v) = body.get("rollup_days").and_then(|x| x.as_u64()) {
         std::env::set_var("AKASHA_MEMORY_ROLLUP_DAYS", v.to_string());
+    }
+    if let Some(v) = body.get("semantic_top_k").and_then(|x| x.as_u64()) {
+        std::env::set_var("AKASHA_MEMORY_SEMANTIC_TOP_K", v.to_string());
+    }
+    if let Some(v) = body.get("graph_expand_hops").and_then(|x| x.as_u64()) {
+        std::env::set_var("AKASHA_MEMORY_GRAPH_EXPAND_HOPS", v.to_string());
+    }
+    if let Some(v) = body.get("user_rag_top_k").and_then(|x| x.as_u64()) {
+        std::env::set_var("AKASHA_MEMORY_USER_RAG_TOP_K", v.to_string());
+    }
+    if let Some(v) = body.get("workspace_graph_top_k").and_then(|x| x.as_u64()) {
+        std::env::set_var("AKASHA_MEMORY_WORKSPACE_GRAPH_TOP_K", v.to_string());
     }
 }
 
@@ -67,8 +84,14 @@ pub async fn expand_queries(router: &Arc<LLMRouter>, message: &str) -> Vec<Strin
         num_gpu: None,
         thinking_level: None,
     };
-    match router.complete(&req).await {
-        Ok(r) => {
+    let timeout = Duration::from_secs(
+        std::env::var("AKASHA_MEMORY_MULTI_QUERY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(15),
+    );
+    match tokio::time::timeout(timeout, router.complete(&req)).await {
+        Ok(Ok(r)) => {
             let mut lines: Vec<String> = r
                 .text
                 .lines()
@@ -84,7 +107,7 @@ pub async fn expand_queries(router: &Arc<LLMRouter>, message: &str) -> Vec<Strin
             }
             lines
         }
-        Err(_) => vec![message.to_string()],
+        Ok(Err(_)) | Err(_) => vec![message.to_string()],
     }
 }
 
@@ -112,10 +135,21 @@ pub async fn hyde_document(router: &Arc<LLMRouter>, message: &str) -> Option<Str
         num_gpu: None,
         thinking_level: None,
     };
-    router
-        .complete(&req)
-        .await
-        .ok()
-        .map(|r| r.text.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let timeout = Duration::from_secs(
+        std::env::var("AKASHA_MEMORY_HYDE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(15),
+    );
+    match tokio::time::timeout(timeout, router.complete(&req)).await {
+        Ok(Ok(r)) => {
+            let s = r.text.trim().to_string();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        _ => None,
+    }
 }

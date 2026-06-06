@@ -54,6 +54,8 @@ pub struct RecallParams {
     pub include_preference_and_personality_episodic: bool,
     /// Optional extra queries (multi-query / HyDE). When empty, only [`message`](RecallParams::message) is searched.
     pub search_queries: Vec<String>,
+    /// Workspace graph excerpts (D7): fused into long-term block instead of separate post-pass when set.
+    pub workspace_graph_lines: Vec<String>,
 }
 
 impl Default for RecallParams {
@@ -78,6 +80,7 @@ impl Default for RecallParams {
             task_outcomes_scope_session: false,
             include_preference_and_personality_episodic: true,
             search_queries: Vec::new(),
+            workspace_graph_lines: Vec::new(),
         }
     }
 }
@@ -104,6 +107,7 @@ impl RecallParams {
             task_outcomes_scope_session: false,
             include_preference_and_personality_episodic: true,
             search_queries: Vec::new(),
+            workspace_graph_lines: Vec::new(),
         }
     }
 }
@@ -263,7 +267,7 @@ pub async fn recall_context(
         let recall_filter = if params.filter_by_session {
             Some(MemorySearchFilter {
                 session_id: Some(params.session_id.clone()),
-                process_id: None,
+                process_id: params.process_id.clone(),
                 entity_id: params.entity_id.clone(),
                 include_global: true,
                 ..Default::default()
@@ -309,6 +313,14 @@ pub async fn recall_context(
             ctx.long_term_block.push_str("- ");
             ctx.long_term_block.push_str(&content.replace('\n', " "));
             ctx.long_term_block.push_str("\n");
+        }
+        if !params.workspace_graph_lines.is_empty() {
+            ctx.long_term_block.push_str("[Workspace graph — fused with memory recall]\n");
+            for line in params.workspace_graph_lines.iter().take(12) {
+                ctx.long_term_block.push_str("- ");
+                ctx.long_term_block.push_str(line);
+                ctx.long_term_block.push_str("\n");
+            }
         }
 
         // Graph RAG: optional multi-hop expansion from top results
@@ -381,7 +393,11 @@ pub async fn recall_context(
             .cloned();
         if params.facts_limit > 0 {
             if let Some(eid) = entity_for_facts {
-                let facts = client.get_facts_by_entity(eid, params.facts_limit);
+                let facts = client
+                    .get_facts_by_entity(eid, params.facts_limit)
+                    .into_iter()
+                    .take(params.facts_limit)
+                    .collect::<Vec<_>>();
                 retrieval_candidates += facts.len() as u64;
                 for f in &facts {
                     ctx.facts_block.push_str(&format!(
@@ -399,6 +415,7 @@ pub async fn recall_context(
         if params.episodic_limit > 0 {
             let ep_filter = EpisodicFilter {
                 session_id: Some(params.session_id.clone()),
+                process_id: params.process_id.clone(),
                 task_id: if params.filter_by_session {
                     None
                 } else {
@@ -456,6 +473,7 @@ pub async fn recall_context(
             let pref_filter = EpisodicFilter {
                 event_type: Some("user_preference".to_string()),
                 session_id: None,
+                process_id: params.process_id.clone(),
                 ..Default::default()
             };
             let prefs = client.search_episodic(pref_filter, 5);
@@ -470,6 +488,7 @@ pub async fn recall_context(
             let personality_filter = EpisodicFilter {
                 event_type: Some("personality_memory".to_string()),
                 session_id: None,
+                process_id: params.process_id.clone(),
                 ..Default::default()
             };
             let personality_events = client.search_episodic(personality_filter, 20);
@@ -503,6 +522,7 @@ pub async fn recall_context(
         if params.task_outcomes_limit > 0 {
             let outcome_filter = EpisodicFilter {
                 event_type: Some("task_outcome".to_string()),
+                process_id: params.process_id.clone(),
                 task_id: if params.task_outcomes_scope_session {
                     None
                 } else {
