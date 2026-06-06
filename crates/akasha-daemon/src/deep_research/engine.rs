@@ -544,6 +544,12 @@ async fn run_engine(
             "No search queries were recorded — methodology trace may be incomplete.".to_string(),
         );
     }
+    tracing::info!(
+        run_id = run_id,
+        query_count = queries_log.len(),
+        pages_fetched = pages_for_meta,
+        "deep research completed"
+    );
     let meta = ReportMeta {
         report_title: report_title.clone(),
         category: category.clone(),
