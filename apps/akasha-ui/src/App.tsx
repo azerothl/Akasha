@@ -3,13 +3,48 @@ import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary }
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
-import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
-import { preprocessMessagePaths } from "./preprocessMessagePaths";
-import { collapseStreamedProgressEvents } from "./taskEvents";
+import {
+  collapseStreamedProgressEvents,
+  isTaskActiveStatus,
+  isTaskTerminalStatus,
+  mergeTaskEvents,
+  normalizeTaskStatus,
+} from "./taskEvents";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
 import { GeoMapView } from "./GeoMapView";
 import { SystemHealthPanel } from "./SystemHealthPanel";
+import { AppNavigation } from "./components/AppNavigation";
+import { PermissionsBell } from "./components/PermissionsBell";
+import { NotificationCenter } from "./components/NotificationCenter";
+import { AppNotificationsSync } from "./components/AppNotificationsSync";
+import { InfoTip, Tooltip } from "./components/Tooltip";
+import { ChatRenderer } from "./components/ChatRenderer";
+import { ChatCompositionBar } from "./components/ChatCompositionBar";
+import { MonoIcon } from "./components/MonoIcon";
+import { useHashRoute } from "./hooks/useHashRoute";
+import { NAV_ITEMS } from "./navigation/types";
+import { ComparePanel } from "./panels/ComparePanel";
+import { CookbookPanel } from "./panels/CookbookPanel";
+import { DeepResearchPanel } from "./panels/DeepResearchPanel";
+import {
+  buildMessageWithResearchContext,
+  type ChatResearchContext,
+} from "./chatResearchContext";
+import type { ResearchReportDocument } from "./researchReportExport";
+import {
+  buildCookbookPricingLookup,
+  lookupPriceRates,
+  parseUsageFromEventPayload,
+  parseUsageFromTaskStatus,
+  type ModelPriceRates,
+  type ModelUsageStats,
+} from "./modelUsage";
+import { ModelUsageBadge } from "./components/ModelUsageBadge";
+import { TaskExecutionSteps } from "./components/TaskExecutionSteps";
+import { CreateTaskDialog } from "./components/CreateTaskDialog";
+import { buildExecutionSteps } from "./tasks/buildExecutionSteps";
+import { pollTaskUntilDone, type PollTaskUntilDoneDeps } from "./tasks/pollTaskUntilDone";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -27,10 +62,16 @@ const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
 const TASK_ORCHESTRATION_DEBUG_STORAGE_KEY = "akasha_task_orchestration_debug";
+const TASK_SIDEBAR_STORAGE_KEY = "akasha_task_sidebar_open";
 const CHAT_TIPS_STORAGE_KEY = "akasha_ui_chat_tips";
 const CHAT_PROMPT_CHIPS_STORAGE_KEY = "akasha_ui_prompt_chips";
 const CHAT_BUDDY_STORAGE_KEY = "akasha_ui_buddy";
 const AKASHA_CHAT_THREADS_KEY = "akasha_chat_threads_v1";
+const DENSITY_STORAGE_KEY = "akasha_ui_density";
+const CHAT_AGENT_MODE_KEY = "akasha_chat_agent_mode";
+const CHAT_WEB_SEARCH_KEY = "akasha_chat_web_search";
+const CHAT_INCOGNITO_KEY = "akasha_chat_incognito";
+const CHAT_COMPANION_OPEN_KEY = "akasha_companion_open";
 
 export type ChatThreadEntry = {
   id: string;
@@ -59,7 +100,6 @@ function loadChatThreadsInitial(): ChatThreadEntry[] {
 }
 
 export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
-type UiMode = "simple" | "expert";
 type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
 const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
@@ -546,6 +586,7 @@ type ChatMessageRow = {
   streaming?: boolean;
   taskId?: string;
   mapVisual?: ChatMapVisual;
+  usage?: ModelUsageStats;
 };
 
 function findLastChatAssistantIndex(messages: ChatMessageRow[], taskId: string): number {
@@ -1181,8 +1222,8 @@ function isDeterministicAutoToolEvent(eventType?: string | null): boolean {
   );
 }
 
-type Tab = "chat" | "scheduled" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory" | "mission";
-
+type UiMode = "simple" | "expert";
+type UiDensity = "compact" | "comfortable" | "spacious";
 type SettingsSection = "display" | "system" | "agent" | "user" | "data";
 type AgentProfileSubTab = "identity" | "personality" | "traits" | "rules" | "can_do" | "cannot_do";
 
@@ -1312,8 +1353,35 @@ function App() {
       })),
     [t]
   );
-  const [tab, setTab] = useState<Tab>("chat");
-  const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
+  const { tab, setTab } = useHashRoute("chat");
+  const [sidebarNavCollapsed, setSidebarNavCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [uiDensity, setUiDensity] = useState<UiDensity>(() => {
+    try {
+      const s = localStorage.getItem(DENSITY_STORAGE_KEY);
+      if (s === "compact" || s === "comfortable" || s === "spacious") return s;
+    } catch {
+      /* ignore */
+    }
+    return "comfortable";
+  });
+  const [chatAgentMode, setChatAgentMode] = useState(() => localStorage.getItem(CHAT_AGENT_MODE_KEY) !== "0");
+  const [chatWebSearch, setChatWebSearch] = useState(() => localStorage.getItem(CHAT_WEB_SEARCH_KEY) === "1");
+  const [chatIncognito, setChatIncognito] = useState(() => localStorage.getItem(CHAT_INCOGNITO_KEY) === "1");
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(() => {
+    try {
+      const raw = localStorage.getItem(TASK_SIDEBAR_STORAGE_KEY);
+      if (raw === "0") return false;
+      if (raw === "1") return true;
+    } catch {
+      /* ignore */
+    }
+    return true;
+  });
+  const [createTaskDialogOpen, setCreateTaskDialogOpen] = useState(false);
+  const [eventTriggers, setEventTriggers] = useState<
+    Array<{ id: string; name: string; enabled: boolean; trigger_type: string; last_fired_at?: string | null }>
+  >([]);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [uiMode, setUiMode] = useState<UiMode>(loadSavedUiMode);
   const [showOnboarding, setShowOnboarding] = useState(() => {
@@ -1530,7 +1598,33 @@ function App() {
   );
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
+  const [chatResearchContext, setChatResearchContext] = useState<ChatResearchContext | null>(null);
+  const [chatDeliveryMode, setChatDeliveryMode] = useState<"immediate" | "steering" | "follow_up">("immediate");
+  const [memoryHygieneHint, setMemoryHygieneHint] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
+  const [modelPricingLookup, setModelPricingLookup] = useState<Map<string, ModelPriceRates>>(new Map());
+
+  const enrichUsageWithPricing = useCallback(
+    (usage: ModelUsageStats | null | undefined): ModelUsageStats | undefined => {
+      if (!usage) return undefined;
+      const rates = lookupPriceRates(modelPricingLookup, usage.model);
+      return rates ? { ...usage, priceRates: rates } : usage;
+    },
+    [modelPricingLookup],
+  );
+
+  const discussResearchReport = useCallback(
+    (doc: ResearchReportDocument) => {
+      if (!doc.reportMarkdown.trim()) return;
+      setChatResearchContext({
+        topic: doc.topic,
+        reportMarkdown: doc.reportMarkdown,
+        category: doc.reportMeta?.category,
+      });
+      setTab("chat");
+    },
+    [setTab],
+  );
   const exportChatTranscript = useCallback(() => {
     const body = exportChatPlainText(messages);
     const base = defaultExportBasename(messages);
@@ -1571,14 +1665,13 @@ function App() {
       return {};
     }
   });
-  /** Tâches : sections pliables (liste / étapes / événements), mémorisées localement. */
+  /** Tâches : sections pliables (étapes / événements), mémorisées localement. */
   const [taskPanelSections, setTaskPanelSections] = useState(() => {
     try {
       const raw = localStorage.getItem("akasha_task_panel_sections");
       if (raw) {
         const j = JSON.parse(raw) as { list?: boolean; steps?: boolean; events?: boolean };
         return {
-          list: j.list !== false,
           steps: j.steps !== false,
           events: j.events !== false,
         };
@@ -1586,7 +1679,7 @@ function App() {
     } catch {
       /* ignore */
     }
-    return { list: true, steps: true, events: true };
+    return { steps: true, events: true };
   });
   const [taskOrchestrationDebugLevel, setTaskOrchestrationDebugLevel] = useState<TaskOrchestrationDebugLevel>(() => {
     try {
@@ -1600,7 +1693,16 @@ function App() {
     }
     return loadSavedUiMode() === "expert" ? "normal" : "minimal";
   });
-  const toggleTaskPanelSection = useCallback((key: "list" | "steps" | "events") => {
+  const setTaskSidebarOpen = useCallback((open: boolean) => {
+    setRightSidebarOpen(open);
+    try {
+      localStorage.setItem(TASK_SIDEBAR_STORAGE_KEY, open ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const toggleTaskPanelSection = useCallback((key: "steps" | "events") => {
     setTaskPanelSections((prev) => {
       const next = { ...prev, [key]: !prev[key] };
       try {
@@ -1654,13 +1756,17 @@ function App() {
   }, [persistCollapsedTaskBranches]);
   const [taskStepsTodos, setTaskStepsTodos] = useState<Array<{ id?: string | null; title: string; status: string }>>([]);
   const selectedTaskIdForTodosRef = useRef<string | null>(null);
+  const tasksEventsTaskIdRef = useRef<string | null>(null);
   const fetchTaskStepsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
+  const fetchTasksEventsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
+  const trackTaskUntilDoneRef = useRef<(taskId: string) => void>(() => {});
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
   /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
   const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
   const chatToolBatchSummary = useMemo(() => {
     const names: string[] = [];
-    for (const evs of Object.values(runningTaskEvents)) {
+    for (const taskId of Object.keys(runningTaskChips)) {
+      const evs = runningTaskEvents[taskId] ?? [];
       for (const ev of evs) {
         const p = ev.payload;
         if (!p || typeof p !== "object") continue;
@@ -1675,7 +1781,7 @@ function App() {
       }
     }
     return heuristicToolBatchSummary(names);
-  }, [runningTaskEvents]);
+  }, [runningTaskEvents, runningTaskChips]);
   /** Human in the loop: when the agent asks for user input, we store question/context/choices per task_id. */
   const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[] }>>({});
   /** Task id for which the human-input modal is open (null = closed). */
@@ -1712,7 +1818,7 @@ function App() {
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
   /** Fil d'activité des agents : ouvert par défaut pour suivre les étapes (assistant conversationnel). */
-  const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(false);
+  const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
   /** Per-root task: whether the discussion block is collapsed in the sub-agent panel (true = collapsed). */
   const [collapsedRootTasks, setCollapsedRootTasks] = useState<Record<string, boolean>>({});
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
@@ -2133,6 +2239,7 @@ function App() {
   });
   const [tipBannerText, setTipBannerText] = useState<string | null>(null);
   const [tipBannerDismissed, setTipBannerDismissed] = useState(false);
+  const [companionOpen, setCompanionOpen] = useState(() => localStorage.getItem(CHAT_COMPANION_OPEN_KEY) === "1");
 
   const setChatTipsEnabledAndSave = useCallback((next: boolean) => {
     setChatTipsEnabled(next);
@@ -2612,7 +2719,8 @@ function App() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.setAttribute("data-ui-mode", uiMode);
-  }, [theme, uiMode]);
+    document.documentElement.setAttribute("data-density", uiDensity);
+  }, [theme, uiMode, uiDensity]);
 
   const setThemeAndSave = useCallback((next: ThemeId) => {
     setTheme(next);
@@ -2682,21 +2790,20 @@ function App() {
   }, [pendingNotifOpen]);
 
   // Global keyboard shortcuts: 1–9 = switch tab (when not in a modal or input)
-  const tabsByIndex: Tab[] = ["chat", "scheduled", "router", "docs", "tasks", "calendar", "memory", "mission", "settings"];
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (humanInputModalTaskId != null) return;
       const target = e.target as HTMLElement;
       if (target?.closest("input") || target?.closest("textarea") || target?.closest("[role='dialog']")) return;
-      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : e.key === "8" ? 8 : e.key === "9" ? 9 : 0;
-      if (n >= 1 && n <= 9) {
+      const item = NAV_ITEMS.find((n) => n.shortcut === e.key);
+      if (item) {
         e.preventDefault();
-        setTab(tabsByIndex[n - 1]);
+        setTab(item.id);
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [humanInputModalTaskId]);
+  }, [humanInputModalTaskId, setTab]);
 
   const fetchMission = useCallback(async () => {
     setMissionLoading(true);
@@ -2834,8 +2941,9 @@ function App() {
     fetchDocs();
   }, [tab, fetchDocs]);
 
-  const fetchTasksList = useCallback(async (options?: { silent?: boolean }) => {
+  const fetchTasksList = useCallback(async (options?: { silent?: boolean; selectTaskId?: string }) => {
     const silent = options?.silent === true;
+    const selectTaskId = options?.selectTaskId;
     if (!silent) setTasksLoading(true);
     try {
       const data = await invoke<{ tasks?: Array<{ id?: string; status?: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string }> }>("get_tasks", {
@@ -2845,7 +2953,7 @@ function App() {
       const tasks: Array<TaskListItem> = list
         .map((t) => ({
           id: t.id ?? "",
-          status: t.status ?? "?",
+          status: normalizeTaskStatus(t.status),
           label: t.label,
           created_at: t.created_at,
           parent_task_id: t.parent_task_id,
@@ -2853,7 +2961,24 @@ function App() {
         }))
         .filter((t) => t.id);
       setTasksList((prev) => (tasksListsEqual(prev, tasks) ? prev : tasks));
-      setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
+      setRunningTaskChips((prev) => {
+        const activeIds = new Set(tasks.filter((t) => isTaskActiveStatus(t.status)).map((t) => t.id));
+        let changed = false;
+        const next = { ...prev };
+        for (const id of Object.keys(next)) {
+          if (!activeIds.has(id)) {
+            delete next[id];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+      if (selectTaskId) {
+        const idx = tasks.findIndex((t) => t.id === selectTaskId);
+        if (idx >= 0) setTasksSelected(idx);
+      } else {
+        setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
+      }
       setCached("tasks", tasks);
     } catch {
       setTasksList([]);
@@ -2862,12 +2987,24 @@ function App() {
     }
   }, []);
 
+  const openChatTaskDetail = useCallback(
+    (taskId: string) => {
+      void fetchTasksList({ selectTaskId: taskId });
+      setTab("tasks");
+      setTaskPanelSections((prev) => ({ ...prev, events: true }));
+    },
+    [fetchTasksList, setTab],
+  );
+
   const filteredTasksList = useMemo(() => {
     let list = tasksList;
     if (taskListFilter === "active") {
-      list = list.filter((t) => t.status === "pending" || t.status === "running");
+      list = list.filter((t) => isTaskActiveStatus(t.status));
     } else {
-      list = list.filter((t) => t.status === "completed" || t.status === "failed");
+      list = list.filter((t) => {
+        const s = normalizeTaskStatus(t.status);
+        return s === "completed" || s === "failed" || s === "cancelled" || s === "interrupted";
+      });
     }
     const q = taskSearchQuery.trim().toLowerCase();
     if (q) {
@@ -3036,14 +3173,31 @@ function App() {
     );
   }, [tasksList]);
 
-  const taskStepsSummary = useMemo(() => {
-    const total = taskStepsTodos.length;
-    const done = taskStepsTodos.filter((step) => step.status === "done").length;
-    const cancelled = taskStepsTodos.filter((step) => step.status === "cancelled").length;
-    const pending = Math.max(0, total - done - cancelled);
-    const progressPct = total > 0 ? Math.round((done / total) * 100) : 0;
-    return { total, done, cancelled, pending, progressPct };
-  }, [taskStepsTodos]);
+  const taskExecutionView = useMemo(() => {
+    return buildExecutionSteps(tasksEvents, tasksList, selectedTask?.id, taskStepsTodos);
+  }, [tasksEvents, tasksList, selectedTask?.id, taskStepsTodos]);
+
+  const fetchEventTriggers = useCallback(async () => {
+    try {
+      const data = await invoke<{ triggers?: Array<{ id?: string; name?: string; enabled?: boolean; trigger_type?: string; last_fired_at?: string | null }> }>(
+        "get_event_triggers",
+        { port: DAEMON_PORT }
+      );
+      setEventTriggers(
+        (data?.triggers ?? [])
+          .filter((t): t is { id: string; name: string; enabled: boolean; trigger_type: string; last_fired_at?: string | null } => Boolean(t.id))
+          .map((t) => ({
+            id: t.id!,
+            name: t.name ?? t.id!,
+            enabled: t.enabled !== false,
+            trigger_type: t.trigger_type ?? "webhook",
+            last_fired_at: t.last_fired_at,
+          }))
+      );
+    } catch {
+      setEventTriggers([]);
+    }
+  }, []);
 
   const selectedTaskSummary = useMemo(() => {
     if (!selectedTask) return null;
@@ -3285,16 +3439,21 @@ function App() {
     try {
       const data = await invoke<unknown>("get_task_events", { taskId, port: DAEMON_PORT });
       const list = normalizeTaskEventsInvokeResponse(data);
-      setTasksEvents(
-        list.map((e) => ({
-          event_type: e.event_type ?? "?",
-          payload: e.payload,
-          at: e.at ?? "",
-          task_id: e.task_id,
-        }))
-      );
+      const mapped = list.map((e) => ({
+        event_type: e.event_type ?? "?",
+        payload: e.payload,
+        at: e.at ?? "",
+        task_id: e.task_id,
+      }));
+      setTasksEvents((prev) => {
+        if (tasksEventsTaskIdRef.current !== taskId) {
+          tasksEventsTaskIdRef.current = taskId;
+          return mapped;
+        }
+        return mergeTaskEvents(prev, mapped);
+      });
     } catch {
-      setTasksEvents([]);
+      /* keep previous events on transient fetch errors */
     }
   }, []);
 
@@ -3320,6 +3479,10 @@ function App() {
   useEffect(() => {
     fetchTaskStepsRef.current = fetchTaskSteps;
   }, [fetchTaskSteps]);
+
+  useEffect(() => {
+    fetchTasksEventsRef.current = fetchTasksEvents;
+  }, [fetchTasksEvents]);
 
   useEffect(() => {
     selectedTaskIdForTodosRef.current = tasksList[tasksSelected]?.id ?? null;
@@ -3405,10 +3568,11 @@ function App() {
       setTasksList(cached);
       setTasksSelected((prev) => (prev >= cached.length && cached.length > 0 ? cached.length - 1 : prev));
       setTasksLoading(false);
-      return;
+    } else {
+      fetchTasksList();
     }
-    fetchTasksList();
-  }, [tab, fetchTasksList]);
+    void fetchEventTriggers();
+  }, [tab, fetchTasksList, fetchEventTriggers]);
 
   const applyChatStreamProgress = useCallback((taskId: string, msg: string) => {
     if (!taskId) return;
@@ -3427,6 +3591,7 @@ function App() {
           taskId,
           streaming: false,
           mapVisual: cachedMap,
+          usage: next[idx].usage,
         };
         return next;
       });
@@ -3438,7 +3603,7 @@ function App() {
         if (idx < 0) return prev;
         const next = [...prev];
         const cachedMap = next[idx].mapVisual ?? chatMapByTaskIdRef.current[taskId];
-        next[idx] = { role: "assistant", text: msg, taskId, streaming: true, mapVisual: cachedMap };
+        next[idx] = { role: "assistant", text: msg, taskId, streaming: true, mapVisual: cachedMap, usage: next[idx].usage };
         return next;
       });
     }
@@ -3468,6 +3633,21 @@ function App() {
             const streamMsg = typeof p.message === "string" ? p.message : "";
             if (tid && streamMsg) applyChatStreamProgress(tid, streamMsg);
           }
+          if (d.event_type === "task_completed" || d.event_type === "task_failed" || d.event_type === "task_cancelled") {
+            const p = d.payload && typeof d.payload === "object" ? (d.payload as Record<string, unknown>) : null;
+            const tid = p && typeof p.task_id === "string" ? p.task_id : "";
+            if (tid) {
+              setRunningTaskChips((prev) => {
+                if (prev[tid] === undefined) return prev;
+                const next = { ...prev };
+                delete next[tid];
+                return next;
+              });
+              if (selectedTaskIdForTodosRef.current === tid) {
+                void fetchTasksEventsRef.current(tid);
+              }
+            }
+          }
           if (d.event_type === "todo_list_updated") {
             const tid =
               (typeof d.payload?.task_id === "string" && d.payload.task_id) ||
@@ -3495,9 +3675,24 @@ function App() {
 
   useEffect(() => {
     const task = tasksList[tasksSelected];
-    if (task?.id) fetchTasksEvents(task.id);
-    else setTasksEvents([]);
+    if (task?.id) {
+      void fetchTasksEvents(task.id);
+    } else {
+      tasksEventsTaskIdRef.current = null;
+      setTasksEvents([]);
+    }
   }, [tasksList, tasksSelected, fetchTasksEvents]);
+
+  useEffect(() => {
+    if (tab !== "tasks") return;
+    const task = tasksList[tasksSelected];
+    if (!task?.id || !isTaskActiveStatus(task.status)) return;
+    const taskId = task.id;
+    const timer = window.setInterval(() => {
+      void fetchTasksEventsRef.current(taskId);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [tab, tasksList, tasksSelected]);
 
   useEffect(() => {
     if (tab !== "calendar") return;
@@ -3862,16 +4057,95 @@ function App() {
     [fetchPluginStatus, t],
   );
 
-  const fetchSystemEndpoint = useCallback(async (path: string): Promise<{ ok: boolean; status: number; text: string }> => {
+  const fetchSystemEndpoint = useCallback(async (path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; text: string }> => {
     if (E2E_WEB) {
-      const res = await fetch(e2eDaemonHttpUrl(path));
+      const res = await fetch(e2eDaemonHttpUrl(path), init);
       return { ok: res.ok, status: res.status, text: await res.text() };
     }
-    return invoke<{ ok: boolean; status: number; text: string }>("daemon_get_text", {
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "GET") {
+      return invoke<{ ok: boolean; status: number; text: string }>("daemon_get_text", {
+        path,
+        port: DAEMON_PORT,
+      });
+    }
+    const body = typeof init?.body === "string" ? init.body : undefined;
+    return invoke<{ ok: boolean; status: number; text: string }>("daemon_request", {
+      method,
       path,
+      body,
       port: DAEMON_PORT,
     });
   }, []);
+
+  const requestSystemEndpoint = useCallback(
+    async (method: string, path: string, body?: string) => fetchSystemEndpoint(path, { method, body }),
+    [fetchSystemEndpoint],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchSystemEndpoint("/api/cookbook/recommendations");
+        if (cancelled || !res.ok) return;
+        const j = JSON.parse(res.text) as {
+          recommendations?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+          suggestions?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+          huggingface_local?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+        };
+        const items = [...(j.recommendations ?? []), ...(j.suggestions ?? []), ...(j.huggingface_local ?? [])];
+        if (!cancelled) setModelPricingLookup(buildCookbookPricingLookup(items));
+      } catch {
+        /* optional pricing data */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchSystemEndpoint]);
+
+  useEffect(() => {
+    if (tab !== "memory") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchSystemEndpoint("/api/memory/recall-metrics");
+        if (cancelled || !res.ok) return;
+        const j = JSON.parse(res.text) as { hygiene_last_suggestions?: number };
+        const n = j.hygiene_last_suggestions ?? 0;
+        if (n > 0) {
+          setMemoryHygieneHint(
+            locale === "en"
+              ? `Hygiene scan: ${n} possible duplicate cluster(s). Review long-term memory or run relation rebuild.`
+              : `Hygiène mémoire : ${n} groupe(s) de doublons possibles. Vérifiez la mémoire long terme ou reconstruisez les relations.`,
+          );
+        } else {
+          setMemoryHygieneHint(null);
+        }
+      } catch {
+        if (!cancelled) setMemoryHygieneHint(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, fetchSystemEndpoint, locale]);
 
   const fetchUserRagDocuments = useCallback(async () => {
     setUserRagLoading(true);
@@ -4207,7 +4481,7 @@ function App() {
 /config set K V   — définir variable (K=V dans akasha.env)
 /vault list       — clés du vault (noms uniquement)
 /plugins          — liste des plugins
-/reload           — recharger les plugins
+/reload           — recharger plugins, tools_policy.yaml et llm_router.yaml (modèles)
 /skills            — liste des skills installés
 /skills list       — idem
 /skills install <url> — installer un skill depuis une URL (GitHub ou hôte autorisé)
@@ -4336,8 +4610,26 @@ function App() {
         .join("\n");
     }
     if (cmd === "reload") {
-      await invoke("reload_plugins", { port });
-      return "Plugins rechargés.";
+      const parts: string[] = [];
+      try {
+        await invoke("reload_plugins", { port });
+        parts.push("Plugins rechargés.");
+      } catch (e) {
+        parts.push(`Plugins : erreur (${String(e)}).`);
+      }
+      try {
+        const json = await invoke<{ reloaded?: boolean }>("reload_tools_policy", { port });
+        parts.push(json?.reloaded ? "tools_policy.yaml rechargé." : "tools_policy : erreur.");
+      } catch (e) {
+        parts.push(`tools_policy : erreur (${String(e)}).`);
+      }
+      try {
+        const json = await invoke<{ reloaded?: boolean }>("reload_router", { port });
+        parts.push(json?.reloaded ? "llm_router.yaml rechargé (modèles/routes)." : "llm_router : erreur.");
+      } catch (e) {
+        parts.push(`llm_router : erreur (${String(e)}).`);
+      }
+      return parts.join(" ");
     }
     if (cmd === "skills") {
       const sub = parts[1]?.toLowerCase() ?? "";
@@ -4605,6 +4897,57 @@ function App() {
     }
   }, [voiceRecording, sessionId]);
 
+  const pollTaskDeps = useMemo(
+    (): PollTaskUntilDoneDeps => ({
+      daemonPort: DAEMON_PORT,
+      sessionId,
+      sessionIdRef,
+      taskIdToSessionIdRef,
+      ackTextByTaskRef,
+      chatMapByTaskIdRef,
+      humanInputAutoOpenedRef,
+      replyWithTtsRef,
+      selectedTaskIdForTodosRef,
+      fetchTasksEventsRef,
+      chatInputRef,
+      akashaSessionIdKey: AKASHA_SESSION_ID_KEY,
+      normalizeTaskEventsInvokeResponse,
+      extractChatMapVisualFromTaskEvents,
+      extractChatMapVisualFromAssistantText,
+      findLastChatAssistantIndex,
+      chatMapMessageCacheKey,
+      applyChatStreamProgress,
+      fetchTasksList,
+      enrichUsageWithPricing,
+      setRunningTaskChips,
+      setRunningTaskEvents,
+      setTasksEvents,
+      setPendingHumanInput,
+      setHumanInputModalTaskId,
+      setChatMapByTaskId,
+      setMessages,
+      voiceTtsConfigured: !!voiceStatus?.tts_configured,
+    }),
+    [
+      sessionId,
+      applyChatStreamProgress,
+      fetchTasksList,
+      enrichUsageWithPricing,
+      voiceStatus?.tts_configured,
+    ],
+  );
+
+  const trackTaskUntilDone = useCallback(
+    (taskId: string) => {
+      void pollTaskUntilDone(taskId, pollTaskDeps);
+    },
+    [pollTaskDeps],
+  );
+
+  useEffect(() => {
+    trackTaskUntilDoneRef.current = trackTaskUntilDone;
+  }, [trackTaskUntilDone]);
+
   const handleSend = async (overrideMessage?: string, fromVoice?: boolean) => {
     const content = (overrideMessage ?? message).trim();
     const hasContent = content || attachments.length > 0;
@@ -4612,6 +4955,11 @@ function App() {
 
     if (fromVoice) replyWithTtsRef.current = true;
     const userMessage = content || "(Pièce(s) jointe(s))";
+    const researchCtx = chatResearchContext;
+    const messageToSend = researchCtx
+      ? buildMessageWithResearchContext(userMessage, researchCtx, locale)
+      : userMessage;
+    if (researchCtx) setChatResearchContext(null);
     setMessages((prev) => {
       const cleaned = prev.filter((m) => !(m.role === "assistant" && m.streaming));
       return [...cleaned, { role: "user", text: userMessage }];
@@ -4647,13 +4995,35 @@ function App() {
       const useNewSession = pendingNewSessionAfterSlashRef.current;
       if (useNewSession) pendingNewSessionAfterSlashRef.current = false;
       const sessionAtSend = sessionId;
-      const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
-        message: userMessage,
+      const runningIds = Object.keys(runningTaskChips);
+      const steerTarget =
+        chatDeliveryMode !== "immediate" && runningIds.length > 0 ? runningIds[0] : undefined;
+      const ack = await invoke<{
+        task_id: string;
+        session_id: string;
+        message: string;
+        queued?: boolean;
+      }>("send_message_ack", {
+        message: messageToSend,
         sessionId: sessionId,
         attachments: attachmentsPayload,
         newSession: useNewSession ? true : undefined,
+        queueMode: steerTarget ? chatDeliveryMode : undefined,
+        targetTaskId: steerTarget,
         port: DAEMON_PORT,
       });
+      if (ack?.queued) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "system",
+            text:
+              chatDeliveryMode === "steering"
+                ? "Message mis en file steering (injection prioritaire)."
+                : "Message mis en file follow-up (après le tour en cours).",
+          },
+        ]);
+      }
       setLoading(false);
       if (ack?.session_id) {
         setSessionId(ack.session_id);
@@ -4719,235 +5089,7 @@ function App() {
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
         setSubAgentPanelCollapsed(false);
         void fetchTasksList({ silent: true });
-        const taskId = ack.task_id;
-        const pollUntilDone = async () => {
-          const maxWait = 600;
-          const MIN_INTERVAL = 1500;
-          const MAX_INTERVAL = 5000;
-          let pollIntervalMs = MIN_INTERVAL;
-          let ticksWithoutChange = 0;
-          let lastStatus = "";
-          let lastMsg = "";
-          for (let i = 0; i < maxWait; i++) {
-            await new Promise((r) => setTimeout(r, pollIntervalMs));
-            try {
-              const [raw, eventsPayloadRaw, humanInputData] = await Promise.all([
-                invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
-                invoke<unknown>("get_task_events", { taskId, port: DAEMON_PORT }).catch(() => null),
-                invoke<{ question?: string; context?: string; choices?: string[] }>("get_task_human_input", { taskId, port: DAEMON_PORT }).catch(() => null),
-              ]);
-              const eventsData = { events: normalizeTaskEventsInvokeResponse(eventsPayloadRaw ?? {}) };
-              const status = JSON.parse(raw) as {
-                status?: string;
-                progress?: Array<{ progress_pct?: number; message?: string }>;
-                tokens_used?: number;
-                cost_usd?: number;
-              };
-              const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
-              const msg = status?.progress?.slice(-1)[0]?.message ?? "";
-              const currentStatus = status?.status ?? "";
-              if (currentStatus === lastStatus && msg === lastMsg) {
-                ticksWithoutChange++;
-                if (ticksWithoutChange >= 4 && pollIntervalMs < MAX_INTERVAL) {
-                  pollIntervalMs = Math.min(pollIntervalMs + 1500, MAX_INTERVAL);
-                  ticksWithoutChange = 0;
-                }
-              } else {
-                lastStatus = currentStatus;
-                lastMsg = msg;
-                ticksWithoutChange = 0;
-                pollIntervalMs = MIN_INTERVAL;
-              }
-              setRunningTaskChips((prev) => {
-                if (prev[taskId] === undefined) return prev;
-                const cur = prev[taskId]!;
-                if (cur.pct === pct && cur.message === msg) return prev;
-                return { ...prev, [taskId]: { pct, message: msg } };
-              });
-              const events = (eventsData?.events ?? []).map((e) => ({
-                event_type: e.event_type ?? "?",
-                payload: e.payload,
-                at: e.at ?? "",
-                task_id: e.task_id,
-              }));
-              setRunningTaskEvents((prev) => {
-                if (prev[taskId] === undefined) return prev;
-                const oldE = prev[taskId]!;
-                try {
-                  if (JSON.stringify(oldE) === JSON.stringify(events)) return prev;
-                } catch {
-                  /* ignore */
-                }
-                return { ...prev, [taskId]: events };
-              });
-              const chatMapVis =
-                extractChatMapVisualFromTaskEvents(events) ?? extractChatMapVisualFromAssistantText(msg);
-              if (chatMapVis) {
-                chatMapByTaskIdRef.current[taskId] = chatMapVis;
-                setChatMapByTaskId((prev) => (prev[taskId] === chatMapVis ? prev : { ...prev, [taskId]: chatMapVis }));
-              }
-              const taskForActiveChat = taskIdToSessionIdRef.current[taskId] === sessionIdRef.current;
-              if (chatMapVis && taskForActiveChat) {
-                setMessages((prev) => {
-                  const idx = findLastChatAssistantIndex(prev, taskId);
-                  if (idx < 0) return prev;
-                  if (prev[idx]?.mapVisual === chatMapVis) return prev;
-                  const next = [...prev];
-                  next[idx] = { ...next[idx]!, mapVisual: chatMapVis };
-                  return next;
-                });
-              }
-              if (humanInputData?.question) {
-                setPendingHumanInput((prev) => ({ ...prev, [taskId]: { question: humanInputData.question ?? "", context: humanInputData.context ?? "", choices: humanInputData.choices } }));
-                if (!humanInputAutoOpenedRef.current.has(taskId)) {
-                  humanInputAutoOpenedRef.current.add(taskId);
-                  setHumanInputModalTaskId(taskId);
-                }
-              } else {
-                setPendingHumanInput((prev) => {
-                  const next = { ...prev };
-                  delete next[taskId];
-                  return next;
-                });
-                humanInputAutoOpenedRef.current.delete(taskId);
-              }
-              if (status?.status !== "completed" && status?.status !== "failed" && msg) {
-                applyChatStreamProgress(taskId, msg);
-              }
-              if (status?.status === "completed") {
-                setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                humanInputAutoOpenedRef.current.delete(taskId);
-                setHumanInputModalTaskId((c) => (c === taskId ? null : c));
-                const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
-                const doneMapVis =
-                  extractChatMapVisualFromTaskEvents(events) ??
-                  extractChatMapVisualFromAssistantText(finalMsg) ??
-                  chatMapByTaskIdRef.current[taskId] ??
-                  null;
-                if (doneMapVis) {
-                  chatMapByTaskIdRef.current[taskId] = doneMapVis;
-                  setChatMapByTaskId((prev) => (prev[taskId] === doneMapVis ? prev : { ...prev, [taskId]: doneMapVis }));
-                }
-                if (taskForActiveChat) {
-                  let storedMapVisual: ChatMapVisual | undefined;
-                  setMessages((prev) => {
-                    const idx = findLastChatAssistantIndex(prev, taskId);
-                    if (idx >= 0) {
-                      const next = [...prev];
-                      const keepMap = next[idx]!.mapVisual ?? doneMapVis ?? chatMapByTaskIdRef.current[taskId] ?? undefined;
-                      storedMapVisual = keepMap;
-                      next[idx] = { role: "assistant", text: finalMsg, taskId, mapVisual: keepMap };
-                      return next;
-                    }
-                    storedMapVisual = doneMapVis ?? undefined;
-                    return [...prev, { role: "assistant", text: finalMsg, taskId, mapVisual: doneMapVis ?? undefined }];
-                  });
-                  if (storedMapVisual && finalMsg.trim()) {
-                    try {
-                      const sid =
-                        (typeof sessionId === "string" && sessionId.trim()) ||
-                        localStorage.getItem(AKASHA_SESSION_ID_KEY) ||
-                        "";
-                      if (sid) {
-                        localStorage.setItem(
-                          chatMapMessageCacheKey(sid, finalMsg.trim()),
-                          JSON.stringify(storedMapVisual),
-                        );
-                      }
-                    } catch {
-                      /* ignore */
-                    }
-                  }
-                  delete ackTextByTaskRef.current[taskId];
-                }
-                if (replyWithTtsRef.current && voiceStatus?.tts_configured && finalMsg?.trim()) {
-                  replyWithTtsRef.current = false;
-                  invoke<{ data_url?: string }>("voice_tts", { text: finalMsg, port: DAEMON_PORT })
-                    .then((r) => {
-                      const url = r?.data_url;
-                      if (url) {
-                        const audio = new Audio(url);
-                        audio.play().catch(() => {});
-                      }
-                    })
-                    .catch(() => {});
-                }
-                requestAnimationFrame(() => chatInputRef.current?.focus());
-                return;
-              }
-              if (status?.status === "failed") {
-                setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                humanInputAutoOpenedRef.current.delete(taskId);
-                setHumanInputModalTaskId((c) => (c === taskId ? null : c));
-                replyWithTtsRef.current = false;
-                if (taskForActiveChat) {
-                  setMessages((prev) => {
-                    const idx = findLastChatAssistantIndex(prev, taskId);
-                    if (idx >= 0) {
-                      const next = [...prev];
-                      const MAX_FAILURE_CHAT_CHARS = 2500;
-                      const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
-                      const tokensUsed = status?.tokens_used;
-                      const costUsd = status?.cost_usd;
-                      const suffixParts: string[] = [];
-                      if (typeof tokensUsed === "number") suffixParts.push(`Tokens: ${tokensUsed}`);
-                      if (typeof costUsd === "number" && Number.isFinite(costUsd) && Math.abs(costUsd) > 0) suffixParts.push(`Coût: ${costUsd.toFixed(4)} USD`);
-                      const suffix = suffixParts.length > 0 ? `\n\n${suffixParts.join(" · ")}` : "";
-                      const composed = `${baseMsg}${suffix}`;
-                      const finalMsg = composed.length > MAX_FAILURE_CHAT_CHARS ? composed.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…" : composed;
-                      next[idx] = { role: "assistant", text: finalMsg, error: true };
-                      return next;
-                    }
-                    const MAX_FAILURE_CHAT_CHARS = 2500;
-                    const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
-                    const tokensUsed = status?.tokens_used;
-                    const costUsd = status?.cost_usd;
-                    const suffixParts: string[] = [];
-                    if (typeof tokensUsed === "number") suffixParts.push(`Tokens: ${tokensUsed}`);
-                    if (typeof costUsd === "number" && Number.isFinite(costUsd) && Math.abs(costUsd) > 0) suffixParts.push(`Coût: ${costUsd.toFixed(4)} USD`);
-                    const suffix = suffixParts.length > 0 ? `\n\n${suffixParts.join(" · ")}` : "";
-                    const composed = `${baseMsg}${suffix}`;
-                    const finalMsg = composed.length > MAX_FAILURE_CHAT_CHARS ? composed.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…" : composed;
-                    return [...prev, { role: "assistant", text: finalMsg, error: true }];
-                  });
-                  delete ackTextByTaskRef.current[taskId];
-                }
-                requestAnimationFrame(() => chatInputRef.current?.focus());
-                return;
-              }
-            } catch {
-              /* ignore */
-            }
-          }
-          setRunningTaskChips((prev) => {
-            const next = { ...prev };
-            delete next[taskId];
-            return next;
-          });
-          setRunningTaskEvents((prev) => {
-            const next = { ...prev };
-            delete next[taskId];
-            return next;
-          });
-          if (taskIdToSessionIdRef.current[taskId] === sessionIdRef.current) {
-            setMessages((prev) => {
-              const idx = findLastChatAssistantIndex(prev, taskId);
-              if (idx >= 0) {
-                const next = [...prev];
-                next[idx] = { role: "assistant", text: "Délai dépassé. Consultez Tâches.", taskId };
-                return next;
-              }
-              return [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches.", taskId }];
-            });
-            delete ackTextByTaskRef.current[taskId];
-          }
-          requestAnimationFrame(() => chatInputRef.current?.focus());
-        };
-        pollUntilDone();
+        trackTaskUntilDone(ack.task_id);
       }
     } catch (err) {
       setLoading(false);
@@ -4958,7 +5100,21 @@ function App() {
   handleSendRef.current = handleSend;
 
   return (
-    <div className={`app ui-mode-${uiMode}`}>
+    <div className={`app ui-mode-${uiMode}${mobileSidebarOpen ? " app--sidebar-open" : ""}`}>
+      <AppNotificationsSync
+        routerError={routerError}
+        docError={docError}
+        memoryError={memoryError}
+        missionError={missionError}
+        calendarTaskDetailError={calendarTaskDetailError}
+        scheduleDetailError={scheduleDetailError}
+        pluginStatusError={pluginStatusError}
+        pluginReputationResetError={pluginReputationResetError}
+        agentProfileError={agentProfileError}
+        userProfileError={userProfileError}
+        userRagError={userRagError}
+        projectGraphError={projectGraphError}
+      />
       <a href="#main-content" className="skip-link">Aller au contenu principal</a>
       {updateBannerInfo && (
         <div className="update-banner" role="region" aria-label={t("update.banner_label")}>
@@ -5000,103 +5156,20 @@ function App() {
         </div>
       )}
       <div className="app-body">
-        <aside className="sidebar-left" aria-label="Navigation principale">
+        {mobileSidebarOpen ? (
+          <button
+            type="button"
+            className="sidebar-mobile-backdrop"
+            aria-label={t("common.close")}
+            onClick={() => setMobileSidebarOpen(false)}
+          />
+        ) : null}
+        <aside className={`sidebar-left${mobileSidebarOpen ? " sidebar-left--open" : ""}${sidebarNavCollapsed ? " sidebar-left--collapsed" : ""}`} aria-label="Navigation principale">
           <div className="sidebar-left-top">
             <h1 className="logo">Akasha</h1>
             <p className="tagline">Local-first AI assistant</p>
           </div>
-          <nav className="tabs sidebar-nav" role="tablist" aria-label="Sections">
-            <button
-              role="tab"
-              aria-selected={tab === "chat"}
-              aria-controls="panel-chat"
-              id="tab-chat"
-              className={tab === "chat" ? "active" : ""}
-              onClick={() => setTab("chat")}
-            >
-              {t("tabs.chat")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "scheduled"}
-              aria-controls="panel-scheduled"
-              id="tab-scheduled"
-              className={tab === "scheduled" ? "active" : ""}
-              onClick={() => setTab("scheduled")}
-            >
-              {t("tabs.scheduled")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "router"}
-              aria-controls="panel-router"
-              id="tab-router"
-              className={tab === "router" ? "active" : ""}
-              onClick={() => setTab("router")}
-            >
-              {t("tabs.router")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "docs"}
-              aria-controls="panel-docs"
-              id="tab-docs"
-              className={tab === "docs" ? "active" : ""}
-              onClick={() => setTab("docs")}
-            >
-              {t("tabs.docs")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "tasks"}
-              aria-controls="panel-tasks"
-              id="tab-tasks"
-              className={tab === "tasks" ? "active" : ""}
-              onClick={() => setTab("tasks")}
-            >
-              {t("tabs.tasks")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "calendar"}
-              aria-controls="panel-calendar"
-              id="tab-calendar"
-              className={tab === "calendar" ? "active" : ""}
-              onClick={() => setTab("calendar")}
-            >
-              {t("tabs.calendar")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "memory"}
-              aria-controls="panel-memory"
-              id="tab-memory"
-              className={tab === "memory" ? "active" : ""}
-              onClick={() => setTab("memory")}
-            >
-              {t("tabs.memory")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "mission"}
-              aria-controls="panel-mission"
-              id="tab-mission"
-              className={tab === "mission" ? "active" : ""}
-              onClick={() => setTab("mission")}
-            >
-              {t("tabs.mission")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "settings"}
-              aria-controls="panel-settings"
-              id="tab-settings"
-              className={tab === "settings" ? "active" : ""}
-              onClick={() => setTab("settings")}
-            >
-              {t("tabs.settings")}
-            </button>
-          </nav>
+          <AppNavigation tab={tab} setTab={(t) => { setTab(t); setMobileSidebarOpen(false); }} t={t} collapsed={sidebarNavCollapsed} onToggleCollapse={() => setSidebarNavCollapsed((c) => !c)} />
           <div className="sidebar-left-bottom">
             <div className="daemon-status" role="status" aria-live="polite">
               <span
@@ -5119,7 +5192,9 @@ function App() {
                   aria-haspopup="true"
                   title={t("pending_actions.title")}
                 >
-                  <span className="header-pending-actions-icon" aria-hidden>⚠</span>
+                  <span className="header-pending-actions-icon" aria-hidden>
+                    <MonoIcon name="warning" />
+                  </span>
                   <span className="header-pending-actions-badge">{Object.keys(pendingHumanInput).length}</span>
                   <span className="header-pending-actions-label">{t("pending_actions.action_required")}</span>
                 </button>
@@ -5156,29 +5231,48 @@ function App() {
           <div className="container-main-inner">
             <header className="view-header">
               <div className="view-header-main">
-                <h2 className="view-title">{t("tabs." + tab)}</h2>
-                <p className="view-subtitle">{isSimpleMode ? t("settings.ui_mode_hint") : t("chat.follow_tasks")}</p>
+                <h2 className="view-title">
+                  {t("tabs." + tab)}
+                  <InfoTip label={t("tabs." + tab)} content={isSimpleMode ? t("settings.ui_mode_hint") : t("chat.follow_tasks")} />
+                </h2>
               </div>
               <div className="view-header-actions">
-                <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
-                <span
-                  className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
-                  role="status"
-                  aria-live="polite"
-                  title={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
-                >
-                  {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
-                </span>
                 <button
                   type="button"
-                  className="sidebar-right-toggle"
-                  onClick={() => setRightSidebarOpen((o) => !o)}
-                  aria-expanded={rightSidebarOpen}
-                  aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
-                  title={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                  className="sidebar-mobile-toggle"
+                  onClick={() => setMobileSidebarOpen((o) => !o)}
+                  aria-expanded={mobileSidebarOpen}
+                  aria-label={t("nav.toggle_sidebar")}
                 >
-                  {rightSidebarOpen ? "▐" : "▌"}
+                  ☰
                 </button>
+                <NotificationCenter />
+                <PermissionsBell fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+                <Tooltip content={uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}>
+                  <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
+                </Tooltip>
+                <Tooltip content={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}>
+                  <span
+                    className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+                  </span>
+                </Tooltip>
+                {tab !== "tasks" && (
+                  <Tooltip content={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}>
+                    <button
+                      type="button"
+                      className="sidebar-right-toggle"
+                      onClick={() => setRightSidebarOpen((o) => !o)}
+                      aria-expanded={rightSidebarOpen}
+                      aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                    >
+                      {rightSidebarOpen ? "▐" : "▌"}
+                    </button>
+                  </Tooltip>
+                )}
               </div>
             </header>
       <main className="main" id="main-content" tabIndex={-1}>
@@ -5463,28 +5557,75 @@ function App() {
             id="panel-chat"
             role="tabpanel"
             aria-labelledby="tab-chat"
-            className="panel chat-panel"
+            className="panel chat-panel chat-panel-centered"
           >
-            <div className="panel-hero chat-panel-hero">
-              <div>
-                <h3 className="panel-hero-title">{t("chat.hero_title")}</h3>
-                <p className="panel-hero-text">{isSimpleMode ? t("chat.hero_simple") : t("chat.hero_expert")}</p>
-              </div>
-              {(messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
-                <div className="panel-hero-aside">
-                  {messages.length > 0 && (
-                    <button type="button" className="panel-hero-action panel-hero-action-secondary" onClick={exportChatTranscript}>
-                      {t("chat.export_transcript")}
+            {chatIncognito ? (
+              <p className="chat-incognito-banner" role="status">
+                {locale === "en" ? "Incognito — memory promotion disabled for this session (UI flag)." : "Incognito — promotion mémoire désactivée pour cette session (indicateur UI)."}
+              </p>
+            ) : null}
+            {(companionBubbleText || messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
+              <div className="chat-panel-top">
+                <div className="chat-panel-toolbar">
+                  {companionBubbleText ? (
+                    <button
+                      type="button"
+                      className="chat-companion-toggle"
+                      onClick={() => {
+                        setCompanionOpen((open) => {
+                          const next = !open;
+                          try {
+                            localStorage.setItem(CHAT_COMPANION_OPEN_KEY, next ? "1" : "0");
+                          } catch {
+                            /* ignore */
+                          }
+                          return next;
+                        });
+                      }}
+                      aria-expanded={companionOpen}
+                      aria-controls="chat-companion-message"
+                      aria-label={t("chat.companion_label")}
+                      title={t("chat.companion_label")}
+                    >
+                      <img src="/akasha-icon.png" alt="" className="chat-companion-icon" width={20} height={20} />
                     </button>
-                  )}
-                  {Object.keys(runningTaskChips).length > 0 && (
-                    <button type="button" className="panel-hero-action" onClick={() => setTab("tasks")}>
-                      {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
-                    </button>
-                  )}
+                  ) : null}
+                  <div className="chat-panel-toolbar-actions">
+                    {messages.length > 0 && (
+                      <button type="button" className="btn-secondary chat-toolbar-btn" onClick={exportChatTranscript}>
+                        {t("chat.export_transcript")}
+                      </button>
+                    )}
+                    {Object.keys(runningTaskChips).length > 0 && (
+                      <button type="button" className="btn-secondary chat-toolbar-btn" onClick={() => setTab("tasks")}>
+                        {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
+                      </button>
+                    )}
+                  </div>
                 </div>
-              )}
-            </div>
+                {companionOpen && companionBubbleText ? (
+                  <div className="chat-companion-row chat-companion-row--open" role="status" aria-live="polite">
+                    <div id="chat-companion-message" className="chat-companion-bubble">
+                      <span className="chat-companion-label">{t("chat.companion_label")}</span>
+                      <span className="chat-companion-text">{companionBubbleText}</span>
+                    </div>
+                    {chatTipsEnabled && tipBannerText && !tipBannerDismissed ? (
+                      <button
+                        type="button"
+                        className="chat-companion-dismiss"
+                        onClick={() => {
+                          setTipBannerDismissed(true);
+                          setTipBannerText(null);
+                        }}
+                        aria-label={t("chat.tip_dismiss")}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            )}
             <div className="chat-area">
               {messages.length === 0 ? (
                 <div className="chat-placeholder">
@@ -5497,92 +5638,67 @@ function App() {
                   </p>
                 </div>
               ) : (
-                <>
-                  {messages.map((m, i) => {
-                    const askUserData = m.role === "assistant" ? parseAskUserMessage(m.text) : null;
-                    const assistantMapVisual =
-                      m.role === "assistant" ? (m.mapVisual ?? (m.taskId ? chatMapByTaskId[m.taskId] : undefined)) : undefined;
-                    return (
-                      <div
-                        key={i}
-                        className={`message ${m.role} ${m.error ? "error" : ""} ${askUserData ? "message-ask-user" : ""} ${m.streaming ? "message-streaming" : ""}`}
+                <ChatRenderer
+                  messages={messages}
+                  parseAskUser={parseAskUserMessage}
+                  onPathClick={handlePathClick}
+                  userAvatar={userAvatar}
+                  agentAvatar={agentProfile.avatar}
+                  agentName={agentProfile.name || "Akasha"}
+                  onOpenTaskDetail={openChatTaskDetail}
+                  taskDetailLabel={t("chat.view_task_detail")}
+                  renderAskUserChoice={(choice, j) => {
+                    const pendingTaskIdForReply = Object.keys(pendingHumanInput)[0] ?? null;
+                    return pendingTaskIdForReply ? (
+                      <button
+                        key={j}
+                        type="button"
+                        className="message-ask-user-choice-tag"
+                        onClick={async () => {
+                          try {
+                            await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, response: choice, port: DAEMON_PORT });
+                            setPendingHumanInput((prev) => {
+                              const next = { ...prev };
+                              delete next[pendingTaskIdForReply];
+                              return next;
+                            });
+                            setHumanInputModalTaskId((c) => (c === pendingTaskIdForReply ? null : c));
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
                       >
-                        <div className="message-head">
-                          {m.role === "user" ? (userAvatar ? <img src={userAvatar} alt="" className="message-avatar message-avatar-user" /> : null) : m.role === "assistant" ? (agentProfile.avatar ? <img src={agentProfile.avatar} alt="" className="message-avatar message-avatar-assistant" /> : null) : null}
-                          <span className="role" aria-hidden>
-                            {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : (agentProfile.name || "Akasha")}
-                          </span>
-                        </div>
-                        {m.role === "system" ? (
-                          <div className="text system-text" style={{ whiteSpace: "pre-wrap" }}>
-                            {m.text}
-                          </div>
-                        ) : askUserData ? (
-                          <div className="message-ask-user-card">
-                            <div className="message-ask-user-question markdown-rendered">
-                              <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
-                                {askUserData.question}
-                              </LazyMarkdownContent></Suspense>
-                            </div>
-                            {askUserData.context && (
-                              <p className="message-ask-user-context">{askUserData.context}</p>
-                            )}
-                            {askUserData.choices?.length ? (
-                              <div className="message-ask-user-choices">
-                                {askUserData.choices.map((choice, j) => {
-                                  const pendingTaskIdForReply = Object.keys(pendingHumanInput)[0] ?? null;
-                                  return pendingTaskIdForReply ? (
-                                    <button
-                                      key={j}
-                                      type="button"
-                                      className="message-ask-user-choice-tag"
-                                      onClick={async () => {
-                                        try {
-                                          await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, response: choice, port: DAEMON_PORT });
-                                          setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskIdForReply]; return next; });
-                                          setHumanInputModalTaskId((c) => (c === pendingTaskIdForReply ? null : c));
-                                        } catch (e) {
-                                          console.error(e);
-                                        }
-                                      }}
-                                    >
-                                      {choice}
-                                    </button>
-                                  ) : (
-                                    <span key={j} className="message-ask-user-choice-tag">{choice}</span>
-                                  );
-                                })}
-                              </div>
-                            ) : null}
-                            <p className="message-ask-user-hint">Répondre ci‑dessous (boutons ou champ texte) ou via « Action requise » sur la tâche.</p>
-                          </div>
-                        ) : (
-                          <div className="text markdown-rendered">
-                            <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent onPathClick={handlePathClick}>
-                              {preprocessMessagePaths(preprocessDataUrlImages(m.text))}
-                            </LazyMarkdownContent></Suspense>
-                            {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}
-                          </div>
-                        )}
-                        {assistantMapVisual ? (
-                          <div className="chat-message-map-embed">
-                            <MapPluginEventView
-                              visual={assistantMapVisual}
-                              t={t}
-                              width={460}
-                              height={160}
-                              toolbar="inline"
-                              variant="chat"
-                              showPanelHeading={false}
-                              onFullscreen={() => setEventVisualFullscreen({ visual: assistantMapVisual, sourceEventType: "chat_map" })}
-                              onExportCsv={() => exportAdvancedViewCsv(assistantMapVisual)}
-                            />
-                          </div>
-                        ) : null}
+                        {choice}
+                      </button>
+                    ) : (
+                      <span key={j} className="message-ask-user-choice-tag">
+                        {choice}
+                      </span>
+                    );
+                  }}
+                  renderMapVisual={(m) => {
+                    const assistantMapVisual =
+                      m.role === "assistant"
+                        ? ((m.mapVisual ?? (m.taskId ? chatMapByTaskId[m.taskId] : undefined)) as EventAdvancedView | undefined)
+                        : undefined;
+                    if (!assistantMapVisual || assistantMapVisual.kind !== "map") return null;
+                    return (
+                      <div className="chat-message-map-embed">
+                        <MapPluginEventView
+                          visual={assistantMapVisual}
+                          t={t}
+                          width={460}
+                          height={160}
+                          toolbar="inline"
+                          variant="chat"
+                          showPanelHeading={false}
+                          onFullscreen={() => setEventVisualFullscreen({ visual: assistantMapVisual, sourceEventType: "chat_map" })}
+                          onExportCsv={() => exportAdvancedViewCsv(assistantMapVisual)}
+                        />
                       </div>
                     );
-                  })}
-                </>
+                  }}
+                />
               )}
               {(loading || Object.keys(runningTaskChips).length > 0) && (
                 <div className="chat-loading-row" role="status" aria-live="polite">
@@ -5769,8 +5885,17 @@ function App() {
                                                       </>
                                                     );
                                                   })() : null}
-                                                  {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
-                                                    <span className="chat-subagents-event-model">— {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
+                                                  {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") ? (
+                                                    (() => {
+                                                      const usage = enrichUsageWithPricing(parseUsageFromEventPayload(ev.payload));
+                                                      if (usage) {
+                                                        return <ModelUsageBadge usage={usage} compact className="chat-subagents-event-usage" />;
+                                                      }
+                                                      const p = ev.payload as { model_used?: string | null };
+                                                      return p.model_used ? (
+                                                        <span className="chat-subagents-event-model">— {t("tasks.model_used")}: {p.model_used}</span>
+                                                      ) : null;
+                                                    })()
                                                   ) : null}
                                                   {ev.payload && typeof ev.payload === "object" && ev.event_type === "task_decomposed" ? (
                                                     (() => {
@@ -5884,6 +6009,23 @@ function App() {
                 </div>
               );
             })()}
+            {chatResearchContext ? (
+              <div className="chat-research-context-banner" role="status">
+                <span>
+                  {locale === "en"
+                    ? `Discussing Deep Research report: ${chatResearchContext.topic}`
+                    : `Discussion du rapport Deep Research : ${chatResearchContext.topic}`}
+                </span>
+                <button
+                  type="button"
+                  className="chat-research-context-dismiss"
+                  onClick={() => setChatResearchContext(null)}
+                  aria-label={locale === "en" ? "Clear report context" : "Retirer le contexte du rapport"}
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
             {attachments.length > 0 && (
               <div className="chat-attachments">
                 {attachments.map((a) => (
@@ -5917,30 +6059,68 @@ function App() {
                 ))}
               </div>
             )}
-            {companionBubbleText && (
-              <div className="chat-companion-row" role="status" aria-live="polite">
-                <span className="chat-companion-avatar" aria-hidden>
-                  🦆
-                </span>
-                <div className="chat-companion-bubble">
-                  <span className="chat-companion-label">{t("chat.companion_label")}</span>
-                  <span className="chat-companion-text">{companionBubbleText}</span>
-                </div>
-                {chatTipsEnabled && tipBannerText && !tipBannerDismissed && (
-                  <button
-                    type="button"
-                    className="chat-companion-dismiss"
-                    onClick={() => {
-                      setTipBannerDismissed(true);
-                      setTipBannerText(null);
-                    }}
-                    aria-label={t("chat.tip_dismiss")}
+            <div className="chat-footer-tools">
+            {Object.keys(runningTaskChips).length > 0 && (
+              <Tooltip
+                content={
+                  locale === "en"
+                    ? "Steering injects mid-task; follow-up runs after the current turn"
+                    : "Steering : injection prioritaire ; follow-up : après le tour en cours"
+                }
+              >
+                <div className="input-group chat-delivery-group" role="group" aria-label={locale === "en" ? "Delivery mode" : "Mode d'envoi"}>
+                  <span className="input-group-addon" id="chat-delivery-mode-label">
+                    {locale === "en" ? "Delivery" : "Envoi"}
+                  </span>
+                  <select
+                    id="chat-delivery-mode"
+                    className="input-group-field chat-delivery-select"
+                    value={chatDeliveryMode}
+                    onChange={(e) =>
+                      setChatDeliveryMode(e.target.value as "immediate" | "steering" | "follow_up")
+                    }
+                    disabled={loading}
+                    aria-labelledby="chat-delivery-mode-label"
                   >
-                    ×
-                  </button>
-                )}
-              </div>
+                    <option value="immediate">{locale === "en" ? "Immediate" : "Immédiat"}</option>
+                    <option value="steering">Steering</option>
+                    <option value="follow_up">Follow-up</option>
+                  </select>
+                </div>
+              </Tooltip>
             )}
+            <ChatCompositionBar
+              locale={locale}
+              agentMode={chatAgentMode}
+              onAgentModeChange={(v) => {
+                setChatAgentMode(v);
+                try {
+                  localStorage.setItem(CHAT_AGENT_MODE_KEY, v ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+              }}
+              webSearchEnabled={chatWebSearch}
+              onWebSearchChange={(v) => {
+                setChatWebSearch(v);
+                try {
+                  localStorage.setItem(CHAT_WEB_SEARCH_KEY, v ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+              }}
+              incognito={chatIncognito}
+              onIncognitoChange={(v) => {
+                setChatIncognito(v);
+                try {
+                  localStorage.setItem(CHAT_INCOGNITO_KEY, v ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+              }}
+              disabled={loading}
+            />
+            </div>
             <div className="input-area">
               <input
                 ref={fileInputRef}
@@ -5951,55 +6131,101 @@ function App() {
                 className="sr-only"
                 aria-hidden
               />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Joindre un fichier"
-                title="Joindre une image ou un document"
-              >
-                Joindre
-              </button>
-              {voiceStatus?.stt_configured && (
-                <button
-                  type="button"
-                  className={`chat-voice-btn ${voiceRecording ? "recording" : ""}`}
-                  onClick={handleVoiceMessageToggle}
+              <div className="input-group" role="group" aria-label={locale === "en" ? "Compose message" : "Composer un message"}>
+                <div className="input-group-prepend">
+                  <button
+                    type="button"
+                    className="input-group-btn btn-secondary"
+                    onClick={() => fileInputRef.current?.click()}
+                    aria-label={locale === "en" ? "Attach file" : "Joindre un fichier"}
+                    title={locale === "en" ? "Attach image or document" : "Joindre une image ou un document"}
+                  >
+                    <MonoIcon name="paperclip" />
+                    <span className="input-group-btn-label">{locale === "en" ? "Attach" : "Joindre"}</span>
+                  </button>
+                  {voiceStatus?.stt_configured ? (
+                    <button
+                      type="button"
+                      className={`input-group-btn btn-secondary chat-voice-btn ${voiceRecording ? "recording" : ""}`}
+                      onClick={handleVoiceMessageToggle}
+                      disabled={loading}
+                      aria-label={
+                        voiceRecording
+                          ? locale === "en"
+                            ? "Stop recording and send"
+                            : "Arrêter l'enregistrement et envoyer"
+                          : locale === "en"
+                            ? "Voice message"
+                            : "Message vocal"
+                      }
+                      title={voiceRecording ? (locale === "en" ? "Stop and send" : "Arrêter et envoyer") : locale === "en" ? "Voice message" : "Message vocal"}
+                    >
+                      {voiceRecording ? (
+                        <span className="chat-voice-btn-inner">● {locale === "en" ? "Recording…" : "Enregistrement…"}</span>
+                      ) : (
+                        <MonoIcon name="mic" />
+                      )}
+                    </button>
+                  ) : null}
+                </div>
+                <label htmlFor="chat-input" className="sr-only">
+                  {locale === "en" ? "Your message" : "Votre message"}
+                </label>
+                <input
+                  ref={chatInputRef}
+                  id="chat-input"
+                  type="text"
+                  className="input-group-field"
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSend()}
+                  placeholder={locale === "en" ? "Your message…" : "Votre message…"}
                   disabled={loading}
-                  aria-label={voiceRecording ? "Arrêter l'enregistrement et envoyer" : "Message vocal (enregistrer puis ré-encliquer pour envoyer)"}
-                  title={voiceRecording ? "Arrêter et envoyer" : "Message vocal"}
-                >
-                  {voiceRecording ? (
-                    <span className="chat-voice-btn-inner">● Enregistrement…</span>
-                  ) : (
-                    <span className="chat-voice-btn-inner" aria-hidden>🎤</span>
-                  )}
-                </button>
-              )}
-              <label htmlFor="chat-input" className="sr-only">
-                Votre message
-              </label>
-              <input
-                ref={chatInputRef}
-                id="chat-input"
-                type="text"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSend()}
-                placeholder="Votre message…"
-                disabled={loading}
-                aria-describedby="send-hint"
-              />
-              <button
-                onClick={() => handleSend()}
-                disabled={loading || (!message.trim() && attachments.length === 0)}
-                aria-label="Envoyer le message"
-              >
-                Envoyer
-              </button>
+                  aria-describedby="send-hint"
+                />
+                <div className="input-group-append">
+                  <button
+                    type="button"
+                    className="input-group-btn btn-primary"
+                    onClick={() => handleSend()}
+                    disabled={loading || (!message.trim() && attachments.length === 0)}
+                    aria-label={locale === "en" ? "Send message" : "Envoyer le message"}
+                  >
+                    {locale === "en" ? "Send" : "Envoyer"}
+                  </button>
+                </div>
+              </div>
             </div>
             <p id="send-hint" className="hint sr-only">
               Entrée pour envoyer
             </p>
+          </section>
+        )}
+
+        {tab === "compare" && (
+          <section id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" className="panel compare-panel-wrap">
+            <ComparePanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+          </section>
+        )}
+
+        <section
+          id="panel-research"
+          role="tabpanel"
+          aria-labelledby="tab-research"
+          className="panel research-panel"
+          hidden={tab !== "research"}
+          aria-hidden={tab !== "research"}
+        >
+          <DeepResearchPanel
+            fetchEndpoint={fetchSystemEndpoint}
+            locale={locale}
+            onDiscussReport={discussResearchReport}
+          />
+        </section>
+
+        {tab === "cookbook" && (
+          <section id="panel-cookbook" role="tabpanel" aria-labelledby="tab-cookbook" className="panel cookbook-panel-wrap">
+            <CookbookPanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
           </section>
         )}
 
@@ -6060,12 +6286,7 @@ function App() {
                 {t("common.loading")}
               </p>
             )}
-            {routerError && (
-              <div className="error-banner" role="alert">
-                {routerError}
-              </div>
-            )}
-            {!routerLoading && !routerError && routerMetrics && (
+            {!routerLoading && routerMetrics && (
               <>
                 <div className="router-metrics-toolbar">
                   <label htmlFor="router-metrics-period" className="router-metrics-period-label">
@@ -6153,13 +6374,7 @@ function App() {
                 {t("common.loading")}
               </p>
             )}
-            {docError && (
-              <div className="error-banner" role="alert">
-                {docError}
-                <p>Assurez-vous que le daemon est démarré (<code>akasha start</code>).</p>
-              </div>
-            )}
-            {!docLoading && !docError && docContent && (
+            {!docLoading && docContent && (
               <>
                 <button
                   type="button"
@@ -6186,16 +6401,34 @@ function App() {
             aria-labelledby="tab-tasks"
             className="panel activity-panel"
           >
-            <h2 className="panel-title">{t("tasks.title")}</h2>
-            <button
-              type="button"
-              className="refresh-btn"
-              onClick={() => void fetchTasksList()}
-              aria-label="Rafraîchir l’activité"
-              disabled={tasksLoading}
-            >
-              Rafraîchir
-            </button>
+            <div className="task-center-toolbar">
+              <h2 className="panel-title task-center-toolbar-title">{t("tasks.title")}</h2>
+              <div className="task-center-toolbar-actions">
+                <Tooltip content={rightSidebarOpen ? t("tasks.hide_task_list") : t("tasks.show_task_list")}>
+                  <button
+                    type="button"
+                    className="task-center-toolbar-btn sidebar-right-toggle"
+                    onClick={() => setTaskSidebarOpen(!rightSidebarOpen)}
+                    aria-expanded={rightSidebarOpen}
+                    aria-label={rightSidebarOpen ? t("tasks.hide_task_list") : t("tasks.show_task_list")}
+                  >
+                    {rightSidebarOpen ? "▐" : "▌"} {rightSidebarOpen ? t("tasks.hide_task_list") : t("tasks.show_task_list")}
+                  </button>
+                </Tooltip>
+                <button type="button" className="task-center-toolbar-btn btn-primary" onClick={() => setCreateTaskDialogOpen(true)}>
+                  + {t("tasks.create_button")}
+                </button>
+                <button
+                  type="button"
+                  className="task-center-toolbar-btn refresh-btn"
+                  onClick={() => void fetchTasksList()}
+                  aria-label={t("sidebar.refresh_tasks")}
+                  disabled={tasksLoading}
+                >
+                  {t("sidebar.refresh_tasks")}
+                </button>
+              </div>
+            </div>
             {!tasksLoading && tasksList.length > 0 && (
               <div className="task-center-summary">
                 <div className="task-center-summary-chips">
@@ -6248,212 +6481,6 @@ function App() {
               <div className="activity-panel-body">
                 <div
                   className={
-                    "activity-tasks-block task-panel-section " +
-                    (taskPanelSections.list ? "task-panel-section--open" : "task-panel-section--closed")
-                  }
-                >
-                  <div className="task-panel-section-head">
-                    <button
-                      type="button"
-                      className="task-panel-section-toggle"
-                      aria-expanded={taskPanelSections.list}
-                      aria-controls="task-panel-body-list"
-                      onClick={() => toggleTaskPanelSection("list")}
-                      aria-label={
-                        (taskPanelSections.list ? t("tasks.section_collapse") : t("tasks.section_expand")) +
-                        ": " +
-                        t("tasks.list_heading")
-                      }
-                    >
-                      <span className="task-panel-chevron" aria-hidden>
-                        {taskPanelSections.list ? "▼" : "▶"}
-                      </span>
-                    </button>
-                    <h3 className="task-panel-section-title" id="task-panel-heading-list">
-                      {t("tasks.list_heading")}
-                    </h3>
-                  </div>
-                  {taskPanelSections.list && (
-                    <div
-                      id="task-panel-body-list"
-                      role="region"
-                      aria-labelledby="task-panel-heading-list"
-                      className="task-panel-section-body"
-                    >
-                      {tasksList.length > 0 && (
-                        <>
-                          <div className="activity-tasks-filters" role="tablist" aria-label={t("tasks.filter_label")}>
-                            <button
-                              type="button"
-                              role="tab"
-                              aria-selected={taskListFilter === "active"}
-                              className={"activity-filter-tab" + (taskListFilter === "active" ? " active" : "")}
-                              onClick={() => setTaskListFilter("active")}
-                            >
-                              {t("tasks.filter_active")}
-                            </button>
-                            <button
-                              type="button"
-                              role="tab"
-                              aria-selected={taskListFilter === "completed"}
-                              className={"activity-filter-tab" + (taskListFilter === "completed" ? " active" : "")}
-                              onClick={() => setTaskListFilter("completed")}
-                            >
-                              {t("tasks.filter_completed")}
-                            </button>
-                          </div>
-                          <div className="activity-tasks-search-wrap">
-                            <input
-                              type="search"
-                              className="activity-tasks-search"
-                              placeholder={t("tasks.search_placeholder")}
-                              value={taskSearchQuery}
-                              onChange={(e) => setTaskSearchQuery(e.target.value)}
-                              aria-label={t("tasks.search_placeholder")}
-                            />
-                          </div>
-                          {taskTreeData.branchIds.size > 0 && (
-                            <div className="task-tree-toolbar" role="group" aria-label={t("tasks.tree_actions")}>
-                              <button
-                                type="button"
-                                className="task-tree-toolbar-btn"
-                                onClick={() => setAllTaskBranchesCollapsed(false)}
-                              >
-                                {t("tasks.expand_all")}
-                              </button>
-                              <button
-                                type="button"
-                                className="task-tree-toolbar-btn"
-                                onClick={() => setAllTaskBranchesCollapsed(true)}
-                              >
-                                {t("tasks.collapse_all")}
-                              </button>
-                            </div>
-                          )}
-                        </>
-                      )}
-                      {tasksList.length === 0 ? (
-                        <p className="empty-state">{t("tasks.empty")}</p>
-                      ) : taskTreeRows.length === 0 ? (
-                        <p className="empty-state">{t("tasks.no_match_filter")}</p>
-                      ) : (
-                        <ul className="activity-task-cards" role="list">
-                          {taskTreeRows.map((row) => {
-                            const task = row.task;
-                            const isSelected = tasksList[tasksSelected]?.id === task.id;
-                            const isAncestor = !isSelected && selectedTaskAncestorIds.has(task.id);
-                            const isActiveRoot = selectedTaskRootId === task.id;
-                            const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
-                            const snippet = runningChip?.message ? trimPreview(runningChip.message, isSimpleMode ? 90 : 140) : trimPreview(taskDisplayLabel(task), 100);
-                            const hierarchyLabel = row.depth > 0 ? t("tasks.subtask_badge") : t("tasks.root_badge");
-                            const childCountLabel = t("tasks.children_count").replace("{{count}}", String(row.visibleChildCount));
-                            const createdLabel = task.created_at ? (() => {
-                              try {
-                                const d = new Date(task.created_at);
-                                return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
-                              } catch {
-                                return task.created_at;
-                              }
-                            })() : null;
-                            return (
-                              <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "") + (isAncestor ? " activity-task-card-ancestor" : "") + (isActiveRoot ? " activity-task-card-active-root" : "") + (row.depth > 0 ? " activity-task-card-child" : " activity-task-card-root") }>
-                                <div
-                                  className={"activity-task-card-inner task-tree-row" + (row.depth > 0 ? " task-tree-row-child" : " task-tree-row-root")}
-                                  role="button"
-                                  tabIndex={0}
-                                  onClick={() => setTasksSelected(tasksList.findIndex((x) => x.id === task.id))}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter" || e.key === " ") {
-                                      e.preventDefault();
-                                      setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
-                                    }
-                                    if (e.key === "ArrowRight" && row.hasChildren && row.isCollapsed) {
-                                      e.preventDefault();
-                                      toggleTaskBranch(task.id);
-                                    }
-                                    if (e.key === "ArrowLeft" && row.hasChildren && !row.isCollapsed) {
-                                      e.preventDefault();
-                                      toggleTaskBranch(task.id);
-                                    }
-                                    const idx = taskTreeRows.findIndex((x) => x.task.id === task.id);
-                                    if (e.key === "ArrowDown" && idx < taskTreeRows.length - 1) {
-                                      const next = taskTreeRows[idx + 1].task;
-                                      setTasksSelected(tasksList.findIndex((x) => x.id === next.id));
-                                    }
-                                    if (e.key === "ArrowUp" && idx > 0) {
-                                      const prev = taskTreeRows[idx - 1].task;
-                                      setTasksSelected(tasksList.findIndex((x) => x.id === prev.id));
-                                    }
-                                  }}
-                                  style={{ marginLeft: `${row.depth * 1.25}rem` }}
-                                >
-                                  <div className="activity-task-card-head">
-                                    <div className="activity-task-card-heading">
-                                      <div className="task-tree-title-row">
-                                        {row.hasChildren ? (
-                                          <button
-                                            type="button"
-                                            className="task-tree-toggle"
-                                            aria-label={(row.isCollapsed ? t("tasks.expand_branch") : t("tasks.collapse_branch")) + ": " + taskDisplayLabel(task)}
-                                            aria-expanded={!row.isCollapsed}
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              toggleTaskBranch(task.id);
-                                            }}
-                                          >
-                                            <span aria-hidden>{row.isCollapsed ? "▶" : "▼"}</span>
-                                          </button>
-                                        ) : (
-                                          <span className="task-tree-toggle-spacer" aria-hidden>
-                                            {row.depth > 0 ? "•" : ""}
-                                          </span>
-                                        )}
-                                        <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
-                                          {taskDisplayLabel(task)}
-                                        </span>
-                                      </div>
-                                      <div className="task-tree-meta-row">
-                                        <span className={"task-tree-kind-badge " + (row.depth > 0 ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
-                                          {hierarchyLabel}
-                                        </span>
-                                        {row.hasChildren && <span className="task-tree-child-count">{childCountLabel}</span>}
-                                      </div>
-                                    </div>
-                                    <span className={"activity-task-status-pill status-" + task.status}>
-                                      {task.status}
-                                    </span>
-                                  </div>
-                                  <p className="activity-task-card-snippet">{snippet}</p>
-                                  {task.status === "running" && runningChip != null && (
-                                    <div className="activity-task-progress">
-                                      <div className="activity-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
-                                      <span className="activity-task-progress-pct">{runningChip.pct ?? 0}%</span>
-                                    </div>
-                                  )}
-                                  <div className="activity-task-meta">
-                                    <span className="activity-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
-                                    {createdLabel && <span className="activity-task-created">{createdLabel}</span>}
-                                    {task.created_at && <span className="activity-task-relative">{formatRelativeTimeLabel(task.created_at, locale)}</span>}
-                                    {task.assigned_agent && <span className="activity-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
-                                  </div>
-                                  <button
-                                    type="button"
-                                    className="activity-task-view-btn"
-                                    onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); }}
-                                  >
-                                    {t("tasks.view_task")}
-                                  </button>
-                                </div>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div
-                  className={
                     "activity-events-block task-steps-section task-panel-section " +
                     (taskPanelSections.steps ? "task-panel-section--open" : "task-panel-section--closed")
                   }
@@ -6486,77 +6513,16 @@ function App() {
                       aria-labelledby="task-panel-heading-steps"
                       className="task-panel-section-body"
                     >
-                      {taskStepsSummary.total > 0 && (
-                        <div className="task-steps-summary">
-                          <div className="task-steps-summary-topline">
-                            <span>{t("tasks.step_done")}: {taskStepsSummary.done}/{taskStepsSummary.total}</span>
-                            <span>{taskStepsSummary.progressPct}%</span>
-                          </div>
-                          <div className="task-steps-summary-bar">
-                            <div className="task-steps-summary-bar-fill" style={{ width: `${taskStepsSummary.progressPct}%` }} />
-                          </div>
-                        </div>
-                      )}
-                      {(() => {
-                        const planEv = tasksEvents.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
-                        let steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> = planEv?.payload && typeof planEv.payload === "object" && Array.isArray((planEv.payload as { steps?: unknown }).steps)
-                          ? (planEv.payload as { steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> }).steps
-                          : [];
-                        if (steps.length === 0) {
-                          const decomposed = tasksEvents.find((e) => e.event_type === "task_decomposed" && e.payload && typeof e.payload === "object" && "agents" in e.payload);
-                          const agents = decomposed?.payload && typeof decomposed.payload === "object" && Array.isArray((decomposed.payload as { agents?: unknown }).agents)
-                            ? (decomposed.payload as { agents: string[] }).agents
-                            : [];
-                          steps = agents.map((agent_type, i) => ({ step_id: `s${i}`, agent_type, intent_preview: "" }));
-                        }
-                        return steps.length > 0 ? (
-                          <div className="chat-subagents-plan task-panel-plan" role="region" aria-label={t("events.plan_proposed")}>
-                            <h4 className="chat-subagents-plan-title">{t("events.plan_proposed")}</h4>
-                            <ol className="chat-subagents-plan-steps">
-                              {steps.map((s, i) => (
-                                <li key={s.step_id ?? i} className="chat-subagents-plan-step">
-                                  {s.agent_type && <span className="chat-subagents-plan-agent agent-kind-pill" data-agent-kind={classifyAgentKind(s.agent_type)}>{s.agent_type}</span>}
-                                  {s.step_id != null && s.step_id !== "" && (
-                                    <span className="chat-subagents-plan-step-id">{s.step_id}</span>
-                                  )}
-                                  <span className="chat-subagents-plan-intent">{s.intent_preview || s.intent || ""}</span>
-                                  {s.acceptance_criteria_preview != null && s.acceptance_criteria_preview.trim() !== "" && (
-                                    <div className="chat-subagents-plan-meta">{s.acceptance_criteria_preview}</div>
-                                  )}
-                                  {Array.isArray(s.deliverables) && s.deliverables.length > 0 && (
-                                    <ul className="chat-subagents-plan-deliverables">
-                                      {s.deliverables.map((d, j) => (
-                                        <li key={j}>{d}</li>
-                                      ))}
-                                    </ul>
-                                  )}
-                                </li>
-                              ))}
-                            </ol>
-                          </div>
-                        ) : null;
-                      })()}
-                      {taskStepsTodos.length === 0 ? (
-                        <p className="empty-state task-steps-empty">{t("tasks.steps_empty")}</p>
-                      ) : (
-                        <ul className="task-steps-list" role="list" aria-label={t("tasks.steps_title")}>
-                          {taskStepsTodos.map((step, idx) => (
-                            <li key={`${step.id ?? idx}-${idx}`} className={`task-step task-step--${step.status}`}>
-                              <span className="task-step-check" aria-hidden>
-                                {step.status === "done" ? "☑" : step.status === "cancelled" ? "⊘" : "☐"}
-                              </span>
-                              <span className="task-step-title">{step.title}</span>
-                              <span className="task-step-badge">
-                                {step.status === "done"
-                                  ? t("tasks.step_done")
-                                  : step.status === "cancelled"
-                                    ? t("tasks.step_cancelled")
-                                    : t("tasks.step_pending")}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
+                      <TaskExecutionSteps
+                        steps={taskExecutionView.steps}
+                        emptyReason={taskExecutionView.emptyReason}
+                        t={t}
+                        classifyAgentKind={classifyAgentKind}
+                        onSelectChildTask={(childTaskId) => {
+                          const idx = tasksList.findIndex((x) => x.id === childTaskId);
+                          if (idx >= 0) setTasksSelected(idx);
+                        }}
+                      />
                     </div>
                   )}
                 </div>
@@ -6655,7 +6621,7 @@ function App() {
                     )}
                     {tasksList.length > 0 && tasksList[tasksSelected] && (() => {
                       const sel = tasksList[tasksSelected];
-                      const canCancel = sel.status === "pending" || sel.status === "running";
+                      const canCancel = isTaskActiveStatus(sel.status);
                       const canRetry = sel.status === "failed";
                       return (canCancel || canRetry) ? (
                         <div className="task-actions-row" role="group" aria-label="Actions sur la tâche">
@@ -7374,11 +7340,7 @@ function App() {
                       </div>
                       <div className="calendar-detail-modal-body">
                         {calendarTaskDetailError ? (
-                          <p className="error-inline" role="alert">
-                            {calendarTaskDetailError}
-                            <br />
-                            <small className="muted">Vérifiez que le daemon tourne (port {DAEMON_PORT}).</small>
-                          </p>
+                          <p className="muted">{t("notifications.check_center")}</p>
                         ) : calendarTaskDetail ? (
                           <>
                             {(() => {
@@ -7503,11 +7465,7 @@ function App() {
                       </div>
                       <div className="calendar-detail-modal-body">
                         {scheduleDetailError ? (
-                          <p className="error-inline" role="alert">
-                            Impossible de charger le détail : {scheduleDetailError}
-                            <br />
-                            <small>Vérifiez que le daemon tourne et que l’app est lancée via Tauri (pas uniquement en navigateur).</small>
-                          </p>
+                          <p className="muted">{t("notifications.check_center")}</p>
                         ) : scheduleDetail ? (
                           <>
                             <p><strong>ID (pour supprimer):</strong>{" "}
@@ -7602,6 +7560,11 @@ function App() {
             className="panel memory-panel"
           >
             <h2 className="panel-title">{t("memory.title")}</h2>
+            {memoryHygieneHint ? (
+              <p className="memory-hygiene-hint" role="status">
+                {memoryHygieneHint}
+              </p>
+            ) : null}
             <button
               type="button"
               className="refresh-btn"
@@ -7611,18 +7574,13 @@ function App() {
             >
               Rafraîchir
             </button>
-            {memoryError && (
-              <p className="error-inline" role="alert">
-                {memoryError}
-              </p>
-            )}
             {memoryLoading && (
               <p className="panel-loading" aria-busy="true">
                 <span className="panel-loading-spinner" aria-hidden />
                 {t("common.loading")}
               </p>
             )}
-            {!memoryLoading && !memoryError && (
+            {!memoryLoading && (
               <div className="memory-content-wrap">
                 <div className="memory-subtabs" role="tablist" aria-label="Type de mémoire">
                   <button
@@ -8043,24 +8001,13 @@ function App() {
             aria-labelledby="tab-mission"
             className="panel memory-panel"
           >
-            <h2 className="panel-title">{t("mission.title")}</h2>
-            <p className="muted">{t("mission.description")}</p>
-            <p className="muted" style={{ marginTop: "0.35rem" }}>
-              {t("mission.intro_detail")}
-            </p>
+            <h2 className="panel-title">
+              {t("mission.title")}
+              <InfoTip label={t("mission.title")} content={<>{t("mission.description")}<br /><br />{t("mission.intro_detail")}</>} />
+            </h2>
             <button type="button" className="refresh-btn" onClick={() => void fetchMission()} disabled={missionLoading}>
               {missionLoading ? t("common.loading") : t("mission.refresh")}
             </button>
-            {missionError === "unavailable" && (
-              <p className="error-inline" role="alert">
-                {t("mission.unavailable")}
-              </p>
-            )}
-            {missionError && missionError !== "unavailable" && (
-              <p className="error-inline" role="alert">
-                {missionError}
-              </p>
-            )}
             {!missionLoading && mission && missionDraft && (
               <div className="memory-content-wrap mission-panel-body">
                 <nav className="settings-tabs" role="tablist" aria-label={t("mission.title")} style={{ marginBottom: "0.75rem" }}>
@@ -8539,6 +8486,27 @@ function App() {
                 </select>
                 <span className="settings-theme-hint">{t("settings.ui_mode_hint")}</span>
               </dd>
+              <dt>{t("settings.ui_density")}</dt>
+              <dd>
+                <select
+                  aria-label={t("settings.ui_density")}
+                  className="settings-theme-select"
+                  value={uiDensity}
+                  onChange={(e) => {
+                    const next = e.target.value as UiDensity;
+                    setUiDensity(next);
+                    try {
+                      localStorage.setItem(DENSITY_STORAGE_KEY, next);
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                >
+                  <option value="compact">{t("settings.ui_density_compact")}</option>
+                  <option value="comfortable">{t("settings.ui_density_comfortable")}</option>
+                  <option value="spacious">{t("settings.ui_density_spacious")}</option>
+                </select>
+              </dd>
               <dt>{t("settings.language")}</dt>
               <dd>
                 <select
@@ -8664,6 +8632,10 @@ function App() {
                       </button>
                       <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
                     </dd>
+                    <dt>{t("settings.utility_model")}</dt>
+                    <dd>
+                      <p className="settings-doc muted">{t("settings.utility_model_hint")}</p>
+                    </dd>
                   </dl>
                 )}
 
@@ -8682,11 +8654,6 @@ function App() {
                         </button>
                       </div>
                     </div>
-                    {pluginStatusError && (
-                      <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
-                        {pluginStatusError}
-                      </p>
-                    )}
                     {!pluginStatusError && pluginStatusList.length === 0 && !pluginStatusLoading && (
                       <p className="settings-doc muted">{t("doctor.no_plugins")}</p>
                     )}
@@ -8837,11 +8804,6 @@ function App() {
                             {pluginReputationResetMessage}
                           </p>
                         )}
-                        {pluginReputationResetError && (
-                          <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
-                            {pluginReputationResetError}
-                          </p>
-                        )}
                       </div>
                     </details>
                   </>
@@ -8851,6 +8813,7 @@ function App() {
                   <SystemHealthPanel
                     sessionId={sessionId}
                     fetchEndpoint={fetchSystemEndpoint}
+                    requestEndpoint={requestSystemEndpoint}
                     expert={uiMode === "expert"}
                     locale={locale}
                     labels={{
@@ -8877,7 +8840,6 @@ function App() {
             {settingsSection === "agent" && (
               <div className="settings-section-content">
                 <p className="settings-doc muted">{t("settings.agent_profile_desc")}</p>
-                {agentProfileError && <p className="error-inline" role="alert">{agentProfileError}</p>}
                 <div className="settings-agent-template-row">
                   <label htmlFor="agent-profile-template">{t("settings.agent_profile_apply_template")}</label>
                   <select id="agent-profile-template" className="settings-theme-select" value="" onChange={(e) => { const idx = e.target.value ? parseInt(e.target.value, 10) : -1; e.target.value = ""; if (idx >= 0 && idx < AGENT_PROFILE_TEMPLATES.length) { const tpl = AGENT_PROFILE_TEMPLATES[idx]; setAgentProfile((p) => ({ ...p, name: tpl.name, role: tpl.role ?? "", personality: tpl.personality, rules: [...tpl.rules], can_do: [...tpl.can_do], cannot_do: [...tpl.cannot_do] })); } }}>
@@ -9204,7 +9166,6 @@ function App() {
             {settingsSection === "user" && (
               <div className="settings-section-content">
                 <p className="settings-doc muted">{t("settings.user_profile_desc")}</p>
-                {userProfileError && <p className="error-inline" role="alert">{userProfileError}</p>}
                 {userProfileLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
                 {!userProfileLoading && (
                   <>
@@ -9290,9 +9251,6 @@ function App() {
                     <>
                       <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
                       <p className="settings-doc muted">{t("settings.user_rag_desc")}</p>
-                      {userRagError && (
-                        <p className="error-inline" role="alert">{userRagError}</p>
-                      )}
                       <input
                         ref={userRagFileInputRef}
                         type="file"
@@ -9360,9 +9318,6 @@ function App() {
                     <>
                       <h3 className="settings-subtitle">{t("settings.workspace_graph_title")}</h3>
                       <p className="settings-doc muted">{t("settings.workspace_graph_desc")}</p>
-                      {projectGraphError && (
-                        <p className="error-inline" role="alert">{projectGraphError}</p>
-                      )}
                       {projectGraphSuccess && (
                         <p className="settings-doc" role="status">{projectGraphSuccess}</p>
                       )}
@@ -9548,7 +9503,7 @@ function App() {
               <button
                 type="button"
                 className="sidebar-right-close"
-                onClick={() => setRightSidebarOpen(false)}
+                onClick={() => (tab === "tasks" ? setTaskSidebarOpen(false) : setRightSidebarOpen(false))}
                 aria-label={tab === "chat" ? t("sidebar.hide_tasks") : t("sidebar.hide_tasks")}
               >
                 ×
@@ -9678,6 +9633,19 @@ function App() {
               {!tasksLoading && tasksList.length > 0 && taskTreeRows.length === 0 && (
                 <p className="empty-state">{t("tasks.no_match_filter")}</p>
               )}
+              {tab === "tasks" && eventTriggers.length > 0 && (
+                <div className="sidebar-right-triggers">
+                  <h4 className="sidebar-right-triggers-title">{t("tasks.triggers_heading")}</h4>
+                  <ul className="sidebar-right-triggers-list" role="list">
+                    {eventTriggers.map((tr) => (
+                      <li key={tr.id} className={"sidebar-right-trigger-item" + (tr.enabled ? "" : " disabled")}>
+                        <span className="sidebar-right-trigger-name">{tr.name}</span>
+                        <span className="sidebar-right-trigger-type">{t("tasks.trigger_type_" + tr.trigger_type)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {!tasksLoading && taskTreeRows.length > 0 && (
                 <ul className="sidebar-right-task-list" role="list">
                   {taskTreeRows.map((row) => {
@@ -9790,6 +9758,27 @@ function App() {
           </aside>
         )}
       </div>
+      <CreateTaskDialog
+        open={createTaskDialogOpen}
+        onClose={() => setCreateTaskDialogOpen(false)}
+        sessionId={sessionId}
+        t={t}
+        eventTriggersEnabled
+        onImmediateCreated={(taskId) => {
+          taskIdToSessionIdRef.current[taskId] = sessionId;
+          setRunningTaskChips((prev) => ({ ...prev, [taskId]: { pct: 0, message: "en cours…" } }));
+          setRunningTaskEvents((prev) => (prev[taskId] ? prev : { ...prev, [taskId]: [] }));
+          trackTaskUntilDone(taskId);
+          void fetchTasksList({ selectTaskId: taskId });
+          setTaskPanelSections((prev) => ({ ...prev, events: true }));
+        }}
+        onScheduleCreated={() => {
+          void fetchEventTriggers();
+        }}
+        onTriggerCreated={() => {
+          void fetchEventTriggers();
+        }}
+      />
     </div>
   );
 }

@@ -3,6 +3,8 @@
 mod policy;
 mod tools;
 mod tool_contract;
+#[cfg(feature = "web")]
+mod web_search;
 
 #[cfg(feature = "container")]
 mod container;
@@ -19,6 +21,8 @@ pub use tools::{
 };
 #[cfg(feature = "web")]
 pub use tools::{web_crawl_start, web_crawl_status, web_fetch, web_search};
+#[cfg(feature = "web")]
+pub use web_search::any_provider_available;
 
 #[cfg(feature = "container")]
 pub use container::{run_container, run_code_in_container, ContainerRunOptions, ContainerRunResult};

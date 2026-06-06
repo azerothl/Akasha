@@ -5,17 +5,40 @@ use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Se
 const DAEMON_PORT: u16 = 3876;
 const TASK_POLL_INTERVAL_MS: u64 = 1500;
 const TASK_POLL_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+const LONG_LLM_REQUEST_TIMEOUT_SECS: u64 = 600;
 
 fn daemon_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
+/// Per-route HTTP timeout for daemon passthrough (embedded LLM can take several minutes).
+fn request_timeout_for_path(path: &str, method: &str) -> std::time::Duration {
+    let p = path.trim();
+    let m = method.trim().to_uppercase();
+    let long_post = m == "POST"
+        && (p.starts_with("/api/research/deep")
+            || p == "/api/compare"
+            || p == "/api/diagnostic/advice"
+            || p == "/api/chat/suggest-thread-title"
+            || p == "/api/memory/rebuild-relations"
+            || p.starts_with("/api/voice/stt")
+            || p.starts_with("/api/voice/tts"));
+    let long_get = m == "GET" && p.starts_with("/api/first-message");
+    if long_post || long_get {
+        std::time::Duration::from_secs(LONG_LLM_REQUEST_TIMEOUT_SECS)
+    } else {
+        std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
+    }
+}
+
 /// Shared HTTP client for all daemon requests (avoids creating a new client per command).
+/// Default 30s; long routes override per request in `daemon_request` / `daemon_get_text`.
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
             .build()
             .expect("HTTP client init")
     })
@@ -67,6 +90,8 @@ struct SendMessageAckResult {
     task_id: String,
     session_id: String,
     message: String,
+    #[serde(default)]
+    queued: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -84,6 +109,9 @@ async fn send_message_ack(
     session_id: Option<String>,
     attachments: Option<Vec<AttachmentPayload>>,
     new_session: Option<bool>,
+    queue_mode: Option<String>,
+    target_task_id: Option<String>,
+    priority: Option<String>,
     port: Option<u16>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
@@ -121,6 +149,24 @@ async fn send_message_ack(
             body["attachments"] = serde_json::Value::Array(arr);
         }
     }
+    if let Some(ref mode) = queue_mode {
+        let m = mode.trim().to_lowercase();
+        if m == "steering" || m == "follow_up" {
+            body["queue_mode"] = serde_json::Value::String(m.clone());
+            body["message_delivery_mode"] = serde_json::Value::String(m);
+        }
+    }
+    if let Some(ref tid) = target_task_id {
+        if !tid.trim().is_empty() {
+            body["target_task_id"] = serde_json::Value::String(tid.trim().to_string());
+        }
+    }
+    if let Some(ref p) = priority {
+        let p = p.trim().to_lowercase();
+        if p == "high" {
+            body["priority"] = serde_json::Value::String("high".to_string());
+        }
+    }
     let resp = client
         .post(&url)
         .json(&body)
@@ -134,11 +180,13 @@ async fn send_message_ack(
     let task_id = json.get("task_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let session_id = json.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let message = json.get("message").and_then(|v| v.as_str()).unwrap_or("Request received. You can follow progress in the Tasks tab.").to_string();
+    let queued = json.get("queued").and_then(|v| v.as_bool()).unwrap_or(false);
     Ok(SendMessageAckResult {
         ack: true,
         task_id,
         session_id,
         message,
+        queued,
     })
 }
 
@@ -626,7 +674,50 @@ async fn daemon_get_text(path: String, port: Option<u16>) -> Result<serde_json::
     }
     let url = format!("{}{}", daemon_base_url(port), p);
     let client = http_client();
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let timeout = request_timeout_for_path(p, "GET");
+    let resp = client
+        .get(&url)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let ok = resp.status().is_success();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": ok, "status": status, "text": text }))
+}
+
+/// Generic daemon HTTP passthrough (GET/POST) for settings panels.
+#[tauri::command]
+async fn daemon_request(
+    method: String,
+    path: String,
+    body: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let p = path.trim();
+    if !p.starts_with('/') || (!p.starts_with("/api/") && p != "/") {
+        return Err("invalid_path".to_string());
+    }
+    if p.contains("..") || p.contains('\\') || p.len() > 2048 || p.chars().any(|c| c.is_control()) {
+        return Err("invalid_path".to_string());
+    }
+    let url = format!("{}{}", daemon_base_url(port), p);
+    let client = http_client();
+    let m = method.trim().to_uppercase();
+    let timeout = request_timeout_for_path(p, &m);
+    let resp = match m.as_str() {
+        "POST" => {
+            let b = body.unwrap_or_else(|| "{}".to_string());
+            client.post(&url).header("Content-Type", "application/json").body(b)
+        }
+        _ => client.get(&url),
+    }
+    .timeout(timeout)
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
     let ok = resp.status().is_success();
     let text = resp.text().await.map_err(|e| e.to_string())?;
@@ -658,6 +749,38 @@ async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
         return Err(format!("{}", resp.status()));
     }
     Ok(())
+}
+
+/// POST /api/router/reload — hot-reload llm_router.yaml (routes/models; for slash /reload).
+#[tauri::command]
+async fn reload_router(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/reload", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/tools/reload — hot-reload tools_policy.yaml (for slash /reload).
+#[tauri::command]
+async fn reload_tools_policy(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tools/reload", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
 }
 
 /// POST /api/plugins/{id}/enable or /disable — user-controlled plugin load.
@@ -1085,6 +1208,79 @@ async fn create_schedule(
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(json)
+}
+
+/// Create schedule with full body: POST /api/schedules.
+#[tauri::command]
+async fn create_schedule_extended(
+    body: serde_json::Value,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/schedules", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// List event triggers: GET /api/event-triggers.
+#[tauri::command]
+async fn get_event_triggers(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/event-triggers", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// Create event trigger: POST /api/event-triggers.
+#[tauri::command]
+async fn create_event_trigger(
+    body: serde_json::Value,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/event-triggers", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// Delete event trigger: DELETE /api/event-triggers/:id.
+#[tauri::command]
+async fn delete_event_trigger(trigger_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!(
+        "{}/api/event-triggers/{}",
+        daemon_base_url(port),
+        trigger_id
+    );
+    let client = http_client();
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
 }
 
 /// Update schedule: PUT /api/schedules/:id (e.g. channel_context / prompt).
@@ -1861,6 +2057,10 @@ pub fn run() {
             get_schedules,
             get_schedule_by_id,
             create_schedule,
+            create_schedule_extended,
+            get_event_triggers,
+            create_event_trigger,
+            delete_event_trigger,
             put_schedule,
             delete_schedule,
             get_calendar_events,
@@ -1912,8 +2112,11 @@ pub fn run() {
             read_file_as_data_url,
             get_advice,
             daemon_get_text,
+            daemon_request,
             get_plugins,
             reload_plugins,
+            reload_router,
+            reload_tools_policy,
             set_plugin_enabled,
             uninstall_plugin,
             get_skills,

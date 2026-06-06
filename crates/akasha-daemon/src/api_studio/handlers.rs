@@ -2868,6 +2868,16 @@ pub async fn handle_studio_route(
                 let rm = tokio::task::spawn_blocking(move || {
                     let store = crate::code_rag::CodeRagStore::new(&data_dir_owned);
                     let _ = store.remove_project_index(&id_owned);
+                    let db_path = data_dir_owned.join("akasha.db");
+                    if let Ok(wg) = akasha_store::WorkspaceGraphStore::open(&db_path) {
+                        let _ = wg.delete_workspace(&id_owned);
+                    }
+                    if let Ok(mem) =
+                        akasha_store::LongTermStore::open(data_dir_owned.join("memory.db"))
+                    {
+                        let prefix = format!("project:{}", id_owned);
+                        let _ = mem.delete_by_source_prefix(&prefix);
+                    }
                     if root_owned.is_dir() {
                         fs::remove_dir_all(&root_owned)?;
                     }

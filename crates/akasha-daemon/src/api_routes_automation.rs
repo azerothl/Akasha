@@ -75,11 +75,19 @@ pub async fn handle_automation_routes(
             .as_object()
             .map(|o| o.keys().map(|k| k.as_str()).collect())
             .unwrap_or_default();
+        let context = serde_json::json!({ "payload": parsed });
+        if let Some(engine) = crate::event_trigger_engine::trigger_engine() {
+            engine
+                .dispatch
+                .fire(akasha_store::TriggerType::Webhook, context.clone())
+                .await;
+        }
         let body_out = serde_json::json!({
             "ok": true,
             "accepted": true,
             "payload_key_count": keys.len(),
             "payload_keys_preview": keys.into_iter().take(24).collect::<Vec<_>>(),
+            "trigger_dispatch": crate::event_trigger_engine::trigger_engine().is_some(),
         });
         return Some(json_response(
             "202 Accepted",

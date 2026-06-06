@@ -50,9 +50,12 @@ command_timeout_secs: 60
 # blocked_web_domains: []
 # Exemple : blocked_web_domains: ["evil.com", "tracker.example.org"]
 
-# Optionnel : activer la recherche web (Brave API). Si true + BRAVE_API_KEY (ou vault brave_api_key),
-# l'agent utilisera web_search pour chercher lui-même météo, actualités, etc. au lieu de suggérer des sites.
+# Optionnel : recherche web multi-fournisseurs (style Odysseus). Sans clé API : SearXNG + DuckDuckGo.
+# Avec clés (vault ou env) : Brave, Tavily, Serper, Google PSE — voir search_provider / search_fallback_chain.
 # web_search_enabled: false
+# search_provider: auto          # auto | brave | searxng | duckduckgo | tavily | serper | google_pse | disabled
+# search_fallback_chain: []      # ex. ["duckduckgo", "searxng"]
+# searxng_url: https://searx.be  # ou SEARXNG_URL
 
 # Optionnel : crawl de site entier via Cloudflare Browser Rendering (/crawl).
 # Si activé, l'agent peut utiliser web_crawl et web_crawl_status. Nécessite un compte Cloudflare.
@@ -133,3 +136,15 @@ command_timeout_secs: 60
 # Recommandé pour install_playwright (téléchargement lourd) : require_approval: [..., install_playwright]
 # Éviter d'ajouter « browser » ici : chaque navigate/snapshot demanderait une approbation.
 # require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file, device_invoke, install_playwright]
+
+# Optionnel : politique MCP (outils `mcp_<server>_<tool>`). Si la section est présente, seuls les serveurs listés sont autorisés.
+# mcp_max_calls_per_task: 20
+# mcp_servers:
+#   filesystem:
+#     enabled: true
+#     allowed_tools: ["*"]
+#     blocked_tools: []
+#     max_calls_per_task: 10
+#   github:
+#     enabled: true
+#     allowed_tools: ["search_repositories", "get_file_contents"]

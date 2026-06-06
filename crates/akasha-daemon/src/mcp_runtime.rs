@@ -3,16 +3,33 @@
 
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
 struct StdioState {
     server: String,
     child: tokio::process::Child,
-    /// Keep stdin open after `initialize` so the MCP server process stays healthy.
-    _stdin: tokio::process::ChildStdin,
+    stdin: tokio::process::ChildStdin,
+    reader: BufReader<tokio::process::ChildStdout>,
+    next_id: AtomicU64,
+}
+
+pub fn mcp_namespaced_tool(server: &str, tool: &str) -> String {
+    let safe_server = server.replace('.', "_").replace('-', "_");
+    let safe_tool = tool.replace('.', "_").replace('-', "_");
+    format!("mcp_{safe_server}_{safe_tool}")
+}
+
+pub fn parse_mcp_tool_name(tool_name: &str) -> Option<(String, String)> {
+    let rest = tool_name.strip_prefix("mcp_")?;
+    let (server, tool) = rest.split_once('_')?;
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    Some((server.to_string(), tool.to_string()))
 }
 
 static STDIO: OnceLock<Mutex<Option<StdioState>>> = OnceLock::new();
@@ -190,15 +207,7 @@ pub async fn start_stdio_server(data_dir: &Path, server: &str) -> Result<Value, 
         .map_err(|e| format!("initialize write: {}", e))?;
 
     let mut reader = BufReader::new(stdout);
-    tokio::spawn(async move {
-        let mut buf = [0u8; 8192];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-    });
+    let _ = read_framed(&mut reader).await;
 
     let mut slot = cell().lock().await;
     if let Some(prev) = slot.take() {
@@ -209,9 +218,76 @@ pub async fn start_stdio_server(data_dir: &Path, server: &str) -> Result<Value, 
     *slot = Some(StdioState {
         server: server.to_string(),
         child,
-        _stdin: stdin,
+        stdin,
+        reader,
+        next_id: AtomicU64::new(2),
     });
     Ok(json!({ "ok": true, "server": server }))
+}
+
+async fn read_framed<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<Value, String> {
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut line = String::new();
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read header: {}", e))?;
+        if n == 0 {
+            return Err("connection closed".to_string());
+        }
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((_, v)) = trimmed.split_once(':') {
+            if trimmed.to_ascii_lowercase().starts_with("content-length") {
+                content_length = v.trim().parse().ok();
+            }
+        }
+    }
+    let len = content_length.ok_or_else(|| "no Content-Length".to_string())?;
+    let mut body = vec![0u8; len];
+    reader
+        .read_exact(&mut body)
+        .await
+        .map_err(|e| format!("read body: {}", e))?;
+    serde_json::from_slice(&body).map_err(|e| format!("json: {}", e))
+}
+
+async fn rpc_request(state: &mut StdioState, method: &str, params: Value) -> Result<Value, String> {
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params
+    });
+    write_framed(&mut state.stdin, &req).await.map_err(|e| e.to_string())?;
+    read_framed(&mut state.reader).await
+}
+
+pub async fn tools_list() -> Result<Value, String> {
+    let mut slot = cell().lock().await;
+    let Some(state) = slot.as_mut() else {
+        return Err("no stdio MCP server attached (POST /api/mcp/runtime/stdio/start)".to_string());
+    };
+    rpc_request(state, "tools/list", json!({})).await
+}
+
+pub async fn tools_call(tool_name: &str, arguments: Value) -> Result<Value, String> {
+    let mut slot = cell().lock().await;
+    let Some(state) = slot.as_mut() else {
+        return Err("no stdio MCP server attached".to_string());
+    };
+    rpc_request(
+        state,
+        "tools/call",
+        json!({ "name": tool_name, "arguments": arguments }),
+    )
+    .await
 }
 
 pub async fn stop_stdio_server() -> Value {

@@ -50,6 +50,9 @@ pub struct PermissionQueueRequest {
     pub expires_at: Option<String>,
     #[serde(default)]
     pub decision_note: Option<String>,
+    /// Origin of the decision: `ui_tauri`, `ui_cockpit`, `api`, `cli`, etc.
+    #[serde(default)]
+    pub decision_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -112,12 +115,16 @@ pub fn update_status(
     id: &str,
     status: QueueStatus,
     decision_note: Option<String>,
+    decision_source: Option<String>,
 ) -> anyhow::Result<Option<PermissionQueueRequest>> {
     let mut state = load(data_dir);
     if let Some(req) = state.requests.iter_mut().find(|r| r.id == id) {
         req.status = status;
         req.updated_at = chrono::Utc::now().to_rfc3339();
         req.decision_note = decision_note;
+        if decision_source.is_some() {
+            req.decision_source = decision_source;
+        }
         let out = req.clone();
         save(data_dir, &state)?;
         return Ok(Some(out));

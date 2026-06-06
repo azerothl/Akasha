@@ -15,6 +15,7 @@ Document **central** : une ligne = un **domaine fonctionnel** ; les colonnes *He
 |---------|----------------|
 | **Hermes Agent** (Nous Research) | [Quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) · [Tools](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools/) · [Features](https://hermes-agent.nousresearch.com/docs/user-guide/features/overview) · [GitHub](https://github.com/NousResearch/hermes-agent) |
 | **OpenClaw** | [openclaws.io](https://openclaws.io) |
+| **Odysseus** | [pewdiepie-archdaemon/odysseus](https://github.com/pewdiepie-archdaemon/odysseus) · [matrice inspiration](./odysseus-inspiration-matrix.md) |
 | **Claude Code** | [Anthropic — Claude Code](https://docs.anthropic.com/en/docs/claude-code) |
 | **Cursor** | [cursor.com](https://cursor.com) |
 | **Mercury Agent** | [cosmicstack-labs/mercury-agent](https://github.com/cosmicstack-labs/mercury-agent) |
@@ -86,7 +87,7 @@ Document **central** : une ligne = un **domaine fonctionnel** ; les colonnes *He
 
 | Domaine | Akasha | Hermes | OpenClaw | Claude Code | Cursor | Mercury | jcode (RFC) | État Akasha |
 |---------|--------|--------|----------|-------------|--------|---------|-------------|-------------|
-| Mémoire | LT + épisodique + compaction, `GET /api/memory/recall-metrics` | FTS5, profils, compaction | Selon stockage perso | Contexte + mémoire produit | Indexation projet | « Second brain » SQLite (README) | Post-retrieval (ph. C) | Existe · haute |
+| Mémoire | LT 4 couches + RRF + graph expand + export/import, `memory_update`, janitor ; vs Mem0/Letta/Zep : local, pas SaaS | FTS5, profils, compaction | SaaS mémoire user_id | Contexte IDE | Indexation projet | « Second brain » SQLite (README) | Post-retrieval implémenté | **Différenciation** · haute |
 | Doctor / diagnostics | `akasha doctor`, `/api/doctor` | `hermes doctor` | Logs / health selon stack | Diagnostics IDE | Diagnostics | n/a | — | Existe · moyenne |
 | Perf / SLO | Métriques routeur, `scripts/bench-e2e.ps1`, runbook interne | Dashboard local récent | Selon déploiement | n/a | n/a | Budget tokens | Métriques qualité (ph. C) | Partiel · moyenne |
 | Cache idempotent HTTP | LRU `GET /api/router/models`, routes, MCP status | — (non focal Hermes) | n/a | n/a | n/a | n/a | — | Partiel · moyenne |

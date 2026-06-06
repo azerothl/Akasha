@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-/// Maps lineage-root task id → absolute disk root for studio tool execution (`workspace:/` mirror, git, run_command cwd).
+/// Maps task id (root or delegated child) → absolute disk root for studio tool execution (`workspace:/` mirror, git, run_command cwd).
 pub type StudioDiskRootRegistry = Arc<RwLock<HashMap<Uuid, PathBuf>>>;
 
 pub fn new_studio_disk_root_registry() -> StudioDiskRootRegistry {
@@ -80,7 +80,7 @@ pub fn is_strictly_under_studio_root(path: &Path, root: &Path) -> bool {
     path_canonical == root_canonical || path_canonical.starts_with(&root_canonical)
 }
 
-/// Register the disk root for a new root task (API message). Keyed by `task_id` (root of lineage).
+/// Register the disk root for a task (root or delegated child).
 pub async fn register_studio_root(registry: &StudioDiskRootRegistry, root_task_id: Uuid, path: PathBuf) {
     let mut g = registry.write().await;
     g.insert(root_task_id, path);

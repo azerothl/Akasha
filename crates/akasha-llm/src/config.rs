@@ -229,6 +229,29 @@ impl RoutingConfig {
         tt.primary = Some(entry);
     }
 
+    /// Append a provider/model to the fallback chain for a task type (creates entry if missing).
+    pub fn add_fallback_route(&mut self, task_type: &str, entry: RouteEntry) {
+        let tt = self.task_types.entry(task_type.to_string()).or_insert_with(|| TaskTypeConfig {
+            primary: None,
+            fallback: vec![
+                RouteEntry { provider: "akasha_embedded".into(), model: "default".into(), config: None },
+                RouteEntry { provider: "akasha_core".into(), model: "core".into(), config: None },
+            ],
+            constraints: None,
+        });
+        if tt.primary.as_ref() == Some(&entry) {
+            return;
+        }
+        if tt
+            .fallback
+            .iter()
+            .any(|e| e.provider == entry.provider && e.model == entry.model)
+        {
+            return;
+        }
+        tt.fallback.push(entry);
+    }
+
     /// Collect all (provider, model) from routing config for listing in UI.
     pub fn list_models_by_provider(&self) -> std::collections::HashMap<String, Vec<String>> {
         let mut by_provider: HashMap<String, HashSet<String>> = HashMap::new();
@@ -245,6 +268,12 @@ impl RoutingConfig {
                     .or_default()
                     .insert(entry.model.clone());
             }
+        }
+        for model_name in self.model_options.keys() {
+            by_provider
+                .entry("ollama".to_string())
+                .or_default()
+                .insert(model_name.clone());
         }
         by_provider
             .into_iter()
@@ -361,5 +390,25 @@ mod tests {
         entry.apply_config_to_request(&mut req);
         assert_eq!(req.max_tokens, Some(2048));
         assert_eq!(req.temperature, Some(0.7f32));
+    }
+
+    #[test]
+    fn add_fallback_route_dedupes() {
+        let mut cfg = RoutingConfig::default_config();
+        let entry = RouteEntry {
+            provider: "ollama".into(),
+            model: "llama3.2".into(),
+            config: None,
+        };
+        cfg.add_fallback_route("conversation", entry.clone());
+        cfg.add_fallback_route("conversation", entry);
+        let tt = cfg.get_route("conversation").unwrap();
+        assert_eq!(
+            tt.fallback
+                .iter()
+                .filter(|e| e.provider == "ollama" && e.model == "llama3.2")
+                .count(),
+            1
+        );
     }
 }
