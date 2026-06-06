@@ -1,3 +1,5 @@
+> **Archive:** Ce document est archivé. Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+
 # Matrice de migration `docs/` -> `spec/` (avril 2026)
 
 Ce document trace le refactor de séparation documentaire:

@@ -1,6 +1,8 @@
+> **Archive:** Ce document est archivé. Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+
 # RFC — Chiffrement au repos de la mémoire long terme (A4)
 
-**Statut :** Veille / draft (wave 6)  
+**Statut :** Foundation + doctor flag (wave 7) — SQLCipher MVP deferred  
 **Owner :** Akasha core team  
 **Référence matrice :** [memory_landscape_roadmap_matrix.md](./memory_landscape_roadmap_matrix.md) — ligne **A4**  
 **Exigence spec :** [spec/06_memory_model.md](../../06_memory_model.md) (long terme « persistant chiffré »)
@@ -94,4 +96,4 @@ Master secret (vault ou AKASHA_MEMORY_KEY env)
 - [kinbot-akasha-parity-matrix.md](./kinbot-akasha-parity-matrix.md)
 - KinBot README — Vault AES-256-GCM
 
-**Dernière mise à jour :** 2026-06-06 (wave 7 foundation — `AKASHA_MEMORY_ENCRYPT` + doctor guidance ; SQLCipher spike deferred pending bench).
+**Dernière mise à jour :** 2026-06-06 (wave 7 — `akasha doctor --fix --encrypt-memory` sets `AKASHA_MEMORY_ENCRYPT=1` ; operator guidance in acceptance criteria ; SQLCipher / per-row AES spike via `scripts/bench-memory-encryption.ps1`).

@@ -1,3 +1,5 @@
+> **Archive:** Ce document est archivé. Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+
 # Hermes parity — remainder (roadmap)
 
 **Delivered in core (v0.8.x + wave 7):** signed inbound webhooks, idempotency + rate limit, SQLite-backed idempotency, process watch, schedule/gateway hooks, MCP runtime + OAuth routes, PTY HTTP, cache LRU (extended: lifecycle hooks, plugins metrics, process watch), worktree doctor, OpenClaw migration API+CLI+UI, **plugin hook bus** (`plugin_hook_bus.rs` on `task_completed`), steering/follow-up queues, permission review queue, task operator reports, Code Studio swarm MVP.

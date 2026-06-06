@@ -1,6 +1,10 @@
+> **Archive:** Ce document est archivé. Statut : **Livré / Archivé** (2026-06-06). Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+
 # Priorités d'alignement (inspiration pi-mono vs Akasha)
 
-Document de **décision produit / technique** suite à l'analyse [pi-mono](https://github.com/badlogic/pi-mono). Il ne modifie pas le code ; il cadrage les axes retenus pour des tickets ou plans d'implémentation ultérieurs.
+**Statut : Livré / Archivé**
+
+Document de **décision produit / technique** suite à l'analyse [pi-mono](https://github.com/badlogic/pi-mono). Tous les axes prioritaires sont livrés ou reclassés Reporter.
 
 ## Axes livrés (2026-06)
 
@@ -12,34 +16,31 @@ Document de **décision produit / technique** suite à l'analyse [pi-mono](https
 
 - **API daemon** : `message_delivery_mode` (`steering` | `follow_up`) sur `POST /api/message` ; `GET/DELETE /api/tasks/:id/queue` — `crates/akasha-daemon/src/steering_queue.rs`.
 - **CLI** : `akasha task queue list|clear <task_id>`.
-- **Tauri** : sélecteur de mode livraison + `SteeringQueueBell` / `SteeringQueuePanel` — `apps/akasha-ui/src/components/`.
+- **Tauri** : sélecteur de mode livraison + raccourcis Entrée=steering (tâche active) / Alt+Entrée=follow-up — `apps/akasha-ui/src/App.tsx`.
 - **Code Studio** : sélecteur steering / follow-up — `akasha-code-studio/src/App.tsx`.
 - **TUI** : envoi avec `message_delivery_mode` steering ou follow_up.
 - **Événements** : `user_steering_queued`, `user_follow_up_queued`, `user_steering_applied`, `user_follow_up_applied` — [agent_client_event_contract.md](../runtime/agent_client_event_contract.md).
-
-**Hors périmètre v1 (reste ouvert)** : parité exacte des raccourcis clavier Pi (Enter vs Alt+Enter) ; modes de vidage `one-at-a-time` | `all` explicites côté client.
 
 ### 2. Fork de session dans Code Studio (branche depuis un message) — **Livré**
 
 **Référence Pi** : `coding-agent` — `/fork`, `/tree`, sessions JSONL avec `parentId`.
 
-**Statut (2026-06)** : v1 implémentée — action UI « Fork à partir d'ici », nouvelle tâche + `session_id` fille, événement `session_fork_created` côté daemon. Voir [`docs/SESSION_FORK_SPEC.md`](../../../../akasha-code-studio/docs/SESSION_FORK_SPEC.md) (cases cochées v1).
+**Statut (2026-06)** : v1 implémentée — action UI « Fork à partir d'ici », nouvelle tâche + `session_id` fille, événement `session_fork_created` côté daemon. Voir [`docs/SESSION_FORK_SPEC.md`](../../../../akasha-code-studio/docs/SESSION_FORK_SPEC.md).
 
-**Hors périmètre v1 (reste ouvert)** : arbre interactif complet type `/tree` Pi ; export HTML gist ; fusion de branches.
+**Reporter v2** : arbre interactif `/tree` ; export HTML gist ; fusion de branches.
 
-## Prochaine priorité produit
+### 3. Handoff modèle explicite — **Livré**
 
-### Handoff modèle explicite
-
-Reprendre le transcript d'une session avec un **autre modèle** (routeur + UI). Dépend d'une sérialisation de contexte stable — voir [wave6_veille_backlog.md](./wave6_veille_backlog.md).
+`POST /api/session/handoff` avec `target_model` / `target_provider` ; réponse `schema_version: 2`. UI handoff Code Studio + routeur daemon.
 
 ## Axes reportés (justification courte)
 
 | Axe | Report |
 |-----|--------|
-| **Streaming JSON partiel des tool calls** (`toolcall_delta`) | Voir [pi_mono_backend_parity_check.md](../integrations/pi_mono_backend_parity_check.md) : aujourd'hui les outils sont surtout dérivés du texte assistant final ; évolution **backend + contrat événements**. |
-| **CSI 2026 / TUI différentiel** (`pi-tui`) | Gain UX terminal ; **faible priorité**. |
-| **RPC stdio JSONL** (`pi --mode rpc`) | HTTP + tâches couvrent l'intégration IDE ; RPC **optionnel** si partenaire IDE l'exige. |
+| **Streaming JSON partiel des tool calls** (`toolcall_delta`) | **Production** (S-EVT-01) — voir [pi_mono_backend_parity_check.md](../integrations/pi_mono_backend_parity_check.md). |
+| **CSI 2026 / TUI différentiel** (`pi-tui`) | **Reporter** — faible priorité. |
+| **RPC stdio JSONL** (`pi --mode rpc`) | **Reporter** — HTTP + tâches suffisent. |
+| **Fork tree UI v2** | **Reporter** — trace événementielle v1 suffit. |
 
 ## Références croisées
 
@@ -47,4 +48,4 @@ Reprendre le transcript d'une session avec un **autre modèle** (routeur + UI). 
 - Contrat d'événements client (cible SSE/WebSocket) : [agent_client_event_contract.md](../runtime/agent_client_event_contract.md)
 - Veille consolidée : [wave6_veille_backlog.md](./wave6_veille_backlog.md)
 
-**Dernière mise à jour :** 2026-06-06 (steering/follow-up marqué livré — aligné code + wave 6).
+**Dernière mise à jour :** 2026-06-06 (clôture roadmap — registre v1.1.0).

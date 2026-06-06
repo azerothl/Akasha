@@ -1,3 +1,5 @@
+> **Archive:** Ce document est archivé. Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+
 # Roadmap — inspirations KinBot
 
 Programme 12 mois (5 phases). Statut mis à jour à l'implémentation initiale (2026-06) ; **wave 5** (2026-06-06) : matrice parité + doc site.

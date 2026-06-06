@@ -1,3 +1,5 @@
+> **Archive:** Ce document est archivé. Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+
 # Roadmap closure status (wave 7–10)
 
 **Date:** 2026-06-06  

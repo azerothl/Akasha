@@ -1,3 +1,5 @@
+> **Archive:** Ce document est archivé. Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+
 # RFC - jcode-inspired integration for Akasha
 
 Status: **Implemented (Phases A–E, wave 5–7)**  
