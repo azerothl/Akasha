@@ -29,6 +29,39 @@ pub async fn try_handle(
     body: Option<&[u8]>,
     ctx: &KinbotRouteCtx<'_>,
 ) -> Option<String> {
+    // User RAG retrieve (knowledge base test search)
+    if method == "GET" && path.starts_with("/api/user-rag/retrieve") {
+        let q = query_str
+            .and_then(|qs| parse_query(qs, "q"))
+            .unwrap_or_default();
+        let top_k = query_str
+            .and_then(|qs| parse_query(qs, "top_k"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(5)
+            .clamp(1, 20);
+        if q.trim().is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"q_required"}"#));
+        }
+        let store = ctx.user_rag_store.lock().await;
+        match store.retrieve_hybrid(&q, None, top_k) {
+            Ok(chunks) => {
+                let body = serde_json::json!({
+                    "query": q,
+                    "top_k": top_k,
+                    "chunks": chunks,
+                    "count": chunks.len(),
+                });
+                return Some(json_response("200 OK", &body.to_string()));
+            }
+            Err(e) => {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                ));
+            }
+        }
+    }
+
     // User RAG status
     if method == "GET" && path.starts_with("/api/user-rag/documents/") && path.ends_with("/status")
     {
