@@ -1967,6 +1967,19 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                     if store.insert(&task).is_err() {
                         continue;
                     }
+                    let at = Utc::now().to_rfc3339();
+                    let _ = store.insert_event(
+                        root_task_id,
+                        "worker_started",
+                        Some(&serde_json::json!({
+                            "worker_task_id": child_id.to_string(),
+                            "assigned_agent": agent_type,
+                            "step_id": &step.step_id,
+                            "delegation_reason": step.intent.clone(),
+                            "schema_version": 1
+                        })),
+                        &at,
+                    );
                 }
                 let _ = bus.send(
                     EventEnvelope::new(
@@ -2361,6 +2374,25 @@ Use TOOL: write_file <exact_path> with real, substantive content for each entry 
                     )
                     .with_correlation(root_task_id),
                 );
+                let assigned_agent = step_ref
+                    .map(|s| s.agent_type.as_str())
+                    .unwrap_or("unknown");
+                if let Ok(store) = TaskStore::open(&store_path_buf) {
+                    let at = Utc::now().to_rfc3339();
+                    let _ = store.insert_event(
+                        root_task_id,
+                        "worker_completed",
+                        Some(&serde_json::json!({
+                            "worker_task_id": child_id.to_string(),
+                            "assigned_agent": assigned_agent,
+                            "step_id": sid,
+                            "success": success,
+                            "failed": failed,
+                            "schema_version": 1
+                        })),
+                        &at,
+                    );
+                }
             }
             cumulative_problem_sids.extend(problematic_this_wave.iter().cloned());
 

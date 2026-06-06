@@ -136,6 +136,20 @@ pub async fn handle_envelope(
     store_path: &Path,
     envelope: MessageEnvelope,
 ) -> anyhow::Result<Uuid> {
+    if let Some(data_dir) = store_path.parent() {
+        let hook_payload = serde_json::json!({
+            "channel_type": envelope.channel_type.as_str(),
+            "channel_id": envelope.channel_id,
+            "session_id": envelope.session_id,
+            "user_id": envelope.user_id,
+            "message_preview": envelope.raw_message.chars().take(800).collect::<String>(),
+        });
+        crate::plugin_hook_bus::dispatch_hook_event(
+            data_dir,
+            "on_channel_message",
+            &hook_payload.to_string(),
+        );
+    }
     main_agent
         .handle_message(
         store_path,

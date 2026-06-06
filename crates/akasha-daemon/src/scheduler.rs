@@ -182,6 +182,17 @@ async fn tick(
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("."));
                 crate::lifecycle_hooks::fire_on_schedule_fire_async(&data_dir, schedule.id, task_id);
+                let hook_payload = serde_json::json!({
+                    "schedule_id": schedule.id.to_string(),
+                    "task_id": task_id.to_string(),
+                    "planned_for": planned_for.to_rfc3339(),
+                    "dedup_key": dedup_key,
+                });
+                crate::plugin_hook_bus::dispatch_hook_event(
+                    &data_dir,
+                    "on_schedule_fire",
+                    &hook_payload.to_string(),
+                );
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::TaskRunCreated,

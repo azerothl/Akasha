@@ -859,12 +859,41 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         seen.insert(key)
     });
 
-    // Studio swarm MVP: synthesize worker lifecycle events from existing delegation/task events.
-    // This keeps backward compatibility while exposing stable status nodes to Code Studio Cockpit.
+    // Studio swarm: prefer native worker_started/worker_completed when persisted; synthesize otherwise.
+    let has_native_worker_events = list.iter().any(|e| {
+        e.event_type == "worker_started" || e.event_type == "worker_completed"
+    });
     let mut synthetic: Vec<TaskEventEntry> = Vec::new();
     let mut spawned_workers: Vec<String> = Vec::new();
     let mut saw_failed = false;
+    if has_native_worker_events {
+        for entry in &list {
+            if entry.event_type == "worker_started" {
+                if let Some(w) = entry
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("worker_task_id"))
+                    .and_then(|v| v.as_str())
+                {
+                    spawned_workers.push(w.to_string());
+                }
+            } else if entry.event_type == "worker_completed" {
+                let failed = entry
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("success"))
+                    .and_then(|v| v.as_bool())
+                    == Some(false);
+                if failed {
+                    saw_failed = true;
+                }
+            }
+        }
+    }
     for entry in &list {
+        if has_native_worker_events {
+            continue;
+        }
         if entry.event_type == "sub_agent_spawned" {
             let worker_task_id = entry
                 .payload
@@ -1775,6 +1804,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("graph_stats", "graph_stats <json_or_args...> — via plugin graph, calcule min/max/moyenne/compte par série et retourne une vue table."),
     ("sim_run", "sim_run <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, exécute une simulation déterministe et retourne une vue timeseries + métriques."),
     ("sim_compare", "sim_compare <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, compare scénario de base et alternatif, retourne delta + tableau de résultats."),
+    ("mcp_server_add", "mcp_server_add <name> <command> [args...] — ajouter ou remplacer une entrée dans data_dir/mcp.json (stdio MCP). Exemple: mcp_server_add demo npx -y @modelcontextprotocol/server-filesystem /tmp"),
+    ("mcp_server_remove", "mcp_server_remove <name> — supprimer un serveur MCP de mcp.json."),
 ];
 
 /// Tools advertised in the Code Studio prompt: dev/repo tools only (policy still gates execution).
@@ -2731,6 +2762,34 @@ fn captured_media_suitable_for_vision_injection(s: &str) -> bool {
         return true;
     }
     !s.starts_with("data:") && !s.is_empty()
+}
+
+fn guess_image_mime_from_path(path: &Path) -> &'static str {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .map(|e| match e.as_str() {
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "svg" => "image/svg+xml",
+            "jpg" | "jpeg" => "image/jpeg",
+            _ => "application/octet-stream",
+        })
+        .unwrap_or("application/octet-stream")
+}
+
+/// Best-effort tool name from a streaming `TOOL:` delta chunk (partial lines allowed).
+fn parse_tool_name_from_toolcall_delta(delta: &str) -> Option<String> {
+    let idx = delta.find("TOOL:")?;
+    let rest = delta[idx + 5..].trim_start();
+    let name = rest.split_whitespace().next()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 fn normalize_captured_media_for_vision_turn(s: &str) -> String {
@@ -4990,6 +5049,62 @@ pub(crate) async fn execute_tool_call_impl(
                 ),
             }
         }
+        "mcp_server_add" => {
+            let name = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let command = args.get(1).map(String::as_str).unwrap_or("").trim();
+            if name.is_empty() || command.is_empty() {
+                return (
+                    false,
+                    "[mcp_server_add] usage: mcp_server_add <name> <command> [args...]".to_string(),
+                    None,
+                );
+            }
+            let mcp_args: Vec<serde_json::Value> = args
+                .get(2..)
+                .unwrap_or(&[])
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect();
+            let entry = if mcp_args.is_empty() {
+                serde_json::json!({ "command": command })
+            } else {
+                serde_json::json!({ "command": command, "args": mcp_args })
+            };
+            match store_path.and_then(|sp| sp.parent()) {
+                Some(data_dir) => match crate::mcp::add_mcp_server(data_dir, name, &entry) {
+                    Ok(msg) => {
+                        crate::http_get_cache::invalidate_mcp_status();
+                        (true, format!("[mcp_server_add] {msg}"), None)
+                    }
+                    Err(e) => (false, format!("[mcp_server_add] {e}"), None),
+                },
+                None => (false, "[mcp_server_add] data directory not available".to_string(), None),
+            }
+        }
+        "mcp_server_remove" => {
+            let name = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if name.is_empty() {
+                return (
+                    false,
+                    "[mcp_server_remove] usage: mcp_server_remove <name>".to_string(),
+                    None,
+                );
+            }
+            match store_path.and_then(|sp| sp.parent()) {
+                Some(data_dir) => match crate::mcp::remove_mcp_server(data_dir, name) {
+                    Ok(msg) => {
+                        crate::http_get_cache::invalidate_mcp_status();
+                        (true, format!("[mcp_server_remove] {msg}"), None)
+                    }
+                    Err(e) => (false, format!("[mcp_server_remove] {e}"), None),
+                },
+                None => (
+                    false,
+                    "[mcp_server_remove] data directory not available".to_string(),
+                    None,
+                ),
+            }
+        }
         "wake_in" => {
             let minutes = args
                 .get(0)
@@ -5468,11 +5583,57 @@ pub(crate) async fn execute_tool_call_impl(
             }
         }
         "image" => {
-            let path_or_url = args.get(0).map(String::as_str).unwrap_or("").trim();
-            if path_or_url.is_empty() {
-                (false, "[image] usage: image <path|url> [prompt]. For vision analysis attach the image in chat (vision-capable model in llm_router) or use a local path.".to_string(), None)
+            let path_str = path_arg_joined(args);
+            let path_str = path_str.trim();
+            if path_str.is_empty() {
+                (
+                    false,
+                    "[image] usage: image <path> [prompt] — read a local image (allowed_read_paths / workspace:/) and return metadata + data URL for vision.".to_string(),
+                    None,
+                )
+            } else if path_str.starts_with("http://") || path_str.starts_with("https://") {
+                (
+                    false,
+                    "[image] remote URLs are not supported — use a local path in allowed_read_paths or workspace:/".to_string(),
+                    None,
+                )
             } else {
-                (true, "[image] Vision analysis: use image as attachment in chat with a vision-capable model (llm_router). Local path metadata not yet implemented (spec 33).".to_string(), None)
+                let disk_path = resolve_tool_disk_path(path_str, workspace_root);
+                if !executor.policy.can_read(&disk_path) {
+                    (
+                        false,
+                        "[image] path not allowed by policy (allowed_read_paths)".to_string(),
+                        None,
+                    )
+                } else {
+                    match tokio::fs::read(&disk_path).await {
+                        Ok(bytes) => {
+                            let mime = guess_image_mime_from_path(&disk_path);
+                            let b64 = base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &bytes,
+                            );
+                            let data_url = format!("data:{mime};base64,{b64}");
+                            (
+                                true,
+                                format!(
+                                    "[image {}] {} bytes, mime={mime} — data URL ready for vision injection",
+                                    disk_path.display(),
+                                    bytes.len()
+                                ),
+                                Some(data_url),
+                            )
+                        }
+                        Err(e) => (
+                            false,
+                            format!(
+                                "[image] read failed: {e} (ensure file exists at {})",
+                                disk_path.display()
+                            ),
+                            None,
+                        ),
+                    }
+                }
             }
         }
         "pdf" => {
@@ -6552,7 +6713,19 @@ pub(crate) async fn execute_tool_call_impl(
                 }
                 vec![interface.to_string()]
             };
+            if !interface.is_empty()
+                && !matches!(interface, "local_media" | "system" | "synthetic_input")
+            {
+                return (
+                    false,
+                    format!(
+                        "[device_discover] interface '{interface}' is not supported (available: local_media, system, synthetic_input). Configure allowed_device_interfaces in tools_policy.yaml — see GET /api/docs."
+                    ),
+                    None,
+                );
+            }
             let mut devices: Vec<serde_json::Value> = Vec::new();
+            let mut unsupported: Vec<String> = Vec::new();
             for iface in &interfaces_to_list {
                 match iface.as_str() {
                     "local_media" => {
@@ -6567,12 +6740,14 @@ pub(crate) async fn execute_tool_call_impl(
                         devices.push(serde_json::json!({ "interface": "synthetic_input", "id": "keyboard", "name": "Keyboard (shortcuts, type)" }));
                         devices.push(serde_json::json!({ "interface": "synthetic_input", "id": "mouse", "name": "Mouse (move, click, scroll, drag)" }));
                     }
-                    _ => {
-                        devices.push(serde_json::json!({ "interface": iface, "id": "default", "name": format!("{} (discovery stub)", iface) }));
-                    }
+                    _ => unsupported.push(iface.clone()),
                 }
             }
-            let body = serde_json::json!({ "devices": devices });
+            let body = if unsupported.is_empty() {
+                serde_json::json!({ "devices": devices })
+            } else {
+                serde_json::json!({ "devices": devices, "unsupported_interfaces": unsupported })
+            };
             (true, format!("[device_discover] {} device(s): {}", devices.len(), body.to_string()), None)
         }
         "device_invoke" => {
@@ -6678,7 +6853,11 @@ pub(crate) async fn execute_tool_call_impl(
                     }
                 }
             } else if interface == "system" {
-                (false, "[device_invoke] system interface (e.g. print) not yet implemented".to_string(), None)
+                (
+                    false,
+                    "[device_invoke] system interface (printer/print) is not supported — OS-level printing is out of scope for Akasha. See GET /api/docs and tools_policy.yaml (allowed_device_interfaces).".to_string(),
+                    None,
+                )
             } else {
                 (false, format!("[device_invoke] interface '{}' handler not yet implemented", interface), None)
             }
@@ -6824,6 +7003,15 @@ pub(crate) async fn execute_tool_call_impl(
 
 /// Compact short-term memory when it would exceed context: summarize oldest turns via LLM and replace in store.
 /// Optionally promote the summary to long-term memory (embed + store).
+/// KinBot-style continuous session: never force a new session when compaction ceiling is hit.
+fn session_continuous_mode() -> bool {
+    std::env::var("AKASHA_SESSION_CONTINUOUS")
+        .ok()
+        .as_deref()
+        .map(|s| matches!(s, "1" | "true" | "yes" | "on" | "TRUE" | "YES" | "ON"))
+        .unwrap_or(false)
+}
+
 /// Refuses compaction beyond MAX_COMPACTIONS_PER_SESSION per session to avoid costly loops.
 async fn compact_short_term_if_needed(
     short_term: &Arc<ShortTermStore>,
@@ -6838,8 +7026,16 @@ async fn compact_short_term_if_needed(
     if short_term.get_compaction_count(session_id).await
         >= crate::memory::MAX_COMPACTIONS_PER_SESSION
     {
-        tracing::info!(session_id, "Short-term compaction skipped: max compactions per session reached (start a new session if context is too long)");
-        return;
+        if session_continuous_mode() {
+            short_term.reset_compaction_count(session_id).await;
+            tracing::debug!(
+                session_id,
+                "Continuous session: compaction counter reset (AKASHA_SESSION_CONTINUOUS)"
+            );
+        } else {
+            tracing::info!(session_id, "Short-term compaction skipped: max compactions per session reached (start a new session if context is too long)");
+            return;
+        }
     }
     const MAX_CONTEXT_DEFAULT: usize = 8192;
     let max_context_tokens = std::env::var("AKASHA_MAX_CONTEXT_TOKENS")
@@ -9249,6 +9445,7 @@ pub(crate) async fn run_message_via_llm(
         .unwrap_or_else(|| task_id.to_string());
     let user_profile = UserProfile::load(data_dir);
     let user_identity_prefix = user_profile.format_for_prompt();
+    let constitution = crate::constitution::Constitution::load(data_dir);
     let mut recall_params = crate::memory_orchestrator::RecallParams {
         message: message.clone(),
         session_id: session_id.clone(),
@@ -9282,6 +9479,11 @@ pub(crate) async fn run_message_via_llm(
         },
         task_outcomes_scope_session: code_studio_disk_task || !turns_empty,
         include_preference_and_personality_episodic: !code_studio_disk_task,
+        constitution: if constitution.is_configured() {
+            Some(constitution)
+        } else {
+            None
+        },
         ..Default::default()
     };
     if memory_profile.semantic_top_k > 0
@@ -10042,13 +10244,16 @@ pub(crate) async fn run_message_via_llm(
                                 &chrono::Utc::now().to_rfc3339(),
                             );
                             if chunk_ref.contains("TOOL:") || chunk_ref.contains("<tool_call") {
+                                let tool_name = parse_tool_name_from_toolcall_delta(chunk_ref);
                                 let _ = bus.send(
                                     EventEnvelope::new(
                                         EventType::ProgressUpdate,
                                         Some(serde_json::json!({
                                             "task_id": task_id.to_string(),
                                             "event_type": "toolcall_delta",
-                                            "delta": chunk_ref
+                                            "delta": chunk_ref,
+                                            "delta_raw": chunk_ref,
+                                            "tool_name": tool_name
                                         })),
                                     )
                                     .with_correlation(task_id),
@@ -10058,8 +10263,9 @@ pub(crate) async fn run_message_via_llm(
                                     "toolcall_delta",
                                     Some(&serde_json::json!({
                                         "delta": chunk_ref,
-                                        "schema_version": 1,
-                                        "stub": true
+                                        "delta_raw": chunk_ref,
+                                        "tool_name": tool_name,
+                                        "schema_version": 1
                                     })),
                                     &chrono::Utc::now().to_rfc3339(),
                                 );
@@ -12600,6 +12806,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             obj.insert("reason".to_string(), serde_json::Value::String(reason_text));
         }
     }
+    let failure_reason = final_payload.get("reason").cloned();
     let _ = bus.send(
         EventEnvelope::new(final_event_type, Some(final_payload)).with_correlation(task_id),
     );
@@ -12610,18 +12817,28 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         "task_completed",
         Some(serde_json::json!({ "status": final_status_str })),
     );
-    if final_status_str == "completed" {
-        let hook_payload = serde_json::json!({
+    if final_status_str == "completed" || final_status_str == "failed" {
+        let hook_event = if final_status_str == "completed" {
+            "task_completed"
+        } else {
+            "task_failed"
+        };
+        let mut hook_payload = serde_json::json!({
             "task_id": task_id.to_string(),
             "session_id": session_id,
             "status": final_status_str,
             "model_used": last_llm_model_used,
             "reply_preview": reply_text.chars().take(800).collect::<String>(),
         });
+        if final_status_str == "failed" {
+            if let (Some(obj), Some(reason)) = (hook_payload.as_object_mut(), failure_reason.as_ref()) {
+                obj.insert("reason".to_string(), reason.clone());
+            }
+        }
         let hook_data_dir = store_path.parent().unwrap_or_else(|| store_path.as_path());
         crate::plugin_hook_bus::dispatch_hook_event(
             hook_data_dir,
-            "task_completed",
+            hook_event,
             &hook_payload.to_string(),
         );
     }
@@ -13602,6 +13819,98 @@ pub async fn handle_api(
         );
     }
 
+    // GET /api/memory/branch/:session_id — branch overview (E3)
+    if method == "GET" && path.starts_with("/api/memory/branch/") {
+        let session_id = path
+            .trim_start_matches("/api/memory/branch/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if session_id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"session_id_required"}"#);
+        }
+        let db = data_dir.join("memory.db");
+        match crate::memory_branch::branch_overview(&db, session_id) {
+            Ok(v) => return json_response("200 OK", &v.to_string()),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+
+    // POST /api/memory/branch/:session_id — clone session memory to target branch (E3)
+    if method == "POST" && path.starts_with("/api/memory/branch/") {
+        let source_session = path
+            .trim_start_matches("/api/memory/branch/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if source_session.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"session_id_required"}"#);
+        }
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let target_session = body_json
+            .as_ref()
+            .and_then(|j| j.get("target_session_id").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if target_session.is_empty() {
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"target_session_id_required"}"#,
+            );
+        }
+        let Some(ref client) = long_term_client else {
+            return json_response(
+                "503 Service Unavailable",
+                r#"{"error":"long_term_memory_unavailable"}"#,
+            );
+        };
+        let db = data_dir.join("memory.db");
+        let client = client.clone();
+        let source = source_session.to_string();
+        let target_for_clone = target_session.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::memory_branch::clone_branch(&client, &db, &source, &target_for_clone)
+        })
+        .await;
+        match result {
+            Ok(Ok((lt, ep))) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({
+                        "ok": true,
+                        "source_session_id": source_session,
+                        "target_session_id": target_session,
+                        "long_term_cloned": lt,
+                        "episodic_cloned": ep,
+                    })
+                    .to_string(),
+                );
+            }
+            Ok(Err(e)) => {
+                return json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+
     if method == "GET" && path == "/api/memory/export" {
         let db = data_dir.join("memory.db");
         match crate::memory_export::export_memory(&db) {
@@ -13680,10 +13989,14 @@ pub async fn handle_api(
             .as_ref()
             .and_then(|v| v.get("dry_run").and_then(|x| x.as_bool()))
             .unwrap_or(false);
+        let import_memory = parsed
+            .as_ref()
+            .and_then(|v| v.get("import_memory").and_then(|x| x.as_bool()))
+            .unwrap_or(false);
         if source_dir.trim().is_empty() {
             return json_response("400 Bad Request", r#"{"error":"missing_source_dir"}"#);
         }
-        match crate::openclaw_migration::apply(&source_dir, data_dir, dry_run) {
+        match crate::openclaw_migration::apply(&source_dir, data_dir, dry_run, import_memory) {
             Ok(r) => {
                 return json_response("200 OK", &serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()));
             }
@@ -14763,6 +15076,7 @@ pub async fn handle_api(
         match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
                 let body = serde_json::json!({
+                    "schema_version": 2,
                     "task_id": task_id.to_string(),
                     "session_id": session_id,
                     "model": model_route
@@ -15630,8 +15944,12 @@ pub async fn handle_api(
 
     // Phase 5: Plugins
     if method == "GET" && path == "/api/plugins" {
+        if let Some(cached) = crate::http_get_cache::cache_get_plugins() {
+            return json_response("200 OK", &cached);
+        }
         let list = plugin_registry.list();
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+        crate::http_get_cache::cache_put_plugins(&body);
         return json_response("200 OK", &body);
     }
     if method == "GET" && (path == "/api/plugins/catalog" || path.starts_with("/api/plugins/catalog?")) {
