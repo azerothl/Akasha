@@ -107,6 +107,11 @@ enum Commands {
         #[command(subcommand)]
         sub: McpSub,
     },
+    /// Migration helpers (OpenClaw compatibility)
+    Migrate {
+        #[command(subcommand)]
+        sub: MigrateSub,
+    },
     /// Terminal / PTY: capabilities from daemon (requires daemon on AKASHA_PORT)
     Terminal {
         #[command(subcommand)]
@@ -295,6 +300,31 @@ enum McpSub {
         /// Timeout per I/O phase (seconds)
         #[arg(long, default_value_t = 8)]
         timeout_secs: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateSub {
+    /// OpenClaw pack migration helpers (preview/apply through daemon API)
+    Openclaw {
+        #[command(subcommand)]
+        sub: OpenclawMigrateSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum OpenclawMigrateSub {
+    /// Preview OpenClaw migration (no files copied)
+    Preview {
+        #[arg(long)]
+        source_dir: PathBuf,
+    },
+    /// Apply OpenClaw migration (optionally dry-run)
+    Apply {
+        #[arg(long)]
+        source_dir: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -615,6 +645,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Toolset { sub } => cmd_toolset(sub),
         Commands::Worktree { sub } => cmd_worktree(sub),
         Commands::Mcp { sub } => cmd_mcp(sub),
+        Commands::Migrate { sub } => cmd_migrate(sub),
         Commands::Terminal { sub } => cmd_terminal(sub),
         Commands::Task { sub } => cmd_task(sub),
         Commands::Telegram { sub } => cmd_telegram(sub),
@@ -1155,6 +1186,50 @@ fn cmd_mcp(sub: McpSub) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn cmd_migrate(sub: MigrateSub) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()?;
+    match sub {
+        MigrateSub::Openclaw { sub } => match sub {
+            OpenclawMigrateSub::Preview { source_dir } => {
+                let body = serde_json::json!({
+                    "source_dir": source_dir,
+                });
+                let resp = client
+                    .post(format!("{}/api/migrate/openclaw/preview", base))
+                    .json(&body)
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                let j: serde_json::Value = resp.json()?;
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            }
+            OpenclawMigrateSub::Apply {
+                source_dir,
+                dry_run,
+            } => {
+                let body = serde_json::json!({
+                    "source_dir": source_dir,
+                    "dry_run": dry_run,
+                });
+                let resp = client
+                    .post(format!("{}/api/migrate/openclaw/apply", base))
+                    .json(&body)
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                let j: serde_json::Value = resp.json()?;
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            }
+        },
+    }
+    Ok(())
 }
 
 fn cmd_router(sub: RouterSub) -> anyhow::Result<()> {
@@ -3962,6 +4037,33 @@ OLLAMA_HOST=http://localhost:11434
             "# Variables principales et optionnelles (défauts port/log ; autres commentés si absents)",
             &mut fixes,
         )?;
+    }
+    if std::env::var("AKASHA_MEMORY_ENCRYPT")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        doctor_fix_env_file(
+            &akasha_env_path,
+            "akasha.env",
+            &["AKASHA_MEMORY_ENCRYPT"],
+            "# Memory encryption (phase-in): SQLCipher full-at-rest integration is deferred; this flag enables compatibility guidance.",
+            &mut fixes,
+        )?;
+        let env_content = std::fs::read_to_string(&akasha_env_path).unwrap_or_default();
+        let (env_map, _) = parse_env_file_content(&env_content);
+        if env_map.get("AKASHA_MEMORY_ENCRYPT").map(String::as_str) != Some("1") {
+            let mut out = env_content.trim_end().to_string();
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str("AKASHA_MEMORY_ENCRYPT=1\n");
+            std::fs::write(&akasha_env_path, out)?;
+            fixes.push("akasha.env: set AKASHA_MEMORY_ENCRYPT=1.".to_string());
+        }
+        fixes.push(
+            "AKASHA_MEMORY_ENCRYPT=1 detected: guidance mode enabled (full SQLCipher at-rest encryption is deferred in this build).".to_string(),
+        );
     }
 
     let agent_profile_path = data_dir.join("agent_profile.json");
