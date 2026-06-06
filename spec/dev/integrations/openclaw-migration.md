@@ -17,6 +17,14 @@
 
 Ne jamais copier de tokens depuis le pack : utiliser `akasha vault set` après migration.
 
-## CLI (optionnel)
+## CLI
 
-Les mêmes endpoints peuvent être appelés via `curl` contre `http://127.0.0.1:3876` pendant la phase opérateur.
+```bash
+akasha migrate openclaw preview --source-dir /path/to/openclaw/data
+akasha migrate openclaw apply --source-dir /path/to/openclaw/data [--dry-run]
+```
+
+Requires a running daemon on `AKASHA_PORT` (default 3876). Equivalent HTTP:
+
+- `POST /api/migrate/openclaw/preview` — body `{ "source_dir": "..." }`
+- `POST /api/migrate/openclaw/apply` — body `{ "source_dir": "...", "dry_run": false }`

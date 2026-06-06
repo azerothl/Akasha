@@ -1,0 +1,28 @@
+# E1 — CMA two-level governance sample
+version: 1
+governance:
+  level_1:
+    name: "Core principles"
+    rules:
+      - id: safety-no-destructive-default
+        text: "Never run destructive actions by default; require explicit user confirmation."
+      - id: transparency-source
+        text: "Always surface the source of policy constraints in responses."
+  level_2:
+    name: "Operational policies"
+    profiles:
+      strict:
+        approvals_required_for:
+          - "network.write"
+          - "filesystem.delete"
+          - "git.push"
+        memory:
+          retention_days: 30
+      balanced:
+        approvals_required_for:
+          - "filesystem.delete"
+          - "git.push"
+        memory:
+          retention_days: 90
+defaults:
+  active_profile: balanced
