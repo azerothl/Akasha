@@ -8,7 +8,7 @@ Programme 12 mois (5 phases). Statut mis à jour à l'implémentation initiale (
 | MEM | Multi-query / HyDE / consolidation / adaptive K / temporal decay | 1 | Partiel — voir notes ci-dessous |
 | ARCH | Conversation archive + search | 1 | Implémenté |
 | WAKE | Wakeups conversationnels | 2 | Implémenté |
-| HITL | HITL multi-canal (Telegram) | 2 | Implémenté (Telegram) |
+| HITL | HITL multi-canal (Telegram) | 2 | Partiel — Telegram + API human-input ; pas WhatsApp/Signal |
 | PROF | Profils agent YAML + API | 2 | Implémenté |
 | DEL | delegation_reason + AgentDelegated | 2 | Implémenté |
 | INTER | Contrat inter-agent | 3 | Implémenté (module) |
@@ -16,9 +16,9 @@ Programme 12 mois (5 phases). Statut mis à jour à l'implémentation initiale (
 | NOTIF | Notifications persistées | 3 | Implémenté |
 | PLUG | Marketplace plugins install API | 4 | Partiel — `POST /api/plugins/install` + CLI catalog ; pas registry npm KinBot |
 | DASH | Dashboards agent sandbox | 4 | Implémenté |
-| SSE | SSE filtrage types | 4 | Implémenté (query `types`/`task_id` + fallback poll UI) |
+| SSE | SSE filtrage types | 4 | Partiel — `GET /api/events` + filtre `types`/`task_id` ; fallback poll sur certains écrans UI |
 | MATRIX | Canal Matrix plugin | 5 | Stub catalogue |
-| ONBOARD | Wizard Tauri premier lancement | Implémenté (wizard multi-étapes) |
+| ONBOARD | Wizard Tauri premier lancement | 5 | Partiel — wizard Tauri 4 étapes + `akasha init` CLI ; pas wizard Docker KinBot |
 | DOC | Matrice parité KinBot | 5 | Implémenté — [kinbot-akasha-parity-matrix.md](./kinbot-akasha-parity-matrix.md) |
 
 ### Notes MEM / B5

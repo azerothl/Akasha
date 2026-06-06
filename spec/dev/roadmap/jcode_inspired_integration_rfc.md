@@ -1,8 +1,18 @@
 # RFC - jcode-inspired integration for Akasha
 
-Status: Draft  
+Status: **Implemented (Phases A–E, wave 5–7)**  
 Owner: Akasha core team  
 Scope: `akasha-daemon`, `akasha-ui`, `akasha-tui`, `akasha-code-studio`, `Akasha_app` — suivi produit croisé : colonne **jcode (RFC)** dans [`reference-products-parity-matrix.md`](./reference-products-parity-matrix.md).
+
+### Implementation status (2026-06-06)
+
+| Phase | Theme | Status | Proof |
+|-------|-------|--------|-------|
+| **A** | Safety queue + session report contracts | Done | This RFC ; queue + transcript schemas |
+| **B** | Permission review MVP | Done | `GET/POST /api/permissions/queue/*`, CLI, `PermissionsBell.tsx`, TUI |
+| **C** | Memory post-retrieval maintenance | Done | `memory_maintenance.rs`, recall metrics — [memory_landscape_roadmap_matrix.md](./memory_landscape_roadmap_matrix.md) F1 |
+| **D** | Code Studio swarm MVP | Done | Wave 5 — [kinbot-akasha-parity-matrix.md](./kinbot-akasha-parity-matrix.md) |
+| **E** | Product communication (`Akasha_app`, docs) | Done | `Akasha_app/docs.html` sections safety-queue, steering-follow-up, code-studio |
 
 ## 1. Goals
 
@@ -236,7 +246,10 @@ Expose structured events through `GET /api/tasks/:id/events` payloads:
 
 ## 8. Acceptance criteria
 
-- Queue lifecycle observable end-to-end in API + at least one UI.
-- Transcript file created for completed tasks/cycles with valid schema.
-- Memory maintenance metrics available through existing metrics surface.
-- Code Studio can run at least 2 parallel workers with visible state transitions.
+- [x] Queue lifecycle observable end-to-end in API + at least one UI.
+- [x] Transcript file created for completed tasks/cycles with valid schema (`GET /api/tasks/:id/report`).
+- [x] Memory maintenance metrics available through existing metrics surface.
+- [x] Code Studio can run at least 2 parallel workers with visible state transitions.
+- [x] Phase E: site + operator onboarding docs fully aligned with queue / swarm / reports (incremental OK).
+
+**Last doc sync:** 2026-06-06 (wave 5 delivery reflected).

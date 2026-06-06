@@ -11,9 +11,9 @@ Statut **surveillance** — pas de sprint actif. Références : [`memory_phase4_
 | E2/E3 | Héritage mémoire / fork identité | Hook upgrade daemon + export/import branché |
 | G2 | `MemoryPlugin` trait | Brancher sur HTTP interne `/api/memory/*` |
 | G1 | Interop LangGraph | Exemple Python dans `spec/dev/integrations/` |
-| pi-mono | Handoff modèle explicite | Après file steering UI (livré) |
+| pi-mono | Handoff modèle explicite | Prochaine priorité pi-mono ([`pi_mono_alignment_priorities.md`](./pi_mono_alignment_priorities.md)) ; steering/follow-up livré |
 | pi-mono | `toolcall_delta` streaming | Backend + [`agent_client_event_contract.md`](../runtime/agent_client_event_contract.md) |
 | pi-mono | RPC stdio JSONL | Optionnel partenaire IDE |
 | pi-mono | CSI / TUI différentiel | Faible priorité |
 
-**Dernière mise à jour :** 2026-06-06 (clôture plan roadmap consolidé).
+**Dernière mise à jour :** 2026-06-06 (wave 7 closure — voir [`ROADMAP_CLOSURE_STATUS.md`](./ROADMAP_CLOSURE_STATUS.md)).

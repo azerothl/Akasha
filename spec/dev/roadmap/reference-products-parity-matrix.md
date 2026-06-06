@@ -51,11 +51,11 @@ Document **central** : une ligne = un **domaine fonctionnel** ; les colonnes *He
 
 | Domaine | Akasha | Hermes | OpenClaw | Claude Code | Cursor | Mercury | jcode (RFC) | État Akasha |
 |---------|--------|--------|----------|-------------|--------|---------|-------------|-------------|
-| Install / setup | `akasha init`, `akasha doctor --fix`, `akasha services install` | `curl … install.sh`, `hermes setup` | Scripts / npm selon doc amont | Via compte Anthropic + intégration IDE | Installeur IDE + compte | Clone / dépendances README | — | Existe · haute |
+| Install / setup | `akasha init`, `akasha doctor --fix`, wizard Tauri (`OnboardingWizard`), `akasha services install` | `curl … install.sh`, `hermes setup` | Scripts / npm selon doc amont | Via compte Anthropic + intégration IDE | Installeur IDE + compte | Clone / dépendances README | — | Existe · haute |
 | Providers / modèles | `llm_router.yaml`, `akasha config models/provider` | `hermes model`, multi-provider | Clés API + local (ex. Ollama) | Claude API / abonnement | Choix modèle + cloud Cursor | BYO modèles | — | Existe · haute |
 | Contexte long (≈64k+) | `AKASHA_MAX_CONTEXT_TOKENS`, compaction | Exigence doc Hermes | Selon routeur utilisateur | Fenêtre contexte IDE | Selon provider / plan | Selon modèle branché | — | Existe · moyenne |
 | CLI / TUI / desktop | `akasha tui`, UI Tauri | `hermes`, `hermes --tui` | CLI principale | CLI / panneaux IDE | IDE natif | CLI + optional bot | — | Existe · haute |
-| Sessions / reprise | `session_id`, mémoire, `/api/session-state`, `/api/session/resume-brief`, `terminal_session …` | `--continue`, sessions | Sessions bots / persistance selon stack | Threads liés au dépôt | Chats session IDE | Persistance locale (README) | Transcripts + résumés opérateur (ph. A–B) | Partiel · moyenne |
+| Sessions / reprise | `session_id`, mémoire, `/api/session-state`, `/api/session/resume-brief`, `terminal_session …` | `--continue`, sessions | Sessions bots / persistance selon stack | Threads liés au dépôt | Chats session IDE | Persistance locale (README) | Transcripts + résumés opérateur (RFC ph. A–B · wave 5) | Partiel · moyenne |
 
 ---
 
@@ -63,9 +63,9 @@ Document **central** : une ligne = un **domaine fonctionnel** ; les colonnes *He
 
 | Domaine | Akasha | Hermes | OpenClaw | Claude Code | Cursor | Mercury | jcode (RFC) | État Akasha |
 |---------|--------|--------|----------|-------------|--------|---------|-------------|-------------|
-| Toolsets / UX outils | `tool_profiles`, `akasha toolset …`, `/api/tools/effective` | `hermes tools`, presets plateforme | Plugins / policy selon doc | Commandes + contexte repo | Rules, MCP, @ fichiers | Fichiers « soul » + budgets | File d’attente permissions (ph. A–B) | Partiel · moyenne |
+| Toolsets / UX outils | `tool_profiles`, `akasha toolset …`, `/api/tools/effective` | `hermes tools`, presets plateforme | Plugins / policy selon doc | Commandes + contexte repo | Rules, MCP, @ fichiers | Fichiers « soul » + budgets | File d’attente permissions (RFC ph. A–B · wave 5) | Partiel · moyenne |
 | Outils machine / registry | `AVAILABLE_TOOLS`, `akasha-tools` | 40+ outils registry | Selon skills/plugins | Outils Anthropic / MCP | Outils IDE + MCP | Outils README (git, shell, …) | — | Existe · haute |
-| Terminal / backends | local, conteneur, `GET /api/terminal/capabilities`, **HTTP PTY** `/api/terminal/pty/sessions`, `akasha terminal capabilities` | local, docker, ssh, modal, … | Shell selon hébergement | Terminal intégré IDE | Terminal + agent | Shell local (README) | Cockpit swarm (ph. D) | Partiel · moyenne |
+| Terminal / backends | local, conteneur, `GET /api/terminal/capabilities`, **HTTP PTY** `/api/terminal/pty/sessions`, `akasha terminal capabilities` | local, docker, ssh, modal, … | Shell selon hébergement | Terminal intégré IDE | Terminal + agent | Shell local (README) | Cockpit swarm (RFC ph. D · wave 5) | Partiel · moyenne |
 | Sandbox | Policy deny-by-default, conteneur `--network=none` | Docker, approbation | Selon déploiement | Garde-fous éditeur | Sandboxing IDE | Permissions strictes README | — | Existe · haute |
 | Gateway messagerie | Slack, Discord, Telegram, Teams | Telegram, Discord, … | Très large (messagers) | n/a | n/a | Souvent Telegram | — | Existe · moyenne |
 
@@ -90,7 +90,7 @@ Document **central** : une ligne = un **domaine fonctionnel** ; les colonnes *He
 |---------|--------|--------|----------|-------------|--------|---------|-------------|-------------|
 | Mémoire | LT 4 couches + RRF + graph expand + export/import, `memory_update`, janitor ; vs Mem0/Letta/Zep : local, pas SaaS | FTS5, profils, compaction | SaaS mémoire user_id | Contexte IDE | Indexation projet | « Second brain » SQLite (README) | Post-retrieval implémenté | **Différenciation** · haute |
 | Doctor / diagnostics | `akasha doctor`, `/api/doctor` | `hermes doctor` | Logs / health selon stack | Diagnostics IDE | Diagnostics | n/a | — | Existe · moyenne |
-| Perf / SLO | Métriques routeur, `scripts/bench-e2e.ps1`, runbook interne | Dashboard local récent | Selon déploiement | n/a | n/a | Budget tokens | Métriques qualité (ph. C) | Partiel · moyenne |
+| Perf / SLO | Métriques routeur, `scripts/bench-e2e.ps1`, runbook interne | Dashboard local récent | Selon déploiement | n/a | n/a | Budget tokens | Métriques qualité mémoire (RFC ph. C · livré) | Partiel · moyenne |
 | Cache idempotent HTTP | LRU `GET /api/router/models`, routes, MCP status | — (non focal Hermes) | n/a | n/a | n/a | n/a | — | Partiel · moyenne |
 | Git worktree | `git_*`, `akasha worktree list|add|remove|doctor` | — | n/a | Outils git IDE | Outils git IDE | Git intégré README | — | Partiel · moyenne |
 | Browser (phase 2) | Playwright via daemon | click/fill… | n/a | n/a | n/a | n/a | — | Partiel · moyenne |
@@ -139,6 +139,7 @@ Légende : **C** = core · **Doc** = doc / site · **Cat** = catalogues skills/p
 
 ## Changelog
 
+- **2.0.1** (2026-06-06): resync roadmaps — jcode wave 5, wizard Tauri onboarding, steering pi-mono livré ([`pi_mono_alignment_priorities.md`](./pi_mono_alignment_priorities.md)).
 - **2.0.0** (2026-05-03): **Centralisation multi-produits** — un seul document avec synthèse + tableaux thématiques (Hermes, OpenClaw, Claude Code, Cursor, Mercury Agent, colonne RFC jcode) ; `hermes-akasha-parity-matrix.md` conservé comme stub de redirection ; liens mis à jour (`Akasha_app`, `Rbitnet`, `apps/akasha-ui`, specs internes).
 - **1.0.8** (2026-04-27): cockpit `akasha-code-studio` restructuré en sections opérateur typées (task runs, process watch, terminal, tools, MCP, lifecycle) avec actions scheduler + auto-refresh léger + fallback raw JSON ; E2E smoke cockpit renforcés ; doc `OPERATOR_COCKPIT.md` synchronisée ; création projet Studio avec initialisation git `main` et reprise projet avec garde-fou de branche primaire (`main`/`master`).
 - **1.0.7** (2026-04-27): OAuth MCP state persisté (`mcp_oauth_state.json`) via `GET/POST /api/mcp/runtime/oauth` ; docs runtime MCP alignées ; `akasha worktree doctor` ; roadmap explicite des domaines encore partiels (`hermes-partial-domains-roadmap.md`).

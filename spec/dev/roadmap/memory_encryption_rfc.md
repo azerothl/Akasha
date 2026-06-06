@@ -81,7 +81,8 @@ Master secret (vault ou AKASHA_MEMORY_KEY env)
 
 ## 7. Critères d’acceptation
 
-- [ ] `memory.db` illisible sans clé (audit `strings` / sqlite3).
+- [x] Operator guidance when `AKASHA_MEMORY_ENCRYPT=1` (`akasha doctor --fix` sets env key).
+- [ ] `memory.db` illisible sans clé (audit `strings` / sqlite3) — requires SQLCipher MVP.
 - [ ] Recall e2e tests passent avec chiffrement activé.
 - [ ] Export v1 reste compatible (migration documentée).
 - [ ] Pas de régression perf >15 % p95 recall sur bench interne.
@@ -93,4 +94,4 @@ Master secret (vault ou AKASHA_MEMORY_KEY env)
 - [kinbot-akasha-parity-matrix.md](./kinbot-akasha-parity-matrix.md)
 - KinBot README — Vault AES-256-GCM
 
-**Dernière mise à jour :** 2026-06-06 (wave 6 veille — draft initial).
+**Dernière mise à jour :** 2026-06-06 (wave 7 foundation — `AKASHA_MEMORY_ENCRYPT` + doctor guidance ; SQLCipher spike deferred pending bench).

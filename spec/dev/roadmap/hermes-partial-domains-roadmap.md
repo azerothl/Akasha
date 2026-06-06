@@ -2,32 +2,29 @@
 
 This file tracks domains that remain **Partiel** in [`reference-products-parity-matrix.md`](./reference-products-parity-matrix.md) and gives an operator-focused closure path.
 
-## 1) Git worktree
+**Wave 7 status:** see [`ROADMAP_CLOSURE_STATUS.md`](./ROADMAP_CLOSURE_STATUS.md).
 
-- CLI baseline exists: `akasha worktree list|add|remove`.
-- Add diagnostics path (`akasha worktree doctor`) so operators can validate branch, cleanliness, and worktree topology before action.
-- Exit target for matrix: clear “happy path” + failure hints in CLI/docs.
+## 1) Git worktree — **Doc closure remaining**
 
-## 2) Browser phase 2
+- CLI: `akasha worktree list|add|remove|doctor` (diagnostics: branch, cleanliness, worktree count).
+- **Remaining:** operator doc happy path + failure hints in user guide / `Akasha_app`.
 
-- Keep Playwright runner as primary backend (`scripts/playwright-runner/run.mjs`).
-- Harden with:
-  - explicit timeout diagnostics,
-  - actionable install guidance (`install_playwright`),
-  - safer domain policy messaging.
+## 2) Browser phase 2 — **Hardened (wave 7)**
 
-## 3) Web crawl (Cloudflare)
+- Playwright runner: explicit timeout diagnostics + `install_playwright` guidance (`scripts/playwright-runner/run.mjs`).
+- **Remaining:** operator surface for domain policy errors in TUI health panel (optional).
 
-- Stabilize by standardizing retries/timeouts and surfacing job-state diagnostics in operator surfaces.
-- Keep `web_crawl` / `web_crawl_status` policy-first (deny by default unless configured).
+## 3) Web crawl (Cloudflare) — **Hardened (wave 7)**
 
-## 4) Migration OpenClaw-like
+- Retries via `AKASHA_WEB_CRAWL_RETRIES`; job-state in tool status output.
+- Policy-first unchanged.
 
-- Move from documentation-only to a guided operator flow:
-  - config validation,
-  - mapping preview,
-  - safe apply.
-- Keep secrets migration vault-only.
+## 4) Migration OpenClaw-like — **MVP livré (wave 7)**
+
+- API: `POST /api/migrate/openclaw/preview|apply`
+- CLI: `akasha migrate openclaw preview|apply --source-dir …`
+- UI: `OpenClawMigrationPanel` (Tauri Settings → System)
+- Docs: [`openclaw-migration.md`](../integrations/openclaw-migration.md), `Akasha_app/docs.html`
 
 ## Validation checklist
 

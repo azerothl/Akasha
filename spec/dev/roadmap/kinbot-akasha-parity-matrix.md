@@ -21,7 +21,7 @@ Une ligne = une capacité **KinBot** (README / doc amont) ; la colonne **Akasha*
 
 | ID | Feature KinBot | Akasha | Notes / preuves |
 |----|----------------|--------|-----------------|
-| B5 | User RAG — upload docs, index hybride, recherche à la requête | **Partiel** | `POST /api/user-rag/documents`, index async (`spawn_user_rag_index`), `retrieve_hybrid` + sidecar `.chunks.json` ; pas d’UI dédiée type « knowledge base » |
+| B5 | User RAG — upload docs, index hybride, recherche à la requête | **Partiel** | API + index async ; UI Réglages Tauri (`App.tsx` user RAG list/upload) ; gap = panel « knowledge base » dédié (recherche test, statut index enrichi) — vague 7 |
 | MEM | Mémoire LT — extraction auto, recherche hybride, intent, consolidation | **Partiel** | 4 couches + RRF (`memory_fusion`) ; multi-query / HyDE (`memory_retrieval_enhance`, env-gated) ; consolidation (`memory_consolidation.rs`) ; adaptive K ; decay via `expires_at` + hygiene — voir notes MEM/B5 roadmap |
 | ARCH | Archive conversation + recherche full-text | **Implémenté** | `ConversationArchiveStore`, `GET /api/sessions/:id/archive/search` |
 | WAKE | Wakeups conversationnels (`wake_me_in`, cron-like) | **Implémenté** | `GET/POST/DELETE /api/wakeups`, scheduler |
@@ -35,7 +35,7 @@ Une ligne = une capacité **KinBot** (README / doc amont) ; la colonne **Akasha*
 | DASH | Mini Apps / dashboards agent (HTML sandbox) | **Implémenté** | `GET/POST/DELETE /api/dashboards`, `GET …/html` — sandbox HTML agent |
 | SSE | Streaming SSE multiplexé + filtrage types | **Partiel** | `GET /api/events` + `parse_sse_event_filter` (task_id, types) ; UI poll fallback sur certains écrans |
 | MATRIX | Canal Matrix | **Stub** | Plugin catalogue `Akasha_plugins/matrix-channel` — WASM à compléter |
-| ONBOARD | Wizard premier lancement (Docker / Tauri) | **À faire** | `akasha init` + `doctor --fix` ; pas de wizard UI guidé |
+| ONBOARD | Wizard premier lancement (Docker / Tauri) | **Partiel** | Wizard Tauri 4 étapes (`apps/akasha-ui/src/components/OnboardingWizard.tsx` : bienvenue, doctor --fix, profil, fin) + `akasha init` CLI ; pas de wizard Docker intégré type KinBot |
 | — | Mémoire chiffrée AES-256 (vault + DB) | **Partiel** | Vault chiffré ; `memory.db` en clair — [memory_encryption_rfc.md](./memory_encryption_rfc.md) (wave 6) |
 | — | Auth multi-utilisateur + rôles + invitations | **Hors scope** | Instance mono-opérateur locale ; gouvernance Telegram v0.8+ |
 | — | 6 canaux (WhatsApp, Signal, …) | **Partiel** | Slack, Discord, Telegram, Teams ; pas WhatsApp/Signal natifs |
@@ -62,7 +62,7 @@ Une ligne = une capacité **KinBot** (README / doc amont) ; la colonne **Akasha*
 | 2 | Wakeups, HITL, profils, délégation | WAKE, PROF, DEL | HITL | — |
 | 3 | Inter-agent, contacts, notifications | INTER, CONT, NOTIF | — | — |
 | 4 | Plugins, dashboards, SSE | DASH | PLUG, SSE | — |
-| 5 | Matrix, onboarding, doc parité | DOC (ce doc) | — | MATRIX, ONBOARD |
+| 5 | Matrix, onboarding, doc parité | DOC (ce doc) | ONBOARD | MATRIX |
 
 ---
 
@@ -73,4 +73,4 @@ Une ligne = une capacité **KinBot** (README / doc amont) ; la colonne **Akasha*
 - [reference-products-parity-matrix.md](./reference-products-parity-matrix.md) (colonne KinBot)
 - Code : `crates/akasha-daemon/src/api_routes_kinbot.rs`, `inter_agent.rs`, `memory_orchestrator.rs`
 
-**Dernière mise à jour :** 2026-06-06 (wave 5 — matrice initiale + clôture DOC).
+**Dernière mise à jour :** 2026-06-06 (resync ONBOARD ↔ wizard Tauri ; aligné avec [kinbot_inspired_roadmap.md](./kinbot_inspired_roadmap.md)).
