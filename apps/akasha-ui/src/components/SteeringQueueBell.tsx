@@ -21,7 +21,7 @@ export function SteeringQueueBell({ taskId, fetchEndpoint, locale }: Props) {
         aria-expanded={open}
         title={locale === "en" ? "Steering / follow-up queue" : "File steering / follow-up"}
       >
-        <MonoIcon name="list" />
+        <MonoIcon name="bell" />
         {pending > 0 ? <span className="steering-queue-bell-badge">{pending}</span> : null}
       </button>
       {open ? (
