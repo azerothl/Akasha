@@ -88,9 +88,10 @@ export function UserRagPanel({
 
   const indexStatusLabel = (status?: string) => {
     if (!status) return "";
-    if (status === "indexed") return locale === "en" ? "indexed" : "indexé";
+    if (status === "ready") return locale === "en" ? "indexed" : "indexé";
     if (status === "pending") return locale === "en" ? "pending" : "en attente";
-    if (status === "error") return locale === "en" ? "error" : "erreur";
+    if (status === "indexing") return locale === "en" ? "indexing" : "en cours";
+    if (status === "failed") return locale === "en" ? "error" : "erreur";
     return status;
   };
 

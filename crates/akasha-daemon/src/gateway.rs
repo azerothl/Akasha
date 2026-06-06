@@ -144,11 +144,11 @@ pub async fn handle_envelope(
             "user_id": envelope.user_id,
             "message_preview": envelope.raw_message.chars().take(800).collect::<String>(),
         });
-        crate::plugin_hook_bus::dispatch_hook_event(
-            data_dir,
-            "on_channel_message",
-            &hook_payload.to_string(),
-        );
+        let data_dir = data_dir.to_path_buf();
+        let payload = hook_payload.to_string();
+        tokio::task::spawn_blocking(move || {
+            crate::plugin_hook_bus::dispatch_hook_event(&data_dir, "on_channel_message", &payload);
+        });
     }
     main_agent
         .handle_message(

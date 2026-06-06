@@ -9351,7 +9351,7 @@ function App() {
                         <p className="settings-doc muted">{t("settings.utility_model_hint")}</p>
                       </dd>
                     </dl>
-                    <OpenClawMigrationPanel locale={locale} />
+                    <OpenClawMigrationPanel locale={locale} fetchEndpoint={fetchSystemEndpoint} />
                     <AgentIdentityPanel locale={locale} fetchEndpoint={requestSystemEndpoint} />
                   </>
                 )}

@@ -72,18 +72,28 @@ pub fn dispatch_hook_event(data_dir: &Path, event_name: &str, payload_json: &str
         };
         let wasm = wasm.with_manifest(manifest.clone());
         match wasm.run(&input) {
-            Ok(out) => tracing::debug!(
-                plugin_id = %manifest.id,
-                event_name,
-                output_preview = %out.chars().take(400).collect::<String>(),
-                "plugin hook dispatched"
-            ),
-            Err(err) => tracing::warn!(
-                plugin_id = %manifest.id,
-                event_name,
-                error = %err,
-                "plugin hook dispatch failed"
-            ),
+            Ok(out) => {
+                rep.record_success(&manifest.id);
+                tracing::debug!(
+                    plugin_id = %manifest.id,
+                    event_name,
+                    output_preview = %out.chars().take(400).collect::<String>(),
+                    "plugin hook dispatched"
+                )
+            },
+            Err(err) => {
+                if matches!(err, akasha_plugin_api::PluginError::Crashed) {
+                    rep.record_crash(&manifest.id);
+                } else {
+                    rep.record_failure(&manifest.id);
+                }
+                tracing::warn!(
+                    plugin_id = %manifest.id,
+                    event_name,
+                    error = %err,
+                    "plugin hook dispatch failed"
+                )
+            },
         }
     }
 }

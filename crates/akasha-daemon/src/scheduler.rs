@@ -188,11 +188,15 @@ async fn tick(
                     "planned_for": planned_for.to_rfc3339(),
                     "dedup_key": dedup_key,
                 });
-                crate::plugin_hook_bus::dispatch_hook_event(
-                    &data_dir,
-                    "on_schedule_fire",
-                    &hook_payload.to_string(),
-                );
+                let hook_data_dir = data_dir.clone();
+                let payload = hook_payload.to_string();
+                tokio::task::spawn_blocking(move || {
+                    crate::plugin_hook_bus::dispatch_hook_event(
+                        &hook_data_dir,
+                        "on_schedule_fire",
+                        &payload,
+                    );
+                });
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::TaskRunCreated,

@@ -1,14 +1,14 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+
+type FetchEndpoint = (path: string, init?: RequestInit) => Promise<{ ok: boolean; status: number; text: string }>;
 
 type Props = {
   locale: "fr" | "en";
   disabled?: boolean;
+  fetchEndpoint: FetchEndpoint;
 };
 
-type EndpointResult = { ok: boolean; status: number; text: string };
-
-export function OpenClawMigrationPanel({ locale, disabled }: Props) {
+export function OpenClawMigrationPanel({ locale, disabled, fetchEndpoint }: Props) {
   const [sourceDir, setSourceDir] = useState("");
   const [importMemory, setImportMemory] = useState(false);
   const [busy, setBusy] = useState<null | "preview" | "apply">(null);
@@ -27,11 +27,9 @@ export function OpenClawMigrationPanel({ locale, disabled }: Props) {
       if (path.endsWith("/apply") && importMemory) {
         body.import_memory = true;
       }
-      const res = await invoke<EndpointResult>("daemon_request", {
+      const res = await fetchEndpoint(path, {
         method: "POST",
-        path,
         body: JSON.stringify(body),
-        port: 3876,
       });
       setResult(res.text || `${res.status}`);
     } catch (e) {
