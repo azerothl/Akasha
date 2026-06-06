@@ -4,6 +4,35 @@ export type TaskEventLike = {
   task_id?: string;
 };
 
+export type TaskEventRow = TaskEventLike & {
+  at: string;
+};
+
+export function normalizeTaskStatus(status: string | undefined): string {
+  return (status ?? "pending").trim().toLowerCase();
+}
+
+export function isTaskActiveStatus(status: string): boolean {
+  const s = normalizeTaskStatus(status);
+  return s === "pending" || s === "queued" || s === "running" || s === "waiting_user_input";
+}
+
+export function isTaskTerminalStatus(status: string): boolean {
+  const s = normalizeTaskStatus(status);
+  return s === "completed" || s === "failed" || s === "cancelled" || s === "interrupted";
+}
+
+/** Union by stable key; keeps the richest timeline when polls overlap. */
+export function mergeTaskEvents<T extends TaskEventRow>(prev: T[], incoming: T[]): T[] {
+  if (incoming.length === 0) return prev;
+  const byKey = new Map<string, T>();
+  const keyOf = (e: T) =>
+    `${e.task_id ?? ""}\0${e.event_type}\0${e.at}\0${JSON.stringify(e.payload ?? null)}`;
+  for (const e of prev) byKey.set(keyOf(e), e);
+  for (const e of incoming) byKey.set(keyOf(e), e);
+  return [...byKey.values()].sort((a, b) => a.at.localeCompare(b.at));
+}
+
 /**
  * Keep one stream entry per (task_id, progress_pct).
  * Later streamed chunks replace earlier ones to avoid noisy duplicates.

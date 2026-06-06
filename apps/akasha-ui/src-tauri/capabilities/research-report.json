@@ -1,0 +1,6 @@
+{
+  "identifier": "research-report",
+  "description": "Research report preview windows",
+  "windows": ["research-*"],
+  "permissions": ["core:default"]
+}

@@ -120,6 +120,11 @@ pub fn spawn_replication_subscriber(nats_client: async_nats::Client, store_path:
                             created_at,
                             updated_at,
                             initial_message: p.get("initial_message").and_then(|v| v.as_str()).map(String::from),
+                            studio_project_id: p
+                                .get("studio_project_id")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(String::from),
                         };
                         let _ = store.insert(&task);
                     }

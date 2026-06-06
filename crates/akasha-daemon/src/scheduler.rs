@@ -162,6 +162,7 @@ async fn tick(
                     created_at: now,
                     updated_at: now,
                     initial_message,
+                    studio_project_id: None,
                 };
                 task_store.insert(&task)?;
                 let task_run = TaskRun {
@@ -370,6 +371,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 initial_message: None,
+                studio_project_id: None,
             })
             .expect("insert task");
 

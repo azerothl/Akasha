@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNotifyOnMessage } from "./notifications/useNotifyOnMessage";
+import { PermissionsQueuePanel } from "./PermissionsQueuePanel";
 
 type LocaleId = "fr" | "en";
 
@@ -10,7 +12,8 @@ type EndpointResult = {
 
 type Props = {
   sessionId: string | null;
-  fetchEndpoint: (path: string) => Promise<EndpointResult>;
+  fetchEndpoint: (path: string, init?: RequestInit) => Promise<EndpointResult>;
+  requestEndpoint?: (method: string, path: string, body?: string) => Promise<EndpointResult>;
   expert: boolean;
   locale: LocaleId;
   labels: {
@@ -230,7 +233,7 @@ function HealthCard({
  * User-friendly system health (tools, memory, MCP, terminal, lifecycle, schedules).
  * Raw JSON is shown under "Détails techniques" in expert mode only.
  */
-export function SystemHealthPanel({ sessionId, fetchEndpoint, expert, locale, labels }: Props) {
+export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, expert, locale, labels }: Props) {
   const [opsSummary, setOpsSummary] = useState<string>("");
   const [resumeJson, setResumeJson] = useState<string>("");
   const [toolsJson, setToolsJson] = useState<string>("");
@@ -239,7 +242,10 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, expert, locale, la
   const [mcpRuntimeJson, setMcpRuntimeJson] = useState<string>("");
   const [terminalJson, setTerminalJson] = useState<string>("");
   const [lifecycleJson, setLifecycleJson] = useState<string>("");
+  const [permissionsJson, setPermissionsJson] = useState<string>("");
   const [err, setErr] = useState<string>("");
+
+  useNotifyOnMessage(err || null, "error", labels.title);
 
   useEffect(() => {
     let cancelled = false;
@@ -267,6 +273,10 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, expert, locale, la
         const lh = await fetchEndpoint("/api/lifecycle/hooks");
         if (!cancelled) {
           setLifecycleJson(lh.ok ? lh.text : `${labels.loadError}: lifecycle/hooks HTTP ${lh.status}`);
+        }
+        const pq = await fetchEndpoint("/api/permissions/queue");
+        if (!cancelled) {
+          setPermissionsJson(pq.ok ? pq.text : `${labels.loadError}: permissions/queue HTTP ${pq.status}`);
         }
         const sc = await fetchEndpoint("/api/schedules");
         const runs = await fetchEndpoint("/api/task_runs");
@@ -343,7 +353,6 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, expert, locale, la
           {labels.docsMcp}
         </a>
       </p>
-      {err ? <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err">{err}</p> : null}
 
       <HealthCard
         title={labels.opsHeading}
@@ -394,6 +403,38 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, expert, locale, la
         expert={expert}
         detailsLabel={labels.detailsToggle}
       />
+      <section className="health-card permissions-queue-card">
+        <h4 className="health-card-title">{locale === "fr" ? "File permissions" : "Permission queue"}</h4>
+        {requestEndpoint ? (
+          <PermissionsQueuePanel
+            locale={locale}
+            fetchEndpoint={(path, init) =>
+              requestEndpoint(init?.method ?? "GET", path, typeof init?.body === "string" ? init.body : undefined)
+            }
+            decisionSource="ui_tauri"
+          />
+        ) : (
+          <HealthCard
+            title=""
+            lines={
+              permissionsJson
+                ? [`${locale === "fr" ? "Voir détails pour approuver/refuser" : "See details to approve/deny"}`]
+                : [labels.summaryUnavailable]
+            }
+            raw={permissionsJson}
+            expert={expert}
+            detailsLabel={labels.detailsToggle}
+          />
+        )}
+        {expert && permissionsJson ? (
+          <details className="health-card-details">
+            <summary>{labels.detailsToggle}</summary>
+            <pre className="operator-insights-pre health-card-pre" tabIndex={0}>
+              {permissionsJson}
+            </pre>
+          </details>
+        ) : null}
+      </section>
     </div>
   );
 }

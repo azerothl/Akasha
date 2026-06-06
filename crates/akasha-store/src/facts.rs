@@ -41,7 +41,77 @@ impl FactsStore {
             CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(created_at);
             "#,
         )?;
+        let has_col = |name: &str| -> anyhow::Result<bool> {
+            let mut stmt =
+                conn.prepare("SELECT name FROM pragma_table_info('facts') WHERE name = ?1")?;
+            Ok(stmt.exists(rusqlite::params![name])?)
+        };
+        if !has_col("valid_from")? {
+            conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT", [])?;
+        }
+        if !has_col("recorded_at")? {
+            conn.execute("ALTER TABLE facts ADD COLUMN recorded_at TEXT", [])?;
+        }
         Ok(Self { conn })
+    }
+
+    pub fn insert_fact_with_temporal(
+        &self,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        source_entry_id: Option<Uuid>,
+        valid_from: Option<&str>,
+        recorded_at: Option<&str>,
+    ) -> anyhow::Result<Uuid> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let now_s = now.to_rfc3339();
+        let recorded = recorded_at.unwrap_or(&now_s);
+        self.conn.execute(
+            r#"
+            INSERT INTO facts (id, subject, predicate, object, source_entry_id, created_at, valid_from, recorded_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            rusqlite::params![
+                id.to_string(),
+                subject,
+                predicate,
+                object,
+                source_entry_id.map(|u| u.to_string()),
+                now.to_rfc3339(),
+                valid_from,
+                recorded,
+            ],
+        )?;
+        Ok(id)
+    }
+
+    /// List facts ordered by created_at desc (export / admin).
+    pub fn list_facts(&self, limit: usize) -> anyhow::Result<Vec<Fact>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, subject, predicate, object, source_entry_id, created_at
+            FROM facts ORDER BY created_at DESC LIMIT ?1
+            "#,
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+            let created_at_s: String = row.get(5)?;
+            let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            Ok(Fact {
+                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
+                subject: row.get(1)?,
+                predicate: row.get(2)?,
+                object: row.get(3)?,
+                source_entry_id: row
+                    .get::<_, Option<String>>(4)?
+                    .and_then(|s| Uuid::parse_str(&s).ok()),
+                created_at,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn insert_fact(

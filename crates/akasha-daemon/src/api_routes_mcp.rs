@@ -65,6 +65,40 @@ data: {}\n\n",
         let j = crate::mcp_runtime::stop_stdio_server().await;
         return Some(json_response("200 OK", &j.to_string()));
     }
+    if method == "POST" && path_only == "/api/mcp/runtime/tools/list" {
+        match crate::mcp_runtime::tools_list().await {
+            Ok(j) => return Some(json_response("200 OK", &j.to_string())),
+            Err(e) => {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({"error":"mcp_tools_list_failed","detail":e}).to_string(),
+                ));
+            }
+        }
+    }
+    if method == "POST" && path_only == "/api/mcp/runtime/tools/call" {
+        let Some(b) = body.as_deref() else {
+            return Some(json_response("400 Bad Request", r#"{"error":"body_required"}"#));
+        };
+        let v: serde_json::Value = match serde_json::from_slice(b) {
+            Ok(v) => v,
+            Err(_) => return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#)),
+        };
+        let tool = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
+        if tool.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"missing_name"}"#));
+        }
+        let args = v.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+        match crate::mcp_runtime::tools_call(tool, args).await {
+            Ok(j) => return Some(json_response("200 OK", &j.to_string())),
+            Err(e) => {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({"error":"mcp_tools_call_failed","detail":e}).to_string(),
+                ));
+            }
+        }
+    }
     if method == "GET" && path_only == "/api/mcp/runtime/oauth" {
         let j = crate::mcp_runtime::oauth_get(data_dir).await;
         return Some(json_response("200 OK", &j.to_string()));

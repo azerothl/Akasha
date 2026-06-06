@@ -14,3 +14,6 @@
 - `releases/`: notes techniques par version
 - `roadmap/`: alignement produit/technique, plans et migration doc  
   - Voir aussi [pi_mono_alignment_priorities.md](roadmap/pi_mono_alignment_priorities.md) (axes prioritaires post-analyse pi-mono).
+  - [memory_landscape_roadmap_matrix.md](roadmap/memory_landscape_roadmap_matrix.md) — rapport « mémoire agents 2026 » vs implémentation Akasha (Fait/Partiel/Gap + phases P0–P3).
+  - [memory_phase4_backlog.md](roadmap/memory_phase4_backlog.md) — backlog CMA / GraphRAG / plugins.
+  - [memory_api_external.md](integrations/memory_api_external.md) — contrat HTTP mémoire externe.

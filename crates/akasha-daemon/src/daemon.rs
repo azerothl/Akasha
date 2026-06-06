@@ -13,8 +13,9 @@ use futures_util::future::Either;
 use tracing::{error, info, warn, Instrument};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask, TaskPersistenceMsg};
-use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
+use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_steering_queue_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
 use crate::studio::new_studio_disk_root_registry;
+use crate::studio_worktree::new_studio_worktree_registry;
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -521,8 +522,7 @@ impl Daemon {
                 match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
                     Ok(mut policy) => {
                         if let Ok(v) = &vault {
-                            policy.brave_api_key = v.get("brave_api_key").ok();
-                            policy.cloudflare_api_token = v.get("cloudflare_api_token").ok();
+                            policy.apply_vault_api_keys(|k| v.get(k).ok());
                         }
                         policy.workspace_root = Some(self.data_dir.clone());
                         Some(Arc::new(tokio::sync::RwLock::new(Arc::new(
@@ -562,8 +562,10 @@ impl Daemon {
             let device_bridge = std::sync::Arc::new(crate::device_bridge::DeviceBridge::new());
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
+            let steering_queue = new_steering_queue_store();
             let workspace_store = new_task_workspace_store();
             let studio_disk_registry = new_studio_disk_root_registry();
+            let studio_worktree_registry = new_studio_worktree_registry();
             let browser_registry: crate::browser::BrowserSessionRegistry =
                 Arc::new(RwLock::new(std::collections::HashMap::new()));
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
@@ -643,6 +645,16 @@ impl Daemon {
                     info!(path = %memory_db_path.display(), "Long-term memory actor started");
                     client
                 });
+            if let Some(ref lt) = long_term_client {
+                crate::memory_hygiene::spawn_scheduler(Some(lt.clone()));
+                crate::memory_agent_identity::bootstrap_agent_identity(&data_dir, Some(lt));
+            }
+            if long_term_client.is_some() {
+                crate::memory_fact_extract::init_fact_extract_worker(
+                    llm_router.clone(),
+                    memory_db_path.clone(),
+                );
+            }
             if long_term_client.is_some() {
                 let st_dir = short_term_dir.clone();
                 let router = llm_router.clone();
@@ -692,6 +704,8 @@ impl Daemon {
                 let progress = progress.clone();
                 let task_completion = task_completion.clone();
                 let delegation_sem = delegation_sem.clone();
+                let studio_disk_registry = studio_disk_registry.clone();
+                let studio_worktree_registry = studio_worktree_registry.clone();
                 async move {
                     run_delegation_handler(
                         delegation_rx,
@@ -701,6 +715,8 @@ impl Daemon {
                         progress,
                         task_completion,
                         delegation_sem,
+                        studio_disk_registry,
+                        studio_worktree_registry,
                     )
                     .await;
                 }
@@ -764,6 +780,8 @@ impl Daemon {
                 let delegation_tx = delegation_tx.clone();
                 let autonomous_mission_worker = autonomous_mission.clone();
                 let studio_disk_registry = studio_disk_registry.clone();
+                let studio_worktree_registry = studio_worktree_registry.clone();
+                let steering_queue = steering_queue.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
@@ -814,6 +832,7 @@ impl Daemon {
                             let process_registry = process_registry.clone();
                             let conv_tx = conv_tx.clone();
                             let human_input_store = human_input_store.clone();
+                            let steering_queue = steering_queue.clone();
                             let task_completion = task_completion.clone();
                             let agent_profile_cache = agent_profile_cache.clone();
                             let task_usage_store = task_usage_store.clone();
@@ -822,6 +841,7 @@ impl Daemon {
                             let browser_registry = browser_registry.clone();
                             let delegation_tx = delegation_tx.clone();
                             let studio_reg = studio_disk_registry.clone();
+                            let studio_worktree_registry = studio_worktree_registry.clone();
                             let task_id = task.task_id;
                             let message = task.message;
                             let session_id = task.session_id;
@@ -848,6 +868,7 @@ impl Daemon {
                                     Some(process_registry),
                                     Some(conv_tx),
                                     Some(human_input_store),
+                                    Some(steering_queue),
                                     Some(delegation_tx),
                                     Some(task_completion),
                                     Some(agent_profile_cache),
@@ -857,6 +878,7 @@ impl Daemon {
                                     Some(browser_registry),
                                     autonomous_mission,
                                     studio_reg,
+                                    studio_worktree_registry,
                                 )
                                 .instrument(span)
                                 .await;
@@ -880,6 +902,7 @@ impl Daemon {
                             let process_registry = process_registry.clone();
                             let conv_tx = conv_tx.clone();
                             let human_input_store = human_input_store.clone();
+                            let steering_queue = steering_queue.clone();
                             let task_completion = task_completion.clone();
                             let agent_profile_cache = agent_profile_cache.clone();
                             let task_usage_store = task_usage_store.clone();
@@ -888,6 +911,7 @@ impl Daemon {
                             let browser_registry = browser_registry.clone();
                             let delegation_tx = delegation_tx.clone();
                             let studio_reg = studio_disk_registry.clone();
+                            let studio_worktree_registry = studio_worktree_registry.clone();
                             let task_id = task.task_id;
                             let message = task.message;
                             let session_id = task.session_id;
@@ -914,6 +938,7 @@ impl Daemon {
                                     Some(process_registry),
                                     Some(conv_tx),
                                     Some(human_input_store),
+                                    Some(steering_queue),
                                     Some(delegation_tx),
                                     Some(task_completion),
                                     Some(agent_profile_cache),
@@ -923,6 +948,7 @@ impl Daemon {
                                     Some(browser_registry),
                                     autonomous_mission,
                                     studio_reg,
+                                    studio_worktree_registry,
                                 )
                                 .instrument(span)
                                 .await;
@@ -985,6 +1011,16 @@ impl Daemon {
                     }
                 }
             });
+            tokio::spawn({
+                let studio_worktree_registry = studio_worktree_registry.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(900));
+                    loop {
+                        interval.tick().await;
+                        crate::studio_worktree::gc_stale_worktrees(&studio_worktree_registry, 24).await;
+                    }
+                }
+            });
 
             if let Some(ref am) = autonomous_mission {
                 let store_path = db_path.clone();
@@ -993,6 +1029,70 @@ impl Daemon {
                 let tx = normal_tx.clone();
                 tokio::spawn(async move {
                     crate::autonomous_heartbeat::run_autonomous_heartbeat(store_path, dd, cfg, tx).await;
+                });
+            }
+
+            // Event triggers: dispatch worker + subscribers + pollers.
+            {
+                let (trigger_fire_tx, trigger_fire_rx) = tokio::sync::mpsc::channel(64);
+                let trigger_dispatch =
+                    crate::event_trigger_engine::TriggerDispatch::new(trigger_fire_tx);
+                let trigger_orch_tx = normal_tx.clone();
+                crate::event_trigger_engine::init_trigger_engine(
+                    crate::event_trigger_engine::TriggerEngineHandles {
+                        store_path: db_path.clone(),
+                        dispatch: trigger_dispatch,
+                        orch_tx: trigger_orch_tx.clone(),
+                        bus: bus.clone(),
+                    },
+                );
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx.clone();
+                    let bus = bus.clone();
+                    async move {
+                        crate::event_trigger_engine::run_trigger_dispatch_worker(
+                            store_path,
+                            orch_tx,
+                            bus,
+                            trigger_fire_rx,
+                        )
+                        .await;
+                    }
+                });
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx.clone();
+                    let bus = bus.clone();
+                    async move {
+                        crate::event_trigger_engine::run_trigger_event_subscriber(
+                            store_path, orch_tx, bus,
+                        )
+                        .await;
+                    }
+                });
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx.clone();
+                    let bus = bus.clone();
+                    async move {
+                        crate::event_trigger_engine::run_filesystem_trigger_poller(
+                            store_path, orch_tx, bus,
+                        )
+                        .await;
+                    }
+                });
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx;
+                    let bus = bus.clone();
+                    let llm_router = llm_router.clone();
+                    async move {
+                        crate::event_trigger_engine::run_model_catalog_poller(
+                            store_path, orch_tx, bus, llm_router,
+                        )
+                        .await;
+                    }
                 });
             }
 
@@ -1148,6 +1248,7 @@ impl Daemon {
                 let short_term = short_term.clone();
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
+                let steering_queue = steering_queue.clone();
                 let user_rag_store = user_rag_store.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
@@ -1212,6 +1313,7 @@ impl Daemon {
                                             Some(short_term),
                                             long_term_client,
                                             Some(human_input_store),
+                                            Some(steering_queue.clone()),
                                             &user_rag_store,
                                             &agent_profile_cache,
                                             &update_check_cache_clone,

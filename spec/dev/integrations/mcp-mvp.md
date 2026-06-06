@@ -40,4 +40,17 @@ Hermes-style **plug-and-play MCP**: declare servers in JSON, validate before ena
 2. Map MCP tools into Akasha tool namespace with policy gates (`tools_policy.yaml`).
 3. Smoke tests against a reference stdio server (filesystem or echo).
 
+### Parité « Agent TARS » (outillage MCP)
+
+Pour rapprocher l’extensibilité à base MCP d’écosystèmes comme [Agent TARS](https://agent-tars.com) sans dépendre de leur UI :
+
+| Étape | Livrable | Notes |
+|-------|-----------|--------|
+| **Namespacing** | Préfixer les outils MCP (`mcp_<server>_<tool>` ou équivalent) pour éviter les collisions avec les outils natifs Akasha. | Documenter la convention dans `tools_policy.yaml` (clés `allowed_tools` / refus par défaut). |
+| **Politique** | Étendre `tools_policy.yaml` avec blocs optionnels `mcp_servers:` ou liste blanche par serveur / par nom d’outil MCP. | Alignement avec le centre de permissions pour les appels sensibles. |
+| **Budget** | Compter tokens / coût des tours qui invoquent des outils MCP comme pour les outils natifs. | Réutiliser les métriques session existantes. |
+| **Échec isolé** | Erreur MCP → message d’outil compact ; pas d’arrêt du daemon. | Même style que `execute_tool_call` aujourd’hui. |
+
+Ordre d’implémentation recommandé : **stdio attaché** (déjà partiellement exposé via `/api/mcp/runtime` — voir **`mcp-runtime.md`**) → **tools/list + invoke** → **mapping + policy** → tests de régression sur un serveur filesystem echo.
+
 See also `../roadmap/reference-products-parity-matrix.md` and `../../16_plugin_architecture.md`.

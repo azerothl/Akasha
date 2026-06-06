@@ -12,6 +12,9 @@ pub const GIT_TEXT_MAX: usize = 8_000;
 pub const BROWSER_SNAPSHOT_TEXT_MAX: usize = 8_000;
 /// Max base64 characters returned for `browser screenshot` (PNG) in tool output.
 pub const BROWSER_SCREENSHOT_B64_MAX: usize = 32_000;
+/// Upper bound on total characters for a full `data:image/...;base64,...` URL injected into the next LLM completion as vision input (UI-TARS-style loop).
+/// Override with `AKASHA_VISION_INJECT_MAX_CHARS`.
+pub const VISION_INJECT_DEFAULT_MAX_CHARS: usize = 8_000_000;
 
 const READ_FILE_PREVIEW_BYTES: usize = 500;
 

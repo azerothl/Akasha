@@ -156,6 +156,7 @@ async fn tick(
             "Autonomous mission heartbeat {}",
             now.format("%Y-%m-%d %H:%M UTC")
         )),
+        studio_project_id: None,
     };
 
     {
