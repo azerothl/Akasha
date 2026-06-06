@@ -751,6 +751,67 @@ async fn daemon_request(
     Ok(serde_json::json!({ "ok": ok, "status": status, "text": text }))
 }
 
+/// POST /api/migrate/openclaw/preview
+#[tauri::command]
+async fn migrate_openclaw_preview(source_dir: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "source_dir": source_dir });
+    daemon_request(
+        "POST".to_string(),
+        "/api/migrate/openclaw/preview".to_string(),
+        Some(body.to_string()),
+        port,
+    )
+    .await
+}
+
+/// POST /api/migrate/openclaw/apply
+#[tauri::command]
+async fn migrate_openclaw_apply(
+    source_dir: String,
+    dry_run: Option<bool>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({
+        "source_dir": source_dir,
+        "dry_run": dry_run.unwrap_or(false),
+    });
+    daemon_request(
+        "POST".to_string(),
+        "/api/migrate/openclaw/apply".to_string(),
+        Some(body.to_string()),
+        port,
+    )
+    .await
+}
+
+/// POST /api/session/handoff
+#[tauri::command]
+async fn session_handoff(
+    session_id: String,
+    target_model: Option<String>,
+    target_provider: Option<String>,
+    task_id: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let mut body = serde_json::json!({ "session_id": session_id });
+    if let Some(m) = target_model.filter(|x| !x.trim().is_empty()) {
+        body["target_model"] = serde_json::Value::String(m);
+    }
+    if let Some(p) = target_provider.filter(|x| !x.trim().is_empty()) {
+        body["target_provider"] = serde_json::Value::String(p);
+    }
+    if let Some(tid) = task_id.filter(|x| !x.trim().is_empty()) {
+        body["task_id"] = serde_json::Value::String(tid);
+    }
+    daemon_request(
+        "POST".to_string(),
+        "/api/session/handoff".to_string(),
+        Some(body.to_string()),
+        port,
+    )
+    .await
+}
+
 /// GET /api/plugins (for slash /plugins).
 #[tauri::command]
 async fn get_plugins(port: Option<u16>) -> Result<Vec<serde_json::Value>, String> {
@@ -2141,6 +2202,9 @@ pub fn run() {
             get_advice,
             daemon_get_text,
             daemon_request,
+            migrate_openclaw_preview,
+            migrate_openclaw_apply,
+            session_handoff,
             get_plugins,
             reload_plugins,
             reload_router,
