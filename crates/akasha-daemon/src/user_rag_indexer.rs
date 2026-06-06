@@ -51,7 +51,7 @@ fn extract_text_from_bytes(name: &str, mime: &str, bytes: &[u8]) -> anyhow::Resu
 }
 
 /// Index one document synchronously (call from spawn_blocking).
-#[cfg(feature = "embeddings")]
+#[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
 pub fn index_document_sync(data_dir: &Path, doc_id: &str) -> anyhow::Result<()> {
     use akasha_embeddings::{embedding_to_bytes, Embedder};
 
@@ -83,7 +83,7 @@ pub fn index_document_sync(data_dir: &Path, doc_id: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-#[cfg(not(feature = "embeddings"))]
+#[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
 pub fn index_document_sync(data_dir: &Path, doc_id: &str) -> anyhow::Result<()> {
     let store = UserRagStore::new(data_dir);
     store.set_index_status(doc_id, "indexing", None, None)?;
