@@ -1688,6 +1688,15 @@ fn web_crawl_timeout_hint(op: &str, secs: u64) -> String {
     )
 }
 
+#[cfg(feature = "web")]
+fn web_crawl_retries() -> u32 {
+    std::env::var("AKASHA_WEB_CRAWL_RETRIES")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .map(|n| n.min(5))
+        .unwrap_or(1)
+}
+
 /// Start a Cloudflare Browser Rendering crawl job. Feature "web". See spec/53.
 #[cfg(feature = "web")]
 pub async fn web_crawl_start(
@@ -1755,19 +1764,34 @@ pub async fn web_crawl_start(
         .timeout(std::time::Duration::from_secs(CRAWL_START_TIMEOUT_SECS))
         .build()
         .context("web_crawl build client")?;
-    let res = client
-        .post(&endpoint)
-        .header("Authorization", format!("Bearer {}", token))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                anyhow::anyhow!(web_crawl_timeout_hint("web_crawl start", CRAWL_START_TIMEOUT_SECS))
-            } else {
-                anyhow::anyhow!("web_crawl send: {e}")
+    let max_retries = web_crawl_retries();
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut res_opt = None;
+    for _attempt in 0..=max_retries {
+        match client
+            .post(&endpoint)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(res) => {
+                res_opt = Some(res);
+                break;
             }
-        })?;
+            Err(e) => {
+                last_err = Some(if e.is_timeout() {
+                    anyhow::anyhow!(web_crawl_timeout_hint("web_crawl start", CRAWL_START_TIMEOUT_SECS))
+                } else {
+                    anyhow::anyhow!("web_crawl send: {e}")
+                });
+            }
+        }
+    }
+    let res = match res_opt {
+        Some(r) => r,
+        None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("web_crawl send failed"))),
+    };
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     let v: serde_json::Value =
@@ -1878,21 +1902,36 @@ pub async fn web_crawl_status(job_id: &str, policy: &crate::policy::ToolsPolicy)
         .timeout(std::time::Duration::from_secs(CRAWL_STATUS_TIMEOUT_SECS))
         .build()
         .context("web_crawl_status build client")?;
-    let res = client
-        .get(&endpoint)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                anyhow::anyhow!(web_crawl_timeout_hint(
-                    "web_crawl_status poll",
-                    CRAWL_STATUS_TIMEOUT_SECS
-                ))
-            } else {
-                anyhow::anyhow!("web_crawl_status send: {e}")
+    let max_retries = web_crawl_retries();
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut res_opt = None;
+    for _attempt in 0..=max_retries {
+        match client
+            .get(&endpoint)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+        {
+            Ok(res) => {
+                res_opt = Some(res);
+                break;
             }
-        })?;
+            Err(e) => {
+                last_err = Some(if e.is_timeout() {
+                    anyhow::anyhow!(web_crawl_timeout_hint(
+                        "web_crawl_status poll",
+                        CRAWL_STATUS_TIMEOUT_SECS
+                    ))
+                } else {
+                    anyhow::anyhow!("web_crawl_status send: {e}")
+                });
+            }
+        }
+    }
+    let res = match res_opt {
+        Some(r) => r,
+        None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("web_crawl_status send failed"))),
+    };
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -1916,10 +1955,15 @@ pub async fn web_crawl_status(job_id: &str, policy: &crate::policy::ToolsPolicy)
         .or_else(|| v.get("status"))
         .and_then(|x| x.as_str())
         .unwrap_or("");
+    let partial_count = v
+        .pointer("/result/crawled_count")
+        .or_else(|| v.pointer("/result/pages_crawled"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
     let summary = match job_status.to_ascii_lowercase().as_str() {
         "running" | "queued" | "pending" | "in_progress" => {
             format!(
-                "crawl job {job_status} — poll again with TOOL: web_crawl_status {job_id} (Cloudflare may take minutes for large limits)"
+                "crawl job {job_status} — partial pages: {partial_count}. Poll again with TOOL: web_crawl_status {job_id} (Cloudflare may take minutes for large limits)"
             )
         }
         "failed" | "error" => {
