@@ -83,7 +83,7 @@
 | E2 | Cycle de vie (Naissance → Départ) | Héritage entre instances | **Partiel** | `GET/POST /api/memory/export|import`, fork session, `agent_identity.yaml` | **P2** | Hook upgrade daemon |
 | E3 | Forking identité | Bifurcation agent | **Partiel** | Fork session/tâche ; filtre `process_id` au recall | **P2** | Clone mémoire par branche |
 | E4 | Second Brain central | Hub mémoire multi-agents | **Partiel** | `/api/memory/*`, [memory_api_external.md](../integrations/memory_api_external.md) | — | — |
-| E5 | Vs Mem0 / Letta / Zep | Différenciation concurrentielle | **Partiel** | Local + graphe 4 couches ; voir parity matrix | **P1** | 3 démos documentées |
+| E5 | Vs Mem0 / Letta / Zep | Différenciation concurrentielle | **Partiel** | Local + graphe 4 couches ; démos [memory_vs_mem0.md](../../../docs/demos/memory_vs_mem0.md), [memory_vs_letta.md](../../../docs/demos/memory_vs_letta.md), [memory_vs_zep.md](../../../docs/demos/memory_vs_zep.md) | **P1** | — |
 
 ### F — Maintenance, decay, coût
 
