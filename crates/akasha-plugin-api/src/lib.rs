@@ -89,6 +89,25 @@ pub trait MemoryPlugin: Send + Sync {
     fn retrieve(&self, key: &str) -> Result<Option<String>, PluginError>;
 }
 
+/// Minimal HTTP delegation envelope for memory plugin adapters (Wave 6 G2).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemoryDelegateRequest {
+    pub operation: String,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemoryDelegateResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 /// Model plugin: multi-LLM / routing (spec 16). Stub for Phase 5.
 pub trait ModelPlugin: Send + Sync {
     fn meta(&self) -> &PluginMeta;
