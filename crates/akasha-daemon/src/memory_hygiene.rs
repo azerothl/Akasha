@@ -101,4 +101,7 @@ async fn run_once(client: crate::memory_actor::LongTermMemoryClient) {
         }
     }
     LAST_SUGGESTIONS.store(clusters, Ordering::Relaxed);
+    if crate::memory_consolidation::consolidation_enabled() {
+        let _ = crate::memory_consolidation::run_consolidation_pass(client, 3).await;
+    }
 }
