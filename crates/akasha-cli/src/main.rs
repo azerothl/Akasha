@@ -46,6 +46,9 @@ enum Commands {
         /// Fix missing or minimal config: create missing files in data_dir (llm_router.yaml, tools_policy.yaml, connectors.env, akasha.env, agent_profile.json)
         #[arg(long)]
         fix: bool,
+        /// With --fix: set AKASHA_MEMORY_ENCRYPT=1 in akasha.env (SQLCipher / field-at-rest encryption foundation; see memory_encryption_rfc.md)
+        #[arg(long)]
+        encrypt_memory: bool,
     },
     /// Vault: manage secrets (Phase 3)
     Vault {
@@ -631,7 +634,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Up => cmd_up(),
         Commands::Start { foreground } => cmd_start(foreground),
         Commands::Stop => cmd_stop(),
-        Commands::Doctor { json, advice, fix } => cmd_doctor(json, advice, fix),
+        Commands::Doctor {
+            json,
+            advice,
+            fix,
+            encrypt_memory,
+        } => cmd_doctor(json, advice, fix, encrypt_memory),
         Commands::Vault { sub } => cmd_vault(sub),
         Commands::Plugin { sub } => cmd_plugin(sub),
         Commands::Permissions { sub } => cmd_permissions(sub),
@@ -3041,7 +3049,7 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
                     || apply.eq_ignore_ascii_case("o")
                     || apply.eq_ignore_ascii_case("y")
                 {
-                    let fixes = run_doctor_fixes(&data_dir)?;
+                    let fixes = run_doctor_fixes(&data_dir, false)?;
                     if !fixes.is_empty() {
                         println!("\nFichiers créés ou réparés :");
                         for f in &fixes {
@@ -3518,7 +3526,8 @@ command_timeout_secs: 60
     // --- 5. RAG / Memory ---
     println!("\n--- RAG & Memory ---");
     println!("  RAG : le dossier spec/ (et spec/runbooks/) du projet est utilisé par défaut.");
-    println!("  Memory : non configuré en MVP (à venir).");
+    println!("  Memory : configurez via l'assistant de premier lancement (OnboardingWizard Tauri),");
+    println!("           `akasha doctor --fix`, ou le profil mémoire dans Paramètres avancés Tauri.");
 
     // --- 5b. Services Docker (optionnel) ---
     if !use_defaults {
@@ -3893,8 +3902,9 @@ fn embedded_tools_policy_example_value(data_dir: &Path) -> anyhow::Result<serde_
 
 /// Apply fixes for missing or minimal config when `akasha doctor --fix` is run.
 /// Templates are embedded at compile time (`embedded_spec`); user values are preserved via merge.
+/// When `encrypt_memory` is true, sets `AKASHA_MEMORY_ENCRYPT=1` in akasha.env (foundation for field-at-rest encryption).
 /// Returns a list of messages describing what was fixed.
-fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
+fn run_doctor_fixes(data_dir: &Path, encrypt_memory: bool) -> anyhow::Result<Vec<String>> {
     let mut fixes = Vec::new();
 
     if !data_dir.exists() {
@@ -4038,16 +4048,17 @@ OLLAMA_HOST=http://localhost:11434
             &mut fixes,
         )?;
     }
-    if std::env::var("AKASHA_MEMORY_ENCRYPT")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
+    let memory_encrypt_requested = encrypt_memory
+        || std::env::var("AKASHA_MEMORY_ENCRYPT")
+            .ok()
+            .as_deref()
+            == Some("1");
+    if memory_encrypt_requested {
         doctor_fix_env_file(
             &akasha_env_path,
             "akasha.env",
             &["AKASHA_MEMORY_ENCRYPT"],
-            "# Memory encryption (phase-in): SQLCipher full-at-rest integration is deferred; this flag enables compatibility guidance.",
+            "# Memory encryption foundation (S-MEM-05): field-at-rest path — SQLCipher memory.db OR per-row content+embedding AES-GCM (see spec/dev/roadmap/memory_encryption_rfc.md). Full SQLCipher integration is deferred pending bench.",
             &mut fixes,
         )?;
         let env_content = std::fs::read_to_string(&akasha_env_path).unwrap_or_default();
@@ -4057,12 +4068,13 @@ OLLAMA_HOST=http://localhost:11434
             if !out.is_empty() {
                 out.push('\n');
             }
+            out.push_str("# Field-at-rest encryption spike: scripts/bench-memory-encryption.ps1\n");
             out.push_str("AKASHA_MEMORY_ENCRYPT=1\n");
             std::fs::write(&akasha_env_path, out)?;
             fixes.push("akasha.env: set AKASHA_MEMORY_ENCRYPT=1.".to_string());
         }
         fixes.push(
-            "AKASHA_MEMORY_ENCRYPT=1 detected: guidance mode enabled (full SQLCipher at-rest encryption is deferred in this build).".to_string(),
+            "Memory encryption foundation enabled: AKASHA_MEMORY_ENCRYPT=1 (field-at-rest path documented in memory_encryption_rfc.md; run scripts/bench-memory-encryption.ps1 for SQLCipher spike steps).".to_string(),
         );
     }
 
@@ -4178,7 +4190,7 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
     out
 }
 
-fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
+fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyhow::Result<()> {
     let port: u16 = std::env::var("AKASHA_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -4190,7 +4202,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
 
     let data_dir = akasha_data_dir();
     if fix {
-        let fixes = run_doctor_fixes(&data_dir)?;
+        let fixes = run_doctor_fixes(&data_dir, encrypt_memory)?;
         if !json && !fixes.is_empty() {
             println!("--fix applied:");
             for msg in &fixes {
@@ -4608,7 +4620,7 @@ mod tests {
     fn doctor_fix_creates_missing_akasha_env() {
         let data_dir = make_temp_dir("doctor-fix-env");
 
-        let fixes = run_doctor_fixes(&data_dir).unwrap();
+        let fixes = run_doctor_fixes(&data_dir, false).unwrap();
         let akasha_env_path = data_dir.join("akasha.env");
         let akasha_env = std::fs::read_to_string(&akasha_env_path).unwrap();
         let akasha_env_check = run_config_checks(&data_dir)
@@ -4634,7 +4646,7 @@ mod tests {
         )
         .unwrap();
 
-        let fixes = run_doctor_fixes(&data_dir).expect("doctor --fix");
+        let fixes = run_doctor_fixes(&data_dir, false).expect("doctor --fix");
         assert!(fixes.iter().any(|m| m.contains("llm_router.yaml")));
         let cfg =
             akasha_llm::RoutingConfig::load_from_path(&data_dir.join("llm_router.yaml")).unwrap();
