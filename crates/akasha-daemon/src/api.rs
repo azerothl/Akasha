@@ -8886,6 +8886,9 @@ pub(crate) async fn run_message_via_llm(
     } else {
         "Reply in the same language as the user message below (French, English, etc.).\n\n"
     });
+    if !is_small_talk_fast_lane && !code_studio_disk_task {
+        user_prefix.push_str(&crate::agents::current_date_context_block(chrono::Local::now()));
+    }
     if let Some(ref am) = autonomous_mission {
         let g = am.read().await;
         if g.enabled && g.status == MissionStatusYaml::Active && session_id == g.session_id {
