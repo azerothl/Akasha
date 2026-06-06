@@ -209,6 +209,16 @@ pub async fn start_stdio_server(data_dir: &Path, server: &str) -> Result<Value, 
     let mut reader = BufReader::new(stdout);
     let _ = read_framed(&mut reader).await;
 
+    // MCP spec requires the client to send notifications/initialized after the
+    // initialize response and before any tool requests (tools/list, tools/call, …).
+    let initialized_notif = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    write_framed(&mut stdin, &initialized_notif)
+        .await
+        .map_err(|e| format!("notifications/initialized write: {}", e))?;
+
     let mut slot = cell().lock().await;
     if let Some(prev) = slot.take() {
         let mut c = prev.child;

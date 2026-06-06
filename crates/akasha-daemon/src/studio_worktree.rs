@@ -268,6 +268,19 @@ fn try_integrate_worktree(state: &mut StudioWorktreeState) {
         }
     }
 
+    // Auto-commit any dirty files left in the child worktree so the branch contains all edits.
+    if !worktree_is_clean(&state.worktree_path) {
+        let _ = git_status_success(&state.worktree_path, &["add", "-A"]);
+        let _ = git_status_success(
+            &state.worktree_path,
+            &[
+                "commit",
+                "-m",
+                &format!("auto-commit child worktree changes ({})", state.worktree_branch),
+            ],
+        );
+    }
+
     let merge_ok = git_status_success(
         &state.project_root,
         &["merge", "--no-ff", "--no-edit", &state.worktree_branch],
