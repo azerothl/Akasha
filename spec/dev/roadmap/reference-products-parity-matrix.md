@@ -13,6 +13,7 @@ Document **central** : une ligne = un **domaine fonctionnel** ; les colonnes *He
 
 | Produit | Entrée utile |
 |---------|----------------|
+| **KinBot** | [kinbot](https://github.com/MarlBurroW/kinbot) · [roadmap](./kinbot_inspired_roadmap.md) |
 | **Hermes Agent** (Nous Research) | [Quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) · [Tools](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools/) · [Features](https://hermes-agent.nousresearch.com/docs/user-guide/features/overview) · [GitHub](https://github.com/NousResearch/hermes-agent) |
 | **OpenClaw** | [openclaws.io](https://openclaws.io) |
 | **Odysseus** | [pewdiepie-archdaemon/odysseus](https://github.com/pewdiepie-archdaemon/odysseus) · [matrice inspiration](./odysseus-inspiration-matrix.md) |

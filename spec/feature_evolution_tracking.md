@@ -19,7 +19,7 @@ Ce registre est la source de vérité sur l'état de couverture des fonctionnali
 | Runtime | Sessions terminal / PTY et backends | Implemented | Partially documented | OK | `43_session_terminal.md`, `dev/runtime/terminal-backends-roadmap.md` |
 | Integrations | MCP runtime / OAuth / MVP | In progress | N/A | OK | `dev/integrations/mcp-runtime.md`, `dev/integrations/mcp-oauth.md`, `dev/integrations/mcp-mvp.md` |
 | Plugins | Architecture plugins + reputation + reseau host | Implemented | Partially documented | OK | `16_plugin_architecture.md`, `27_plugin_reputation_system.md`, `dev/plugins/plugin-host-network.md` |
-| Memory | Memoire LT + compaction + knowledge graph | Implemented | Partially documented | OK | `06_memory_model.md`, `47_memory_4_layers.md`, `46_memory_facts_knowledge_graph.md` |
+| Memory | Memoire LT + compaction + knowledge graph + user RAG async | Implemented | Partially documented | OK | `06_memory_model.md`, `47_memory_4_layers.md`, `dev/roadmap/kinbot_inspired_roadmap.md` |
 | Graph | Workspace project graph | Implemented | OK | OK | `../docs/user_guide_final.md`, `54_workspace_project_knowledge_graph.md` |
 | Security | Menaces, permissions, policy engine | Implemented | Partially documented | OK | `12_threat_model.md`, `07_security_model.md`, `49_policy_engine.md` |
 | Observability | Metrics, diagnostics, runbooks | Implemented | Partially documented | OK | `observability.md`, `runbooks/01_diagnostic.md`, `runbooks/02_daemon_restart.md` |
