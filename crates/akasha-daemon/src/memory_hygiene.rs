@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::Arc;
 use std::time::Duration;
 
 static LAST_RUN_AT: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
@@ -35,7 +36,10 @@ fn hygiene_interval_secs() -> u64 {
 }
 
 /// Background loop: periodic purge + duplicate scan.
-pub fn spawn_scheduler(client: Option<crate::memory_actor::LongTermMemoryClient>) {
+pub fn spawn_scheduler(
+    client: Option<crate::memory_actor::LongTermMemoryClient>,
+    llm_router: Option<Arc<akasha_llm::LLMRouter>>,
+) {
     let interval_secs = hygiene_interval_secs();
     if interval_secs == 0 {
         return;
@@ -45,12 +49,15 @@ pub fn spawn_scheduler(client: Option<crate::memory_actor::LongTermMemoryClient>
         let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs.max(300)));
         loop {
             ticker.tick().await;
-            run_once(client.clone()).await;
+            run_once(client.clone(), llm_router.clone()).await;
         }
     });
 }
 
-async fn run_once(client: crate::memory_actor::LongTermMemoryClient) {
+async fn run_once(
+    client: crate::memory_actor::LongTermMemoryClient,
+    llm_router: Option<Arc<akasha_llm::LLMRouter>>,
+) {
     RUN_COUNT.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut g) = last_run_at_cell().lock() {
         *g = Some(chrono::Utc::now().to_rfc3339());
@@ -104,5 +111,5 @@ async fn run_once(client: crate::memory_actor::LongTermMemoryClient) {
     if crate::memory_consolidation::consolidation_enabled() {
         let _ = crate::memory_consolidation::run_consolidation_pass(client.clone(), 3).await;
     }
-    crate::memory_hierarchical::run_lt_rollup_stub(&client).await;
+    crate::memory_hierarchical::run_lt_rollup_with_llm(&client, llm_router.as_deref()).await;
 }

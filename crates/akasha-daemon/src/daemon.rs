@@ -67,6 +67,29 @@ fn log_bind_port_failure(port: u16, err: &std::io::Error) {
     );
 }
 
+fn log_upgrade_heritage_reminder(data_dir: &std::path::Path) {
+    let marker = data_dir.join(".daemon-version");
+    let current = env!("CARGO_PKG_VERSION");
+    match std::fs::read_to_string(&marker) {
+        Ok(prev) => {
+            let prev_trimmed = prev.trim();
+            if !prev_trimmed.is_empty() && prev_trimmed != current {
+                info!(
+                    previous_version = prev_trimmed,
+                    current_version = current,
+                    "Daemon version changed; heritage reminder: review migrations and memory continuity notes."
+                );
+            }
+        }
+        Err(_) => {
+            // First run or marker missing: nothing to compare.
+        }
+    }
+    if let Err(e) = std::fs::write(&marker, format!("{current}\n")) {
+        warn!(error = %e, path = %marker.display(), "Failed to persist daemon version marker");
+    }
+}
+
 /// Outcome of a daemon run. Used so that main can exit with the right code (e.g. 85 for restart).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
@@ -96,6 +119,7 @@ impl Daemon {
 
     /// Run the daemon (blocks until shutdown)
     pub async fn run(&self) -> anyhow::Result<RunOutcome> {
+        log_upgrade_heritage_reminder(&self.data_dir);
         // Load specs at startup
         match load_specs(&self.spec_dir) {
             Ok(specs) => {
@@ -646,7 +670,7 @@ impl Daemon {
                     client
                 });
             if let Some(ref lt) = long_term_client {
-                crate::memory_hygiene::spawn_scheduler(Some(lt.clone()));
+                crate::memory_hygiene::spawn_scheduler(Some(lt.clone()), Some(llm_router.clone()));
                 crate::memory_agent_identity::bootstrap_agent_identity(&data_dir, Some(lt));
             }
             if long_term_client.is_some() {
