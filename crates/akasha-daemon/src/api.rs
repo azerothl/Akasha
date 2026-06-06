@@ -7209,8 +7209,29 @@ fn memory_profile_for_task(
     is_subagent: bool,
     orch_disk_deliverables: bool,
 ) -> MemoryProfile {
+    fn env_usize(name: &str) -> Option<usize> {
+        std::env::var(name).ok().and_then(|s| s.parse::<usize>().ok())
+    }
+    fn env_u8(name: &str) -> Option<u8> {
+        std::env::var(name).ok().and_then(|s| s.parse::<u8>().ok())
+    }
+    let apply_env_overrides = |mut profile: MemoryProfile| -> MemoryProfile {
+        if let Some(v) = env_usize("AKASHA_MEMORY_SEMANTIC_TOP_K") {
+            profile.semantic_top_k = v.min(50);
+        }
+        if let Some(v) = env_u8("AKASHA_MEMORY_GRAPH_EXPAND_HOPS") {
+            profile.graph_expand_hops = v.min(4);
+        }
+        if let Some(v) = env_usize("AKASHA_MEMORY_USER_RAG_TOP_K") {
+            profile.user_rag_top_k = v.min(50);
+        }
+        if let Some(v) = env_usize("AKASHA_MEMORY_WORKSPACE_GRAPH_TOP_K") {
+            profile.workspace_graph_top_k = v.min(50);
+        }
+        profile
+    };
     if is_subagent {
-        return MemoryProfile {
+        return apply_env_overrides(MemoryProfile {
             recent_turns_limit: 0,
             recent_context_max_chars: 0,
             semantic_top_k: 0,
@@ -7223,7 +7244,7 @@ fn memory_profile_for_task(
             compact_before_prompt: false,
             allow_project_recall: false,
             allow_identity_lookup: false,
-        };
+        });
     }
 
     let enriched = !memory_fast_path_enabled()
@@ -7233,7 +7254,7 @@ fn memory_profile_for_task(
         || message.chars().count() > 280;
 
     if enriched {
-        MemoryProfile {
+        apply_env_overrides(MemoryProfile {
             recent_turns_limit: 15,
             recent_context_max_chars: 2_000,
             semantic_top_k: 5,
@@ -7250,9 +7271,9 @@ fn memory_profile_for_task(
             compact_before_prompt: true,
             allow_project_recall: true,
             allow_identity_lookup: true,
-        }
+        })
     } else {
-        MemoryProfile {
+        apply_env_overrides(MemoryProfile {
             recent_turns_limit: 6,
             recent_context_max_chars: 800,
             semantic_top_k: 2,
@@ -7265,7 +7286,7 @@ fn memory_profile_for_task(
             compact_before_prompt: false,
             allow_project_recall: false,
             allow_identity_lookup: true,
-        }
+        })
     }
 }
 
@@ -7275,6 +7296,14 @@ fn task_stall_timeout_secs() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&s| s >= 30)
         .unwrap_or(180)
+}
+
+fn memory_recall_timeout_secs() -> u64 {
+    std::env::var("AKASHA_MEMORY_RECALL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s >= 5)
+        .unwrap_or(45)
 }
 
 /// Fails the task when no meaningful progress occurred within the stall timeout (worker hang, LLM never responds).
@@ -8837,6 +8866,19 @@ pub(crate) async fn run_message_via_llm(
             orch_disk_deliverables,
         )
     };
+    if incognito {
+        memory_profile.recent_turns_limit = 0;
+        memory_profile.recent_context_max_chars = 0;
+        memory_profile.semantic_top_k = 0;
+        memory_profile.episodic_limit = 0;
+        memory_profile.facts_limit = 0;
+        memory_profile.user_rag_top_k = 0;
+        memory_profile.workspace_graph_top_k = 0;
+        memory_profile.graph_expand_hops = 0;
+        memory_profile.expand_by_graph = false;
+        memory_profile.allow_project_recall = false;
+        memory_profile.allow_identity_lookup = false;
+    }
     // For external/transport/general-knowledge queries, always isolate from recent context.
     // Loading previous dev/Akasha-specific turns from short-term history actively misleads
     // small local models: they latch onto the most recent topic (e.g. Akasha CLI discussion)
@@ -9202,6 +9244,9 @@ pub(crate) async fn run_message_via_llm(
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
     };
+    let process_id_for_recall = resolve_root_task_id(store_path.as_path(), task_id)
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| task_id.to_string());
     let user_profile = UserProfile::load(data_dir);
     let user_identity_prefix = user_profile.format_for_prompt();
     let mut recall_params = crate::memory_orchestrator::RecallParams {
@@ -9219,7 +9264,7 @@ pub(crate) async fn run_message_via_llm(
             && !code_studio_disk_task,
         expand_by_graph: memory_profile.expand_by_graph,
         graph_expand_hops: memory_profile.graph_expand_hops,
-        process_id: Some(task_id.to_string()),
+        process_id: Some(process_id_for_recall),
         task_id: Some(task_id.to_string()),
         user_identity_prefix: if user_identity_prefix.is_empty()
             || !memory_profile.allow_identity_lookup
@@ -9228,7 +9273,13 @@ pub(crate) async fn run_message_via_llm(
         } else {
             Some(user_identity_prefix)
         },
-        task_outcomes_limit: if code_studio_disk_task { 6 } else { 8 },
+        task_outcomes_limit: if incognito {
+            0
+        } else if code_studio_disk_task {
+            6
+        } else {
+            8
+        },
         task_outcomes_scope_session: code_studio_disk_task || !turns_empty,
         include_preference_and_personality_episodic: !code_studio_disk_task,
         ..Default::default()
@@ -9246,15 +9297,64 @@ pub(crate) async fn run_message_via_llm(
         }
         recall_params.search_queries = search_queries;
     }
+    let mut workspace_registry_lines: Vec<String> = Vec::new();
+    if memory_profile.workspace_graph_top_k > 0 {
+        let graph_query = message.clone();
+        let graph_k = memory_profile.workspace_graph_top_k;
+        let sp = store_path.clone();
+        if let Some((workspace_lines, graph_lines)) = tokio::task::spawn_blocking(move || {
+            let store = WorkspaceGraphStore::open(&sp)?;
+            let workspaces = store.list_workspaces()?;
+            let workspace_lines: Vec<String> = workspaces
+                .iter()
+                .map(|w| format!("- \"{}\" — id {} — {}", w.name, w.id, w.root_path))
+                .collect();
+            let graph_lines = store.search_graph_context(&graph_query, graph_k, None)?;
+            Ok::<_, anyhow::Error>((workspace_lines, graph_lines))
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        {
+            workspace_registry_lines = workspace_lines;
+            recall_params.workspace_graph_lines = graph_lines;
+        }
+    }
     if memory_profile.semantic_top_k > 0
         || memory_profile.episodic_limit > 0
         || memory_profile.facts_limit > 0
         || recall_params.user_identity_prefix.is_some()
         || recall_params.task_outcomes_limit > 0
+        || !recall_params.workspace_graph_lines.is_empty()
     {
-        let fused =
-            crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params)
-                .await;
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 8,
+                    "message": "Chargement du contexte et de la mémoire…"
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        let recall_timeout = std::time::Duration::from_secs(memory_recall_timeout_secs());
+        let fused = match tokio::time::timeout(
+            recall_timeout,
+            crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params),
+        )
+        .await
+        {
+            Ok(ctx) => ctx,
+            Err(_) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    timeout_secs = recall_timeout.as_secs(),
+                    "memory recall timed out; continuing without long-term context"
+                );
+                crate::memory_orchestrator::FusedMemoryContext::default()
+            }
+        };
         let fused_str = fused.to_context_string();
         if !fused_str.is_empty() {
             user_prefix.push_str(&fused_str);
@@ -9298,59 +9398,24 @@ pub(crate) async fn run_message_via_llm(
             user_prefix.push_str("\n");
         }
     }
-    if memory_profile.workspace_graph_top_k > 0 {
-        let graph_query = message.clone();
-        let graph_k = memory_profile.workspace_graph_top_k;
-        let sp = store_path.clone();
-        let (workspace_lines, graph_lines) = tokio::task::spawn_blocking(move || {
-            let store = WorkspaceGraphStore::open(&sp)?;
-            let workspaces = store.list_workspaces()?;
-            let workspace_lines: Vec<String> = workspaces
-                .iter()
-                .map(|w| {
-                    format!(
-                        "- \"{}\" — id {} — {}",
-                        w.name, w.id, w.root_path
-                    )
-                })
-                .collect();
-            let graph_lines = store.search_graph_context(&graph_query, graph_k, None)?;
-            Ok::<_, anyhow::Error>((workspace_lines, graph_lines))
-        })
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
-        if workspace_lines.len() > 1 {
-            const MAX_WORKSPACE_LINES: usize = 8;
-            user_prefix.push_str(
-                "[Project knowledge graphs — registered workspaces (use id with workspace_graph_search --workspace)]\n",
-            );
-            for line in workspace_lines.iter().take(MAX_WORKSPACE_LINES) {
-                user_prefix.push_str(line);
-                user_prefix.push_str("\n");
-            }
-            if workspace_lines.len() > MAX_WORKSPACE_LINES {
-                user_prefix.push_str(&format!(
-                    "- … ({} more workspaces not shown)\n",
-                    workspace_lines.len() - MAX_WORKSPACE_LINES
-                ));
-            }
-            user_prefix.push_str(
-                "To fetch more symbols or files from the index, call: workspace_graph_search <keywords> [--workspace <id>]\n\n",
-            );
-        }
-        if !graph_lines.is_empty() {
-            user_prefix.push_str(
-                "[Project knowledge graphs — excerpts matching this message (indexed folders)]\n",
-            );
-            for line in &graph_lines {
-                user_prefix.push_str("- ");
-                user_prefix.push_str(line);
-                user_prefix.push_str("\n");
-            }
+    if workspace_registry_lines.len() > 1 {
+        const MAX_WORKSPACE_LINES: usize = 8;
+        user_prefix.push_str(
+            "[Project knowledge graphs — registered workspaces (use id with workspace_graph_search --workspace)]\n",
+        );
+        for line in workspace_registry_lines.iter().take(MAX_WORKSPACE_LINES) {
+            user_prefix.push_str(line);
             user_prefix.push_str("\n");
         }
+        if workspace_registry_lines.len() > MAX_WORKSPACE_LINES {
+            user_prefix.push_str(&format!(
+                "- … ({} more workspaces not shown)\n",
+                workspace_registry_lines.len() - MAX_WORKSPACE_LINES
+            ));
+        }
+        user_prefix.push_str(
+            "To fetch more symbols or files from the index, call: workspace_graph_search <keywords> [--workspace <id>]\n\n",
+        );
     }
     let router_task_type_for_compact = if preferred_task_type_override.as_deref()
         == Some("image_generation")
@@ -9685,6 +9750,17 @@ pub(crate) async fn run_message_via_llm(
             log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
         }
     } else {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 12,
+                    "message": "Génération de la réponse…"
+                })),
+            )
+            .with_correlation(task_id),
+        );
         let mut max_tool_rounds = std::env::var("AKASHA_MAX_TOOL_ROUNDS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -9965,6 +10041,29 @@ pub(crate) async fn run_message_via_llm(
                                 })),
                                 &chrono::Utc::now().to_rfc3339(),
                             );
+                            if chunk_ref.contains("TOOL:") || chunk_ref.contains("<tool_call") {
+                                let _ = bus.send(
+                                    EventEnvelope::new(
+                                        EventType::ProgressUpdate,
+                                        Some(serde_json::json!({
+                                            "task_id": task_id.to_string(),
+                                            "event_type": "toolcall_delta",
+                                            "delta": chunk_ref
+                                        })),
+                                    )
+                                    .with_correlation(task_id),
+                                );
+                                let _ = store.insert_event(
+                                    task_id,
+                                    "toolcall_delta",
+                                    Some(&serde_json::json!({
+                                        "delta": chunk_ref,
+                                        "schema_version": 1,
+                                        "stub": true
+                                    })),
+                                    &chrono::Utc::now().to_rfc3339(),
+                                );
+                            }
                         }
                     }
                     Ok(None) => break,
@@ -12511,6 +12610,21 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         "task_completed",
         Some(serde_json::json!({ "status": final_status_str })),
     );
+    if final_status_str == "completed" {
+        let hook_payload = serde_json::json!({
+            "task_id": task_id.to_string(),
+            "session_id": session_id,
+            "status": final_status_str,
+            "model_used": last_llm_model_used,
+            "reply_preview": reply_text.chars().take(800).collect::<String>(),
+        });
+        let hook_data_dir = store_path.parent().unwrap_or_else(|| store_path.as_path());
+        crate::plugin_hook_bus::dispatch_hook_event(
+            hook_data_dir,
+            "task_completed",
+            &hook_payload.to_string(),
+        );
+    }
     clear_task_milestones(task_id, Some(store_path.as_path()));
 
     if let Some(data_dir) = store_path.parent().map(|p| p.to_path_buf()) {
@@ -12949,13 +13063,23 @@ pub async fn handle_api(
     }
 
     if method == "GET" && path_only == "/api/process/watch/recent" {
-        let limit = crate::api_security::parse_query_param(query_str, "limit")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(50);
+        let limit_opt = crate::api_security::parse_query_param(query_str, "limit")
+            .and_then(|s| s.parse::<usize>().ok());
+        let can_cache = limit_opt.unwrap_or(50) == 50;
+        if can_cache {
+            if let Some(cached) = crate::http_get_cache::cache_get_process_watch_recent() {
+                return json_response("200 OK", &cached);
+            }
+        }
+        let limit = limit_opt.unwrap_or(50);
         let ev = crate::process_watch::recent(limit).await;
+        let body = serde_json::to_string(&ev).unwrap_or_else(|_| "[]".to_string());
+        if can_cache {
+            crate::http_get_cache::cache_put_process_watch_recent(&body);
+        }
         return json_response(
             "200 OK",
-            &serde_json::to_string(&ev).unwrap_or_else(|_| "[]".to_string()),
+            &body,
         );
     }
 
@@ -14526,6 +14650,131 @@ pub async fn handle_api(
         return json_response("404 Not Found", r#"{"error":"teams_not_configured"}"#);
     }
 
+    if method == "POST" && path == "/api/session/handoff" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let Some(body_json) = body_json else {
+            return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
+        };
+        let session_id = body_json
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let Some(session_id) = session_id else {
+            return json_response("400 Bad Request", r#"{"error":"missing_session_id"}"#);
+        };
+        let target_model = body_json
+            .get("target_model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let target_provider = body_json
+            .get("target_provider")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let task_id_filter = body_json
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let task_uuid = match task_id_filter {
+            Some(ref s) => match Uuid::parse_str(s) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    return json_response("400 Bad Request", r#"{"error":"invalid_task_id"}"#);
+                }
+            },
+            None => None,
+        };
+        let transcript_ctx = if let Some(tid) = task_uuid {
+            let transcript_path = data_dir.join("transcripts").join(format!("{tid}.json"));
+            if let Ok(raw) = std::fs::read_to_string(&transcript_path) {
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .map(|v| {
+                        let status = v
+                            .get("status")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("unknown");
+                        let summary = v
+                            .get("summary")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .chars()
+                            .take(1800)
+                            .collect::<String>();
+                        let actions = v
+                            .get("actions")
+                            .and_then(|x| x.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .take(8)
+                                    .filter_map(|a| a.get("summary").and_then(|s| s.as_str()))
+                                    .map(|s| format!("- {}", s.trim()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            "[Handoff transcript]\n- source_task_id: {tid}\n- status: {status}\n- summary: {summary}\n{}",
+                            if actions.is_empty() {
+                                String::new()
+                            } else {
+                                format!("\n[Recent actions]\n{actions}\n")
+                            }
+                        )
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        let model_route = match (&target_provider, &target_model) {
+            (Some(p), Some(m)) => format!("{p}/{m}"),
+            (Some(p), None) => p.clone(),
+            (None, Some(m)) => m.clone(),
+            (None, None) => "auto".to_string(),
+        };
+        let route_hint = if target_provider.is_some() || target_model.is_some() {
+            format!(
+                "[Handoff route request]\n- target_provider: {}\n- target_model: {}\nUse this route preference if configured; otherwise fall back to the nearest available route and mention the fallback.\n\n",
+                target_provider.as_deref().unwrap_or(""),
+                target_model.as_deref().unwrap_or("")
+            )
+        } else {
+            String::new()
+        };
+        let handoff_prompt = format!(
+            "{}{}\n[Instruction]\nContinue the conversation from this handoff context and produce the next actionable response.",
+            route_hint, transcript_ctx
+        );
+        let envelope = crate::gateway::MessageEnvelope::api(
+            session_id.clone(),
+            handoff_prompt,
+            None,
+            TaskPriority::UserNormal,
+            false,
+        );
+        match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
+            Ok(task_id) => {
+                let body = serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "session_id": session_id,
+                    "model": model_route
+                });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(_) => {
+                return json_response("500 Internal Server Error", r#"{"error":"handle_failed"}"#)
+            }
+        }
+    }
+
     if method == "POST" && path == "/api/message" {
         let body_json = body
             .as_deref()
@@ -14683,8 +14932,14 @@ pub async fn handle_api(
             .unwrap_or(TaskPriority::UserNormal);
         let incognito = body_json
             .as_ref()
-            .and_then(|v| v.get("incognito"))
-            .and_then(|v| v.as_bool())
+            .map(|v| {
+                v.get("incognito")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false)
+                    || v.get("no_memory")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false)
+            })
             .unwrap_or(false);
         let studio_code_mode = body_json
             .as_ref()
@@ -15396,10 +15651,15 @@ pub async fn handle_api(
         }
     }
     if method == "GET" && path == "/api/plugins/metrics" {
+        if let Some(cached) = crate::http_get_cache::cache_get_plugins_metrics() {
+            return json_response("200 OK", &cached);
+        }
         let m = crate::plugins::metrics::snapshot();
+        let body = serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string());
+        crate::http_get_cache::cache_put_plugins_metrics(&body);
         return json_response(
             "200 OK",
-            &serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string()),
+            &body,
         );
     }
     // GET /api/plugins/routing_rules[?message=...] — debug dynamic plugin routing rules
