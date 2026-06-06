@@ -9490,6 +9490,17 @@ pub(crate) async fn run_message_via_llm(
         && !is_small_talk_fast_lane
         && !code_studio_disk_task
     {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 6,
+                    "message": "Préparation du contexte…"
+                })),
+            )
+            .with_correlation(task_id),
+        );
         let mut search_queries =
             crate::memory_retrieval_enhance::expand_queries(&llm_router, &message).await;
         if let Some(hyde) =

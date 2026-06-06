@@ -81,6 +81,42 @@ const CHAT_AGENT_MODE_KEY = "akasha_chat_agent_mode";
 const CHAT_WEB_SEARCH_KEY = "akasha_chat_web_search";
 const CHAT_INCOGNITO_KEY = "akasha_chat_incognito";
 const CHAT_COMPANION_OPEN_KEY = "akasha_companion_open";
+const AKASHA_TASK_SESSIONS_KEY = "akasha_task_sessions_v1";
+
+function loadTaskSessionMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(AKASHA_TASK_SESSIONS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function persistTaskSession(taskId: string, sessionId: string) {
+  if (!taskId.trim() || !sessionId.trim()) return;
+  try {
+    const map = loadTaskSessionMap();
+    map[taskId] = sessionId;
+    const keys = Object.keys(map);
+    if (keys.length > 64) {
+      for (const k of keys.slice(0, keys.length - 64)) {
+        delete map[k];
+      }
+    }
+    localStorage.setItem(AKASHA_TASK_SESSIONS_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore */
+  }
+}
+
+function isGenericTaskLabel(label: string | undefined, taskId: string): boolean {
+  if (!label?.trim()) return true;
+  const suffix = taskId.length >= 8 ? taskId.slice(-8) : taskId;
+  return label.includes(`…${suffix}`) || label.includes(`...${suffix}`);
+}
 
 export type ChatThreadEntry = {
   id: string;
@@ -5256,6 +5292,47 @@ function App() {
     trackTaskUntilDoneRef.current = trackTaskUntilDone;
   }, [trackTaskUntilDone]);
 
+  const resumedActiveTasksRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    Object.assign(taskIdToSessionIdRef.current, loadTaskSessionMap());
+  }, []);
+
+  useEffect(() => {
+    if (!health?.ok || !sessionId?.trim()) return;
+    Object.assign(taskIdToSessionIdRef.current, loadTaskSessionMap());
+    if (tasksList.length === 0) {
+      void fetchTasksList({ silent: true });
+      return;
+    }
+    for (const task of tasksList) {
+      if (!isTaskActiveStatus(task.status)) continue;
+      if (taskIdToSessionIdRef.current[task.id] !== sessionId) continue;
+      if (resumedActiveTasksRef.current.has(task.id)) continue;
+      resumedActiveTasksRef.current.add(task.id);
+      setRunningTaskChips((prev) =>
+        prev[task.id] !== undefined ? prev : { ...prev, [task.id]: { pct: 5, message: "en cours…" } },
+      );
+      setMessages((prev) => {
+        if (prev.some((m) => m.taskId === task.id)) return prev;
+        const label = task.label?.trim();
+        const userText = label && !isGenericTaskLabel(label, task.id) ? label : null;
+        const next = [...prev];
+        if (userText && !prev.some((m) => m.role === "user" && m.text === userText)) {
+          next.push({ role: "user", text: userText });
+        }
+        next.push({
+          role: "assistant",
+          text: "Reprise de la tâche en cours…",
+          taskId: task.id,
+          streaming: true,
+        });
+        return next;
+      });
+      trackTaskUntilDone(task.id);
+    }
+  }, [health?.ok, sessionId, tasksList, trackTaskUntilDone, fetchTasksList]);
+
   const handleSend = async (overrideMessage?: string, fromVoice?: boolean) => {
     const content = (overrideMessage ?? message).trim();
     const hasContent = content || attachments.length > 0;
@@ -5394,6 +5471,7 @@ function App() {
         const sidResolved = (ack.session_id || sessionAtSend || "").trim();
         if (sidResolved) {
           taskIdToSessionIdRef.current[ack.task_id] = sidResolved;
+          persistTaskSession(ack.task_id, sidResolved);
         }
         lastChatTaskIdRef.current = ack.task_id;
         ackTextByTaskRef.current[ack.task_id] = ackText;
@@ -10457,6 +10535,7 @@ function App() {
         eventTriggersEnabled
         onImmediateCreated={(taskId) => {
           taskIdToSessionIdRef.current[taskId] = sessionId ?? "";
+          persistTaskSession(taskId, sessionId ?? "");
           setRunningTaskChips((prev) => ({ ...prev, [taskId]: { pct: 0, message: "en cours…" } }));
           setRunningTaskEvents((prev) => (prev[taskId] ? prev : { ...prev, [taskId]: [] }));
           trackTaskUntilDone(taskId);

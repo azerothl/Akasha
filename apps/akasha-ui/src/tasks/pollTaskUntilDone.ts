@@ -69,6 +69,9 @@ function isStartupProgressMessage(msg: string): boolean {
   if (!m) return true;
   return (
     m.startsWith("Analyzing your request") ||
+    m.startsWith("Préparation du contexte") ||
+    m.startsWith("Chargement du contexte") ||
+    m.startsWith("Génération de la réponse") ||
     m.startsWith("Still spinning") ||
     m.startsWith("Still working")
   );

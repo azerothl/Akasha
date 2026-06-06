@@ -66,59 +66,71 @@ pub async fn maybe_run_hierarchical_compaction(
         return;
     }
     if let Some(client) = long_term {
-        let source = if trigger_l2 {
-            "session_checkpoint_l2"
-        } else {
-            "session_checkpoint_l1"
-        };
-        let explicit_links = if trigger_l2 {
-            let (entries, _) = client.list(30, 0);
-            let links: Vec<(String, String)> = entries
-                .iter()
-                .filter(|(_, _, _, src)| src == "session_checkpoint_l1")
-                .take(5)
-                .map(|(id, _, _, _)| (id.clone(), "relates_to".to_string()))
-                .collect();
-            if links.is_empty() {
-                None
+        let client = client.clone();
+        let session_id_owned = session_id.to_string();
+        let l1_summary_owned = l1_summary.clone();
+        let turn_count = turns.len();
+        let token_estimate = max_context_tokens / 10;
+        if tokio::task::spawn_blocking(move || {
+            let source = if trigger_l2 {
+                "session_checkpoint_l2"
             } else {
-                Some(links)
+                "session_checkpoint_l1"
+            };
+            let explicit_links = if trigger_l2 {
+                let (entries, _) = client.list(30, 0);
+                let links: Vec<(String, String)> = entries
+                    .iter()
+                    .filter(|(_, _, _, src)| src == "session_checkpoint_l1")
+                    .take(5)
+                    .map(|(id, _, _, _)| (id.clone(), "relates_to".to_string()))
+                    .collect();
+                if links.is_empty() {
+                    None
+                } else {
+                    Some(links)
+                }
+            } else {
+                None
+            };
+            if let Err(e) = client.promote(
+                l1_summary_owned.clone(),
+                source.to_string(),
+                None,
+                None,
+                Some(session_id_owned.clone()),
+                Some(if trigger_l2 { 2 } else { 1 }),
+                Some("session".to_string()),
+                None,
+                explicit_links,
+            ) {
+                tracing::warn!(error = %e, "L1/L2 promote failed");
             }
-        } else {
-            None
-        };
-        if let Err(e) = client.promote(
-            l1_summary.clone(),
-            source.to_string(),
-            None,
-            None,
-            Some(session_id.to_string()),
-            Some(if trigger_l2 { 2 } else { 1 }),
-            Some("session".to_string()),
-            None,
-            explicit_links,
-        ) {
-            tracing::warn!(error = %e, "L1/L2 promote failed");
-        }
-        let payload = serde_json::json!({
-            "level": if trigger_l2 { "L2" } else { "L1" },
-            "summary_ref": l1_summary.chars().take(120).collect::<String>(),
-            "token_estimate": max_context_tokens / 10,
-            "at_turn": turns.len(),
-            "schema_version": 1
-        });
-        if let Err(e) = client.emit_event(
-            "session_checkpoint".to_string(),
-            payload.to_string(),
-            None,
-            None,
-            Some(session_id.to_string()),
-            None,
-            Some(if trigger_l2 { 2 } else { 1 }),
-            Some("session".to_string()),
-            Some(source.to_string()),
-        ) {
-            tracing::debug!(error = %e, "session_checkpoint emit failed");
+            let payload = serde_json::json!({
+                "level": if trigger_l2 { "L2" } else { "L1" },
+                "summary_ref": l1_summary_owned.chars().take(120).collect::<String>(),
+                "token_estimate": token_estimate,
+                "at_turn": turn_count,
+                "schema_version": 1
+            });
+            if let Err(e) = client.emit_event(
+                "session_checkpoint".to_string(),
+                payload.to_string(),
+                None,
+                None,
+                Some(session_id_owned),
+                None,
+                Some(if trigger_l2 { 2 } else { 1 }),
+                Some("session".to_string()),
+                Some(source.to_string()),
+            ) {
+                tracing::debug!(error = %e, "session_checkpoint emit failed");
+            }
+        })
+        .await
+        .is_err()
+        {
+            tracing::debug!("L1/L2 hierarchical compaction memory join failed");
         }
     }
 }
