@@ -57,6 +57,11 @@ enum Commands {
         #[command(subcommand)]
         sub: PluginSub,
     },
+    /// Review pending tool permission requests
+    Permissions {
+        #[command(subcommand)]
+        sub: PermissionsSub,
+    },
     /// LLM Router: metrics, complete (Phase 6)
     Router {
         #[command(subcommand)]
@@ -162,6 +167,53 @@ enum TaskSub {
         /// Task UUID
         task_id: String,
     },
+    /// Inspect or clear steering / follow-up message queue
+    Queue {
+        #[command(subcommand)]
+        sub: TaskQueueSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskQueueSub {
+    /// GET /api/tasks/:id/queue
+    List { task_id: String },
+    /// DELETE /api/tasks/:id/queue
+    Clear { task_id: String },
+}
+
+#[derive(Subcommand)]
+enum PermissionsSub {
+    /// Permission review queue (daemon must be running)
+    Queue {
+        #[command(subcommand)]
+        sub: PermissionsQueueSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermissionsQueueSub {
+    /// List queue items (`GET /api/permissions/queue`)
+    List {
+        #[arg(long, default_value = "pending")]
+        status: String,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Approve a pending request
+    Approve {
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Deny a pending request
+    Deny {
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Expire a pending request (operator)
+    Expire { id: String },
 }
 
 #[derive(Subcommand)]
@@ -416,8 +468,14 @@ enum PluginSub {
     List,
     /// Reload plugins (no daemon restart)
     Reload,
-    /// Install a plugin from a directory (manifest + .wasm)
-    Install { path: PathBuf },
+    /// Install a plugin from a directory (manifest + .wasm) or from the remote catalog
+    Install {
+        /// Install from catalog by plugin id (POST /api/plugins/install on daemon)
+        #[arg(long)]
+        catalog: Option<String>,
+        /// Local directory containing manifest.toml and plugin.wasm
+        path: Option<PathBuf>,
+    },
     /// Uninstall a plugin by id
     Uninstall { id: String },
     /// Show local catalog of available plugins
@@ -546,6 +604,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Doctor { json, advice, fix } => cmd_doctor(json, advice, fix),
         Commands::Vault { sub } => cmd_vault(sub),
         Commands::Plugin { sub } => cmd_plugin(sub),
+        Commands::Permissions { sub } => cmd_permissions(sub),
         Commands::Router { sub } => cmd_router(sub),
         Commands::Init { defaults } => cmd_init(defaults),
         Commands::Tui => cmd_tui(),
@@ -710,6 +769,83 @@ fn cmd_task(sub: TaskSub) -> anyhow::Result<()> {
             }
             println!("{}", body);
         }
+        TaskSub::Queue { sub } => match sub {
+            TaskQueueSub::List { task_id } => {
+                let resp = client
+                    .get(format!("{}/api/tasks/{}/queue", base, task_id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", serde_json::to_string_pretty(&resp.json::<serde_json::Value>()?)?);
+            }
+            TaskQueueSub::Clear { task_id } => {
+                let resp = client
+                    .delete(format!("{}/api/tasks/{}/queue", base, task_id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+        },
+    }
+    Ok(())
+}
+
+fn cmd_permissions(sub: PermissionsSub) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    match sub {
+        PermissionsSub::Queue { sub } => match sub {
+            PermissionsQueueSub::List { status, limit } => {
+                let resp = client
+                    .get(format!(
+                        "{}/api/permissions/queue?status={}&limit={}",
+                        base, status, limit
+                    ))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", serde_json::to_string_pretty(&resp.json::<serde_json::Value>()?)?);
+            }
+            PermissionsQueueSub::Approve { id, note } => {
+                let body = note.map(|n| serde_json::json!({ "note": n }));
+                let mut req = client.post(format!("{}/api/permissions/queue/{}/approve", base, id));
+                if let Some(b) = body {
+                    req = req.json(&b);
+                }
+                let resp = req.send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+            PermissionsQueueSub::Deny { id, note } => {
+                let body = note.map(|n| serde_json::json!({ "note": n }));
+                let mut req = client.post(format!("{}/api/permissions/queue/{}/deny", base, id));
+                if let Some(b) = body {
+                    req = req.json(&b);
+                }
+                let resp = req.send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+            PermissionsQueueSub::Expire { id } => {
+                let resp = client
+                    .post(format!("{}/api/permissions/queue/{}/expire", base, id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+        },
     }
     Ok(())
 }
@@ -1330,7 +1466,40 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
             }
             println!("Plugins reloaded.");
         }
-        PluginSub::Install { path } => {
+        PluginSub::Install { catalog, path } => {
+            if let Some(id) = catalog {
+                if path.is_some() {
+                    anyhow::bail!("Use either --catalog <id> or a local path, not both");
+                }
+                let resp = client
+                    .post(format!("{}/api/plugins/install", base))
+                    .json(&serde_json::json!({ "id": id }))
+                    .timeout(std::time::Duration::from_secs(120))
+                    .send()?;
+                let status = resp.status();
+                let j: serde_json::Value = resp.json().unwrap_or(serde_json::json!({}));
+                if !status.is_success() {
+                    let err = j
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("install failed");
+                    anyhow::bail!("Catalog install failed: {}", err);
+                }
+                let installed = j.get("id").and_then(|v| v.as_str()).unwrap_or(&id);
+                println!(
+                    "Installed plugin {} from catalog.",
+                    installed
+                );
+                if let Some(msg) = j.get("message").and_then(|v| v.as_str()) {
+                    println!("{}", msg);
+                }
+                return Ok(());
+            }
+            let Some(path) = path else {
+                anyhow::bail!(
+                    "Provide --catalog <id> or a local directory path (manifest.toml + plugin.wasm)"
+                );
+            };
             if !path.is_dir() {
                 anyhow::bail!(
                     "Install path must be a directory containing manifest.toml and plugin.wasm"

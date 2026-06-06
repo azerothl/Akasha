@@ -681,12 +681,19 @@ impl ToolsPolicy {
             "web_search" => {
                 if !self.web_search_enabled {
                     notes.push("operational:web_search_disabled_in_policy".to_string());
-                } else if !crate::web_search::any_provider_available(self) {
-                    notes.push("operational:web_search_no_provider".to_string());
-                } else if self.brave_api_key.as_deref().unwrap_or("").trim().is_empty()
-                    && std::env::var("BRAVE_API_KEY").map(|k| k.trim().is_empty()).unwrap_or(true)
-                {
-                    notes.push("operational:web_search_keyless_fallback".to_string());
+                } else {
+                    #[cfg(feature = "web")]
+                    {
+                        if !crate::web_search::any_provider_available(self) {
+                            notes.push("operational:web_search_no_provider".to_string());
+                        } else if self.brave_api_key.as_deref().unwrap_or("").trim().is_empty()
+                            && std::env::var("BRAVE_API_KEY").map(|k| k.trim().is_empty()).unwrap_or(true)
+                        {
+                            notes.push("operational:web_search_keyless_fallback".to_string());
+                        }
+                    }
+                    #[cfg(not(feature = "web"))]
+                    notes.push("operational:web_search_feature_disabled".to_string());
                 }
             }
             "web_fetch" => {
