@@ -1,7 +1,8 @@
 //! Memory Orchestrator (Phase 5 — Mémoire 4 couches): composite retrieval and context fusion.
 
 use crate::memory_actor::LongTermMemoryClient;
-use akasha_store::{EpisodicFilter, MemorySearchFilter};
+use akasha_store::{reciprocal_rank_fusion, EpisodicFilter, MemorySearchFilter, DEFAULT_RRF_K};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static MEMORY_RECALL_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -51,6 +52,8 @@ pub struct RecallParams {
     pub task_outcomes_scope_session: bool,
     /// When false, skip global `user_preference` and `personality_memory` episodic blocks (Code Studio isolation).
     pub include_preference_and_personality_episodic: bool,
+    /// Optional extra queries (multi-query / HyDE). When empty, only [`message`](RecallParams::message) is searched.
+    pub search_queries: Vec<String>,
 }
 
 impl Default for RecallParams {
@@ -74,6 +77,7 @@ impl Default for RecallParams {
             task_outcomes_limit: 8,
             task_outcomes_scope_session: false,
             include_preference_and_personality_episodic: true,
+            search_queries: Vec::new(),
         }
     }
 }
@@ -99,8 +103,71 @@ impl RecallParams {
             task_outcomes_limit: 8,
             task_outcomes_scope_session: false,
             include_preference_and_personality_episodic: true,
+            search_queries: Vec::new(),
         }
     }
+}
+
+fn dedupe_queries(queries: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for q in queries {
+        let t = q.trim();
+        if t.len() < 3 {
+            continue;
+        }
+        if out.iter().any(|x: &String| x.eq_ignore_ascii_case(t)) {
+            continue;
+        }
+        out.push(t.to_string());
+    }
+    out
+}
+
+fn fuse_semantic_search(
+    client: &LongTermMemoryClient,
+    queries: &[String],
+    top_k: usize,
+    filter: Option<MemorySearchFilter>,
+) -> Vec<(String, String)> {
+    if top_k == 0 || queries.is_empty() {
+        return Vec::new();
+    }
+    if queries.len() == 1 {
+        return client.search(queries[0].clone(), top_k, filter);
+    }
+    let per_query_k = (top_k * 2).clamp(top_k, 20);
+    let mut lists: Vec<Vec<(String, f32)>> = Vec::new();
+    let mut id_to_content: HashMap<String, String> = HashMap::new();
+    for query in queries {
+        let hits = client.search(query.clone(), per_query_k, filter.clone());
+        if hits.is_empty() {
+            continue;
+        }
+        let ranked: Vec<(String, f32)> = hits
+            .iter()
+            .enumerate()
+            .map(|(rank, (id, content))| {
+                id_to_content
+                    .entry(id.clone())
+                    .or_insert_with(|| content.clone());
+                (id.clone(), (hits.len() - rank) as f32)
+            })
+            .collect();
+        lists.push(ranked);
+    }
+    if lists.is_empty() {
+        return Vec::new();
+    }
+    let fused = if lists.len() > 1 {
+        reciprocal_rank_fusion(&lists, DEFAULT_RRF_K)
+    } else {
+        lists.remove(0)
+    };
+    fused
+        .into_iter()
+        .take(top_k)
+        .filter_map(|(id, _)| id_to_content.get(&id).map(|c| (id, c.clone())))
+        .collect()
 }
 
 /// Fused memory context: sections to inject into the prompt.
@@ -202,11 +269,17 @@ pub async fn recall_context(
         } else {
             None
         };
+        let search_queries = if params.search_queries.is_empty() {
+            vec![params.message.clone()]
+        } else {
+            dedupe_queries(&params.search_queries)
+        };
         let results = if params.semantic_top_k == 0 {
             Vec::new()
         } else {
-            client.search(
-                params.message.clone(),
+            fuse_semantic_search(
+                &client,
+                &search_queries,
                 params.semantic_top_k,
                 recall_filter,
             )

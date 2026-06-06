@@ -9096,7 +9096,7 @@ pub(crate) async fn run_message_via_llm(
     };
     let user_profile = UserProfile::load(data_dir);
     let user_identity_prefix = user_profile.format_for_prompt();
-    let recall_params = crate::memory_orchestrator::RecallParams {
+    let mut recall_params = crate::memory_orchestrator::RecallParams {
         message: message.clone(),
         session_id: session_id.clone(),
         semantic_top_k: memory_profile.semantic_top_k,
@@ -9125,6 +9125,19 @@ pub(crate) async fn run_message_via_llm(
         include_preference_and_personality_episodic: !code_studio_disk_task,
         ..Default::default()
     };
+    if memory_profile.semantic_top_k > 0
+        && !is_small_talk_fast_lane
+        && !code_studio_disk_task
+    {
+        let mut search_queries =
+            crate::memory_retrieval_enhance::expand_queries(&llm_router, &message).await;
+        if let Some(hyde) =
+            crate::memory_retrieval_enhance::hyde_document(&llm_router, &message).await
+        {
+            search_queries.push(hyde);
+        }
+        recall_params.search_queries = search_queries;
+    }
     if memory_profile.semantic_top_k > 0
         || memory_profile.episodic_limit > 0
         || memory_profile.facts_limit > 0
