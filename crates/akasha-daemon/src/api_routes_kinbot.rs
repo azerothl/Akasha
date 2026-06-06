@@ -4,6 +4,7 @@ use crate::agent_profiles::{AgentProfileDef, AgentProfilesStore};
 use crate::dashboards::DashboardStore;
 use crate::user_rag::SharedUserRagStore;
 use crate::user_rag_indexer;
+use std::sync::Arc;
 use akasha_store::platform_extras::{
     Contact, ContactStore, ConversationArchiveStore, NotificationRow, NotificationStore, Wakeup,
     WakeupStore,
@@ -18,6 +19,7 @@ pub struct KinbotRouteCtx<'a> {
     pub store_path: &'a Path,
     pub data_dir: &'a Path,
     pub user_rag_store: &'a SharedUserRagStore,
+    pub plugin_registry: Option<&'a Arc<crate::plugins::PluginRegistry>>,
 }
 
 pub async fn try_handle(
@@ -292,21 +294,38 @@ pub async fn try_handle(
         ));
     }
 
-    // Plugin install from URL (stub: copy instructions)
+    // Plugin install from catalog URL
     if method == "POST" && path == "/api/plugins/install" {
         let j = parse_json(body)?;
-        let url = j.get("url").and_then(|v| v.as_str());
         let catalog_id = j.get("id").and_then(|v| v.as_str());
-        return Some(json_response(
-            "501 Not Implemented",
-            &serde_json::json!({
-                "error": "use_cli",
-                "detail": "Install via akasha plugin install or copy WASM to data_dir/plugins/",
-                "url": url,
-                "catalog_id": catalog_id
-            })
-            .to_string(),
-        ));
+        let url = j.get("url").and_then(|v| v.as_str());
+        let catalog_url = j.get("catalog_url").and_then(|v| v.as_str());
+        let result = async {
+            let installed_id = if let Some(id) = catalog_id {
+                crate::plugin_install::install_from_catalog_id(ctx.data_dir, id, catalog_url)
+                    .await?
+            } else if let Some(base) = url {
+                crate::plugin_install::install_from_plugin_base_url(ctx.data_dir, base).await?
+            } else {
+                anyhow::bail!("provide id or url");
+            };
+            if let Some(reg) = ctx.plugin_registry {
+                reg.reload();
+            }
+            Ok::<String, anyhow::Error>(installed_id)
+        }
+        .await;
+        return Some(match result {
+            Ok(id) => json_response(
+                "200 OK",
+                &serde_json::json!({ "ok": true, "id": id, "message": "Plugin installed." })
+                    .to_string(),
+            ),
+            Err(e) => json_response(
+                "400 Bad Request",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            ),
+        });
     }
 
     None

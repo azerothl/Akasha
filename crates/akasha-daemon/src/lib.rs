@@ -72,6 +72,7 @@ pub mod process_watch;
 pub mod terminal_pty;
 pub mod http_get_cache;
 pub mod mcp_runtime;
+pub mod plugin_install;
 pub mod plugins;
 pub mod scheduler;
 pub mod skills;
