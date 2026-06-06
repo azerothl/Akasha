@@ -1,6 +1,7 @@
 //! Multi-workspace project knowledge graphs (Graphify-style).
 //! Each workspace has a name, root path, nodes/edges scoped by `workspace_id`.
 
+use crate::memory_fusion::{reciprocal_rank_fusion, DEFAULT_RRF_K};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -532,7 +533,9 @@ impl WorkspaceGraphStore {
             return Ok(Vec::new());
         }
 
-        let mut out: Vec<String> = Vec::new();
+        let mut label_hits: Vec<(String, f32)> = Vec::new();
+        let mut context_hits: Vec<(String, f32)> = Vec::new();
+        let mut line_by_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut hit_samples: Vec<serde_json::Value> = Vec::new();
         let workspaces = if let Some(wid) = workspace_id {
             self.get_workspace(wid)?.into_iter().collect::<Vec<_>>()
@@ -542,7 +545,7 @@ impl WorkspaceGraphStore {
         let workspace_count = workspaces.len();
 
         for ws in workspaces {
-            if out.len() >= limit {
+            if label_hits.len() + context_hits.len() >= limit.saturating_mul(4) {
                 break;
             }
             let mut stmt = self.conn.prepare(
@@ -558,44 +561,88 @@ impl WorkspaceGraphStore {
             })?;
 
             for row in rows {
-                if out.len() >= limit {
-                    break;
-                }
                 let (id, kind, label, path) = row?;
-                let hay = format!(
-                    "{} {} {} {} {} {}",
-                    id.to_lowercase(),
-                    kind.to_lowercase(),
-                    label.to_lowercase(),
-                    path.as_deref().unwrap_or("").to_lowercase(),
-                    ws.name.to_lowercase(),
-                    ws.root_path.to_lowercase()
+                let label_l = label.to_lowercase();
+                let path_l = path.as_deref().unwrap_or("").to_lowercase();
+                let kind_l = kind.to_lowercase();
+                let ws_name_l = ws.name.to_lowercase();
+                let ws_root_l = ws.root_path.to_lowercase();
+                let p = path.as_deref().unwrap_or("");
+                let line = format!(
+                    "[Workspace \"{}\"] {} — {} ({})",
+                    ws.name, kind, label, p
                 );
-                let hit = terms.is_empty()
-                    || terms.iter().any(|t| hay.contains(t.as_str()));
-                if hit {
-                    let p = path.as_deref().unwrap_or("");
-                    if hit_samples.len() < 5 {
-                        let matched_terms: Vec<String> = terms
-                            .iter()
-                            .filter(|t| hay.contains(t.as_str()))
-                            .cloned()
-                            .collect();
-                        hit_samples.push(serde_json::json!({
-                            "workspace": ws.name.as_str(),
-                            "kind": kind.as_str(),
-                            "label": label.as_str(),
-                            "path": p,
-                            "matched_terms": matched_terms
-                        }));
-                    }
-                    out.push(format!(
-                        "[Workspace \"{}\"] {} — {} ({})",
-                        ws.name, kind, label, p
-                    ));
+                let node_key = format!("{}:{}", ws.id, id);
+                if terms.is_empty() {
+                    label_hits.push((node_key.clone(), 1.0));
+                    line_by_id.insert(node_key, line);
+                    continue;
+                }
+                let label_match = terms.iter().any(|t| label_l.contains(t.as_str()));
+                let path_match = terms.iter().any(|t| path_l.contains(t.as_str()) || kind_l.contains(t.as_str()));
+                let context_match = terms.iter().any(|t| {
+                    ws_name_l.contains(t.as_str()) || ws_root_l.contains(t.as_str()) || id.to_lowercase().contains(t.as_str())
+                });
+                if !(label_match || path_match || context_match) {
+                    continue;
+                }
+                line_by_id.insert(node_key.clone(), line);
+                if hit_samples.len() < 5 {
+                    let matched_terms: Vec<String> = terms
+                        .iter()
+                        .filter(|t| {
+                            label_l.contains(t.as_str())
+                                || path_l.contains(t.as_str())
+                                || kind_l.contains(t.as_str())
+                                || ws_name_l.contains(t.as_str())
+                        })
+                        .cloned()
+                        .collect();
+                    hit_samples.push(serde_json::json!({
+                        "workspace": ws.name.as_str(),
+                        "kind": kind.as_str(),
+                        "label": label.as_str(),
+                        "path": p,
+                        "matched_terms": matched_terms
+                    }));
+                }
+                if label_match {
+                    let score = terms.iter().filter(|t| label_l.contains(t.as_str())).count() as f32;
+                    label_hits.push((node_key.clone(), score));
+                }
+                if path_match || context_match {
+                    let score = terms
+                        .iter()
+                        .filter(|t| {
+                            path_l.contains(t.as_str())
+                                || kind_l.contains(t.as_str())
+                                || ws_name_l.contains(t.as_str())
+                                || ws_root_l.contains(t.as_str())
+                        })
+                        .count() as f32;
+                    context_hits.push((node_key, score));
                 }
             }
         }
+
+        let ranked: Vec<(String, f32)> = if label_hits.is_empty() && context_hits.is_empty() {
+            Vec::new()
+        } else if label_hits.is_empty() {
+            let mut v = context_hits;
+            v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            v
+        } else if context_hits.is_empty() {
+            let mut v = label_hits;
+            v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            v
+        } else {
+            reciprocal_rank_fusion(&[label_hits, context_hits], DEFAULT_RRF_K)
+        };
+        let out: Vec<String> = ranked
+            .into_iter()
+            .take(limit)
+            .filter_map(|(key, _)| line_by_id.get(&key).cloned())
+            .collect();
 
         tracing::debug!(
             query = %query,
@@ -608,7 +655,7 @@ impl WorkspaceGraphStore {
             "graph lexical search diagnostics"
         );
 
-        Ok(out.into_iter().take(limit).collect())
+        Ok(out)
     }
 }
 

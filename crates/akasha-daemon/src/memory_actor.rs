@@ -69,6 +69,8 @@ pub enum MemoryRequest {
     Update { id: String, content: String },
     /// Janitor: purge expired and low-confidence entries.
     HygienePurge,
+    /// Rollup stub for entries older than N days.
+    LtRollup { days: u32, limit: usize },
 }
 
 pub enum MemoryResponse {
@@ -91,6 +93,7 @@ pub enum MemoryResponse {
     RecordRecallDecay(Result<u64, String>),
     Update(Result<(), String>),
     HygienePurge(Result<(u64, u64), String>),
+    LtRollup(Result<u64, String>),
 }
 
 /// Receive a memory-actor response. Safe from Tokio worker threads (uses `block_in_place`).
@@ -518,6 +521,29 @@ impl LongTermMemoryClient {
             Ok((0, 0))
         }
     }
+
+    pub fn run_lt_rollup(&self, days: u32) -> Result<u64, String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self
+                .tx
+                .send((MemoryRequest::LtRollup { days, limit: 20 }, resp_tx))
+                .is_err()
+            {
+                return Err("memory actor disconnected".into());
+            }
+            match recv_memory_response(resp_rx) {
+                Ok(MemoryResponse::LtRollup(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = days;
+            Ok(0)
+        }
+    }
 }
 
 /// Start the long-term memory actor on a dedicated thread. Returns a client and the join handle.
@@ -791,6 +817,49 @@ pub fn start_memory_actor(
                         let expired = store.purge_expired_entries().unwrap_or(0);
                         let low = store.purge_low_confidence(0.2).unwrap_or(0);
                         MemoryResponse::HygienePurge(Ok((expired, low)))
+                    }
+                    MemoryRequest::LtRollup { days, limit } => {
+                        let result = (|| -> Result<u64, String> {
+                            let old = store
+                                .list_entries_older_than(days, limit)
+                                .map_err(|e| e.to_string())?;
+                            if old.is_empty() {
+                                return Ok(0);
+                            }
+                            let preview: String = old
+                                .iter()
+                                .take(3)
+                                .map(|(_, content, _)| content.chars().take(120).collect::<String>())
+                                .collect::<Vec<_>>()
+                                .join("\n---\n");
+                            let _summary = format!(
+                                "[Rollup stub — {} entrée(s) antérieures à {} j]\n{}",
+                                old.len(),
+                                days,
+                                preview
+                            );
+                            tracing::info!(count = old.len(), days, "LT memory rollup stub");
+                            if let Some(ref ep) = episodic_store {
+                                let payload = serde_json::json!({
+                                    "rollup_days": days,
+                                    "entry_count": old.len(),
+                                    "entry_ids": old.iter().map(|(id, _, _)| id).take(10).collect::<Vec<_>>(),
+                                });
+                                let _ = ep.insert_event(
+                                    "memory_rollup",
+                                    &payload.to_string(),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    Some(1),
+                                    Some("global_user"),
+                                    Some("rollup"),
+                                );
+                            }
+                            Ok(old.len() as u64)
+                        })();
+                        MemoryResponse::LtRollup(result)
                     }
                 };
                 let _ = resp_tx.send(response);

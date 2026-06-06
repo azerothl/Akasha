@@ -642,6 +642,23 @@ impl LongTermStore {
         self.conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |row| row.get::<_, i64>(0).map(|n| n as u64)).map_err(Into::into)
     }
 
+    /// Entries older than `days` (for rollup / archival jobs). Returns (id, content, source).
+    pub fn list_entries_older_than(
+        &self,
+        days: u32,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        let cutoff = Utc::now() - chrono::Duration::days(days as i64);
+        let cutoff_s = cutoff.to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, source FROM memory_entries WHERE created_at < ?1 AND source NOT LIKE 'memory_rollup%' ORDER BY created_at ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![cutoff_s, limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Load search metadata for hybrid fusion re-rank.
     pub fn get_entries_search_metadata_by_ids(
         &self,

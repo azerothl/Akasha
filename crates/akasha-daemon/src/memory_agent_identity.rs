@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
 pub struct AgentIdentityManifest {
     pub name: Option<String>,
     pub role: Option<String>,
@@ -76,4 +76,11 @@ pub fn bootstrap_agent_identity(
 
 pub fn manifest_path(data_dir: &Path) -> PathBuf {
     data_dir.join("agent_identity.yaml")
+}
+
+pub fn save(data_dir: &Path, manifest: &AgentIdentityManifest) -> anyhow::Result<()> {
+    let path = manifest_path(data_dir);
+    let yaml = serde_yaml::to_string(manifest)?;
+    std::fs::write(path, yaml)?;
+    Ok(())
 }

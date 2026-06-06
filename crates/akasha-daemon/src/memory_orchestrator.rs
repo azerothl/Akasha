@@ -249,19 +249,30 @@ pub async fn recall_context(
     let result = tokio::task::spawn_blocking(move || {
         MEMORY_RECALL_TOTAL.fetch_add(1, Ordering::Relaxed);
         let mut ctx = FusedMemoryContext::default();
+        let mut retrieval_candidates = 0u64;
+        let mut retrieval_used = 0u64;
 
-        // Semantic retriever: main message with optional session filter
+        // Semantic retriever: main message with optional session / task filter
         let recall_filter = if params.filter_by_session {
             Some(MemorySearchFilter {
                 session_id: Some(params.session_id.clone()),
-                process_id: params.process_id.clone(),
+                process_id: params
+                    .task_id
+                    .clone()
+                    .or(params.process_id.clone()),
                 entity_id: params.entity_id.clone(),
                 include_global: true,
                 ..Default::default()
             })
-        } else if params.process_id.is_some() || params.entity_id.is_some() {
+        } else if params.task_id.is_some()
+            || params.process_id.is_some()
+            || params.entity_id.is_some()
+        {
             Some(MemorySearchFilter {
-                process_id: params.process_id.clone(),
+                process_id: params
+                    .task_id
+                    .clone()
+                    .or(params.process_id.clone()),
                 entity_id: params.entity_id.clone(),
                 include_global: true,
                 ..Default::default()
@@ -357,34 +368,47 @@ pub async fn recall_context(
             }
         }
 
-        // Graph retriever: facts by entity or process
+        // Graph retriever: facts by entity, task, or process
         let entity_for_facts = params
             .entity_id
             .as_ref()
+            .or(params.task_id.as_ref())
             .or(params.process_id.as_ref())
             .cloned();
         if params.facts_limit > 0 {
             if let Some(eid) = entity_for_facts {
             let facts = client.get_facts_by_entity(eid, params.facts_limit);
+            retrieval_candidates += facts.len() as u64;
             for f in &facts {
                 ctx.facts_block.push_str(&format!("{} --{}--> {}\n", f.subject, f.predicate, f.object));
+            }
+            if !facts.is_empty() {
+                retrieval_used += facts.len() as u64;
             }
             }
         }
 
-        // Episodic retriever: recent events for session
+        // Episodic retriever: recent events for session (optionally scoped to task)
         if params.episodic_limit > 0 {
             let ep_filter = EpisodicFilter {
                 session_id: Some(params.session_id.clone()),
+                task_id: params.task_id.clone(),
                 ..Default::default()
             };
             let events = client.search_episodic(ep_filter, params.episodic_limit);
+            retrieval_candidates += events.len() as u64;
             for e in &events {
                 // task_outcome is surfaced in [Recent task outcomes]; listing it here too duplicates content.
                 if e.event_type == "task_outcome" {
                     continue;
                 }
                 ctx.episodic_block.push_str(&format!("{}: {}\n", e.event_type, e.payload.replace('\n', " ")));
+            }
+            if !ctx.episodic_block.is_empty() {
+                retrieval_used += events
+                    .iter()
+                    .filter(|e| e.event_type != "task_outcome")
+                    .count() as u64;
             }
         }
 
@@ -448,6 +472,7 @@ pub async fn recall_context(
         if params.task_outcomes_limit > 0 {
             let outcome_filter = EpisodicFilter {
                 event_type: Some("task_outcome".to_string()),
+                task_id: params.task_id.clone(),
                 session_id: if params.task_outcomes_scope_session {
                     Some(params.session_id.clone())
                 } else {
@@ -456,6 +481,7 @@ pub async fn recall_context(
                 ..Default::default()
             };
             let outcome_events = client.search_episodic(outcome_filter, params.task_outcomes_limit);
+            retrieval_candidates += outcome_events.len() as u64;
             for e in &outcome_events {
                 ctx.recent_outcomes_block.push_str("- ");
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&e.payload) {
@@ -475,7 +501,16 @@ pub async fn recall_context(
                     ctx.recent_outcomes_block.push_str("\n");
                 }
             }
+            if !ctx.recent_outcomes_block.is_empty() {
+                retrieval_used += outcome_events.len() as u64;
+            }
         }
+
+        if params.semantic_top_k > 0 {
+            retrieval_candidates += results.len() as u64;
+            retrieval_used += results.len() as u64;
+        }
+        crate::memory_maintenance::record_retrieval_metrics(retrieval_candidates, retrieval_used);
 
         ctx
     })

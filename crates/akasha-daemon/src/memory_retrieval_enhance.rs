@@ -17,6 +17,32 @@ pub fn memory_hyde_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Snapshot of advanced retrieval toggles (for UI / diagnostics).
+pub fn advanced_settings_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "multi_query": memory_multi_query_enabled(),
+        "hyde": memory_hyde_enabled(),
+        "rrf": akasha_store::memory_rrf_enabled(),
+        "rollup_days": crate::memory_hierarchical::memory_rollup_days(),
+    })
+}
+
+/// Apply advanced settings from API/UI (updates process env; persist via akasha.env separately).
+pub fn apply_advanced_settings(body: &serde_json::Value) {
+    if let Some(v) = body.get("multi_query").and_then(|x| x.as_bool()) {
+        std::env::set_var("AKASHA_MEMORY_MULTI_QUERY", if v { "1" } else { "0" });
+    }
+    if let Some(v) = body.get("hyde").and_then(|x| x.as_bool()) {
+        std::env::set_var("AKASHA_MEMORY_HYDE", if v { "1" } else { "0" });
+    }
+    if let Some(v) = body.get("rrf").and_then(|x| x.as_bool()) {
+        std::env::set_var("AKASHA_MEMORY_RRF", if v { "1" } else { "0" });
+    }
+    if let Some(v) = body.get("rollup_days").and_then(|x| x.as_u64()) {
+        std::env::set_var("AKASHA_MEMORY_ROLLUP_DAYS", v.to_string());
+    }
+}
+
 /// Generate 2–3 query reformulations via lightweight LLM call.
 pub async fn expand_queries(router: &Arc<LLMRouter>, message: &str) -> Vec<String> {
     if !memory_multi_query_enabled() || message.trim().len() < 8 {

@@ -122,3 +122,21 @@ pub async fn maybe_run_hierarchical_compaction(
         }
     }
 }
+
+/// Rollup threshold in days for compressing old long-term entries (`AKASHA_MEMORY_ROLLUP_DAYS`, default 90; 0 = off).
+pub fn memory_rollup_days() -> u32 {
+    std::env::var("AKASHA_MEMORY_ROLLUP_DAYS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(90)
+}
+
+/// Scheduled rollup stub: summarize/compress LT entries older than [`memory_rollup_days`].
+pub async fn run_lt_rollup_stub(client: &LongTermMemoryClient) {
+    let days = memory_rollup_days();
+    if days == 0 {
+        return;
+    }
+    let client = client.clone();
+    let _ = tokio::task::spawn_blocking(move || client.run_lt_rollup(days)).await;
+}
