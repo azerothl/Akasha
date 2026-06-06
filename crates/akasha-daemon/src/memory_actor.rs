@@ -98,21 +98,26 @@ pub enum MemoryResponse {
 
 /// Receive a memory-actor response from the dedicated memory thread.
 ///
-/// Must run on a blocking thread (`spawn_blocking` or the memory actor's OS thread).
-/// Do not use `block_in_place` here: `try_current()` is also set inside `spawn_blocking`,
-/// and calling `block_in_place` from the blocking pool can stall the runtime under load.
+/// Uses `std::sync::mpsc` (not `tokio::sync::oneshot::blocking_recv`) so callers on
+/// `spawn_blocking` threads can block safely. When a Tokio handle is present (worker or
+/// blocking pool), wrap the wait in `block_in_place` so worker threads yield their core.
 #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
 fn recv_memory_response(
-    resp_rx: tokio::sync::oneshot::Receiver<MemoryResponse>,
+    resp_rx: std::sync::mpsc::Receiver<MemoryResponse>,
 ) -> Result<MemoryResponse, ()> {
-    resp_rx.blocking_recv().map_err(|_| ())
+    let recv = || resp_rx.recv().map_err(|_| ());
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(recv)
+    } else {
+        recv()
+    }
 }
 
 /// Client handle: Send + Sync, can be used from async code.
 #[derive(Clone)]
 pub struct LongTermMemoryClient {
     #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
-    tx: std::sync::mpsc::Sender<(MemoryRequest, tokio::sync::oneshot::Sender<MemoryResponse>)>,
+    tx: std::sync::mpsc::Sender<(MemoryRequest, std::sync::mpsc::Sender<MemoryResponse>)>,
 }
 
 impl LongTermMemoryClient {
@@ -126,7 +131,7 @@ impl LongTermMemoryClient {
     ) -> Vec<(String, String)> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Search { query_text, top_k, filter }, resp_tx)).is_err() {
                 return Vec::new();
             }
@@ -156,7 +161,7 @@ impl LongTermMemoryClient {
     ) -> Result<Option<String>, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at, explicit_links }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
@@ -177,7 +182,7 @@ impl LongTermMemoryClient {
     pub fn list(&self, limit: usize, offset: usize) -> (Vec<(String, String, String, String)>, u64) {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::List { limit, offset }, resp_tx)).is_err() {
                 return (Vec::new(), 0);
             }
@@ -197,7 +202,7 @@ impl LongTermMemoryClient {
     pub fn delete(&self, id: String) -> Result<(), String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Delete { id }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
@@ -217,7 +222,7 @@ impl LongTermMemoryClient {
     pub fn has_daily_summary_for_date(&self, date: String) -> bool {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::HasDailySummary { date }, resp_tx)).is_err() {
                 return false;
             }
@@ -237,7 +242,7 @@ impl LongTermMemoryClient {
     pub fn forget_by_query(&self, query: String) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::ForgetByQuery { query }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
@@ -257,7 +262,7 @@ impl LongTermMemoryClient {
     pub fn stats(&self) -> Result<(u64, u64), String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Stats, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
@@ -285,7 +290,7 @@ impl LongTermMemoryClient {
     ) -> Result<uuid::Uuid, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::EmitEvent { event_type, payload, entity_id, process_id, session_id, task_id, importance, scope, tags }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
@@ -305,7 +310,7 @@ impl LongTermMemoryClient {
     pub fn search_episodic(&self, filter: akasha_store::EpisodicFilter, limit: usize) -> Vec<akasha_store::EpisodicEvent> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::SearchEpisodic { filter, limit }, resp_tx)).is_err() {
                 return Vec::new();
             }
@@ -325,7 +330,7 @@ impl LongTermMemoryClient {
     pub fn get_facts_by_entity(&self, entity_id: String, limit: usize) -> Vec<akasha_store::Fact> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::GetFactsByEntity { entity_id, limit }, resp_tx)).is_err() {
                 return Vec::new();
             }
@@ -345,7 +350,7 @@ impl LongTermMemoryClient {
     pub fn get_related_ids(&self, entry_id: String, kind: Option<String>, limit: usize) -> Vec<String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::GetRelatedIds { entry_id, kind, limit }, resp_tx)).is_err() {
                 return Vec::new();
             }
@@ -368,7 +373,7 @@ impl LongTermMemoryClient {
             if ids.is_empty() {
                 return Vec::new();
             }
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::GetContentsByIds { ids }, resp_tx)).is_err() {
                 return Vec::new();
             }
@@ -391,7 +396,7 @@ impl LongTermMemoryClient {
             if ids.is_empty() {
                 return std::collections::HashMap::new();
             }
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::GetRelationsForEntries { ids }, resp_tx)).is_err() {
                 return std::collections::HashMap::new();
             }
@@ -411,7 +416,7 @@ impl LongTermMemoryClient {
     pub fn rebuild_similar_relations(&self, max_per_entry: usize) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::RebuildSimilarRelations { max_per_entry }, resp_tx)).is_err() {
                 return Err("memory actor unavailable".to_string());
             }
@@ -431,7 +436,7 @@ impl LongTermMemoryClient {
     pub fn gc(&self, retention_days: u32, protect_sources: Option<Vec<String>>) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Gc { retention_days, protect_sources }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
@@ -450,7 +455,7 @@ impl LongTermMemoryClient {
     pub fn record_recall_boost(&self, ids: Vec<String>) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::RecordRecallBoost { ids }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
@@ -469,7 +474,7 @@ impl LongTermMemoryClient {
     pub fn record_recall_decay(&self, ids: Vec<String>) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::RecordRecallDecay { ids }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
@@ -488,7 +493,7 @@ impl LongTermMemoryClient {
     pub fn update(&self, id: String, content: String) -> Result<(), String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Update { id, content }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
@@ -507,7 +512,7 @@ impl LongTermMemoryClient {
     pub fn run_hygiene_purge(&self) -> Result<(u64, u64), String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::HygienePurge, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
@@ -525,7 +530,7 @@ impl LongTermMemoryClient {
     pub fn run_lt_rollup(&self, days: u32) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self
                 .tx
                 .send((MemoryRequest::LtRollup { days, limit: 20 }, resp_tx))
@@ -555,7 +560,6 @@ pub fn start_memory_actor(
     #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
     {
         use std::sync::mpsc;
-        use tokio::sync::oneshot;
         use uuid::Uuid;
         use akasha_embeddings::{embedding_to_bytes, Embedder};
         use akasha_store::{
@@ -565,7 +569,7 @@ pub fn start_memory_actor(
         use crate::memory_fact_extract;
         use crate::memory_relation_inference;
 
-        let (tx, rx) = mpsc::channel::<(MemoryRequest, oneshot::Sender<MemoryResponse>)>();
+        let (tx, rx) = mpsc::channel::<(MemoryRequest, mpsc::Sender<MemoryResponse>)>();
         let memory_db_path = _memory_db_path.to_path_buf();
         let embedding_cache_dir = _embedding_cache_dir.to_path_buf();
         let handle = thread::spawn(move || {
