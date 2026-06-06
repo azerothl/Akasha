@@ -56,6 +56,8 @@ pub struct RecallParams {
     pub search_queries: Vec<String>,
     /// Workspace graph excerpts (D7): fused into long-term block instead of separate post-pass when set.
     pub workspace_graph_lines: Vec<String>,
+    /// Optional constitution governance (S-RAG-02): filters recall + injects read-only rules.
+    pub constitution: Option<crate::constitution::Constitution>,
 }
 
 impl Default for RecallParams {
@@ -81,6 +83,7 @@ impl Default for RecallParams {
             include_preference_and_personality_episodic: true,
             search_queries: Vec::new(),
             workspace_graph_lines: Vec::new(),
+            constitution: None,
         }
     }
 }
@@ -108,6 +111,7 @@ impl RecallParams {
             include_preference_and_personality_episodic: true,
             search_queries: Vec::new(),
             workspace_graph_lines: Vec::new(),
+            constitution: None,
         }
     }
 }
@@ -176,6 +180,45 @@ fn fuse_semantic_search(
 
 fn per_query_top_k(top_k: usize) -> usize {
     top_k.max(top_k.saturating_mul(2).min(20))
+}
+
+fn graph_communities_enabled() -> bool {
+    std::env::var("AKASHA_MEMORY_GRAPH_COMMUNITIES")
+        .ok()
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// GraphRAG light (D4): cluster `project:*` sources into per-project community snippets.
+fn append_project_communities(client: &LongTermMemoryClient, block: &mut String) {
+    if !graph_communities_enabled() {
+        return;
+    }
+    let rows = client.list_by_source_prefix("project:".to_string(), 48);
+    if rows.is_empty() {
+        return;
+    }
+    let mut by_project: HashMap<String, Vec<String>> = HashMap::new();
+    for (_id, content, source) in rows {
+        let project = source
+            .strip_prefix("project:")
+            .unwrap_or(&source)
+            .split(':')
+            .next()
+            .unwrap_or("unknown")
+            .trim()
+            .to_string();
+        let snippet = content.chars().take(120).collect::<String>();
+        by_project.entry(project).or_default().push(snippet);
+    }
+    if by_project.is_empty() {
+        return;
+    }
+    block.push_str("[Project memory communities — GraphRAG light]\n");
+    for (project, snippets) in by_project {
+        let joined = snippets.into_iter().take(3).collect::<Vec<_>>().join(" | ");
+        block.push_str(&format!("- project:{project} ({joined})\n"));
+    }
 }
 
 /// Fused memory context: sections to inject into the prompt.
@@ -300,6 +343,14 @@ pub async fn recall_context(
                 recall_filter,
             )
         };
+        let results: Vec<(String, String)> = if let Some(ref constitution) = params.constitution {
+            results
+                .into_iter()
+                .filter(|(_, content)| !constitution.blocks_recall_content(content))
+                .collect()
+        } else {
+            results
+        };
         if params.semantic_top_k > 0 {
             if results.is_empty() {
                 MEMORY_RECALL_SEMANTIC_EMPTY.fetch_add(1, Ordering::Relaxed);
@@ -383,6 +434,7 @@ pub async fn recall_context(
                 ctx.project_block.push_str("\n");
             }
         }
+        append_project_communities(&client, &mut ctx.project_block);
 
         // Graph retriever: facts by entity, task, or process
         let entity_for_facts = params
@@ -465,6 +517,16 @@ pub async fn recall_context(
         }
 
         // Phase 6: Policy retriever — explicit rules + learned preferences from episodic
+        if let Some(ref constitution) = params.constitution {
+            if constitution.is_configured() {
+                let rules = constitution.recall_policy_text();
+                if !rules.is_empty() {
+                    ctx.policy_block.push_str("[Constitution — read-only]\n");
+                    ctx.policy_block.push_str(&rules);
+                    ctx.policy_block.push_str("\n\n");
+                }
+            }
+        }
         if let Some(summary) = params.policy_summary {
             ctx.policy_block.push_str(&summary);
             ctx.policy_block.push_str("\n");

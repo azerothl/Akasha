@@ -9,6 +9,7 @@ Ce dossier contient uniquement la documentation destinee aux utilisateurs finaux
 | [user_guide_final.md](user_guide_final.md) | Guide utilisateur principal (installation, configuration, interfaces, commandes, depannage). |
 | [user_guide.md](user_guide.md) | Copie diffusee dans les releases et utilisee par l'onglet **Doc** des interfaces. |
 | [screenshots/README.md](screenshots/README.md) | Informations sur les captures d'ecran utilisateur. |
+| [constitution.yaml.example](constitution.yaml.example) | Gabarit gouvernance mémoire (E1) — copier vers `~/akasha/constitution.yaml` pour activer le filtre recall. |
 
 ## Portee
 

@@ -146,7 +146,8 @@ fn parse_env_usize(name: &str, default_value: usize, min_value: usize, max_value
 /// 4. delete rolled-up entry ids
 pub async fn run_lt_rollup_with_llm(client: &LongTermMemoryClient, llm_router: Option<&LLMRouter>) {
     let Some(router) = llm_router else {
-        run_lt_rollup_stub(client).await;
+        tracing::warn!(rollup_deferred = true, "LT rollup deferred: no LLM router; running actor rollup without LLM summarization");
+        run_lt_rollup_without_llm(client).await;
         return;
     };
     let days = memory_rollup_days();
@@ -248,12 +249,27 @@ pub async fn run_lt_rollup_with_llm(client: &LongTermMemoryClient, llm_router: O
         }
     }
     if rolled_up > 0 {
-        tracing::info!(days, rolled_up, "LT memory rollup with LLM completed");
+        tracing::info!(
+            days,
+            memory_rollup_entries = rolled_up,
+            "LT memory rollup with LLM completed"
+        );
     }
 }
 
-/// Scheduled rollup stub: summarize/compress LT entries older than [`memory_rollup_days`].
-pub async fn run_lt_rollup_stub(client: &LongTermMemoryClient) {
+#[cfg(test)]
+mod tests {
+    use super::memory_rollup_days;
+
+    #[test]
+    fn memory_rollup_days_defaults_to_ninety() {
+        std::env::remove_var("AKASHA_MEMORY_ROLLUP_DAYS");
+        assert_eq!(memory_rollup_days(), 90);
+    }
+}
+
+/// Rollup without LLM: delegates to the memory actor's LtRollup handler.
+pub async fn run_lt_rollup_without_llm(client: &LongTermMemoryClient) {
     let days = memory_rollup_days();
     if days == 0 {
         return;

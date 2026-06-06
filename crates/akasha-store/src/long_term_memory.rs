@@ -642,6 +642,58 @@ impl LongTermStore {
         self.conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |row| row.get::<_, i64>(0).map(|n| n as u64)).map_err(Into::into)
     }
 
+    /// Test / migration helper: override `created_at` for an entry.
+    #[doc(hidden)]
+    pub fn set_created_at(&self, id: &Uuid, created_at: DateTime<Utc>) -> anyhow::Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE memory_entries SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![created_at.to_rfc3339(), id.to_string()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// List entries whose `source` starts with `prefix` (e.g. `project:`). Returns (id, content, source).
+    pub fn list_by_source_prefix(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        let p = prefix.trim();
+        if p.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pattern = format!(
+            "{}%",
+            p.replace('%', "\\%").replace('_', "\\_").replace('\\', "\\\\")
+        );
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, source FROM memory_entries WHERE source LIKE ?1 ESCAPE '\\' ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// List entries attributed to a session. Returns (id, content, source).
+    pub fn list_entries_by_session(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        let sid = session_id.trim();
+        if sid.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, source FROM memory_entries WHERE session_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![sid, limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Entries older than `days` (for rollup / archival jobs). Returns (id, content, source).
     pub fn list_entries_older_than(
         &self,
@@ -1092,6 +1144,51 @@ mod tests {
         assert!(!store.content_exists("unique content").unwrap());
         store.insert("unique content", &embedding_f32_to_bytes(&[0.0]), "test").unwrap();
         assert!(store.content_exists("unique content").unwrap());
+    }
+
+    #[test]
+    fn list_entries_older_than_finds_stale_entries_for_lt_rollup() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        let emb = embedding_f32_to_bytes(&[1.0, 0.0, 0.0]);
+        let id = store
+            .insert("stale memory for rollup", &emb, "session_checkpoint_l1")
+            .unwrap();
+        let old_ts = Utc::now() - chrono::Duration::days(120);
+        assert!(store.set_created_at(&id, old_ts).unwrap());
+        let old = store.list_entries_older_than(90, 20).unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].0, id.to_string());
+        assert!(!old[0].2.contains("memory_rollup"));
+    }
+
+    #[test]
+    fn list_by_source_prefix_groups_project_entries() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        let emb = embedding_f32_to_bytes(&[0.0; 4]);
+        store.insert("alpha", &emb, "project:demo").unwrap();
+        store.insert("beta", &emb, "project:demo").unwrap();
+        store.insert("other", &emb, "user_preference").unwrap();
+        let rows = store.list_by_source_prefix("project:", 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|(_, _, src)| src.starts_with("project:")));
+    }
+
+    #[test]
+    fn list_entries_by_session_filters_attribution() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        let emb = embedding_f32_to_bytes(&[0.0; 4]);
+        store
+            .insert_with_attribution("branch a", &emb, "test", None, None, Some("sess-a"), None, None, None, None, None)
+            .unwrap();
+        store
+            .insert_with_attribution("branch b", &emb, "test", None, None, Some("sess-b"), None, None, None, None, None)
+            .unwrap();
+        let rows = store.list_entries_by_session("sess-a", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "branch a");
     }
 
     #[test]

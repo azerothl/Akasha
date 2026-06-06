@@ -71,6 +71,10 @@ pub enum MemoryRequest {
     HygienePurge,
     /// Rollup stub for entries older than N days.
     LtRollup { days: u32, limit: usize },
+    /// GraphRAG light: list entries by source prefix (e.g. `project:`).
+    ListBySourcePrefix { prefix: String, limit: usize },
+    /// E3 branch clone: list entries for a session.
+    ListBySession { session_id: String, limit: usize },
 }
 
 pub enum MemoryResponse {
@@ -94,6 +98,8 @@ pub enum MemoryResponse {
     Update(Result<(), String>),
     HygienePurge(Result<(u64, u64), String>),
     LtRollup(Result<u64, String>),
+    ListBySourcePrefix(Vec<(String, String, String)>),
+    ListBySession(Vec<(String, String, String)>),
 }
 
 /// Receive a memory-actor response from the dedicated memory thread.
@@ -527,6 +533,52 @@ impl LongTermMemoryClient {
         }
     }
 
+    pub fn list_by_source_prefix(&self, prefix: String, limit: usize) -> Vec<(String, String, String)> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+            if self
+                .tx
+                .send((MemoryRequest::ListBySourcePrefix { prefix, limit }, resp_tx))
+                .is_err()
+            {
+                return Vec::new();
+            }
+            match recv_memory_response(resp_rx) {
+                Ok(MemoryResponse::ListBySourcePrefix(rows)) => rows,
+                _ => Vec::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (prefix, limit);
+            Vec::new()
+        }
+    }
+
+    pub fn list_by_session(&self, session_id: String, limit: usize) -> Vec<(String, String, String)> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+            if self
+                .tx
+                .send((MemoryRequest::ListBySession { session_id, limit }, resp_tx))
+                .is_err()
+            {
+                return Vec::new();
+            }
+            match recv_memory_response(resp_rx) {
+                Ok(MemoryResponse::ListBySession(rows)) => rows,
+                _ => Vec::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (session_id, limit);
+            Vec::new()
+        }
+    }
+
     pub fn run_lt_rollup(&self, days: u32) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
@@ -680,7 +732,9 @@ pub fn start_memory_actor(
                                             if entry.id == id {
                                                 continue;
                                             }
-                                            if let Some(kind) = auto_relation_kind(sim, &content) {
+                                            if let Some(kind) =
+                                                auto_relation_kind(sim, &content, &entry.content)
+                                            {
                                                 let _ = store.insert_relation(id, entry.id, kind);
                                                 n += 1;
                                             }
@@ -822,6 +876,18 @@ pub fn start_memory_actor(
                         let low = store.purge_low_confidence(0.2).unwrap_or(0);
                         MemoryResponse::HygienePurge(Ok((expired, low)))
                     }
+                    MemoryRequest::ListBySourcePrefix { prefix, limit } => {
+                        let rows = store
+                            .list_by_source_prefix(&prefix, limit)
+                            .unwrap_or_default();
+                        MemoryResponse::ListBySourcePrefix(rows)
+                    }
+                    MemoryRequest::ListBySession { session_id, limit } => {
+                        let rows = store
+                            .list_entries_by_session(&session_id, limit)
+                            .unwrap_or_default();
+                        MemoryResponse::ListBySession(rows)
+                    }
                     MemoryRequest::LtRollup { days, limit } => {
                         let result = (|| -> Result<u64, String> {
                             let old = store
@@ -830,24 +896,67 @@ pub fn start_memory_actor(
                             if old.is_empty() {
                                 return Ok(0);
                             }
-                            let preview: String = old
+                            let source = format!(
+                                "memory_rollup_{}",
+                                chrono::Utc::now().format("%Y-%m-%d")
+                            );
+                            let summary_lines = old
                                 .iter()
-                                .take(3)
-                                .map(|(_, content, _)| content.chars().take(120).collect::<String>())
+                                .map(|(id, content, src)| {
+                                    format!(
+                                        "- [{id}] (source={src}) {}",
+                                        content.chars().take(800).collect::<String>()
+                                    )
+                                })
                                 .collect::<Vec<_>>()
-                                .join("\n---\n");
-                            let _summary = format!(
-                                "[Rollup stub — {} entrée(s) antérieures à {} j]\n{}",
+                                .join("\n");
+                            let summary = format!(
+                                "[Rollup mémoire long-terme: {} entrée(s) > {} jours]\n{}",
                                 old.len(),
                                 days,
-                                preview
+                                summary_lines
                             );
-                            tracing::info!(count = old.len(), days, "LT memory rollup stub");
+                            if store.content_exists(&summary).unwrap_or(false) {
+                                tracing::debug!(days, "LT memory rollup skipped: duplicate summary");
+                                return Ok(0);
+                            }
+                            let ids_to_delete: Vec<String> =
+                                old.iter().map(|(id, _, _)| id.clone()).collect();
+                            embedder
+                                .embed_one(&summary)
+                                .map_err(|e| e.to_string())
+                                .and_then(|vec| {
+                                    let bytes = embedding_to_bytes(&vec);
+                                    store
+                                        .insert_with_attribution(
+                                            &summary,
+                                            &bytes,
+                                            &source,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            Some(1),
+                                            Some("global_user"),
+                                            None,
+                                        )
+                                        .map_err(|e| e.to_string())
+                                })?;
+                            let mut deleted = 0u64;
+                            for id_str in ids_to_delete {
+                                if let Ok(uuid) = Uuid::parse_str(&id_str) {
+                                    if store.delete_by_id(uuid).map_err(|e| e.to_string())? {
+                                        deleted += 1;
+                                    }
+                                }
+                            }
                             if let Some(ref ep) = episodic_store {
                                 let payload = serde_json::json!({
                                     "rollup_days": days,
                                     "entry_count": old.len(),
-                                    "entry_ids": old.iter().map(|(id, _, _)| id).take(10).collect::<Vec<_>>(),
+                                    "deleted_count": deleted,
+                                    "source": source,
                                 });
                                 let _ = ep.insert_event(
                                     "memory_rollup",
@@ -861,7 +970,14 @@ pub fn start_memory_actor(
                                     Some("rollup"),
                                 );
                             }
-                            Ok(old.len() as u64)
+                            tracing::info!(
+                                count = deleted,
+                                memory_rollup_entries = deleted,
+                                days,
+                                source = %source,
+                                "LT memory rollup completed"
+                            );
+                            Ok(deleted)
                         })();
                         MemoryResponse::LtRollup(result)
                     }
