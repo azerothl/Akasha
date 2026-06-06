@@ -1975,7 +1975,19 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                             "parent_id": root_task_id.to_string(),
                             "agent": agent_type,
                             "step_id": &step.step_id,
-                            "delegation_reason": serde_json::Value::Null
+                            "delegation_reason": step.intent.clone()
+                        })),
+                    )
+                    .with_correlation(root_task_id),
+                );
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::AgentDelegated,
+                        Some(serde_json::json!({
+                            "task_id": child_id.to_string(),
+                            "parent_id": root_task_id.to_string(),
+                            "agent": agent_type,
+                            "reason": step.intent.clone()
                         })),
                     )
                     .with_correlation(root_task_id),
