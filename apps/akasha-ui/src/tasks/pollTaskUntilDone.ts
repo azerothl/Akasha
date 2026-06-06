@@ -63,6 +63,17 @@ export type PollTaskUntilDoneDeps = {
   voiceTtsConfigured: boolean;
 };
 
+/** Progress messages emitted before real LLM/tool output — not shown as the final chat reply. */
+function isStartupProgressMessage(msg: string): boolean {
+  const m = msg.trim();
+  if (!m) return true;
+  return (
+    m.startsWith("Analyzing your request") ||
+    m.startsWith("Still spinning") ||
+    m.startsWith("Still working")
+  );
+}
+
 export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneDeps): Promise<void> {
   const maxWait = 600;
   const MIN_INTERVAL = 1500;
@@ -71,6 +82,7 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
   let ticksWithoutChange = 0;
   let lastStatus = "";
   let lastMsg = "";
+  let stallHintShown = false;
 
   for (let i = 0; i < maxWait; i++) {
     await new Promise((r) => setTimeout(r, pollIntervalMs));
@@ -182,11 +194,29 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
         });
         deps.humanInputAutoOpenedRef.current.delete(taskId);
       }
-      if (!isTaskTerminalStatus(currentStatus) && msg) {
+      if (!isTaskTerminalStatus(currentStatus) && msg && !isStartupProgressMessage(msg)) {
         deps.applyChatStreamProgress(taskId, msg);
+      } else if (
+        currentStatus === "running" &&
+        taskForActiveChat &&
+        isStartupProgressMessage(msg) &&
+        ticksWithoutChange >= 12 &&
+        !stallHintShown
+      ) {
+        stallHintShown = true;
+        deps.applyChatStreamProgress(
+          taskId,
+          "Tâche en cours… (assemblage du contexte ou appel au modèle — patientez quelques instants).",
+        );
       }
       if (currentStatus === "completed") {
         deps.setRunningTaskChips((prev) => {
+          const next = { ...prev };
+          delete next[taskId];
+          return next;
+        });
+        deps.setRunningTaskEvents((prev) => {
+          if (prev[taskId] === undefined) return prev;
           const next = { ...prev };
           delete next[taskId];
           return next;
@@ -272,6 +302,12 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
           delete next[taskId];
           return next;
         });
+        deps.setRunningTaskEvents((prev) => {
+          if (prev[taskId] === undefined) return prev;
+          const next = { ...prev };
+          delete next[taskId];
+          return next;
+        });
         void deps.fetchTasksList({ silent: true });
         deps.setPendingHumanInput((prev) => {
           const next = { ...prev };
@@ -311,6 +347,12 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
     }
   }
   deps.setRunningTaskChips((prev) => {
+    const next = { ...prev };
+    delete next[taskId];
+    return next;
+  });
+  deps.setRunningTaskEvents((prev) => {
+    if (prev[taskId] === undefined) return prev;
     const next = { ...prev };
     delete next[taskId];
     return next;

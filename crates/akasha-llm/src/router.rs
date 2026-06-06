@@ -290,6 +290,15 @@ impl LLMRouter {
         Ok(())
     }
 
+    /// Replace in-memory routing config (task_types, providers metadata, global) from disk or API reload.
+    /// Registered provider clients (Ollama, OpenRouter, etc.) are unchanged — route/model switches take effect immediately.
+    pub fn reload_routing_config(&self, config: RoutingConfig) {
+        match self.config.write() {
+            Ok(mut cfg) => *cfg = config,
+            Err(poisoned) => *poisoned.into_inner() = config,
+        }
+    }
+
     /// Set the primary provider/model for a task type (e.g. conversation, code_generation). Applied immediately.
     pub fn set_primary_route(&self, task_type: &str, entry: crate::config::RouteEntry) {
         match self.config.write() {
@@ -546,6 +555,35 @@ mod tests {
                 total_duration_ns: None,
             })
         }
+    }
+
+    #[test]
+    fn reload_routing_config_updates_primary_route() {
+        let mut config = RoutingConfig::default_config();
+        config.set_primary_route(
+            "conversation",
+            RouteEntry {
+                provider: "akasha_embedded".into(),
+                model: "default".into(),
+                config: None,
+            },
+        );
+        let router = LLMRouter::new(config);
+        let mut new_config = RoutingConfig::default_config();
+        new_config.set_primary_route(
+            "conversation",
+            RouteEntry {
+                provider: "openrouter".into(),
+                model: "qwen/test".into(),
+                config: None,
+            },
+        );
+        router.reload_routing_config(new_config);
+        let route = router.primary_route_for_task_type("conversation");
+        assert_eq!(
+            route,
+            Some(("openrouter".to_string(), "qwen/test".to_string()))
+        );
     }
 
     #[tokio::test]

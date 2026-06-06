@@ -3265,12 +3265,7 @@ async fn do_install_skill(
             };
             if need_hot_reload {
                 if let Some((r, path)) = tools_reload {
-                    if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
-                        if let Ok(v) = akasha_vault::open_vault(data_dir) {
-                            reloaded.apply_vault_api_keys(|k| v.get(k).ok());
-                        }
-                        *r.write().await =
-                            std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
+                    if reload_tools_executor_policy(r, path, data_dir).await.is_ok() {
                         commands_added_msg = commands_added_msg
                             .replace(" (allowed_commands) :", " ; politique rechargée à chaud :");
                     }
@@ -3371,12 +3366,7 @@ async fn do_uninstall_skill(
     }
     if policy_updated {
         if let Some((r, path)) = tools_reload {
-            if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
-                if let Ok(v) = akasha_vault::open_vault(data_dir) {
-                    reloaded.apply_vault_api_keys(|k| v.get(k).ok());
-                }
-                *r.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
-            }
+            let _ = reload_tools_executor_policy(r, path, data_dir).await;
         }
     }
     match skill_registry.reload(data_dir, spec_dir).await {
@@ -7108,6 +7098,86 @@ fn memory_profile_for_task(
     }
 }
 
+fn task_stall_timeout_secs() -> u64 {
+    std::env::var("AKASHA_TASK_STALL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s >= 30)
+        .unwrap_or(180)
+}
+
+/// Fails the task when no meaningful progress occurred within the stall timeout (worker hang, LLM never responds).
+fn spawn_task_stall_watchdog(
+    bus: EventBus,
+    store_path: std::path::PathBuf,
+    correlation_id: Uuid,
+    task_id: Uuid,
+    meaningful_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    task_completion_registry: Option<TaskCompletionRegistry>,
+    steering_queue: Option<SteeringQueueStore>,
+    mut cancel_rx: oneshot::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let timeout_secs = task_stall_timeout_secs();
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+                if meaningful_progress.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let still_running = TaskStore::open(&store_path)
+                    .ok()
+                    .and_then(|s| s.get(task_id).ok().flatten())
+                    .map(|t| t.status == TaskStatus::Running)
+                    .unwrap_or(false);
+                if !still_running {
+                    return;
+                }
+                let reason = format!(
+                    "La tâche n'a produit aucune progression utile après {} secondes. \
+                     Le worker a peut‑être bloqué ou le fournisseur LLM ne répond pas. \
+                     Réessayez ou redémarrez le daemon.",
+                    timeout_secs
+                );
+                if let Ok(store) = TaskStore::open(&store_path) {
+                    let _ = store.update_status(task_id, TaskStatus::Failed);
+                }
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 100,
+                            "message": reason
+                        })),
+                    )
+                    .with_correlation(correlation_id),
+                );
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::TaskFailed,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "status": "failed",
+                            "reason": reason
+                        })),
+                    )
+                    .with_correlation(correlation_id),
+                );
+                if let Some(ref sq) = steering_queue {
+                    sq.unregister_active(task_id).await;
+                }
+                notify_task_completion(&task_completion_registry, task_id).await;
+                tracing::warn!(
+                    task_id = %task_id,
+                    timeout_secs,
+                    "task stall watchdog: marked failed (no meaningful progress)"
+                );
+            }
+            _ = &mut cancel_rx => {}
+        }
+    });
+}
+
 fn spawn_progress_watchdog(
     bus: EventBus,
     correlation_id: Uuid,
@@ -7149,6 +7219,29 @@ fn cancel_progress_watchdog(cancel_tx: &mut Option<oneshot::Sender<()>>) {
     if let Some(tx) = cancel_tx.take() {
         let _ = tx.send(());
     }
+}
+
+fn cancel_task_watchdogs(
+    progress_cancel: &mut Option<oneshot::Sender<()>>,
+    stall_cancel: &mut Option<oneshot::Sender<()>>,
+) {
+    cancel_progress_watchdog(progress_cancel);
+    cancel_progress_watchdog(stall_cancel);
+}
+
+/// Reload `tools_policy.yaml` from disk into the in-memory executor (hot reload).
+async fn reload_tools_executor_policy(
+    executor: &std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
+    policy_path: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let mut reloaded = akasha_tools::ToolsPolicy::load_from_path(policy_path)?;
+    if let Ok(v) = akasha_vault::open_vault(data_dir) {
+        reloaded.apply_vault_api_keys(|k| v.get(k).ok());
+    }
+    reloaded.workspace_root = Some(data_dir.to_path_buf());
+    *executor.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
+    Ok(())
 }
 
 async fn wait_for_task_activity(
@@ -8361,6 +8454,17 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+    let _ = bus.send(
+        EventEnvelope::new(
+            EventType::ProgressUpdate,
+            Some(serde_json::json!({
+                "task_id": task_id.to_string(),
+                "progress_pct": 5,
+                "message": "Analyzing your request…"
+            })),
+        )
+        .with_correlation(task_id),
+    );
     let (message, embedded_studio_acceptance) =
         crate::api_studio::strip_embedded_acceptance_json(&message);
     let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
@@ -8484,6 +8588,28 @@ pub(crate) async fn run_message_via_llm(
     let timeline_correlation = resolve_root_task_id(&store_path, task_id)
         .or_else(|| task_snapshot.as_ref().and_then(|t| t.parent_task_id))
         .unwrap_or(task_id);
+    let meaningful_progress_flag =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (watchdog_tx, watchdog_rx) = oneshot::channel();
+    let mut watchdog_cancel = Some(watchdog_tx);
+    let (stall_tx, stall_rx) = oneshot::channel();
+    let mut stall_cancel = Some(stall_tx);
+    spawn_progress_watchdog(
+        bus.clone(),
+        timeline_correlation,
+        task_id,
+        watchdog_rx,
+    );
+    spawn_task_stall_watchdog(
+        bus.clone(),
+        store_path.clone(),
+        timeline_correlation,
+        task_id,
+        meaningful_progress_flag.clone(),
+        task_completion_registry.clone(),
+        steering_queue.clone(),
+        stall_rx,
+    );
 
     // All intent detection / classification uses clean_message so a guardrail prefix never
     // breaks fast-lane matching or memory profile selection.
@@ -8587,22 +8713,6 @@ pub(crate) async fn run_message_via_llm(
         )
         .with_correlation(task_id),
     );
-
-    // Progress to show we have started (model may be loading on first call).
-    let _ = bus.send(
-        EventEnvelope::new(
-            EventType::ProgressUpdate,
-            Some(serde_json::json!({
-                "task_id": task_id.to_string(),
-                "progress_pct": 10,
-                "message": "Analyzing your request…"
-            })),
-        )
-        .with_correlation(task_id),
-    );
-    let (watchdog_tx, watchdog_rx) = oneshot::channel();
-    let mut watchdog_cancel = Some(watchdog_tx);
-    spawn_progress_watchdog(bus.clone(), timeline_correlation, task_id, watchdog_rx);
 
     let max_tokens = std::env::var("AKASHA_MAX_RESPONSE_TOKENS")
         .ok()
@@ -9358,7 +9468,8 @@ pub(crate) async fn run_message_via_llm(
             }
         });
         first_meaningful_progress_sent = true;
-        cancel_progress_watchdog(&mut watchdog_cancel);
+        meaningful_progress_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
         if emit_timeline_once_for_task(
             &bus,
             Some(store_path.as_path()),
@@ -9433,7 +9544,9 @@ pub(crate) async fn run_message_via_llm(
 
         'tool_rounds: loop {
             match store.get(task_id).ok().flatten().map(|t| t.status) {
-                Some(TaskStatus::Paused) | Some(TaskStatus::Cancelled) => {
+                Some(TaskStatus::Paused)
+                | Some(TaskStatus::Cancelled)
+                | Some(TaskStatus::Failed) => {
                     break 'tool_rounds;
                 }
                 _ => {}
@@ -9590,7 +9703,9 @@ pub(crate) async fn run_message_via_llm(
                     Ok(Some(chunk)) => {
                         if !first_meaningful_progress_sent && !chunk.trim().is_empty() {
                             first_meaningful_progress_sent = true;
-                            cancel_progress_watchdog(&mut watchdog_cancel);
+                            meaningful_progress_flag
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
                             if emit_timeline_once_for_task(
                                 &bus,
                                 Some(store_path.as_path()),
@@ -10096,7 +10211,9 @@ pub(crate) async fn run_message_via_llm(
                         let progress_msg = progress_message_for_tool(display_tool, tool_args);
                         if !first_meaningful_progress_sent {
                             first_meaningful_progress_sent = true;
-                            cancel_progress_watchdog(&mut watchdog_cancel);
+                            meaningful_progress_flag
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
                             if emit_timeline_once_for_task(
                                 &bus,
                                 Some(store_path.as_path()),
@@ -11537,7 +11654,12 @@ pub(crate) async fn run_message_via_llm(
     let is_paused = matches!(task_status_snapshot, Some(TaskStatus::Paused));
     let halted_user = matches!(
         task_status_snapshot,
-        Some(TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Interrupted)
+        Some(
+            TaskStatus::Paused
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
+                | TaskStatus::Failed
+        )
     );
     let mut studio_verify_error: Option<String> = None;
     let mut studio_autofix_applied = false;
@@ -11737,7 +11859,8 @@ pub(crate) async fn run_message_via_llm(
         }
     }
     if !first_meaningful_progress_sent && !reply_text.trim().is_empty() {
-        cancel_progress_watchdog(&mut watchdog_cancel);
+        meaningful_progress_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
         if emit_timeline_once_for_task(
             &bus,
             Some(store_path.as_path()),
@@ -11748,7 +11871,7 @@ pub(crate) async fn run_message_via_llm(
             log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
         }
     } else {
-        cancel_progress_watchdog(&mut watchdog_cancel);
+        cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
     }
 
     // Persist this exchange in short-term memory (spec 06)
@@ -12116,6 +12239,8 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         EventType::TaskPaused
     } else if matches!(task_status_snapshot, Some(TaskStatus::Interrupted)) {
         EventType::TaskPaused
+    } else if matches!(task_status_snapshot, Some(TaskStatus::Failed)) {
+        EventType::TaskFailed
     } else if studio_verify_error.is_some() {
         EventType::TaskFailed
     } else {
@@ -12127,6 +12252,8 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         "paused"
     } else if matches!(task_status_snapshot, Some(TaskStatus::Interrupted)) {
         "interrupted"
+    } else if matches!(task_status_snapshot, Some(TaskStatus::Failed)) {
+        "failed"
     } else if studio_verify_error.is_some() {
         "failed"
     } else {
@@ -15015,6 +15142,30 @@ pub async fn handle_api(
         plugin_registry.reload();
         return json_response("200 OK", r#"{"reloaded":true}"#);
     }
+    if method == "POST" && path == "/api/tools/reload" {
+        let policy_path = data_dir.join("tools_policy.yaml");
+        match tools_executor {
+            Some(exec) => match reload_tools_executor_policy(exec, policy_path.as_path(), data_dir).await
+            {
+                Ok(()) => {
+                    tracing::info!(path = %policy_path.display(), "Tools policy hot-reloaded");
+                    return json_response("200 OK", r#"{"reloaded":true}"#);
+                }
+                Err(e) => {
+                    let body = serde_json::json!({
+                        "error": "reload_failed",
+                        "detail": e.to_string()
+                    })
+                    .to_string();
+                    return json_response("500 Internal Server Error", &body);
+                }
+            },
+            None => {
+                let body = serde_json::json!({ "error": "tools_executor_unavailable" }).to_string();
+                return json_response("503 Service Unavailable", &body);
+            }
+        }
+    }
     // POST /api/plugins/reputation/reset
     // Body optional:
     // - { "plugin_id": "maps" } to reset one plugin
@@ -16038,6 +16189,33 @@ pub async fn handle_api(
             "hint": hint
         });
         return json_response("200 OK", &body.to_string());
+    }
+
+    // POST /api/router/reload — hot-reload llm_router.yaml (routes/models per task type)
+    if method == "POST" && path == "/api/router/reload" {
+        let router_path = data_dir.join("llm_router.yaml");
+        match akasha_llm::config::RoutingConfig::load_from_path(&router_path) {
+            Ok(config) => {
+                llm_router.reload_routing_config(config);
+                crate::http_get_cache::invalidate_router_models();
+                crate::http_get_cache::invalidate_router_routes();
+                tracing::info!(path = %router_path.display(), "LLM router config hot-reloaded");
+                let body = serde_json::json!({
+                    "reloaded": true,
+                    "path": router_path.display().to_string(),
+                    "message": "Routes and models reloaded from llm_router.yaml."
+                });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                let body = serde_json::json!({
+                    "error": "reload_failed",
+                    "detail": e.to_string()
+                })
+                .to_string();
+                return json_response("500 Internal Server Error", &body);
+            }
+        }
     }
 
     // POST /api/router/embedded/reload — unload embedded model; next request will load it again

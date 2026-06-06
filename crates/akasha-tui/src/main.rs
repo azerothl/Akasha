@@ -1493,7 +1493,7 @@ impl App {
   /config set K V   — définir variable (K=V dans akasha.env)
   /vault list       — clés du vault (noms uniquement)
   /plugins          — liste des plugins
-  /reload           — recharger les plugins
+  /reload           — recharger plugins, tools_policy.yaml et llm_router.yaml (modèles)
   /skills            — liste des skills installés
   /skills list       — idem
   /skills install <url> — installer un skill depuis une URL (GitHub ou hôte autorisé)
@@ -1723,12 +1723,30 @@ impl App {
                 return "Impossible de lister les plugins.".to_string();
             }
             "reload" => {
-                let url = format!("{}/api/plugins/reload", base);
-                match client.post(&url).send() {
-                    Ok(r) if r.status().is_success() => return "Plugins rechargés.".to_string(),
-                    Ok(r) => return format!("Erreur: {}", r.status()),
-                    Err(e) => return format!("Erreur: {}", e),
+                let mut parts: Vec<String> = Vec::new();
+                let plugins_url = format!("{}/api/plugins/reload", base);
+                match client.post(&plugins_url).send() {
+                    Ok(r) if r.status().is_success() => parts.push("Plugins rechargés.".to_string()),
+                    Ok(r) => parts.push(format!("Plugins : erreur ({})", r.status())),
+                    Err(e) => parts.push(format!("Plugins : erreur ({})", e)),
                 }
+                let tools_url = format!("{}/api/tools/reload", base);
+                match client.post(&tools_url).send() {
+                    Ok(r) if r.status().is_success() => {
+                        parts.push("tools_policy.yaml rechargé.".to_string())
+                    }
+                    Ok(r) => parts.push(format!("tools_policy : erreur ({})", r.status())),
+                    Err(e) => parts.push(format!("tools_policy : erreur ({})", e)),
+                }
+                let router_url = format!("{}/api/router/reload", base);
+                match client.post(&router_url).send() {
+                    Ok(r) if r.status().is_success() => {
+                        parts.push("llm_router.yaml rechargé (modèles/routes).".to_string())
+                    }
+                    Ok(r) => parts.push(format!("llm_router : erreur ({})", r.status())),
+                    Err(e) => parts.push(format!("llm_router : erreur ({})", e)),
+                }
+                return parts.join(" ");
             }
             "skills" => {
                 let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();

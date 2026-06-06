@@ -751,6 +751,38 @@ async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
     Ok(())
 }
 
+/// POST /api/router/reload — hot-reload llm_router.yaml (routes/models; for slash /reload).
+#[tauri::command]
+async fn reload_router(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/reload", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/tools/reload — hot-reload tools_policy.yaml (for slash /reload).
+#[tauri::command]
+async fn reload_tools_policy(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tools/reload", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// POST /api/plugins/{id}/enable or /disable — user-controlled plugin load.
 #[tauri::command]
 async fn set_plugin_enabled(plugin_id: String, enabled: bool, port: Option<u16>) -> Result<(), String> {
@@ -2083,6 +2115,8 @@ pub fn run() {
             daemon_request,
             get_plugins,
             reload_plugins,
+            reload_router,
+            reload_tools_policy,
             set_plugin_enabled,
             uninstall_plugin,
             get_skills,

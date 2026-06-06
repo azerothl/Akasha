@@ -1765,7 +1765,8 @@ function App() {
   const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
   const chatToolBatchSummary = useMemo(() => {
     const names: string[] = [];
-    for (const evs of Object.values(runningTaskEvents)) {
+    for (const taskId of Object.keys(runningTaskChips)) {
+      const evs = runningTaskEvents[taskId] ?? [];
       for (const ev of evs) {
         const p = ev.payload;
         if (!p || typeof p !== "object") continue;
@@ -1780,7 +1781,7 @@ function App() {
       }
     }
     return heuristicToolBatchSummary(names);
-  }, [runningTaskEvents]);
+  }, [runningTaskEvents, runningTaskChips]);
   /** Human in the loop: when the agent asks for user input, we store question/context/choices per task_id. */
   const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[] }>>({});
   /** Task id for which the human-input modal is open (null = closed). */
@@ -4480,7 +4481,7 @@ function App() {
 /config set K V   — définir variable (K=V dans akasha.env)
 /vault list       — clés du vault (noms uniquement)
 /plugins          — liste des plugins
-/reload           — recharger les plugins
+/reload           — recharger plugins, tools_policy.yaml et llm_router.yaml (modèles)
 /skills            — liste des skills installés
 /skills list       — idem
 /skills install <url> — installer un skill depuis une URL (GitHub ou hôte autorisé)
@@ -4609,8 +4610,26 @@ function App() {
         .join("\n");
     }
     if (cmd === "reload") {
-      await invoke("reload_plugins", { port });
-      return "Plugins rechargés.";
+      const parts: string[] = [];
+      try {
+        await invoke("reload_plugins", { port });
+        parts.push("Plugins rechargés.");
+      } catch (e) {
+        parts.push(`Plugins : erreur (${String(e)}).`);
+      }
+      try {
+        const json = await invoke<{ reloaded?: boolean }>("reload_tools_policy", { port });
+        parts.push(json?.reloaded ? "tools_policy.yaml rechargé." : "tools_policy : erreur.");
+      } catch (e) {
+        parts.push(`tools_policy : erreur (${String(e)}).`);
+      }
+      try {
+        const json = await invoke<{ reloaded?: boolean }>("reload_router", { port });
+        parts.push(json?.reloaded ? "llm_router.yaml rechargé (modèles/routes)." : "llm_router : erreur.");
+      } catch (e) {
+        parts.push(`llm_router : erreur (${String(e)}).`);
+      }
+      return parts.join(" ");
     }
     if (cmd === "skills") {
       const sub = parts[1]?.toLowerCase() ?? "";
