@@ -2,7 +2,10 @@
 //! Loads a .wasm module, expects exports: "memory", "run"(input_len: i32) -> i32.
 //! Optional import: `akasha::http_fetch` for permission-gated HTTP (see manifest `network`).
 
-use akasha_plugin_api::{PluginError, PluginManifest, PluginNetworkConfig};
+use akasha_plugin_api::{
+    MemoryDelegateRequest, MemoryDelegateResponse, PluginError, PluginKind, PluginManifest,
+    PluginNetworkConfig,
+};
 use anyhow::{anyhow, Context};
 use std::path::Path;
 use std::sync::{
@@ -100,6 +103,32 @@ impl WasmPlugin {
     pub fn with_manifest(mut self, manifest: PluginManifest) -> Self {
         self.manifest = Some(manifest);
         self
+    }
+
+    /// For `kind = memory`: fulfill [`MemoryDelegateRequest`] via host callback before WASM `run`.
+    pub fn run_with_memory_delegate<F>(
+        &self,
+        input: &str,
+        delegate: F,
+    ) -> Result<String, PluginError>
+    where
+        F: FnOnce(&MemoryDelegateRequest) -> Result<MemoryDelegateResponse, PluginError>,
+    {
+        if self
+            .manifest
+            .as_ref()
+            .map(|m| m.kind == PluginKind::Memory)
+            .unwrap_or(false)
+        {
+            if let Ok(req) = serde_json::from_str::<MemoryDelegateRequest>(input) {
+                if !req.operation.trim().is_empty() {
+                    let resp = delegate(&req)?;
+                    return serde_json::to_string(&resp)
+                        .map_err(|e| PluginError::Message(format!("memory delegate json: {e}")));
+                }
+            }
+        }
+        self.run(input)
     }
 
     /// Run the plugin with JSON input, returns JSON output.
