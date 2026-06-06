@@ -35,7 +35,9 @@ pub async fn handle_profiles_routes(
             "can_do": profile.can_do,
             "cannot_do": profile.cannot_do,
             "traits_override": profile.traits_override,
-            "preferred_mode": profile.preferred_mode
+            "preferred_mode": profile.preferred_mode,
+            "temperature": profile.temperature,
+            "system_prompt": profile.system_prompt
         });
         return Some(json_response("200 OK", &body_json.to_string()));
     }
@@ -103,6 +105,19 @@ pub async fn handle_profiles_routes(
                         .get("preferred_mode")
                         .and_then(|x| x.as_str())
                         .map(String::from);
+                }
+                if v.get("temperature").is_some() {
+                    profile.temperature = v
+                        .get("temperature")
+                        .and_then(|x| x.as_f64())
+                        .filter(|t| *t >= 0.0 && *t <= 2.0);
+                }
+                if v.get("system_prompt").is_some() {
+                    profile.system_prompt = v
+                        .get("system_prompt")
+                        .and_then(|x| x.as_str())
+                        .map(String::from)
+                        .filter(|s| !s.trim().is_empty());
                 }
             }
         }

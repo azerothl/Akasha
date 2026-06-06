@@ -42,6 +42,12 @@ pub struct AgentProfile {
     /// Preferred personality mode: "assistant" | "operator" | "architect" | "onboarding".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_mode: Option<String>,
+    /// Optional LLM sampling temperature override (0.0–2.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Optional extra system prompt block prepended to agent context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 pub(crate) fn formality_prompt_line(formality: Option<&str>) -> Option<String> {
@@ -72,6 +78,8 @@ impl AgentProfile {
             && self.cannot_do.is_empty()
             && self.traits_override.as_ref().map_or(true, |m| m.is_empty())
             && self.preferred_mode.is_none()
+            && self.temperature.is_none()
+            && self.system_prompt.as_ref().map_or(true, |s| s.trim().is_empty())
     }
 
     /// Load profile from data_dir/agent_profile.json. Returns default empty profile if file missing or invalid.
@@ -172,6 +180,16 @@ impl AgentProfile {
             out.push_str("- You must not:\n");
             for c in &self.cannot_do {
                 out.push_str(&format!("  • {}\n", c));
+            }
+        }
+        if let Some(ref sp) = self.system_prompt {
+            let sp = sp.trim();
+            if !sp.is_empty() {
+                out.push_str("- Additional system instructions:\n");
+                out.push_str(sp);
+                if !sp.ends_with('\n') {
+                    out.push('\n');
+                }
             }
         }
         out.push_str("\n");

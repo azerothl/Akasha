@@ -847,6 +847,7 @@ impl Daemon {
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
                             let preferred_task_type_override = task.preferred_task_type.clone();
+                            let incognito = task.incognito;
                             let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
                                 run_message_via_llm(
@@ -879,6 +880,7 @@ impl Daemon {
                                     autonomous_mission,
                                     studio_reg,
                                     studio_worktree_registry,
+                                    incognito,
                                 )
                                 .instrument(span)
                                 .await;
@@ -917,6 +919,7 @@ impl Daemon {
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
                             let preferred_task_type_override = task.preferred_task_type.clone();
+                            let incognito = task.incognito;
                             let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
                                 run_message_via_llm(
@@ -949,6 +952,7 @@ impl Daemon {
                                     autonomous_mission,
                                     studio_reg,
                                     studio_worktree_registry,
+                                    incognito,
                                 )
                                 .instrument(span)
                                 .await;
@@ -1285,8 +1289,13 @@ impl Daemon {
                                         _ => buf,
                                     };
                                     let (method, path, body, headers) = parse_request(&full_buf);
-                                    if method == "GET" && path == "/api/events" {
-                                        let _ = crate::api::stream_sse_events(&bus_clone, &mut stream).await;
+                                    let (path_only, _) = crate::api_security::split_path_query(&path);
+                                    if method == "GET" && path_only == "/api/events" {
+                                        let (_, query) = crate::api_security::split_path_query(&path);
+                                        let filter = crate::api::parse_sse_event_filter(query);
+                                        let _ =
+                                            crate::api::stream_sse_events(&bus_clone, &mut stream, filter)
+                                                .await;
                                         return;
                                     }
                                     let response = if method == "OPTIONS" {

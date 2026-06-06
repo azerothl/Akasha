@@ -29,6 +29,8 @@ const MAX_BODY_BYTES: usize = 256 * 1024;
 const ROUTER_MODELS_KEY: &str = "GET|/api/router/models|";
 const ROUTER_ROUTES_KEY: &str = "GET|/api/router/routes|";
 const MCP_STATUS_KEY: &str = "GET|/api/mcp/status|";
+const DOCTOR_KEY: &str = "GET|/api/doctor|";
+const RECALL_METRICS_KEY: &str = "GET|/api/memory/recall-metrics|";
 
 /// Return cached JSON body for `GET /api/router/models` if still valid.
 pub fn cache_get_router_models() -> Option<String> {
@@ -63,6 +65,22 @@ pub fn cache_get_mcp_status() -> Option<String> {
 
 pub fn cache_put_mcp_status(body: &str) {
     put(MCP_STATUS_KEY, body);
+}
+
+pub fn cache_get_doctor() -> Option<String> {
+    get(DOCTOR_KEY)
+}
+
+pub fn cache_put_doctor(body: &str) {
+    put(DOCTOR_KEY, body);
+}
+
+pub fn cache_get_recall_metrics() -> Option<String> {
+    get(RECALL_METRICS_KEY)
+}
+
+pub fn cache_put_recall_metrics(body: &str) {
+    put(RECALL_METRICS_KEY, body);
 }
 
 pub fn invalidate_router_models() {

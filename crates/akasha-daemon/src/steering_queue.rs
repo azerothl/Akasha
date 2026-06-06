@@ -175,4 +175,97 @@ impl SteeringQueueStore {
             .max_by_key(|(_, m)| m.started_at)
             .map(|(id, _)| *id)
     }
+
+    pub async fn pending_count(&self, task_id: Uuid) -> usize {
+        let g = self.inner.read().await;
+        g.get(&task_id)
+            .map(|q| q.steering.len() + q.follow_up.len())
+            .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn enqueue_and_snapshot_steering_and_follow_up() {
+        let store = SteeringQueueStore::new();
+        let task_id = Uuid::new_v4();
+        let s = store
+            .enqueue(task_id, QueueMode::Steering, "steer msg".into())
+            .await;
+        let f = store
+            .enqueue(task_id, QueueMode::FollowUp, "follow msg".into())
+            .await;
+        assert_eq!(s.mode, "steering");
+        assert_eq!(f.mode, "follow_up");
+        let snap = store.snapshot(task_id).await;
+        assert_eq!(snap["steering"].as_array().unwrap().len(), 1);
+        assert_eq!(snap["follow_up"].as_array().unwrap().len(), 1);
+        assert_eq!(store.pending_count(task_id).await, 2);
+    }
+
+    #[tokio::test]
+    async fn drain_steering_then_follow_up() {
+        let store = SteeringQueueStore::new();
+        let task_id = Uuid::new_v4();
+        store
+            .enqueue(task_id, QueueMode::Steering, "a".into())
+            .await;
+        store
+            .enqueue(task_id, QueueMode::FollowUp, "b".into())
+            .await;
+        let steering = store.drain_steering(task_id).await;
+        assert_eq!(steering.len(), 1);
+        assert_eq!(steering[0].text, "a");
+        let snap = store.snapshot(task_id).await;
+        assert_eq!(snap["steering"].as_array().unwrap().len(), 0);
+        assert_eq!(snap["follow_up"].as_array().unwrap().len(), 1);
+        let follow = store.drain_follow_up(task_id).await;
+        assert_eq!(follow.len(), 1);
+        assert_eq!(follow[0].text, "b");
+    }
+
+    #[tokio::test]
+    async fn flush_clears_both_queues() {
+        let store = SteeringQueueStore::new();
+        let task_id = Uuid::new_v4();
+        store
+            .enqueue(task_id, QueueMode::Steering, "x".into())
+            .await;
+        store
+            .enqueue(task_id, QueueMode::FollowUp, "y".into())
+            .await;
+        let (s, f) = store.flush(task_id).await;
+        assert_eq!(s, 1);
+        assert_eq!(f, 1);
+        assert_eq!(store.pending_count(task_id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_running_task_prefers_explicit_root() {
+        let store = SteeringQueueStore::new();
+        let task_id = Uuid::new_v4();
+        let session = "sess-1".to_string();
+        store
+            .register_active(task_id, session.clone(), true)
+            .await;
+        let resolved = store
+            .resolve_running_task(&session, Some(task_id))
+            .await;
+        assert_eq!(resolved, Some(task_id));
+        let other = Uuid::new_v4();
+        assert!(store
+            .resolve_running_task(&session, Some(other))
+            .await
+            .is_none());
+    }
+
+    #[test]
+    fn queue_mode_parse_aliases() {
+        assert_eq!(QueueMode::parse("steer"), Some(QueueMode::Steering));
+        assert_eq!(QueueMode::parse("follow-up"), Some(QueueMode::FollowUp));
+        assert!(QueueMode::parse("immediate").is_none());
+    }
 }

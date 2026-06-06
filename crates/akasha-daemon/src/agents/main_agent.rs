@@ -179,6 +179,8 @@ pub struct OrchestratorTask {
     pub execution_mode: Option<ExecutionMode>,
     /// Optional system-selected task type for routing (falls back to current classifier/router when absent).
     pub preferred_task_type: Option<String>,
+    /// When true, skip long-term memory promotion for this turn.
+    pub incognito: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -458,6 +460,7 @@ User message:\n{}",
         studio_disk_root: Option<std::path::PathBuf>,
         studio_forced_agent: Option<String>,
         studio_evolution_branch: Option<String>,
+        incognito: bool,
     ) -> anyhow::Result<Uuid> {
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
@@ -554,6 +557,7 @@ User message:\n{}",
         let message_owned = message_for_llm;
         let original_user_message_owned = original_user_message;
         let session_id_owned = session_id.to_string();
+        let incognito_flag = incognito;
         let store_path_buf = store_path.to_path_buf();
         let preliminary_agent_str = preliminary_agent.to_string();
         tokio::spawn(async move {
@@ -716,6 +720,7 @@ User message:\n{}",
                         image_data_urls,
                         execution_mode: None,
                         preferred_task_type: preferred_task_type.clone(),
+                        incognito: incognito_flag,
                     };
                     if let Err(e) = tx.try_send(task_msg) {
                         match e {
@@ -738,6 +743,7 @@ User message:\n{}",
                             image_data_urls,
                             execution_mode,
                             preferred_task_type,
+                            incognito: incognito_flag,
                         },
                         priority,
                     );
@@ -793,6 +799,7 @@ User message:\n{}",
             image_data_urls: None,
             execution_mode,
             preferred_task_type: None,
+            incognito: false,
         };
         // Update status to Queued BEFORE enqueuing so the conversation worker won't
         // see a Paused/Interrupted status and silently drop the task.

@@ -1512,6 +1512,7 @@ pub async fn run_delegation_handler(
                 image_data_urls: None,
                 execution_mode: None,
                 preferred_task_type: None,
+                incognito: false,
             })
             .await
             .is_err()
@@ -4834,6 +4835,7 @@ pub(crate) async fn execute_tool_call_impl(
                                     image_data_urls: None,
                                     execution_mode: None,
                                     preferred_task_type: None,
+                                    incognito: false,
                                 })
                                 .await
                                 .is_err()
@@ -5141,7 +5143,12 @@ pub(crate) async fn execute_tool_call_impl(
                 }
                 let host = url.parse::<url::Url>().ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
                 if !executor.policy.can_use_browser_domain(&host) {
-                    return (false, format!("[browser] Domain not allowed: {}", host), None);
+                    let hint = crate::browser::format_domain_denied(
+                        &host,
+                        &executor.policy.browser_allowed_domains,
+                        &executor.policy.browser_blocked_domains,
+                    );
+                    return (false, format!("[browser] {}", hint), None);
                 }
                 let mut g = registry.write().await;
                 let session = if let Some(mut s) = g.remove(&task_id) {
@@ -5165,7 +5172,14 @@ pub(crate) async fn execute_tool_call_impl(
                             }
                             res
                         }
-                        Err(e) => return (false, format!("[browser] error: {}", e), None),
+                        Err(e) => {
+                            let msg = crate::browser::format_runner_error(
+                                &e,
+                                action_timeout,
+                                session_timeout,
+                            );
+                            return (false, format!("[browser] error: {}", msg), None);
+                        }
                     }
                 };
                 match session {
@@ -5185,10 +5199,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, msg, None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("Navigate failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "snapshot" {
                 let mut g = registry.write().await;
@@ -5219,10 +5237,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, msg, None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("Snapshot failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "screenshot" {
                 let mut g = registry.write().await;
@@ -5279,10 +5301,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, msg, captured_for_llm)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("screenshot failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "click" {
                 let selector = args[1..].join(" ").trim().to_string();
@@ -5308,10 +5334,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, "[browser] Click OK.".to_string(), None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("click failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "fill" {
                 let Some(sel) = args.get(1).map(|s| s.as_str()) else {
@@ -5349,10 +5379,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, "[browser] Fill OK.".to_string(), None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("fill failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "wait" {
                 let arg = args[1..].join(" ").trim().to_string();
@@ -5386,10 +5420,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, "[browser] Wait completed.".to_string(), None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("wait failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else {
                 (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot | browser click <selector> | browser fill <selector> <text> | browser wait <selector|ms>".to_string(), None)
@@ -8574,6 +8612,7 @@ pub(crate) async fn run_message_via_llm(
     autonomous_mission: Option<Arc<RwLock<AutonomousMissionConfig>>>,
     studio_disk_registry: crate::studio::StudioDiskRootRegistry,
     studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
+    incognito: bool,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -9042,6 +9081,11 @@ pub(crate) async fn run_message_via_llm(
         Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
         None => AgentProfile::load(data_dir),
     };
+    let completion_temperature = agent_profile
+        .temperature
+        .filter(|t| *t >= 0.0 && *t <= 2.0)
+        .map(|t| t as f32)
+        .unwrap_or(0.7);
     let profile_block = if code_studio_disk_task {
         String::new()
     } else {
@@ -9227,8 +9271,19 @@ pub(crate) async fn run_message_via_llm(
         let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
         let rag_query = message.clone();
         let rag_top_k = memory_profile.user_rag_top_k;
+        let data_dir_rag = data_dir.to_path_buf();
         let chunks =
-            tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, rag_top_k))
+            tokio::task::spawn_blocking(move || {
+                #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+                let query_embedding = {
+                    use akasha_embeddings::Embedder;
+                    let cache_dir = data_dir_rag.join("embedding_model");
+                    Embedder::new(&cache_dir).embed_one(&rag_query).ok()
+                };
+                #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+                let query_embedding: Option<Vec<f32>> = None;
+                user_rag_store.retrieve_hybrid(&rag_query, query_embedding.as_deref(), rag_top_k)
+            })
                 .await
                 .ok()
                 .and_then(|res| res.ok())
@@ -9311,7 +9366,7 @@ pub(crate) async fn run_message_via_llm(
         .primary_route_for_task_type(&router_task_type_for_compact)
         .unwrap_or_else(|| ("default".to_string(), "default".to_string()));
     if let Some(ref st) = short_term {
-        if memory_profile.compact_before_prompt {
+        if memory_profile.compact_before_prompt && !incognito {
             let new_msg_tokens = ShortTermStore::estimate_tokens_calibrated(
                 tok_prov.as_str(),
                 tok_model.as_str(),
@@ -9794,7 +9849,7 @@ pub(crate) async fn run_message_via_llm(
             let request = CompletionRequest {
                 prompt: format!("{}{}", current_prompt, tool_instruction),
                 max_tokens: Some(completion_max_tokens),
-                temperature: Some(0.7),
+                temperature: Some(completion_temperature),
                 preferred_task_type,
                 system_prompt: system_prompt.clone(),
                 image_data_urls: merged_image_data_urls,
@@ -12029,7 +12084,7 @@ pub(crate) async fn run_message_via_llm(
     // Persist this exchange in short-term memory (spec 06)
     // Skip orchestrated task messages ([Task]\n prefix): they are internal planner artefacts,
     // not real user/assistant turns. Storing them pollutes future context with unrelated content.
-    if !is_small_talk_fast_lane && !is_orchestrated_task_msg {
+    if !incognito && !is_small_talk_fast_lane && !is_orchestrated_task_msg {
         if let Some(ref st) = short_term {
             // Store the clean user message (without any guardrail prefix) so history is human-readable.
             st.append(&session_id, "user", clean_message.to_string())
@@ -12040,7 +12095,7 @@ pub(crate) async fn run_message_via_llm(
     }
 
     // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
-    if !is_small_talk_fast_lane {
+    if !incognito && !is_small_talk_fast_lane {
         if let Some(ref long_term) = long_term_client {
             // Heuristic: capture obvious name/intro from user message. Promote these *immediately* so they appear in Memory tab right away.
             // Case-insensitive matching on lowercased text, but extract from original message to preserve casing.
@@ -12458,6 +12513,15 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     );
     clear_task_milestones(task_id, Some(store_path.as_path()));
 
+    if let Some(data_dir) = store_path.parent().map(|p| p.to_path_buf()) {
+        let sp = store_path.to_path_buf();
+        let tid = task_id;
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::session_transcript::write_task_transcript(&data_dir, &sp, tid);
+        })
+        .await;
+    }
+
     // Phase 2 AI OS: do not overwrite Paused / Cancelled / Interrupted with Completed.
     if !halted_user {
         if studio_verify_error.is_some() {
@@ -12656,8 +12720,72 @@ pub(crate) async fn learn_from_task_outcome_async(
 /// Optional channel to trigger daemon shutdown (for POST /api/restart).
 pub type RestartTx = Option<tokio::sync::mpsc::Sender<()>>;
 
+/// Optional filters for GET /api/events (`?task_id=` and/or `?types=` comma-separated).
+#[derive(Debug, Clone, Default)]
+pub struct SseEventFilter {
+    pub task_id: Option<uuid::Uuid>,
+    pub event_types: Option<std::collections::HashSet<String>>,
+}
+
+/// Parse `task_id` and `types` / `event_types` from a query string (without leading `?`).
+pub fn parse_sse_event_filter(query: &str) -> SseEventFilter {
+    let mut filter = SseEventFilter::default();
+    for pair in query.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = k.trim().to_lowercase();
+        let val = urlencoding::decode(v.trim()).unwrap_or_else(|_| v.trim().into());
+        match key.as_str() {
+            "task_id" | "correlation_id" => {
+                if let Ok(id) = uuid::Uuid::parse_str(val.trim()) {
+                    filter.task_id = Some(id);
+                }
+            }
+            "types" | "event_types" => {
+                let set: std::collections::HashSet<String> = val
+                    .split(',')
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !set.is_empty() {
+                    filter.event_types = Some(set);
+                }
+            }
+            _ => {}
+        }
+    }
+    filter
+}
+
+fn sse_event_matches_filter(envelope: &EventEnvelope, filter: &SseEventFilter) -> bool {
+    if let Some(tid) = filter.task_id {
+        let corr = envelope.correlation_id == Some(tid);
+        let payload_tid = envelope
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("task_id"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            == Some(tid);
+        if !corr && !payload_tid {
+            return false;
+        }
+    }
+    if let Some(ref types) = filter.event_types {
+        if !types.contains(&envelope.event_type.as_str().to_lowercase()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Stream event-bus events as Server-Sent Events (GET /api/events). Keeps connection open until client disconnects.
-pub async fn stream_sse_events<W>(bus: &EventBus, stream: &mut W) -> std::io::Result<()>
+pub async fn stream_sse_events<W>(
+    bus: &EventBus,
+    stream: &mut W,
+    filter: SseEventFilter,
+) -> std::io::Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -12668,6 +12796,9 @@ where
     loop {
         match rx.recv().await {
             Ok(envelope) => {
+                if !sse_event_matches_filter(&envelope, &filter) {
+                    continue;
+                }
                 let payload = serde_json::json!({
                     "id": envelope.id.to_string(),
                     "event_type": envelope.event_type.as_str(),
@@ -13165,6 +13296,82 @@ pub async fn handle_api(
     }
 
     // Second brain controls: settings, overview and clear.
+    if method == "GET" && path == "/api/agent-identity" {
+        let identity = crate::memory_agent_identity::AgentIdentityManifest::load(data_dir);
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "identity": identity }).to_string(),
+        );
+    }
+    if method == "POST" && path == "/api/agent-identity" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mut identity = body_json
+            .as_ref()
+            .and_then(|v| v.get("identity"))
+            .and_then(|v| serde_json::from_value::<crate::memory_agent_identity::AgentIdentityManifest>(v.clone()).ok())
+            .unwrap_or_else(|| crate::memory_agent_identity::AgentIdentityManifest::load(data_dir));
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("name")).and_then(|x| x.as_str()) {
+            identity.name = Some(v.to_string());
+        }
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("role")).and_then(|x| x.as_str()) {
+            identity.role = Some(v.to_string());
+        }
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("tone")).and_then(|x| x.as_str()) {
+            identity.tone = Some(v.to_string());
+        }
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("values")).and_then(|x| x.as_array()) {
+            identity.values = Some(
+                v.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+            );
+        }
+        if let Some(v) = body_json
+            .as_ref()
+            .and_then(|j| j.get("constraints"))
+            .and_then(|x| x.as_array())
+        {
+            identity.constraints = Some(
+                v.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+            );
+        }
+        match crate::memory_agent_identity::save(data_dir, &identity) {
+            Ok(()) => {
+                crate::memory_agent_identity::bootstrap_agent_identity(data_dir, long_term_client.as_ref());
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "identity": identity }).to_string(),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+    if method == "GET" && path == "/api/memory/advanced-settings" {
+        let settings = crate::memory_retrieval_enhance::advanced_settings_snapshot();
+        return json_response("200 OK", &serde_json::json!({ "settings": settings }).to_string());
+    }
+    if method == "POST" && path == "/api/memory/advanced-settings" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        if let Some(ref j) = body_json {
+            crate::memory_retrieval_enhance::apply_advanced_settings(j);
+        }
+        let settings = crate::memory_retrieval_enhance::advanced_settings_snapshot();
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "settings": settings }).to_string(),
+        );
+    }
     if method == "GET" && path == "/api/memory/second-brain/settings" {
         let settings = load_second_brain_settings(data_dir);
         let body = serde_json::json!({ "settings": settings });
@@ -13367,6 +13574,9 @@ pub async fn handle_api(
 
     // GET /api/memory/recall-metrics — counters from memory orchestrator (semantic recall hits/empty).
     if method == "GET" && path == "/api/memory/recall-metrics" {
+        if let Some(cached) = crate::http_get_cache::cache_get_recall_metrics() {
+            return json_response("200 OK", &cached);
+        }
         let mut body = crate::memory_orchestrator::memory_recall_metrics_snapshot();
         if let Some(obj) = body.as_object_mut() {
             if let Some(m) = crate::memory_maintenance::metrics_snapshot().as_object() {
@@ -13380,10 +13590,9 @@ pub async fn handle_api(
                 }
             }
         }
-        return json_response(
-            "200 OK",
-            &serde_json::to_string(&body).unwrap_or_else(|_| "{}".into()),
-        );
+        let body_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+        crate::http_get_cache::cache_put_recall_metrics(&body_str);
+        return json_response("200 OK", &body_str);
     }
 
     // GET /api/memory/short-term?session_id=... — turns for session (default: day-YYYY-MM-DD)
@@ -13879,6 +14088,13 @@ pub async fn handle_api(
 
     // GET /api/doctor — health checks from daemon (for slash /doctor)
     if method == "GET" && path == "/api/doctor" {
+        if let Some(cached) = crate::http_get_cache::cache_get_doctor() {
+            return format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                cached.len(),
+                cached
+            );
+        }
         let mut checks: Vec<serde_json::Value> = Vec::new();
         checks.push(
             serde_json::json!({ "id": "daemon", "ok": true, "description": "Daemon running" }),
@@ -14097,6 +14313,7 @@ pub async fn handle_api(
         let body_json =
             serde_json::json!({ "ok": all_ok, "checks": checks, "playwright": playwright_json })
                 .to_string();
+        crate::http_get_cache::cache_put_doctor(&body_json);
         return format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body_json.len(),
@@ -14464,6 +14681,11 @@ pub async fn handle_api(
                 }
             })
             .unwrap_or(TaskPriority::UserNormal);
+        let incognito = body_json
+            .as_ref()
+            .and_then(|v| v.get("incognito"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let studio_code_mode = body_json
             .as_ref()
             .and_then(|v| v.get("studio_code_mode").and_then(|x| x.as_str()))
@@ -14878,6 +15100,7 @@ pub async fn handle_api(
             message_for_llm,
             image_data_urls,
             priority,
+            incognito,
         );
         envelope.studio_disk_root = studio_disk_root.clone();
         envelope.studio_forced_agent = studio_forced_agent;
@@ -15155,6 +15378,22 @@ pub async fn handle_api(
         let list = plugin_registry.list();
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
         return json_response("200 OK", &body);
+    }
+    if method == "GET" && (path == "/api/plugins/catalog" || path.starts_with("/api/plugins/catalog?")) {
+        match crate::plugin_install::fetch_remote_catalog(None).await {
+            Ok(catalog) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::to_string(&catalog).unwrap_or_else(|_| "{}".to_string()),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "502 Bad Gateway",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
     }
     if method == "GET" && path == "/api/plugins/metrics" {
         let m = crate::plugins::metrics::snapshot();
@@ -15925,6 +16164,38 @@ pub async fn handle_api(
                         let _ = pending.response_tx.send("Refuser".to_string());
                     }
                 }
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "item": item }).to_string(),
+                );
+            }
+            Ok(None) => return json_response("404 Not Found", r#"{"error":"request_not_found"}"#),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "POST"
+        && (path_only.starts_with("/api/permissions/queue/") && path_only.ends_with("/expire"))
+    {
+        let id = path_only
+            .trim_start_matches("/api/permissions/queue/")
+            .trim_end_matches("/expire")
+            .trim_matches('/');
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        match crate::permissions_queue::update_status(
+            data_dir,
+            id,
+            crate::permissions_queue::QueueStatus::Expired,
+            Some("expired by operator".to_string()),
+            Some("api".to_string()),
+        ) {
+            Ok(Some(item)) => {
                 return json_response(
                     "200 OK",
                     &serde_json::json!({ "ok": true, "item": item }).to_string(),
@@ -17587,6 +17858,7 @@ async fn schedule_run_now(
             None,
             None,
             None,
+            false,
         )
         .await
     {
@@ -17838,7 +18110,7 @@ mod tests {
         ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, packaged_spec_check_ok, parse_content_length,
-        parse_device_invoke_params, parse_generate_image_tool_args,
+        parse_device_invoke_params, parse_generate_image_tool_args, parse_sse_event_filter,
         parse_memory_store_explicit_links, parse_plugin_reputation_reset_body, parse_run_command_args,
         parse_skill_install_url, parse_tool_calls, parse_write_file_request,
         resolve_run_command_working_dir, strip_markdown_fences_from_write_content,
@@ -17849,6 +18121,18 @@ mod tests {
     };
     use akasha_store::TaskStatus;
     use uuid::Uuid;
+
+    #[test]
+    fn parse_sse_event_filter_task_id_and_types() {
+        let tid = Uuid::new_v4();
+        let q = format!(
+            "task_id={}&types=progress_update,task_completed",
+            tid
+        );
+        let f = parse_sse_event_filter(&q);
+        assert_eq!(f.task_id, Some(tid));
+        assert!(f.event_types.as_ref().unwrap().contains("progress_update"));
+    }
 
     #[test]
     fn parse_content_length_returns_header_end_and_content_length() {

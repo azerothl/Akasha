@@ -1769,6 +1769,7 @@ async fn process_root_task(
                 image_data_urls,
                 execution_mode: None,
                 preferred_task_type: None,
+                incognito: false,
             })
             .await
             .map_err(|_| anyhow::anyhow!("conversation channel closed"))?;
@@ -2058,6 +2059,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                         image_data_urls: None,
                         execution_mode: None,
                         preferred_task_type: None,
+                        incognito: false,
                     })
                     .await
                     .is_err()
@@ -2194,6 +2196,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                                     image_data_urls: None,
                                     execution_mode: None,
                                     preferred_task_type: None,
+                                    incognito: false,
                                 })
                                 .await;
                             let retry_timed_out = tokio::time::timeout(
@@ -2291,6 +2294,7 @@ Use TOOL: write_file <exact_path> with real, substantive content for each entry 
                                 image_data_urls: None,
                                 execution_mode: None,
                                 preferred_task_type: None,
+                                incognito: false,
                             })
                             .await;
                         let _ = tokio::time::timeout(retry_timeout, notify_retry.notified()).await;
@@ -2445,6 +2449,7 @@ Reply with SHORT actionable guidance only: what the user should provide, which p
                                 image_data_urls: None,
                                 execution_mode: None,
                                 preferred_task_type: None,
+                                incognito: false,
                             })
                             .await;
                         let _ =
@@ -2525,6 +2530,7 @@ Do not only describe the files — execute the tools."#,
                             image_data_urls: None,
                             execution_mode: None,
                             preferred_task_type: None,
+                            incognito: false,
                         })
                         .await;
                     let _ = tokio::time::timeout(per_child_timeout, notify_r.notified()).await;
@@ -2797,6 +2803,7 @@ Formatting rules (Markdown):
                         image_data_urls: None,
                         execution_mode: None,
                         preferred_task_type: None,
+                        incognito: false,
                     })
                     .await;
                 if tokio::time::timeout(per_child_timeout, notify_refinement.notified())

@@ -54,10 +54,18 @@ pub struct MessageEnvelope {
     pub studio_forced_agent: Option<String>,
     /// Optional git branch hint prepended to the user message for agents.
     pub studio_evolution_branch: Option<String>,
+    /// When true, skip long-term memory promotion for this message.
+    pub incognito: bool,
 }
 
 impl MessageEnvelope {
-    pub fn api<S, M>(session_id: S, raw_message: M, image_data_urls: Option<Vec<String>>, priority: TaskPriority) -> Self
+    pub fn api<S, M>(
+        session_id: S,
+        raw_message: M,
+        image_data_urls: Option<Vec<String>>,
+        priority: TaskPriority,
+        incognito: bool,
+    ) -> Self
     where
         S: Into<String>,
         M: Into<String>,
@@ -74,6 +82,7 @@ impl MessageEnvelope {
             studio_disk_root: None,
             studio_forced_agent: None,
             studio_evolution_branch: None,
+            incognito,
         }
     }
 
@@ -94,6 +103,7 @@ impl MessageEnvelope {
             studio_disk_root: None,
             studio_forced_agent: None,
             studio_evolution_branch: None,
+            incognito: false,
         }
     }
 
@@ -114,6 +124,7 @@ impl MessageEnvelope {
             studio_disk_root: None,
             studio_forced_agent: None,
             studio_evolution_branch: None,
+            incognito: false,
         }
     }
 }
@@ -137,6 +148,7 @@ pub async fn handle_envelope(
         envelope.studio_disk_root.clone(),
         envelope.studio_forced_agent.clone(),
         envelope.studio_evolution_branch.clone(),
+        envelope.incognito,
     )
         .await
 }

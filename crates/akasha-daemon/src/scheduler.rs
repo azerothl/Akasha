@@ -213,6 +213,7 @@ async fn tick(
                 image_data_urls: None,
                 execution_mode: None,
                 preferred_task_type: None,
+                incognito: false,
             })
             .await
         {
@@ -279,6 +280,7 @@ async fn process_due_wakeups(
                 image_data_urls: None,
                 execution_mode: None,
                 preferred_task_type: None,
+                incognito: false,
             })
             .await;
         let store = WakeupStore::open(store_path)?;

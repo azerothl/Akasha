@@ -153,3 +153,10 @@ pub async fn install_from_plugin_base_url(data_dir: &Path, base_url: &str) -> an
 pub fn plugins_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("plugins")
 }
+
+/// Fetch remote plugin catalog JSON (jsDelivr Akasha_plugins).
+pub async fn fetch_remote_catalog(catalog_url: Option<&str>) -> anyhow::Result<serde_json::Value> {
+    let url = catalog_url.unwrap_or(DEFAULT_CATALOG_URL);
+    let bytes = fetch_bytes(url).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
