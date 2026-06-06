@@ -137,8 +137,13 @@ data: {}\n\n",
     }
 
     if method == "GET" && path_only == "/api/lifecycle/hooks" {
+        if let Some(cached) = crate::http_get_cache::cache_get_lifecycle_hooks() {
+            return Some(json_response("200 OK", &cached));
+        }
         let j = crate::lifecycle_hooks::lifecycle_hooks_summary(data_dir);
-        return Some(json_response("200 OK", &j.to_string()));
+        let body = j.to_string();
+        crate::http_get_cache::cache_put_lifecycle_hooks(&body);
+        return Some(json_response("200 OK", &body));
     }
 
     None
