@@ -1728,6 +1728,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("web_crawl_status", "web_crawl_status <job_id> — statut / résultat d’un job crawl Cloudflare (même config que web_crawl)."),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
+    ("user_rag_search", "user_rag_search <query> [top_k] — rechercher dans les documents utilisateur indexés (user RAG)"),
     ("workspace_graph_search", "workspace_graph_search <query> [--workspace <uuid>] — rechercher dans les graphes projet indexés (nœuds label/chemin) ; limite ~20 lignes ; --workspace pour un espace enregistré uniquement"),
     ("memory_store", "memory_store <content> <source> [link_to: uuid1+kind1,uuid2+kind2,...] [link_kind: default_kind] — mémoire long terme. Types recommandés : similar, relates_to, related, updates, supersedes, excludes, contradicts, supports, derived_from, same_as, spouse, child, birth_date, … ; par cible utiliser uuid+kind, ou uuid seuls avec link_kind (défaut related)."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
@@ -3907,6 +3908,60 @@ pub(crate) async fn execute_tool_call_impl(
                         None,
                     ),
                 }
+            }
+        }
+        "user_rag_search" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (
+                    false,
+                    "[user_rag_search] no data dir".to_string(),
+                    None,
+                );
+            };
+            let data_dir = data_dir.to_path_buf();
+            let mut top_k = 5usize;
+            let mut rest: Vec<String> = Vec::new();
+            for a in args {
+                if let Ok(k) = a.parse::<usize>() {
+                    top_k = k.clamp(1, 20);
+                } else {
+                    rest.push(a.clone());
+                }
+            }
+            let query = rest.join(" ").trim().to_string();
+            if query.is_empty() {
+                return (
+                    false,
+                    "[user_rag_search] usage: user_rag_search <query> [top_k]".to_string(),
+                    None,
+                );
+            }
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::user_rag::UserRagStore::new(&data_dir);
+                store.retrieve(&query, top_k)
+            })
+            .await
+            {
+                Ok(Ok(chunks)) if chunks.is_empty() => (
+                    true,
+                    "[user_rag_search] no matching excerpts".to_string(),
+                    None,
+                ),
+                Ok(Ok(chunks)) => (
+                    true,
+                    format!(
+                        "[user_rag_search]\n{}",
+                        chunks
+                            .iter()
+                            .enumerate()
+                            .map(|(i, c)| format!("{}. {}", i + 1, c))
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    ),
+                    None,
+                ),
+                Ok(Err(e)) => (false, format!("[user_rag_search] {}", e), None),
+                Err(e) => (false, format!("[user_rag_search] join: {}", e), None),
             }
         }
         "studio_list_tickets" => {
@@ -6679,6 +6734,7 @@ async fn compact_short_term_if_needed(
     long_term_client: Option<&LongTermMemoryClient>,
     tokenizer_provider: &str,
     tokenizer_model: &str,
+    tasks_db_path: &std::path::Path,
 ) {
     if short_term.get_compaction_count(session_id).await
         >= crate::memory::MAX_COMPACTIONS_PER_SESSION
@@ -6702,6 +6758,22 @@ async fn compact_short_term_if_needed(
 
     let to_summarize = turns.len() / 2;
     let old_turns: Vec<_> = turns.into_iter().take(to_summarize).collect();
+    let archive_batch: Vec<(usize, String, String)> = old_turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, t.role.clone(), t.content.clone()))
+        .collect();
+    if !archive_batch.is_empty() {
+        let sp = tasks_db_path.to_path_buf();
+        let sid = session_id.to_string();
+        let batch = archive_batch.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(store) = akasha_store::ConversationArchiveStore::open(&sp) {
+                let _ = store.archive_turns(&sid, &batch);
+            }
+        })
+        .await;
+    }
     let blob = ShortTermStore::turns_to_context(&old_turns);
     let summary_prompt = format!(
         "Summarize in a short paragraph in English, keeping important facts and decisions:\n\n{}",
@@ -9176,6 +9248,7 @@ pub(crate) async fn run_message_via_llm(
                 long_term_client.as_ref(),
                 tok_prov.as_str(),
                 tok_model.as_str(),
+                &store_path,
             )
             .await;
         }
@@ -12648,6 +12721,22 @@ pub async fn handle_api(
         return resp;
     }
 
+    if let Some(resp) = crate::api_routes_kinbot::try_handle(
+        method,
+        path_only,
+        Some(query_str),
+        body.as_deref(),
+        &crate::api_routes_kinbot::KinbotRouteCtx {
+            store_path,
+            data_dir,
+            user_rag_store,
+        },
+    )
+    .await
+    {
+        return resp;
+    }
+
     if method == "GET" && path_only == "/api/process/watch/recent" {
         let limit = crate::api_security::parse_query_param(query_str, "limit")
             .and_then(|s| s.parse::<usize>().ok())
@@ -15998,8 +16087,10 @@ pub async fn handle_api(
         let store = user_rag_store.lock().await;
         match store.add_document(&content_base64, &name, &mime_type) {
             Ok(id) => {
+                let data_dir = store_path.parent().unwrap_or(store_path).to_path_buf();
+                crate::api_routes_kinbot::spawn_user_rag_index(data_dir, id.clone());
                 let body =
-                    serde_json::json!({ "id": id, "name": name, "message": "Document ajouté." });
+                    serde_json::json!({ "id": id, "name": name, "message": "Document ajouté.", "index_status": "pending" });
                 return json_response("200 OK", &body.to_string());
             }
             Err(e) => {
