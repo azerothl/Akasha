@@ -3,6 +3,7 @@ import { ModelUsageBadge } from "./ModelUsageBadge";
 import { preprocessDataUrlImages } from "../preprocessDataUrlImages";
 import { preprocessMessagePaths } from "../preprocessMessagePaths";
 import type { ModelUsageStats } from "../modelUsage";
+import { redactDisplaySecrets } from "../utils/redactDisplay";
 
 const LazyMarkdownContent = lazy(() => import("../MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -97,7 +98,11 @@ export function ChatRenderer({
               <div className="text markdown-rendered">
                 <Suspense fallback={<span className="markdown-rendered">…</span>}>
                   <LazyMarkdownContent onPathClick={onPathClick}>
-                    {preprocessMessagePaths(preprocessDataUrlImages(m.text))}
+                    {preprocessMessagePaths(
+                      preprocessDataUrlImages(
+                        m.role === "assistant" ? redactDisplaySecrets(m.text) : m.text,
+                      ),
+                    )}
                   </LazyMarkdownContent>
                 </Suspense>
                 {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}

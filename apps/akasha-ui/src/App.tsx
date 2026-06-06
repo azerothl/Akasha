@@ -16,6 +16,9 @@ import { GeoMapView } from "./GeoMapView";
 import { SystemHealthPanel } from "./SystemHealthPanel";
 import { AppNavigation } from "./components/AppNavigation";
 import { PermissionsBell } from "./components/PermissionsBell";
+import { SteeringQueueBell } from "./components/SteeringQueueBell";
+import { OnboardingWizard, readSetupWizardPending } from "./components/OnboardingWizard";
+import { PluginCatalogPanel } from "./components/PluginCatalogPanel";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { AppNotificationsSync } from "./components/AppNotificationsSync";
 import { InfoTip, Tooltip } from "./components/Tooltip";
@@ -43,8 +46,13 @@ import {
 import { ModelUsageBadge } from "./components/ModelUsageBadge";
 import { TaskExecutionSteps } from "./components/TaskExecutionSteps";
 import { CreateTaskDialog } from "./components/CreateTaskDialog";
+import { NotesPanel } from "./components/NotesPanel";
+import { ThemeEditorPanel, applyThemeOverrides, loadThemeOverrides } from "./components/ThemeEditorPanel";
 import { buildExecutionSteps } from "./tasks/buildExecutionSteps";
 import { pollTaskUntilDone, type PollTaskUntilDoneDeps } from "./tasks/pollTaskUntilDone";
+import { THEME_IDS, THEME_STORAGE_KEY, type ThemeId } from "./themeTypes";
+
+export type { ThemeId } from "./themeTypes";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -57,7 +65,6 @@ function e2eDaemonHttpUrl(path: string): string {
   if (E2E_WEB) return `/__e2e_daemon${p}`;
   return `http://127.0.0.1:${DAEMON_PORT}${p}`;
 }
-const THEME_STORAGE_KEY = "akasha_theme";
 const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
@@ -99,10 +106,8 @@ function loadChatThreadsInitial(): ChatThreadEntry[] {
   return [];
 }
 
-export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
-type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
-const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
+type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
 function shouldChatStreamProgress(message: string): boolean {
   const m = message?.trim() ?? "";
@@ -1384,13 +1389,7 @@ function App() {
   >([]);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [uiMode, setUiMode] = useState<UiMode>(loadSavedUiMode);
-  const [showOnboarding, setShowOnboarding] = useState(() => {
-    try {
-      return localStorage.getItem("akasha_onboarding_dismissed") !== "1";
-    } catch {
-      return true;
-    }
-  });
+  const [showOnboarding, setShowOnboarding] = useState(() => readSetupWizardPending());
   const eventLabel = useCallback(
     (typ: string) => {
       const key = "events." + typ;
@@ -1601,6 +1600,15 @@ function App() {
   const [chatResearchContext, setChatResearchContext] = useState<ChatResearchContext | null>(null);
   const [chatDeliveryMode, setChatDeliveryMode] = useState<"immediate" | "steering" | "follow_up">("immediate");
   const [memoryHygieneHint, setMemoryHygieneHint] = useState<string | null>(null);
+  type MemoryAdvancedSettings = {
+    multi_query?: boolean;
+    hyde?: boolean;
+    rrf?: boolean;
+    rollup_days?: number;
+  };
+  const [memoryAdvancedSettings, setMemoryAdvancedSettings] = useState<MemoryAdvancedSettings | null>(null);
+  const [memoryAdvancedSaving, setMemoryAdvancedSaving] = useState(false);
+  const [memoryAdvancedMessage, setMemoryAdvancedMessage] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
   const [modelPricingLookup, setModelPricingLookup] = useState<Map<string, ModelPriceRates>>(new Map());
 
@@ -1761,6 +1769,10 @@ function App() {
   const fetchTasksEventsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
   const trackTaskUntilDoneRef = useRef<(taskId: string) => void>(() => {});
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
+  const activeSteeringTaskId = useMemo(() => {
+    const ids = Object.keys(runningTaskChips);
+    return ids.length > 0 ? ids[ids.length - 1]! : null;
+  }, [runningTaskChips]);
   /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
   const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
   const chatToolBatchSummary = useMemo(() => {
@@ -2159,6 +2171,8 @@ function App() {
     cannot_do: string[];
     traits_override: Record<string, number>;
     preferred_mode: string;
+    temperature: string;
+    system_prompt: string;
   }>({
     name: "",
     role: "",
@@ -2171,6 +2185,8 @@ function App() {
     cannot_do: [],
     traits_override: {},
     preferred_mode: "",
+    temperature: "",
+    system_prompt: "",
   });
   /** User avatar (data URL) for chat display. Stored in localStorage. */
   const [userAvatar, setUserAvatar] = useState<string>(() => {
@@ -2725,6 +2741,7 @@ function App() {
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.setAttribute("data-ui-mode", uiMode);
     document.documentElement.setAttribute("data-density", uiDensity);
+    applyThemeOverrides(theme, loadThemeOverrides());
   }, [theme, uiMode, uiDensity]);
 
   const setThemeAndSave = useCallback((next: ThemeId) => {
@@ -3630,21 +3647,40 @@ function App() {
   }, []);
 
   // SSE: subscribe to daemon events for real-time updates (< 1s) when daemon is healthy.
+  // On disconnect, fall back to polling task list every 5s (see agent_client_event_contract.md).
   useEffect(() => {
     if (!health?.ok) return;
-    const url = E2E_WEB
+    const sseTypes =
+      "progress_update,task_completed,task_failed,task_cancelled,todo_list_updated,user_steering_queued,user_follow_up_queued,user_steering_applied,user_follow_up_applied,user_queue_flushed";
+    const base = E2E_WEB
       ? e2eDaemonHttpUrl("/api/events")
       : `http://127.0.0.1:${health.port ?? DAEMON_PORT}/api/events`;
+    const url = `${base}?types=${encodeURIComponent(sseTypes)}`;
     let es: EventSource | null = null;
+    let pollFallbackId: number | null = null;
+    const startPollFallback = () => {
+      if (pollFallbackId != null) return;
+      pollFallbackId = window.setInterval(() => {
+        void fetchTasksList({ silent: true });
+        void fetchPendingHumanInput();
+      }, 5000);
+    };
+    const stopPollFallback = () => {
+      if (pollFallbackId != null) {
+        window.clearInterval(pollFallbackId);
+        pollFallbackId = null;
+      }
+    };
     try {
       es = new EventSource(url);
+      es.onopen = () => stopPollFallback();
       es.onmessage = (msgEv) => {
         void fetchTasksList({ silent: true });
         fetchPendingHumanInput();
         try {
           const d = JSON.parse(msgEv.data) as {
             event_type?: string;
-            payload?: { task_id?: string; message?: string } | Record<string, unknown>;
+            payload?: { task_id?: string; message?: string; text?: string } | Record<string, unknown>;
             correlation_id?: string | null;
           };
           if (d.event_type === "progress_update" && d.payload && typeof d.payload === "object") {
@@ -3652,6 +3688,22 @@ function App() {
             const tid = typeof p.task_id === "string" ? p.task_id : "";
             const streamMsg = typeof p.message === "string" ? p.message : "";
             if (tid && streamMsg) applyChatStreamProgress(tid, streamMsg);
+          }
+          if (
+            d.event_type === "user_steering_queued" ||
+            d.event_type === "user_follow_up_queued" ||
+            d.event_type === "user_steering_applied" ||
+            d.event_type === "user_follow_up_applied"
+          ) {
+            const p = d.payload && typeof d.payload === "object" ? (d.payload as Record<string, unknown>) : null;
+            const tid =
+              (p && typeof p.task_id === "string" ? p.task_id : "") ||
+              (typeof d.correlation_id === "string" ? d.correlation_id : "");
+            const hint =
+              (p && typeof p.text === "string" ? p.text : "") ||
+              (p && typeof p.message === "string" ? p.message : "") ||
+              d.event_type;
+            if (tid && hint) applyChatStreamProgress(tid, `[queue] ${hint}`);
           }
           if (d.event_type === "task_completed" || d.event_type === "task_failed" || d.event_type === "task_cancelled") {
             const p = d.payload && typeof d.payload === "object" ? (d.payload as Record<string, unknown>) : null;
@@ -3684,12 +3736,14 @@ function App() {
       es.onerror = () => {
         es?.close();
         es = null;
+        startPollFallback();
       };
     } catch {
-      /* ignore */
+      startPollFallback();
     }
     return () => {
       es?.close();
+      stopPollFallback();
     };
   }, [health?.ok, health?.port, fetchTasksList, fetchPendingHumanInput, applyChatStreamProgress]);
 
@@ -4167,6 +4221,48 @@ function App() {
     };
   }, [tab, fetchSystemEndpoint, locale]);
 
+  useEffect(() => {
+    if (tab !== "memory") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchSystemEndpoint("/api/memory/advanced-settings");
+        if (cancelled || !res.ok) return;
+        const j = JSON.parse(res.text) as { settings?: MemoryAdvancedSettings };
+        if (j.settings) setMemoryAdvancedSettings(j.settings);
+      } catch {
+        if (!cancelled) setMemoryAdvancedSettings(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, fetchSystemEndpoint]);
+
+  const saveMemoryAdvancedSettings = useCallback(async () => {
+    if (!memoryAdvancedSettings) return;
+    setMemoryAdvancedSaving(true);
+    setMemoryAdvancedMessage(null);
+    try {
+      const res = await fetchSystemEndpoint(
+        "/api/memory/advanced-settings",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(memoryAdvancedSettings),
+        },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j = JSON.parse(res.text) as { settings?: MemoryAdvancedSettings };
+      if (j.settings) setMemoryAdvancedSettings(j.settings);
+      setMemoryAdvancedMessage(locale === "en" ? "Advanced memory settings saved." : "Paramètres mémoire avancés enregistrés.");
+    } catch (e) {
+      setMemoryAdvancedMessage(String(e));
+    } finally {
+      setMemoryAdvancedSaving(false);
+    }
+  }, [memoryAdvancedSettings, fetchSystemEndpoint, locale]);
+
   const fetchUserRagDocuments = useCallback(async () => {
     setUserRagLoading(true);
     setUserRagError(null);
@@ -4238,6 +4334,8 @@ function App() {
         cannot_do?: string[];
         traits_override?: Record<string, number> | null;
         preferred_mode?: string | null;
+        temperature?: number | null;
+        system_prompt?: string | null;
       }>("get_agent_profile", { port: DAEMON_PORT });
       const to = data?.traits_override;
       const f = data?.formality;
@@ -4253,6 +4351,8 @@ function App() {
         cannot_do: Array.isArray(data?.cannot_do) ? data.cannot_do : [],
         traits_override: to && typeof to === "object" ? { ...to } : {},
         preferred_mode: data?.preferred_mode ?? "",
+        temperature: typeof data?.temperature === "number" ? String(data.temperature) : "",
+        system_prompt: data?.system_prompt ?? "",
       });
     } catch (e) {
       setAgentProfileError(String(e));
@@ -5030,6 +5130,7 @@ function App() {
         newSession: useNewSession ? true : undefined,
         queueMode: steerTarget ? chatDeliveryMode : undefined,
         targetTaskId: steerTarget,
+        incognito: chatIncognito ? true : undefined,
         port: DAEMON_PORT,
       });
       if (ack?.queued) {
@@ -5268,6 +5369,11 @@ function App() {
                 </button>
                 <NotificationCenter />
                 <PermissionsBell fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+                <SteeringQueueBell
+                  taskId={activeSteeringTaskId}
+                  fetchEndpoint={fetchSystemEndpoint}
+                  locale={locale}
+                />
                 <Tooltip content={uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}>
                   <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
                 </Tooltip>
@@ -5298,29 +5404,12 @@ function App() {
       <main className="main" id="main-content" tabIndex={-1}>
         {/* Onboarding: first steps modal (dismissible, "Ne plus afficher" stored in localStorage) */}
         {showOnboarding && (
-          <div className="human-input-overlay onboarding-overlay" role="dialog" aria-labelledby="onboarding-title" aria-modal="true">
-            <div className="human-input-modal onboarding-modal">
-              <h2 id="onboarding-title">{t("onboarding.title")}</h2>
-              <p className="onboarding-intro">{t("onboarding.intro")}</p>
-              <ul className="onboarding-steps">
-                <li>{t("onboarding.step0")}</li>
-                <li>{t("onboarding.step1")}</li>
-                <li>{t("onboarding.step2")}</li>
-                <li>{t("onboarding.step3")}</li>
-              </ul>
-              <div className="onboarding-actions">
-                <button type="button" className="onboarding-doc-btn" onClick={() => { setTab("docs"); setShowOnboarding(false); }}>
-                  {t("onboarding.open_doc")}
-                </button>
-                <button type="button" className="onboarding-dismiss" onClick={() => { try { localStorage.setItem("akasha_onboarding_dismissed", "1"); } catch { /* ignore */ } setShowOnboarding(false); }}>
-                  {t("onboarding.dismiss")}
-                </button>
-                <button type="button" className="human-input-close" onClick={() => setShowOnboarding(false)} aria-label={t("common.close")}>
-                  ×
-                </button>
-              </div>
-            </div>
-          </div>
+          <OnboardingWizard
+            locale={locale}
+            daemonOk={!!health?.ok}
+            onComplete={() => setShowOnboarding(false)}
+            t={t}
+          />
         )}
         {/* Human-in-the-loop: visible on all tabs */}
         {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (
@@ -6246,6 +6335,12 @@ function App() {
         {tab === "cookbook" && (
           <section id="panel-cookbook" role="tabpanel" aria-labelledby="tab-cookbook" className="panel cookbook-panel-wrap">
             <CookbookPanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+          </section>
+        )}
+
+        {tab === "notes" && (
+          <section id="panel-notes" role="tabpanel" aria-labelledby="tab-notes" className="panel notes-panel-wrap">
+            <NotesPanel t={t} />
           </section>
         )}
 
@@ -7692,6 +7787,71 @@ function App() {
                 {memoryHygieneHint}
               </p>
             ) : null}
+            {memoryAdvancedSettings ? (
+              <details className="memory-advanced-settings">
+                <summary>{t("memory.advanced_settings_title")}</summary>
+                <div className="settings-list memory-advanced-settings-body">
+                  <label className="memory-advanced-toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAdvancedSettings.multi_query ?? false}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({ ...s!, multi_query: e.target.checked }))
+                      }
+                    />
+                    {t("memory.advanced_multi_query")}
+                  </label>
+                  <label className="memory-advanced-toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAdvancedSettings.hyde ?? false}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({ ...s!, hyde: e.target.checked }))
+                      }
+                    />
+                    {t("memory.advanced_hyde")}
+                  </label>
+                  <label className="memory-advanced-toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAdvancedSettings.rrf ?? true}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({ ...s!, rrf: e.target.checked }))
+                      }
+                    />
+                    {t("memory.advanced_rrf")}
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>{t("memory.advanced_rollup_days")}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={3650}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.rollup_days ?? 90}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          rollup_days: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={memoryAdvancedSaving}
+                    onClick={() => void saveMemoryAdvancedSettings()}
+                  >
+                    {memoryAdvancedSaving ? t("common.loading") : t("memory.advanced_save")}
+                  </button>
+                  {memoryAdvancedMessage ? (
+                    <p className="muted" role="status">{memoryAdvancedMessage}</p>
+                  ) : null}
+                  <p className="settings-doc muted">{t("memory.advanced_settings_hint")}</p>
+                </div>
+              </details>
+            ) : null}
             <button
               type="button"
               className="refresh-btn"
@@ -8600,6 +8760,10 @@ function App() {
                 </select>
                 <span className="settings-theme-hint">{t("settings.theme_saved")}</span>
               </dd>
+              <dt>{t("theme_editor.title")}</dt>
+              <dd>
+                <ThemeEditorPanel theme={theme} t={t} />
+              </dd>
               <dt>{t("settings.ui_mode")}</dt>
               <dd>
                 <select
@@ -8768,6 +8932,13 @@ function App() {
 
                 {systemSubTab === "plugins" && (
                   <>
+                    <PluginCatalogPanel
+                      fetchEndpoint={fetchSystemEndpoint}
+                      requestEndpoint={requestSystemEndpoint}
+                      installedIds={new Set(pluginStatusList.map((p) => p.id ?? "").filter(Boolean))}
+                      onInstalled={() => void fetchPluginStatus()}
+                      locale={locale}
+                    />
                     <h3 className="settings-subtitle">{t("settings.plugins_status_title")}</h3>
                     <p className="settings-doc muted">{t("settings.plugin_reputation_desc")}</p>
                     <div className="settings-plugin-status-header">
@@ -9054,6 +9225,16 @@ function App() {
                             <textarea aria-label={t("settings.agent_profile_personality")} className="settings-textarea" rows={8} maxLength={AGENT_PROFILE_LIMITS.personality} value={agentProfile.personality} onChange={(e) => setAgentProfile((p) => ({ ...p, personality: e.target.value.slice(0, AGENT_PROFILE_LIMITS.personality) }))} placeholder={t("settings.agent_profile_personality")} />
                             <span className="settings-char-count">{agentProfile.personality.length} / {AGENT_PROFILE_LIMITS.personality}</span>
                           </dd>
+                          <dt>{t("settings.agent_profile_system_prompt")}</dt>
+                          <dd>
+                            <textarea aria-label={t("settings.agent_profile_system_prompt")} className="settings-textarea" rows={6} maxLength={4000} value={agentProfile.system_prompt} onChange={(e) => setAgentProfile((p) => ({ ...p, system_prompt: e.target.value.slice(0, 4000) }))} placeholder={t("settings.agent_profile_system_prompt_hint")} />
+                            <span className="settings-char-count">{agentProfile.system_prompt.length} / 4000</span>
+                          </dd>
+                          <dt>{t("settings.agent_profile_temperature")}</dt>
+                          <dd>
+                            <input type="number" aria-label={t("settings.agent_profile_temperature")} className="settings-input" min={0} max={2} step={0.05} value={agentProfile.temperature} onChange={(e) => setAgentProfile((p) => ({ ...p, temperature: e.target.value }))} placeholder="0.7" />
+                            <span className="settings-doc muted">{t("settings.agent_profile_temperature_hint")}</span>
+                          </dd>
                         </dl>
                       )}
                       {agentProfileSubTab === "traits" && (
@@ -9285,7 +9466,7 @@ function App() {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; const formality = agentProfile.formality === "formal" || agentProfile.formality === "informal" ? agentProfile.formality : null; await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, formality, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; const formality = agentProfile.formality === "formal" || agentProfile.formality === "informal" ? agentProfile.formality : null; const tempRaw = agentProfile.temperature.trim(); const temperature = tempRaw ? Math.min(2, Math.max(0, parseFloat(tempRaw))) : undefined; await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, formality, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined, system_prompt: agentProfile.system_prompt.trim().slice(0, 4000) || undefined, temperature: Number.isFinite(temperature) ? temperature : undefined }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
                   </>
                 )}
               </div>

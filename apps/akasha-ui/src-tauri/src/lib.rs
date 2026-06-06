@@ -112,6 +112,7 @@ async fn send_message_ack(
     queue_mode: Option<String>,
     target_task_id: Option<String>,
     priority: Option<String>,
+    incognito: Option<bool>,
     port: Option<u16>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
@@ -166,6 +167,9 @@ async fn send_message_ack(
         if p == "high" {
             body["priority"] = serde_json::Value::String("high".to_string());
         }
+    }
+    if incognito == Some(true) {
+        body["incognito"] = serde_json::Value::Bool(true);
     }
     let resp = client
         .post(&url)
@@ -513,6 +517,29 @@ async fn get_doctor(port: Option<u16>) -> Result<serde_json::Value, String> {
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(json)
+}
+
+/// Run `akasha doctor --fix` for first-launch setup wizard.
+#[tauri::command]
+async fn run_akasha_doctor_fix(port: Option<u16>) -> Result<String, String> {
+    let _port = port.unwrap_or(DAEMON_PORT);
+    let output = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("akasha")
+            .args(["doctor", "--fix"])
+            .output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.stderr.is_empty() {
+        text.push_str("\n");
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    if !output.status.success() && text.trim().is_empty() {
+        return Err(format!("akasha doctor --fix exited with {}", output.status));
+    }
+    Ok(text)
 }
 
 /// GET /api/update/status — cached latest version info from daemon (for update banner).
@@ -2104,6 +2131,7 @@ pub fn run() {
             get_router_models,
             restart_daemon,
             get_doctor,
+            run_akasha_doctor_fix,
             get_update_status,
             get_app_version,
             open_url,

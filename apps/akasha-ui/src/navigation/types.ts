@@ -3,6 +3,7 @@ export type Tab =
   | "compare"
   | "research"
   | "cookbook"
+  | "notes"
   | "scheduled"
   | "router"
   | "mission"
@@ -26,6 +27,7 @@ export const NAV_ITEMS: NavItem[] = [
   { id: "compare", labelKey: "tabs.compare", group: "workspace", shortcut: "2" },
   { id: "research", labelKey: "tabs.research", group: "workspace", shortcut: "3" },
   { id: "cookbook", labelKey: "tabs.cookbook", group: "workspace" },
+  { id: "notes", labelKey: "tabs.notes", group: "workspace" },
   { id: "tasks", labelKey: "tabs.tasks", group: "operations", shortcut: "4" },
   { id: "scheduled", labelKey: "tabs.scheduled", group: "operations" },
   { id: "router", labelKey: "tabs.router", group: "operations", shortcut: "5" },
