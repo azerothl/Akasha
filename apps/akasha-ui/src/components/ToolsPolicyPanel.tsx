@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { InfoTip } from "./Tooltip";
+import { DeviceInterfaceListEditor } from "./DeviceInterfaceListEditor";
 
 const DAEMON_PORT = 3876;
 
@@ -491,20 +492,20 @@ export function ToolsPolicyPanel({ t }: Props) {
         <dl className="settings-list">
           <dt><PolicyFieldLabel label={t("tools_policy.allowed_device_interfaces")} hintKey="tools_policy.allowed_device_interfaces_hint" t={t} /></dt>
           <dd>
-            <StringListEditor
+            <DeviceInterfaceListEditor
               items={policy.allowed_device_interfaces}
               onChange={(v) => setPolicy((p) => ({ ...p, allowed_device_interfaces: v }))}
-              placeholder="local_media"
-              addLabel={t("tools_policy.add_entry")}
+              addLabel={t("tools_policy.add_device_iface")}
+              t={t}
             />
           </dd>
           <dt><PolicyFieldLabel label={t("tools_policy.blocked_device_interfaces")} hintKey="tools_policy.blocked_device_interfaces_hint" t={t} /></dt>
           <dd>
-            <StringListEditor
+            <DeviceInterfaceListEditor
               items={policy.blocked_device_interfaces}
               onChange={(v) => setPolicy((p) => ({ ...p, blocked_device_interfaces: v }))}
-              placeholder="usb"
-              addLabel={t("tools_policy.add_entry")}
+              addLabel={t("tools_policy.add_device_iface")}
+              t={t}
             />
           </dd>
         </dl>

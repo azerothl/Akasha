@@ -907,6 +907,21 @@ async fn post_tools_policy(body: serde_json::Value, port: Option<u16>) -> Result
     resp.json().await.map_err(|e| e.to_string())
 }
 
+/// GET /api/tools/device-interfaces — catalog for settings UI (local / network / usb).
+#[tauri::command]
+async fn get_device_interfaces(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tools/device-interfaces", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 /// GET /api/connectors — connector enable flags from connectors.env.
 #[tauri::command]
 async fn get_connectors(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -2428,6 +2443,7 @@ pub fn run() {
             reload_tools_policy,
             get_tools_policy,
             post_tools_policy,
+            get_device_interfaces,
             get_connectors,
             post_connectors,
             set_vault_key,
