@@ -16657,6 +16657,10 @@ pub async fn handle_api(
         plugin_registry.reload();
         return json_response("200 OK", r#"{"reloaded":true}"#);
     }
+    if method == "GET" && path == "/api/tools/device-interfaces" {
+        let body = crate::device_catalog::device_interface_catalog();
+        return json_response("200 OK", &body.to_string());
+    }
     if method == "GET" && path == "/api/tools/policy" {
         let policy_path = data_dir.join("tools_policy.yaml");
         let policy = akasha_tools::ToolsPolicy::load_from_path(&policy_path).unwrap_or_default();

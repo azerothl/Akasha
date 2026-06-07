@@ -49,6 +49,7 @@ pub mod studio_task_snapshot;
 pub mod daemon;
 pub mod replication;
 pub mod device_bridge;
+pub mod device_catalog;
 pub mod health;
 pub mod image_generation;
 pub mod latency;
