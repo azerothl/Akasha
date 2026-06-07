@@ -141,9 +141,18 @@ pub fn apply(
             let bundle: crate::memory_export::MemoryExportBundle =
                 serde_json::from_str(&raw).map_err(|e| e.to_string())?;
             let db = data_dir.join("memory.db");
-            match crate::memory_export::import_memory(&db, &bundle) {
+            let embedding_cache_dir = data_dir.join("embedding_model");
+            match crate::memory_export::import_memory_with_embedder(&db, &bundle, Some(&embedding_cache_dir)) {
                 Ok((entries, _facts)) => memory_imported = entries,
-                Err(e) => warnings.push(format!("memory import failed: {e}")),
+                Err(e) => {
+                    warnings.push(format!(
+                        "memory import re-embedding failed, fallback to placeholder embeddings: {e}"
+                    ));
+                    match crate::memory_export::import_memory(&db, &bundle) {
+                        Ok((entries, _facts)) => memory_imported = entries,
+                        Err(e) => warnings.push(format!("memory import failed: {e}")),
+                    }
+                }
             }
         }
     }

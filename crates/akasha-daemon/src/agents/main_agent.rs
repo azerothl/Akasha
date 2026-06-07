@@ -13,28 +13,6 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-// #region agent log
-fn agent_debug_log_main(location: &str, message: &str, hypothesis_id: &str, data: serde_json::Value) {
-    let payload = serde_json::json!({
-        "sessionId": "0d82aa",
-        "timestamp": chrono::Utc::now().timestamp_millis(),
-        "location": location,
-        "message": message,
-        "hypothesisId": hypothesis_id,
-        "data": data,
-    });
-    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-0d82aa.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{}", payload);
-    }
-}
-// #endregion
-
 fn is_session_recall_message(message: &str) -> bool {
     let lower = message
         .trim()
@@ -736,20 +714,6 @@ User message:\n{}",
             if forward_to_orchestrator {
                 if use_direct {
                     let tx = agent_clone.direct_conversation_tx.as_ref().unwrap().clone();
-                    // #region agent log
-                    agent_debug_log_main(
-                        "main_agent.rs:handle_message",
-                        "dispatch_to_conversation_worker",
-                        "D",
-                        serde_json::json!({
-                            "task_id": task_id.to_string(),
-                            "session_id": session_id,
-                            "use_direct": use_direct,
-                            "selector_timed_out": selector_result.timed_out,
-                            "assigned_agent": assigned_agent,
-                        }),
-                    );
-                    // #endregion
                     let guardrail_prefix = if selector_result.timed_out {
                         "[Guardrail: the routing selector timed out. Do NOT write any files unless the user explicitly mentioned a file path or asked to save something. For external information (schedules, weather, news, timetables), use TOOL: web_search first. Reformulate the user's intent carefully before taking any action.]\n\n"
                     } else {
@@ -782,14 +746,6 @@ User message:\n{}",
                                         task_id = %dropped_task_id,
                                         "conversation queue saturated; task failed after enqueue timeout"
                                     );
-                                    // #region agent log
-                                    agent_debug_log_main(
-                                        "main_agent.rs:handle_message",
-                                        "conversation_queue_enqueue_timeout",
-                                        "D",
-                                        serde_json::json!({ "task_id": dropped_task_id.to_string() }),
-                                    );
-                                    // #endregion
                                     if let Ok(store) = TaskStore::open(store_path_recover.as_path()) {
                                         let _ = store.update_status(dropped_task_id, TaskStatus::Failed);
                                         let _ = store.insert_event(
@@ -806,14 +762,6 @@ User message:\n{}",
                             }
                             mpsc::error::TrySendError::Closed(_) => {
                                 tracing::error!(task_id = %task_id, "direct conversation channel closed; task dropped");
-                                // #region agent log
-                                agent_debug_log_main(
-                                    "main_agent.rs:handle_message",
-                                    "conversation_channel_closed",
-                                    "D",
-                                    serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
-                                );
-                                // #endregion
                                 if let Ok(store) = TaskStore::open(store_path) {
                                     let _ = store.update_status(task_id, TaskStatus::Failed);
                                 }
