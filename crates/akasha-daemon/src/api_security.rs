@@ -27,6 +27,39 @@ pub fn parse_query_param(query: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Return true only when `origin` resolves to localhost / loopback.
+/// Parses the host component to avoid prefix-spoofing (e.g. `http://localhost.evil.example`).
+fn origin_is_local(origin: &str) -> bool {
+    if origin == "null" {
+        return true;
+    }
+    // tauri:// is the desktop app scheme — always local.
+    if origin.starts_with("tauri://") {
+        return true;
+    }
+    let host_port = if let Some(rest) = origin.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = origin.strip_prefix("http://") {
+        rest
+    } else {
+        return false;
+    };
+    // Strip any trailing path.
+    let host_port = host_port.split('/').next().unwrap_or(host_port);
+    // Handle IPv6 bracket notation: [::1] or [::1]:port.
+    let host = if host_port.starts_with('[') {
+        host_port
+            .split(']')
+            .next()
+            .unwrap_or(host_port)
+            .trim_start_matches('[')
+    } else {
+        // Extract host before optional port.
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "tauri.localhost")
+}
+
 /// Reject state-changing browser requests from non-local origins (CSRF).
 /// Returns `Some(full HTTP response)` when the request must be blocked.
 pub fn csrf_reject_response(
@@ -38,15 +71,7 @@ pub fn csrf_reject_response(
         return None;
     }
     let origin = headers.get("origin")?.trim();
-    let is_local = origin == "null"
-        || origin.starts_with("http://localhost")
-        || origin.starts_with("http://127.0.0.1")
-        || origin.starts_with("https://localhost")
-        || origin.starts_with("https://127.0.0.1")
-        || origin.starts_with("http://tauri.localhost")
-        || origin.starts_with("https://tauri.localhost")
-        || origin.starts_with("tauri://");
-    if is_local {
+    if origin_is_local(origin) {
         return None;
     }
     tracing::warn!(
@@ -106,6 +131,14 @@ mod tests {
     fn csrf_blocks_unknown_origin_for_post() {
         let m = header_map_origin("https://evil.example");
         assert!(csrf_reject_response("POST", "/api/message", &m).is_some());
+    }
+
+    #[test]
+    fn csrf_blocks_localhost_prefix_spoof() {
+        // e.g. http://localhost.evil.example should NOT be treated as local
+        assert!(!origin_allowed("http://localhost.evil.example"));
+        assert!(!origin_allowed("http://127.0.0.1.evil.example"));
+        assert!(!origin_allowed("https://localhost-evil.example"));
     }
 
     #[test]

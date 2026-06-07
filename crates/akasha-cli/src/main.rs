@@ -1110,6 +1110,13 @@ async fn probe_stdio_mcp_local(
 
     let mut tools_resp = serde_json::Value::Null;
     if include_tools_list {
+        // MCP spec: client must send notifications/initialized before tool requests.
+        let initialized_notif = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        });
+        let _ = timeout(deadline, mcp_write_framed_local(&mut stdin, &initialized_notif)).await;
+
         let list = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
