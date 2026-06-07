@@ -20,9 +20,98 @@ use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
 use crate::latency::env_usize;
+use akasha_store::TaskStatus;
+use uuid::Uuid;
 
 const HEALTHCHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 3876;
+
+// #region agent log
+fn agent_debug_log_daemon(location: &str, message: &str, hypothesis_id: &str, data: serde_json::Value) {
+    let payload = serde_json::json!({
+        "sessionId": "0d82aa",
+        "timestamp": chrono::Utc::now().timestamp_millis(),
+        "location": location,
+        "message": message,
+        "hypothesisId": hypothesis_id,
+        "data": data,
+    });
+    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-0d82aa.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", payload);
+    }
+}
+// #endregion
+
+fn is_recoverable_direct_agent(agent: &str) -> bool {
+    // Only re-queue lightweight chat tasks — not studio/orchestrator specialists (would flood conv_rx).
+    agent == "conversation" || agent == "llm"
+}
+
+/// Fail stale pending/running chat tasks after daemon restart (in-memory conv queue is lost).
+fn recover_orphaned_conversation_tasks(store_path: PathBuf) {
+    tokio::spawn(async move {
+        let Ok(store) = TaskStore::open(store_path.as_path()) else {
+            return;
+        };
+        let Ok(candidates) = store.get_pending_or_running() else {
+            return;
+        };
+        let stale_fail_age = chrono::Duration::minutes(5);
+        let now = chrono::Utc::now();
+        for task in candidates {
+            if task.parent_task_id.is_some() || !is_recoverable_direct_agent(&task.assigned_agent) {
+                continue;
+            }
+            let age = now.signed_duration_since(task.created_at);
+            if age <= stale_fail_age {
+                continue;
+            }
+            let _ = store.update_status(task.id, TaskStatus::Failed);
+            let _ = store.insert_event(
+                task.id,
+                "task_failed",
+                Some(&serde_json::json!({
+                    "reason": "stale_pending_on_startup",
+                    "message": "Tâche interrompue (daemon redémarré). Renvoyez votre message."
+                })),
+                &now.to_rfc3339(),
+            );
+            // #region agent log
+            agent_debug_log_daemon(
+                "daemon.rs:recover_orphaned",
+                "fail_stale_pending_task",
+                "D",
+                serde_json::json!({ "task_id": task.id.to_string(), "age_secs": age.num_seconds() }),
+            );
+            // #endregion
+        }
+    });
+}
+
+fn fail_task_on_worker_slot_timeout(
+    store_path: &std::path::Path,
+    task_id: Uuid,
+    reason: &str,
+) {
+    if let Ok(store) = TaskStore::open(store_path) {
+        let _ = store.update_status(task_id, TaskStatus::Failed);
+        let _ = store.insert_event(
+            task_id,
+            "task_failed",
+            Some(&serde_json::json!({
+                "reason": reason,
+                "message": "Trop de tâches en parallèle — réessayez dans quelques instants."
+            })),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+    }
+}
 
 fn bind_loopback_listener(port: u16) -> std::io::Result<TcpListener> {
     let addr = format!("127.0.0.1:{port}").parse().map_err(|e| {
@@ -808,6 +897,17 @@ impl Daemon {
                 let steering_queue = steering_queue.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
+                        // #region agent log
+                        agent_debug_log_daemon(
+                            "daemon.rs:conv_worker",
+                            "conv_worker_dequeued",
+                            "D",
+                            serde_json::json!({
+                                "task_id": task.task_id.to_string(),
+                                "session_id": task.session_id,
+                            }),
+                        );
+                        // #endregion
                         // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
                         // Phase 2 AI OS: skip if task was paused.
                         if let Ok(store) = akasha_store::TaskStore::open(store_path.as_path()) {
@@ -871,9 +971,43 @@ impl Daemon {
                             let incognito = task.incognito;
                             let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
-                                let permit = match subtask_llm_sem.acquire_owned().await {
-                                    Ok(p) => p,
-                                    Err(_) => return,
+                                // #region agent log
+                                agent_debug_log_daemon(
+                                    "daemon.rs:conv_worker",
+                                    "conv_worker_sem_wait_start",
+                                    "D",
+                                    serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": true }),
+                                );
+                                // #endregion
+                                let permit = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(120),
+                                    subtask_llm_sem.acquire_owned(),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(p)) => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_acquired",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": true }),
+                                        );
+                                        p
+                                    }
+                                    _ => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_timeout",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": true }),
+                                        );
+                                        fail_task_on_worker_slot_timeout(
+                                            store_path.as_path(),
+                                            task_id,
+                                            "subtask_llm_sem_timeout",
+                                        );
+                                        return;
+                                    }
                                 };
                                 run_message_via_llm(
                                     bus,
@@ -944,9 +1078,43 @@ impl Daemon {
                             let incognito = task.incognito;
                             let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
-                                let permit = match root_llm_sem.acquire_owned().await {
-                                    Ok(p) => p,
-                                    Err(_) => return,
+                                // #region agent log
+                                agent_debug_log_daemon(
+                                    "daemon.rs:conv_worker",
+                                    "conv_worker_sem_wait_start",
+                                    "D",
+                                    serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": false }),
+                                );
+                                // #endregion
+                                let permit = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(120),
+                                    root_llm_sem.acquire_owned(),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(p)) => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_acquired",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": false }),
+                                        );
+                                        p
+                                    }
+                                    _ => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_timeout",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": false }),
+                                        );
+                                        fail_task_on_worker_slot_timeout(
+                                            store_path.as_path(),
+                                            task_id,
+                                            "root_llm_sem_timeout",
+                                        );
+                                        return;
+                                    }
                                 };
                                 run_message_via_llm(
                                     bus,
@@ -988,6 +1156,7 @@ impl Daemon {
                     }
                 }
             });
+            recover_orphaned_conversation_tasks(db_path.clone());
             tokio::spawn({
                 let bus = bus.clone();
                 let progress = progress.clone();

@@ -541,6 +541,12 @@ User message:\n{}",
                 studio_project_id,
             };
             store.insert(&task)?;
+            let _ = store.insert_event(
+                task_id,
+                "session_bound",
+                Some(&serde_json::json!({ "session_id": session_id })),
+                &Utc::now().to_rfc3339(),
+            );
         }
 
         if let Some(p) = studio_disk_root.clone() {
@@ -761,8 +767,41 @@ User message:\n{}",
                     if let Err(e) = tx.try_send(task_msg) {
                         match e {
                             mpsc::error::TrySendError::Full(t) => {
+                                let store_path_recover = store_path_buf.clone();
+                                let dropped_task_id = t.task_id;
                                 tokio::spawn(async move {
-                                    let _ = tx.send(t).await;
+                                    let send_outcome = tokio::time::timeout(
+                                        std::time::Duration::from_secs(30),
+                                        tx.send(t),
+                                    )
+                                    .await;
+                                    if send_outcome.is_ok() && send_outcome.unwrap().is_ok() {
+                                        return;
+                                    }
+                                    tracing::error!(
+                                        task_id = %dropped_task_id,
+                                        "conversation queue saturated; task failed after enqueue timeout"
+                                    );
+                                    // #region agent log
+                                    agent_debug_log_main(
+                                        "main_agent.rs:handle_message",
+                                        "conversation_queue_enqueue_timeout",
+                                        "D",
+                                        serde_json::json!({ "task_id": dropped_task_id.to_string() }),
+                                    );
+                                    // #endregion
+                                    if let Ok(store) = TaskStore::open(store_path_recover.as_path()) {
+                                        let _ = store.update_status(dropped_task_id, TaskStatus::Failed);
+                                        let _ = store.insert_event(
+                                            dropped_task_id,
+                                            "task_failed",
+                                            Some(&serde_json::json!({
+                                                "reason": "conversation_queue_full",
+                                                "message": "La file conversation est saturée. Réessayez dans quelques secondes."
+                                            })),
+                                            &Utc::now().to_rfc3339(),
+                                        );
+                                    }
                                 });
                             }
                             mpsc::error::TrySendError::Closed(_) => {
@@ -775,6 +814,9 @@ User message:\n{}",
                                     serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
                                 );
                                 // #endregion
+                                if let Ok(store) = TaskStore::open(store_path) {
+                                    let _ = store.update_status(task_id, TaskStatus::Failed);
+                                }
                             }
                         }
                     }

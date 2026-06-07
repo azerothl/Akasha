@@ -8861,21 +8861,9 @@ pub(crate) async fn run_message_via_llm(
     studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
     incognito: bool,
 ) {
-    let store = match TaskStore::open(&store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(task_id = %task_id, error_kind = "store_open", error = %e, "LLM task: store open failed");
-            if let Some(reg) = &browser_registry {
-                crate::browser::close_task(reg, task_id).await;
-            }
-            if let Some(ref sq) = steering_queue {
-                sq.unregister_active(task_id).await;
-            }
-            notify_task_completion(&task_completion_registry, task_id).await;
-            return;
-        }
-    };
-    let _ = store.update_status(task_id, TaskStatus::Running);
+    if let Ok(store) = TaskStore::open(&store_path) {
+        let _ = store.update_status(task_id, TaskStatus::Running);
+    }
     let _ = bus.send(
         EventEnvelope::new(
             EventType::ProgressUpdate,
@@ -8935,10 +8923,9 @@ pub(crate) async fn run_message_via_llm(
         } else {
             drop(reg);
             let mut resolved: Option<std::path::PathBuf> = None;
-            if let Some(pid) = store
-                .get(lineage_for_studio)
+            if let Some(pid) = TaskStore::open(&store_path)
                 .ok()
-                .flatten()
+                .and_then(|s| s.get(lineage_for_studio).ok().flatten())
                 .and_then(|t| t.studio_project_id.clone())
             {
                 if let Ok(dir) = crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags, &pid) {
@@ -8969,7 +8956,21 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     // NOTE: interpret_message is called below, after guardrail extraction, so it uses clean_message.
-    let task_snapshot = store.get(task_id).ok().flatten();
+    let task_snapshot = TaskStore::open(&store_path)
+        .ok()
+        .and_then(|s| s.get(task_id).ok().flatten());
+    // #region agent log
+    agent_debug_log(
+        "api.rs:run_message_via_llm",
+        "tool_disk_setup_done",
+        "A",
+        serde_json::json!({
+            "task_id": task_id.to_string(),
+            "session_id": session_id,
+            "code_studio_disk_task": code_studio_disk_task,
+        }),
+    );
+    // #endregion
     let assigned_agent = task_snapshot
         .as_ref()
         .map(|t| t.assigned_agent.clone())
@@ -8992,20 +8993,24 @@ pub(crate) async fn run_message_via_llm(
         let dd = data_dir_for_studio_flags.to_path_buf();
         let root = tool_disk_workspace_root.clone();
         let tid = task_id;
-        match tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             let snap_path = dd.join("studio-task-snapshots").join(format!("{tid}.json"));
             if snap_path.exists() {
                 return Ok(false);
             }
             crate::studio_task_snapshot::capture_task_snapshot(&dd, tid, &root)?;
             Ok(true)
-        })
+        }),
+        )
         .await
         {
-            Ok(Ok(true)) => {}
-            Ok(Ok(false)) => tracing::debug!(task_id = %tid, "studio task snapshot already captured; skipping"),
-            Ok(Err(e)) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot capture failed"),
-            Err(e) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot join failed"),
+            Ok(Ok(Ok(true))) => {}
+            Ok(Ok(Ok(false))) => tracing::debug!(task_id = %tid, "studio task snapshot already captured; skipping"),
+            Ok(Ok(Err(e))) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot capture failed"),
+            Ok(Err(e)) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot join failed"),
+            Err(_) => tracing::warn!(task_id = %tid, "studio task snapshot timed out"),
         }
     }
     // When main_agent prepends a guardrail block on selector timeout, extract the real user message.
@@ -9804,6 +9809,17 @@ pub(crate) async fn run_message_via_llm(
             }
         }
     }
+    let store = match TaskStore::open(&store_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(task_id = %task_id, error_kind = "store_open", error = %e, "LLM task: store open failed before prompt assembly");
+            if let Some(ref sq) = steering_queue {
+                sq.unregister_active(task_id).await;
+            }
+            notify_task_completion(&task_completion_registry, task_id).await;
+            return;
+        }
+    };
     if !is_small_talk_fast_lane {
         if let Ok(todos) = store.get_todos(task_id) {
             if let Some(block) = format_todos_plan_block(&todos) {
