@@ -8801,6 +8801,28 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
     any_write_success
 }
 
+// #region agent log
+fn agent_debug_log(location: &str, message: &str, hypothesis_id: &str, data: serde_json::Value) {
+    let payload = serde_json::json!({
+        "sessionId": "0d82aa",
+        "timestamp": chrono::Utc::now().timestamp_millis(),
+        "location": location,
+        "message": message,
+        "hypothesisId": hypothesis_id,
+        "data": data,
+    });
+    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-0d82aa.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", payload);
+    }
+}
+// #endregion
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 /// preferred_task_type_override: when set (e.g. system selector task_type), overrides routing/reminders vs. assigned_agent alone.
@@ -8864,6 +8886,39 @@ pub(crate) async fn run_message_via_llm(
             })),
         )
         .with_correlation(task_id),
+    );
+    // #region agent log
+    agent_debug_log(
+        "api.rs:run_message_via_llm",
+        "progress_5_sent",
+        "A",
+        serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+    );
+    // #endregion
+    // Start stall/progress watchdogs immediately after the first progress line so a hang in
+    // studio setup, session_state I/O, or context assembly still surfaces updates and can fail the task.
+    let meaningful_progress_flag =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timeline_correlation = task_id;
+    let (watchdog_tx, watchdog_rx) = oneshot::channel();
+    let mut watchdog_cancel = Some(watchdog_tx);
+    let (stall_tx, stall_rx) = oneshot::channel();
+    let mut stall_cancel = Some(stall_tx);
+    spawn_progress_watchdog(
+        bus.clone(),
+        timeline_correlation,
+        task_id,
+        watchdog_rx,
+    );
+    spawn_task_stall_watchdog(
+        bus.clone(),
+        store_path.clone(),
+        timeline_correlation,
+        task_id,
+        meaningful_progress_flag.clone(),
+        task_completion_registry.clone(),
+        steering_queue.clone(),
+        stall_rx,
     );
     let (message, embedded_studio_acceptance) =
         crate::api_studio::strip_embedded_acceptance_json(&message);
@@ -8977,39 +9032,45 @@ pub(crate) async fn run_message_via_llm(
     // Anchor the CLEAN user goal (without guardrail prefix) in session state at task start.
     // Skip for orchestrated task messages — their [Task]\nObjective text is not a user goal.
     if !is_subagent && !is_orchestrated_task_msg && !clean_message.trim().is_empty() {
-        let data_dir_goal = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+        let data_dir_goal = store_path.parent().unwrap_or_else(|| store_path.as_ref()).to_path_buf();
         let goal_text = clean_message.chars().take(240).collect::<String>();
-        let _ = crate::session_state::merge(data_dir_goal, &session_id, |s| {
-            if s.goals.iter().all(|g| g != &goal_text) {
-                s.goals.push(goal_text);
-            }
-        });
+        let session_id_goal = session_id.clone();
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "session_state_merge_start",
+            "A",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
+        let merge_outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            tokio::task::spawn_blocking(move || {
+                crate::session_state::merge(&data_dir_goal, &session_id_goal, |s| {
+                    if s.goals.iter().all(|g| g != &goal_text) {
+                        s.goals.push(goal_text);
+                    }
+                })
+            }),
+        )
+        .await;
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "session_state_merge_done",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "ok": matches!(merge_outcome, Ok(Ok(Ok(_)))),
+                "timed_out": matches!(merge_outcome, Err(_)),
+            }),
+        );
+        // #endregion
     }
     let timeline_correlation = resolve_root_task_id(&store_path, task_id)
         .or_else(|| task_snapshot.as_ref().and_then(|t| t.parent_task_id))
         .unwrap_or(task_id);
-    let meaningful_progress_flag =
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (watchdog_tx, watchdog_rx) = oneshot::channel();
-    let mut watchdog_cancel = Some(watchdog_tx);
-    let (stall_tx, stall_rx) = oneshot::channel();
-    let mut stall_cancel = Some(stall_tx);
-    spawn_progress_watchdog(
-        bus.clone(),
-        timeline_correlation,
-        task_id,
-        watchdog_rx,
-    );
-    spawn_task_stall_watchdog(
-        bus.clone(),
-        store_path.clone(),
-        timeline_correlation,
-        task_id,
-        meaningful_progress_flag.clone(),
-        task_completion_registry.clone(),
-        steering_queue.clone(),
-        stall_rx,
-    );
 
     // All intent detection / classification uses clean_message so a guardrail prefix never
     // breaks fast-lane matching or memory profile selection.
@@ -9440,6 +9501,27 @@ pub(crate) async fn run_message_via_llm(
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
     };
+    // #region agent log
+    {
+        let turn_count = if let Some(st) = &short_term {
+            st.get_turns(&session_id).await.len()
+        } else {
+            0usize
+        };
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "session_turns_snapshot",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "turns_empty": turns_empty,
+                "turn_count": turn_count,
+                "semantic_top_k": memory_profile.semantic_top_k,
+            }),
+        );
+    }
+    // #endregion
     let process_id_for_recall = resolve_root_task_id(store_path.as_path(), task_id)
         .map(|id| id.to_string())
         .unwrap_or_else(|| task_id.to_string());
@@ -9552,6 +9634,18 @@ pub(crate) async fn run_message_via_llm(
             .with_correlation(task_id),
         );
         let recall_timeout = std::time::Duration::from_secs(memory_recall_timeout_secs());
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "memory_recall_start",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "timeout_secs": recall_timeout.as_secs(),
+            }),
+        );
+        // #endregion
         let fused = match tokio::time::timeout(
             recall_timeout,
             crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params),
@@ -9565,9 +9659,29 @@ pub(crate) async fn run_message_via_llm(
                     timeout_secs = recall_timeout.as_secs(),
                     "memory recall timed out; continuing without long-term context"
                 );
+                // #region agent log
+                agent_debug_log(
+                    "api.rs:run_message_via_llm",
+                    "memory_recall_timeout",
+                    "A",
+                    serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+                );
+                // #endregion
                 crate::memory_orchestrator::FusedMemoryContext::default()
             }
         };
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "memory_recall_done",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "had_results": !fused.to_context_string().is_empty(),
+            }),
+        );
+        // #endregion
         let fused_str = fused.to_context_string();
         if !fused_str.is_empty() {
             user_prefix.push_str(&fused_str);
@@ -9974,6 +10088,14 @@ pub(crate) async fn run_message_via_llm(
             )
             .with_correlation(task_id),
         );
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "progress_12_llm_loop_start",
+            "A",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
         let mut max_tool_rounds = std::env::var("AKASHA_MAX_TOOL_ROUNDS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -12869,6 +12991,18 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         if studio_verify_error.is_some() {
             let _ = store.update_status(task_id, TaskStatus::Failed);
         } else {
+            // #region agent log
+            agent_debug_log(
+                "api.rs:run_message_via_llm",
+                "task_completed",
+                "A",
+                serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "session_id": session_id,
+                    "final_status": final_status_str,
+                }),
+            );
+            // #endregion
             let _ = store.update_status(task_id, TaskStatus::Completed);
             if let Ok(events) = store.get_events(task_id) {
                 if let Some(ticket_id) = events
@@ -15567,6 +15701,18 @@ pub async fn handle_api(
                         "session_id": session_id,
                         "message": "Message mis en file pour la tâche en cours."
                     });
+                    // #region agent log
+                    agent_debug_log(
+                        "api.rs:post_message",
+                        "message_queued_to_running_task",
+                        "B",
+                        serde_json::json!({
+                            "task_id": tid.to_string(),
+                            "session_id": session_id,
+                            "queue_mode": queued.mode,
+                        }),
+                    );
+                    // #endregion
                     return json_response("200 OK", &body.to_string());
                 }
             }
@@ -18056,14 +18202,19 @@ async fn get_task_status(
                 .collect()
         })
         .unwrap_or_default();
-    // Prefer persisted progress when available; fall back to in-memory progress if none is stored.
+    // Merge in-memory progress (live bus updates) with DB rows so polling shows watchdog/LLM
+    // progress even when the persistence writer is contending on SQLite.
+    let mem_entries: Vec<ProgressEntry> = {
+        let g = progress.read().await;
+        g.get(&id)
+            .map(|q| q.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let db_last_pct = progress_list.last().map(|e| e.progress_pct).unwrap_or(0);
+    let mem_last_pct = mem_entries.last().map(|e| e.progress_pct).unwrap_or(0);
     if progress_list.is_empty() {
-        let mem_entries: Vec<ProgressEntry> = {
-            let g = progress.read().await;
-            g.get(&id)
-                .map(|q| q.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
-        };
+        progress_list = mem_entries;
+    } else if mem_last_pct > db_last_pct || mem_entries.len() > progress_list.len() {
         progress_list = mem_entries;
     }
     // For a root task with children, aggregate child progress so the UI shows intermediate percentages.

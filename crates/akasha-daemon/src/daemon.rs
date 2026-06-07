@@ -839,10 +839,7 @@ impl Daemon {
                             .map(|t| t.parent_task_id.is_some())
                             .unwrap_or(false);
                         if is_subagent {
-                            let permit = match subtask_llm_sem.clone().acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
+                            let subtask_llm_sem = subtask_llm_sem.clone();
                             let bus = bus.clone();
                             let llm_router = llm_router.clone();
                             let store_path = store_path.clone();
@@ -874,6 +871,10 @@ impl Daemon {
                             let incognito = task.incognito;
                             let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
+                                let permit = match subtask_llm_sem.acquire_owned().await {
+                                    Ok(p) => p,
+                                    Err(_) => return,
+                                };
                                 run_message_via_llm(
                                     bus,
                                     llm_router,
@@ -911,10 +912,7 @@ impl Daemon {
                                 drop(permit);
                             });
                         } else {
-                            let permit = match root_llm_sem.clone().acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
+                            let root_llm_sem = root_llm_sem.clone();
                             let bus = bus.clone();
                             let llm_router = llm_router.clone();
                             let store_path = store_path.clone();
@@ -946,6 +944,10 @@ impl Daemon {
                             let incognito = task.incognito;
                             let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
+                                let permit = match root_llm_sem.acquire_owned().await {
+                                    Ok(p) => p,
+                                    Err(_) => return,
+                                };
                                 run_message_via_llm(
                                     bus,
                                     llm_router,

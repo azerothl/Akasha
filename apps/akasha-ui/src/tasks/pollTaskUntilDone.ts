@@ -86,6 +86,27 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
   let lastStatus = "";
   let lastMsg = "";
   let stallHintShown = false;
+  let lastLoggedPct = -1;
+  let pollErrors = 0;
+
+  // #region agent log
+  fetch("http://127.0.0.1:7708/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "0d82aa" },
+    body: JSON.stringify({
+      sessionId: "0d82aa",
+      location: "pollTaskUntilDone.ts:start",
+      message: "poll_started",
+      hypothesisId: "C",
+      data: {
+        taskId,
+        sessionId: deps.sessionIdRef.current,
+        mappedSession: deps.taskIdToSessionIdRef.current[taskId] ?? null,
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
 
   for (let i = 0; i < maxWait; i++) {
     await new Promise((r) => setTimeout(r, pollIntervalMs));
@@ -111,6 +132,31 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
       const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
       const msg = status?.progress?.slice(-1)[0]?.message ?? "";
       const currentStatus = normalizeTaskStatus(status?.status);
+      if (pct !== lastLoggedPct || currentStatus !== lastStatus) {
+        lastLoggedPct = pct;
+        // #region agent log
+        fetch("http://127.0.0.1:7708/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "0d82aa" },
+          body: JSON.stringify({
+            sessionId: "0d82aa",
+            location: "pollTaskUntilDone.ts:poll",
+            message: "poll_tick",
+            hypothesisId: "C",
+            data: {
+              taskId,
+              iteration: i,
+              currentStatus,
+              pct,
+              msgPreview: msg.slice(0, 120),
+              sessionMatch: deps.taskIdToSessionIdRef.current[taskId] === deps.sessionIdRef.current,
+              chipDefined: true,
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+        // #endregion
+      }
       if (currentStatus === lastStatus && msg === lastMsg) {
         ticksWithoutChange++;
         if (ticksWithoutChange >= 4 && pollIntervalMs < MAX_INTERVAL) {
@@ -345,8 +391,22 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
         requestAnimationFrame(() => deps.chatInputRef.current?.focus());
         return;
       }
-    } catch {
-      /* ignore */
+    } catch (err) {
+      pollErrors++;
+      // #region agent log
+      fetch("http://127.0.0.1:7708/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "0d82aa" },
+        body: JSON.stringify({
+          sessionId: "0d82aa",
+          location: "pollTaskUntilDone.ts:catch",
+          message: "poll_error",
+          hypothesisId: "C",
+          data: { taskId, iteration: i, pollErrors, error: String(err) },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
     }
   }
   deps.setRunningTaskChips((prev) => {
