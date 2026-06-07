@@ -1,18 +1,19 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ThemeId } from "../themeTypes";
+import { InfoTip } from "./Tooltip";
 
 export const THEME_OVERRIDE_STORAGE_KEY = "akasha_theme_css_overrides";
 
 /** CSS variables users may override per theme. */
-export const EDITABLE_THEME_VARS: Array<{ key: string; labelKey: string }> = [
-  { key: "--akasha-bg", labelKey: "theme_editor.var_bg" },
-  { key: "--akasha-bg-surface", labelKey: "theme_editor.var_surface" },
-  { key: "--akasha-text", labelKey: "theme_editor.var_text" },
-  { key: "--akasha-text-muted", labelKey: "theme_editor.var_text_muted" },
-  { key: "--akasha-accent", labelKey: "theme_editor.var_accent" },
-  { key: "--akasha-border", labelKey: "theme_editor.var_border" },
-  { key: "--akasha-success", labelKey: "theme_editor.var_success" },
-  { key: "--akasha-error", labelKey: "theme_editor.var_error" },
+export const EDITABLE_THEME_VARS: Array<{ key: string; labelKey: string; hintKey: string }> = [
+  { key: "--akasha-bg", labelKey: "theme_editor.var_bg", hintKey: "theme_editor.var_bg_hint" },
+  { key: "--akasha-bg-surface", labelKey: "theme_editor.var_surface", hintKey: "theme_editor.var_surface_hint" },
+  { key: "--akasha-text", labelKey: "theme_editor.var_text", hintKey: "theme_editor.var_text_hint" },
+  { key: "--akasha-text-muted", labelKey: "theme_editor.var_text_muted", hintKey: "theme_editor.var_text_muted_hint" },
+  { key: "--akasha-accent", labelKey: "theme_editor.var_accent", hintKey: "theme_editor.var_accent_hint" },
+  { key: "--akasha-border", labelKey: "theme_editor.var_border", hintKey: "theme_editor.var_border_hint" },
+  { key: "--akasha-success", labelKey: "theme_editor.var_success", hintKey: "theme_editor.var_success_hint" },
+  { key: "--akasha-error", labelKey: "theme_editor.var_error", hintKey: "theme_editor.var_error_hint" },
 ];
 
 export type ThemeOverrides = Record<ThemeId, Record<string, string>>;
@@ -52,6 +53,28 @@ export function applyThemeOverrides(theme: ThemeId, overrides: ThemeOverrides) {
   }
 }
 
+export function themeOverrideCount(overrides: ThemeOverrides, theme: ThemeId): number {
+  return Object.keys(overrides[theme] ?? {}).filter((k) => (overrides[theme]?.[k] ?? "").trim()).length;
+}
+
+function readThemeDefaults(theme: ThemeId): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (typeof document === "undefined") return out;
+  const root = document.documentElement;
+  const prev = root.getAttribute("data-theme");
+  root.setAttribute("data-theme", theme);
+  for (const { key } of EDITABLE_THEME_VARS) {
+    root.style.removeProperty(key);
+  }
+  for (const { key } of EDITABLE_THEME_VARS) {
+    const val = getComputedStyle(root).getPropertyValue(key).trim();
+    if (val) out[key] = val;
+  }
+  if (prev) root.setAttribute("data-theme", prev);
+  else root.removeAttribute("data-theme");
+  return out;
+}
+
 type Props = {
   theme: ThemeId;
   t: (key: string) => string;
@@ -61,6 +84,17 @@ type Props = {
 export function ThemeEditorPanel({ theme, t, onChange }: Props) {
   const [overrides, setOverrides] = useState<ThemeOverrides>(() => loadThemeOverrides());
   const current = useMemo(() => overrides[theme] ?? {}, [overrides, theme]);
+  const overrideCount = useMemo(() => themeOverrideCount(overrides, theme), [overrides, theme]);
+  const [expanded, setExpanded] = useState(() => themeOverrideCount(loadThemeOverrides(), theme) > 0);
+  const [defaults, setDefaults] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setDefaults(readThemeDefaults(theme));
+  }, [theme]);
+
+  useEffect(() => {
+    if (overrideCount > 0) setExpanded(true);
+  }, [theme, overrideCount]);
 
   const setVar = useCallback(
     (cssVar: string, value: string) => {
@@ -98,28 +132,41 @@ export function ThemeEditorPanel({ theme, t, onChange }: Props) {
   }, [theme, onChange]);
 
   return (
-    <div className="theme-editor-panel">
-      <p className="settings-doc muted">{t("theme_editor.desc")}</p>
-      <dl className="settings-list theme-editor-vars">
-        {EDITABLE_THEME_VARS.map(({ key, labelKey }) => (
-          <div key={key} className="theme-editor-row">
-            <dt>{t(labelKey)}</dt>
-            <dd>
-              <input
-                type="text"
-                className="settings-input theme-editor-input"
-                value={current[key] ?? ""}
-                placeholder={key}
-                onChange={(e) => setVar(key, e.target.value)}
-                aria-label={`${t(labelKey)} (${key})`}
-              />
-            </dd>
-          </div>
-        ))}
-      </dl>
-      <button type="button" className="btn-secondary" onClick={resetTheme}>
-        {t("theme_editor.reset")}
-      </button>
-    </div>
+    <details
+      className="theme-editor-details"
+      open={expanded}
+      onToggle={(e) => setExpanded(e.currentTarget.open)}
+    >
+      <summary className="theme-editor-summary">
+        {t("theme_editor.title")}
+        {overrideCount > 0 ? <span className="theme-editor-badge">({overrideCount})</span> : null}
+      </summary>
+      <div className="theme-editor-panel">
+        <p className="settings-doc muted">{t("theme_editor.desc")}</p>
+        <dl className="settings-list theme-editor-vars">
+          {EDITABLE_THEME_VARS.map(({ key, labelKey, hintKey }) => (
+            <div key={key} className="theme-editor-row">
+              <dt>
+                {t(labelKey)}
+                <InfoTip label={t(labelKey)} content={t(hintKey)} />
+              </dt>
+              <dd>
+                <input
+                  type="text"
+                  className="settings-input theme-editor-input"
+                  value={current[key] ?? ""}
+                  placeholder={defaults[key] || key}
+                  onChange={(e) => setVar(key, e.target.value)}
+                  aria-label={`${t(labelKey)} (${key})`}
+                />
+              </dd>
+            </div>
+          ))}
+        </dl>
+        <button type="button" className="btn-secondary" onClick={resetTheme}>
+          {t("theme_editor.reset")}
+        </button>
+      </div>
+    </details>
   );
 }
