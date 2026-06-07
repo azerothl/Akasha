@@ -82,7 +82,7 @@ pub trait SkillPlugin: Send + Sync {
     fn run(&self, input: &str) -> Result<String, PluginError>;
 }
 
-/// Memory plugin: alternative storage / vector DB (spec 16). Stub for Phase 5.
+/// Memory plugin: alternative storage / vector DB (spec 16). **Production** — HTTP delegate (S-PLG-01).
 pub trait MemoryPlugin: Send + Sync {
     fn meta(&self) -> &PluginMeta;
     fn store(&self, key: &str, value: &str) -> Result<(), PluginError>;
