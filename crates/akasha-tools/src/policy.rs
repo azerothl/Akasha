@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+fn default_calendar_read_enabled() -> bool {
+    true
+}
+
 fn path_normalize(p: &Path) -> PathBuf {
     let s = p.to_string_lossy().replace('\\', "/").to_lowercase();
     PathBuf::from(s)
@@ -43,6 +47,12 @@ pub struct ToolsPolicy {
     /// Optional: enable Cloudflare Browser Rendering crawl (`web_crawl` / `web_crawl_status`). See spec/53.
     #[serde(default)]
     pub web_crawl_enabled: bool,
+    /// Optional: allow agent `calendar_query` (read external calendar cache).
+    #[serde(default = "default_calendar_read_enabled")]
+    pub calendar_read_enabled: bool,
+    /// Optional: allow agent calendar_create/update/delete (default deny).
+    #[serde(default)]
+    pub calendar_write_enabled: bool,
     /// Cloudflare account id for `/browser-rendering/crawl` (or set `CLOUDFLARE_ACCOUNT_ID` env).
     #[serde(default)]
     pub cloudflare_account_id: Option<String>,
@@ -732,6 +742,16 @@ impl ToolsPolicy {
                     notes.push("operational:missing_cloudflare_api_token".to_string());
                 }
             }
+            "calendar_query" => {
+                if !self.calendar_read_enabled {
+                    notes.push("operational:calendar_read_disabled".to_string());
+                }
+            }
+            "calendar_create" | "calendar_update" | "calendar_delete" => {
+                if !self.calendar_write_enabled {
+                    notes.push("operational:calendar_write_disabled".to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -748,6 +768,8 @@ impl ToolsPolicy {
                     && self.resolved_cloudflare_account_id().is_some()
                     && self.resolved_cloudflare_api_token().is_some()
             }
+            "calendar_query" => self.calendar_read_enabled,
+            "calendar_create" | "calendar_update" | "calendar_delete" => self.calendar_write_enabled,
             _ => true,
         }
     }
