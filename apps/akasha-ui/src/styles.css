@@ -6468,6 +6468,140 @@ a.settings-link-btn.refresh-btn {
   resize: vertical;
 }
 
+.notes-panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--akasha-space-sm);
+}
+
+.notes-save-status {
+  font-size: 0.75rem;
+  color: var(--akasha-text-muted);
+}
+
+.notes-error {
+  color: var(--akasha-error);
+  font-size: 0.875rem;
+}
+
+.notes-agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.note-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--akasha-border);
+  border-radius: var(--akasha-radius, 0);
+  background: var(--akasha-surface);
+}
+
+.notes-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--akasha-border);
+}
+
+.notes-toolbar-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--akasha-text-muted);
+  padding: 0.2rem 0.45rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+  border-radius: var(--akasha-radius, 0);
+}
+
+.notes-toolbar-btn:hover,
+.notes-toolbar-btn.active {
+  color: var(--akasha-accent);
+  border-color: var(--akasha-border);
+}
+
+.notes-tiptap-content {
+  flex: 1;
+  min-height: 14rem;
+  overflow: auto;
+  padding: 0.75rem 1rem;
+}
+
+.notes-tiptap-content .ProseMirror {
+  outline: none;
+  min-height: 12rem;
+  color: var(--akasha-text);
+}
+
+.notes-tiptap-content .ProseMirror p.is-editor-empty:first-child::before {
+  color: var(--akasha-text-dim);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+.notes-tiptap-content .ProseMirror img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--akasha-radius, 0);
+}
+
+.chat-note-context-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.65rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.8125rem;
+  background: color-mix(in srgb, var(--akasha-accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--akasha-accent) 35%, transparent);
+  border-radius: var(--akasha-radius, 0);
+}
+
+.chat-note-picker {
+  margin-bottom: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--akasha-border);
+  border-radius: var(--akasha-radius, 0);
+  background: var(--akasha-surface);
+  max-height: 12rem;
+  overflow: auto;
+}
+
+.chat-note-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.35rem;
+}
+
+.chat-note-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.chat-note-picker-list button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--akasha-text);
+  padding: 0.35rem 0.25rem;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.chat-note-picker-list button:hover {
+  color: var(--akasha-accent);
+}
+
 .theme-editor-panel {
   display: flex;
   flex-direction: column;
