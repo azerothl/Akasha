@@ -129,8 +129,8 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
             </p>
             <p className="muted">
               {locale === "en"
-                ? "Configure connectors in Settings or connectors.env. Matrix requires MATRIX_HOMESERVER_URL + access token and the matrix-channel sidecar."
-                : "Configurez les connecteurs dans Réglages ou connectors.env. Matrix nécessite MATRIX_HOMESERVER_URL + token et le sidecar matrix-channel."}
+                ? "Configure connectors in Settings → System → Connectors (or connectors.env). Matrix requires MATRIX_HOMESERVER_URL + access token and the matrix-channel sidecar."
+                : "Configurez les connecteurs dans Paramètres → Système → Connecteurs (ou connectors.env). Matrix nécessite MATRIX_HOMESERVER_URL + token et le sidecar matrix-channel."}
             </p>
           </>
         )}

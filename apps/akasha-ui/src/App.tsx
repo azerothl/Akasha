@@ -20,7 +20,8 @@ import { OnboardingWizard, readSetupWizardPending } from "./components/Onboardin
 import { UserRagPanel } from "./components/UserRagPanel";
 import { PluginCatalogPanel } from "./components/PluginCatalogPanel";
 import { OpenClawMigrationPanel } from "./components/OpenClawMigrationPanel";
-import { AgentIdentityPanel } from "./components/AgentIdentityPanel";
+import { ToolsPolicyPanel } from "./components/ToolsPolicyPanel";
+import { ConnectorsPanel } from "./components/ConnectorsPanel";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { AppNotificationsSync } from "./components/AppNotificationsSync";
 import { useNotify } from "./notifications/useNotifyOnMessage";
@@ -2265,11 +2266,17 @@ function App() {
   const [userProfileSaving, setUserProfileSaving] = useState(false);
   const [userProfileError, setUserProfileError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
-  const [systemSubTab, setSystemSubTab] = useState<"general" | "plugins" | "health">("general");
+  const [systemSubTab, setSystemSubTab] = useState<"general" | "plugins" | "policy" | "connectors" | "health">("general");
   const [pluginTableBusyId, setPluginTableBusyId] = useState<string | null>(null);
   const [skillsCatalogText, setSkillsCatalogText] = useState<string | null>(null);
   const [skillsCatalogLoading, setSkillsCatalogLoading] = useState(false);
   const [agentProfileSubTab, setAgentProfileSubTab] = useState<AgentProfileSubTab>("identity");
+  /** Constitution layer (agent_identity.yaml): tone, values, constraints. Name/role shared with agentProfile. */
+  const [agentConstitution, setAgentConstitution] = useState<{
+    tone: string;
+    values: string[];
+    constraints: string[];
+  }>({ tone: "", values: [], constraints: [] });
   const [rulesDraft, setRulesDraft] = useState("");
   const [canDoDraft, setCanDoDraft] = useState("");
   const [cannotDoDraft, setCannotDoDraft] = useState("");
@@ -4578,12 +4585,40 @@ function App() {
         temperature: typeof data?.temperature === "number" ? String(data.temperature) : "",
         system_prompt: data?.system_prompt ?? "",
       });
+      try {
+        const idRes = await requestSystemEndpoint("GET", "/api/agent-identity");
+        if (idRes.ok) {
+          const parsed = JSON.parse(idRes.text) as {
+            identity?: {
+              name?: string;
+              role?: string;
+              tone?: string;
+              values?: string[];
+              constraints?: string[];
+            };
+          };
+          const id = parsed.identity ?? {};
+          setAgentConstitution({
+            tone: id.tone ?? "",
+            values: Array.isArray(id.values) ? id.values : [],
+            constraints: Array.isArray(id.constraints) ? id.constraints : [],
+          });
+          if (id.name && !data?.name) {
+            setAgentProfile((p) => ({ ...p, name: id.name ?? p.name }));
+          }
+          if (id.role && !data?.role) {
+            setAgentProfile((p) => ({ ...p, role: id.role ?? p.role }));
+          }
+        }
+      } catch {
+        /* constitution optional */
+      }
     } catch (e) {
       setAgentProfileError(String(e));
     } finally {
       setAgentProfileLoading(false);
     }
-  }, []);
+  }, [requestSystemEndpoint]);
 
   const fetchUserProfile = useCallback(async () => {
     setUserProfileLoading(true);
@@ -9182,8 +9217,7 @@ function App() {
                 </select>
                 <span className="settings-theme-hint">{t("settings.theme_saved")}</span>
               </dd>
-              <dt>{t("theme_editor.title")}</dt>
-              <dd>
+              <dd className="settings-theme-editor-cell">
                 <ThemeEditorPanel theme={theme} t={t} />
               </dd>
               <dt>{t("settings.ui_mode")}</dt>
@@ -9324,6 +9358,24 @@ function App() {
                   <button
                     type="button"
                     role="tab"
+                    aria-selected={systemSubTab === "policy"}
+                    className={systemSubTab === "policy" ? "active" : ""}
+                    onClick={() => setSystemSubTab("policy")}
+                  >
+                    {t("settings.system_subtab_policy")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={systemSubTab === "connectors"}
+                    className={systemSubTab === "connectors" ? "active" : ""}
+                    onClick={() => setSystemSubTab("connectors")}
+                  >
+                    {t("settings.system_subtab_connectors")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
                     aria-selected={systemSubTab === "health"}
                     className={systemSubTab === "health" ? "active" : ""}
                     onClick={() => setSystemSubTab("health")}
@@ -9352,9 +9404,12 @@ function App() {
                       </dd>
                     </dl>
                     <OpenClawMigrationPanel locale={locale} fetchEndpoint={fetchSystemEndpoint} />
-                    <AgentIdentityPanel locale={locale} fetchEndpoint={requestSystemEndpoint} />
                   </>
                 )}
+
+                {systemSubTab === "policy" && <ToolsPolicyPanel t={t} />}
+
+                {systemSubTab === "connectors" && <ConnectorsPanel t={t} />}
 
                 {systemSubTab === "plugins" && (
                   <>
@@ -9597,6 +9652,11 @@ function App() {
                       loadError: t("settings.system_health_load_error"),
                       detailsToggle: t("settings.system_health_details_toggle"),
                       summaryUnavailable: t("settings.system_health_summary_unavailable"),
+                      editPolicy: t("settings.system_health_edit_policy"),
+                    }}
+                    onEditToolsPolicy={() => {
+                      setSettingsSection("system");
+                      setSystemSubTab("policy");
                     }}
                   />
                 )}
@@ -9623,6 +9683,10 @@ function App() {
                     <div className="settings-agent-tab-content">
                       {agentProfileSubTab === "identity" && (
                         <>
+                          <p className="settings-doc muted settings-identity-hint">
+                            {t("settings.agent_identity_constitution_hint")}
+                            <InfoTip label={t("settings.agent_subtab_identity")} content={t("settings.agent_identity_constitution_hint")} />
+                          </p>
                           <dl className="settings-list">
                             <dt>{t("settings.agent_profile_name")}</dt>
                             <dd>
@@ -9680,6 +9744,112 @@ function App() {
                                   <button type="button" className="btn-secondary" onClick={() => agentAvatarFileInputRef.current?.click()}>{t("settings.agent_profile_avatar_choose")}</button>
                                   {agentProfile.avatar ? <button type="button" className="btn-secondary" onClick={() => setAgentProfile((p) => ({ ...p, avatar: "" }))}>{t("settings.agent_profile_avatar_remove")}</button> : null}
                                 </div>
+                              </div>
+                            </dd>
+                            <dt>{t("settings.agent_constitution_tone")}</dt>
+                            <dd>
+                              <input
+                                type="text"
+                                aria-label={t("settings.agent_constitution_tone")}
+                                className="settings-input"
+                                maxLength={256}
+                                value={agentConstitution.tone}
+                                onChange={(e) => setAgentConstitution((c) => ({ ...c, tone: e.target.value.slice(0, 256) }))}
+                                placeholder={t("settings.agent_constitution_tone_placeholder")}
+                              />
+                            </dd>
+                            <dt>{t("settings.agent_constitution_values")}</dt>
+                            <dd>
+                              <div className="settings-list-editor">
+                                {agentConstitution.values.length === 0 ? (
+                                  <p className="settings-doc muted">{t("settings.agent_list_empty")}</p>
+                                ) : (
+                                  <ul className="settings-string-list">
+                                    {agentConstitution.values.map((line, i) => (
+                                      <li key={i} className="settings-list-item">
+                                        <input
+                                          type="text"
+                                          className="settings-input"
+                                          value={line}
+                                          onChange={(e) => {
+                                            const next = [...agentConstitution.values];
+                                            next[i] = e.target.value;
+                                            setAgentConstitution((c) => ({ ...c, values: next }));
+                                          }}
+                                        />
+                                        <button
+                                          type="button"
+                                          className="settings-list-item-delete"
+                                          onClick={() =>
+                                            setAgentConstitution((c) => ({
+                                              ...c,
+                                              values: c.values.filter((_, j) => j !== i),
+                                            }))
+                                          }
+                                          aria-label={t("settings.agent_delete_line")}
+                                        >
+                                          ×
+                                        </button>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  onClick={() =>
+                                    setAgentConstitution((c) => ({ ...c, values: [...c.values, ""] }))
+                                  }
+                                >
+                                  {t("settings.agent_add_line")}
+                                </button>
+                              </div>
+                            </dd>
+                            <dt>{t("settings.agent_constitution_constraints")}</dt>
+                            <dd>
+                              <div className="settings-list-editor">
+                                {agentConstitution.constraints.length === 0 ? (
+                                  <p className="settings-doc muted">{t("settings.agent_list_empty")}</p>
+                                ) : (
+                                  <ul className="settings-string-list">
+                                    {agentConstitution.constraints.map((line, i) => (
+                                      <li key={i} className="settings-list-item">
+                                        <input
+                                          type="text"
+                                          className="settings-input"
+                                          value={line}
+                                          onChange={(e) => {
+                                            const next = [...agentConstitution.constraints];
+                                            next[i] = e.target.value;
+                                            setAgentConstitution((c) => ({ ...c, constraints: next }));
+                                          }}
+                                        />
+                                        <button
+                                          type="button"
+                                          className="settings-list-item-delete"
+                                          onClick={() =>
+                                            setAgentConstitution((c) => ({
+                                              ...c,
+                                              constraints: c.constraints.filter((_, j) => j !== i),
+                                            }))
+                                          }
+                                          aria-label={t("settings.agent_delete_line")}
+                                        >
+                                          ×
+                                        </button>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  onClick={() =>
+                                    setAgentConstitution((c) => ({ ...c, constraints: [...c.constraints, ""] }))
+                                  }
+                                >
+                                  {t("settings.agent_add_line")}
+                                </button>
                               </div>
                             </dd>
                           </dl>
@@ -9933,7 +10103,7 @@ function App() {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; const formality = agentProfile.formality === "formal" || agentProfile.formality === "informal" ? agentProfile.formality : null; const tempRaw = agentProfile.temperature.trim(); const temperature = tempRaw ? Math.min(2, Math.max(0, parseFloat(tempRaw))) : undefined; await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, formality, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined, system_prompt: agentProfile.system_prompt.trim().slice(0, 4000) || undefined, temperature: Number.isFinite(temperature) ? temperature : undefined }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; const formality = agentProfile.formality === "formal" || agentProfile.formality === "informal" ? agentProfile.formality : null; const tempRaw = agentProfile.temperature.trim(); const temperature = tempRaw ? Math.min(2, Math.max(0, parseFloat(tempRaw))) : undefined; const profileName = agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name); const profileRole = agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role); await invoke("post_agent_profile", { body: { name: profileName || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: profileRole || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, formality, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined, system_prompt: agentProfile.system_prompt.trim().slice(0, 4000) || undefined, temperature: Number.isFinite(temperature) ? temperature : undefined }, port: DAEMON_PORT }); const idBody = JSON.stringify({ name: profileName || undefined, role: profileRole || undefined, tone: agentConstitution.tone.trim() || undefined, values: agentConstitution.values.map((v) => v.trim()).filter(Boolean), constraints: agentConstitution.constraints.map((v) => v.trim()).filter(Boolean) }); const idRes = await requestSystemEndpoint("POST", "/api/agent-identity", idBody); if (!idRes.ok) throw new Error(idRes.text.slice(0, 200)); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
                   </>
                 )}
               </div>
