@@ -9,6 +9,7 @@ pub mod long_term_memory;
 pub mod memory_fusion;
 pub mod metrics;
 pub mod pipeline;
+pub mod external_calendar;
 pub mod platform_extras;
 pub mod schedules;
 pub mod tasks;
@@ -36,6 +37,10 @@ pub use memory_fusion::{
     hybrid_memory_search, memory_rrf_enabled, parse_score_weights_from_env,
     reciprocal_rank_fusion, HybridSearchOptions, MemoryScoreWeights, DEFAULT_CANDIDATE_TOP_K,
     DEFAULT_RRF_K,
+};
+pub use external_calendar::{
+    default_ics_account_id, CalDavAccount, CalDavOutboxRow, ExternalCalendarEvent,
+    ExternalCalendarStore,
 };
 pub use platform_extras::{
     ArchivedTurn, Contact, ContactStore, ConversationArchiveStore, NotificationRow,
