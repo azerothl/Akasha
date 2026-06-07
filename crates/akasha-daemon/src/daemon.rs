@@ -683,6 +683,7 @@ impl Daemon {
                 Arc::new(RwLock::new(std::collections::HashMap::new()));
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
+            let notes_store = crate::notes::NotesStore::new_shared(&data_dir);
             let autonomous_mission = match crate::autonomous_mission_config::load_and_sync_db(data_dir, db_path.as_path()) {
                 Ok(c) => Some(c),
                 Err(e) => {
@@ -1449,6 +1450,7 @@ impl Daemon {
                 let human_input_store = human_input_store.clone();
                 let steering_queue = steering_queue.clone();
                 let user_rag_store = user_rag_store.clone();
+                let notes_store = notes_store.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
                                 let autonomous_mission_http = autonomous_mission.clone();
@@ -1519,6 +1521,7 @@ impl Daemon {
                                             Some(human_input_store),
                                             Some(steering_queue.clone()),
                                             &user_rag_store,
+                                            &notes_store,
                                             &agent_profile_cache,
                                             &update_check_cache_clone,
                                             task_usage_store.as_ref(),

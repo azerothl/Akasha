@@ -1759,6 +1759,10 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
     ("user_rag_search", "user_rag_search <query> [top_k] — rechercher dans les documents utilisateur indexés (user RAG)"),
+    ("notes_list", "notes_list — lister les notes utilisateur (id + titre)"),
+    ("notes_read", "notes_read <id> — lire le contenu markdown d'une note"),
+    ("notes_write", "notes_write <id> puis contenu markdown sur les lignes suivantes — mettre à jour une note"),
+    ("notes_search", "notes_search <query> [limit] — rechercher dans les notes utilisateur"),
     ("workspace_graph_search", "workspace_graph_search <query> [--workspace <uuid>] — rechercher dans les graphes projet indexés (nœuds label/chemin) ; limite ~20 lignes ; --workspace pour un espace enregistré uniquement"),
     ("memory_store", "memory_store <content> <source> [link_to: uuid1+kind1,uuid2+kind2,...] [link_kind: default_kind] — mémoire long terme. Types recommandés : similar, relates_to, related, updates, supersedes, excludes, contradicts, supports, derived_from, same_as, spouse, child, birth_date, … ; par cible utiliser uuid+kind, ou uuid seuls avec link_kind (défaut related)."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
@@ -4026,6 +4030,159 @@ pub(crate) async fn execute_tool_call_impl(
                 ),
                 Ok(Err(e)) => (false, format!("[user_rag_search] {}", e), None),
                 Err(e) => (false, format!("[user_rag_search] join: {}", e), None),
+            }
+        }
+        "notes_list" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (false, "[notes_list] no data dir".to_string(), None);
+            };
+            let data_dir = data_dir.to_path_buf();
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::notes::NotesStore::new(&data_dir);
+                store.list()
+            })
+            .await
+            {
+                Ok(Ok(notes)) if notes.is_empty() => (true, "[notes_list] no notes".to_string(), None),
+                Ok(Ok(notes)) => {
+                    let lines: Vec<String> = notes
+                        .iter()
+                        .map(|n| format!("{} — {}", n.id, n.title))
+                        .collect();
+                    (true, format!("[notes_list]\n{}", lines.join("\n")), None)
+                }
+                Ok(Err(e)) => (false, format!("[notes_list] {}", e), None),
+                Err(e) => (false, format!("[notes_list] join: {}", e), None),
+            }
+        }
+        "notes_read" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (false, "[notes_read] no data dir".to_string(), None);
+            };
+            let id = args.first().map(String::as_str).unwrap_or("").trim();
+            if id.is_empty() {
+                return (
+                    false,
+                    "[notes_read] usage: notes_read <id>".to_string(),
+                    None,
+                );
+            }
+            let data_dir = data_dir.to_path_buf();
+            let id = id.to_string();
+            let id_for_err = id.clone();
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::notes::NotesStore::new(&data_dir);
+                store.read(&id)
+            })
+            .await
+            {
+                Ok(Ok(Some(doc))) => (
+                    true,
+                    format!(
+                        "[notes_read] {} — {}\n\n{}",
+                        doc.meta.id, doc.meta.title, doc.content
+                    ),
+                    None,
+                ),
+                Ok(Ok(None)) => (false, format!("[notes_read] note not found: {id_for_err}"), None),
+                Ok(Err(e)) => (false, format!("[notes_read] {}", e), None),
+                Err(e) => (false, format!("[notes_read] join: {}", e), None),
+            }
+        }
+        "notes_write" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (false, "[notes_write] no data dir".to_string(), None);
+            };
+            let id = args.first().map(String::as_str).unwrap_or("").trim();
+            if id.is_empty() {
+                return (
+                    false,
+                    "[notes_write] usage: notes_write <id> puis contenu markdown".to_string(),
+                    None,
+                );
+            }
+            let content = if args.len() > 1 {
+                args[1..].join("\n")
+            } else {
+                String::new()
+            };
+            let data_dir = data_dir.to_path_buf();
+            let id = id.to_string();
+            let id_for_err = id.clone();
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::notes::NotesStore::new(&data_dir);
+                store.update(&id, None, Some(&content))
+            })
+            .await
+            {
+                Ok(Ok(Some(doc))) => (
+                    true,
+                    format!(
+                        "[notes_write] updated {} — {} ({} chars)",
+                        doc.meta.id,
+                        doc.meta.title,
+                        doc.content.len()
+                    ),
+                    None,
+                ),
+                Ok(Ok(None)) => (false, format!("[notes_write] note not found: {id_for_err}"), None),
+                Ok(Err(e)) => (false, format!("[notes_write] {}", e), None),
+                Err(e) => (false, format!("[notes_write] join: {}", e), None),
+            }
+        }
+        "notes_search" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (false, "[notes_search] no data dir".to_string(), None);
+            };
+            let mut limit = 10usize;
+            let mut rest: Vec<String> = Vec::new();
+            for a in args {
+                if let Ok(k) = a.parse::<usize>() {
+                    limit = k.clamp(1, 50);
+                } else {
+                    rest.push(a.clone());
+                }
+            }
+            let query = rest.join(" ").trim().to_string();
+            if query.is_empty() {
+                return (
+                    false,
+                    "[notes_search] usage: notes_search <query> [limit]".to_string(),
+                    None,
+                );
+            }
+            let data_dir = data_dir.to_path_buf();
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::notes::NotesStore::new(&data_dir);
+                store.search(&query, limit)
+            })
+            .await
+            {
+                Ok(Ok(hits)) if hits.is_empty() => (
+                    true,
+                    "[notes_search] no matching notes".to_string(),
+                    None,
+                ),
+                Ok(Ok(hits)) => (
+                    true,
+                    format!(
+                        "[notes_search]\n{}",
+                        hits.iter()
+                            .enumerate()
+                            .map(|(i, h)| format!(
+                                "{}. {} — {}\n   {}",
+                                i + 1,
+                                h.id,
+                                h.title,
+                                h.snippet
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
+                    None,
+                ),
+                Ok(Err(e)) => (false, format!("[notes_search] {}", e), None),
+                Err(e) => (false, format!("[notes_search] join: {}", e), None),
             }
         }
         "studio_list_tickets" => {
@@ -13498,6 +13655,7 @@ pub async fn handle_api(
     human_input_store: Option<HumanInputStore>,
     steering_queue: Option<SteeringQueueStore>,
     user_rag_store: &crate::user_rag::SharedUserRagStore,
+    notes_store: &crate::notes::SharedNotesStore,
     agent_profile_cache: &AgentProfileCache,
     update_cache: &UpdateCheckCache,
     task_usage_store: &TaskUsageStore,
@@ -13559,6 +13717,18 @@ pub async fn handle_api(
         path_only,
         body.as_deref(),
         store_path,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    if let Some(resp) = crate::api_routes_notes::try_handle(
+        method,
+        path_only,
+        Some(query_str),
+        body.as_deref(),
+        notes_store,
     )
     .await
     {

@@ -88,6 +88,8 @@ pub mod memory_consolidation;
 pub mod memory_retrieval_enhance;
 pub mod user_rag;
 pub mod user_rag_indexer;
+pub mod notes;
+pub mod api_routes_notes;
 
 pub use daemon::{Daemon, RunOutcome};
 pub use health::{HealthState, HealthStatus};

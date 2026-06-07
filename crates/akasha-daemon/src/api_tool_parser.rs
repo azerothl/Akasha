@@ -147,6 +147,10 @@ const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
     "budget_status",
         "workspace_graph_search",
         "user_rag_search",
+        "notes_list",
+        "notes_read",
+        "notes_write",
+        "notes_search",
     "device_invoke",
     "ask_user",
     "generate_image",
@@ -216,7 +220,7 @@ pub(crate) fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> 
 pub(crate) fn tool_supports_multiline_body(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "apply_patch" | "edit_file" | "write_file" | "ask_user" | "search_replace"
+        "apply_patch" | "edit_file" | "write_file" | "ask_user" | "search_replace" | "notes_write"
     )
 }
 
