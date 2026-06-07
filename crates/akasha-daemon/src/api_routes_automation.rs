@@ -95,6 +95,44 @@ pub async fn handle_automation_routes(
         ));
     }
 
+    if method == "GET" && path_only == "/api/automation/webhook/recent" {
+        let limit = 20usize;
+        let dd = data_dir.to_path_buf();
+        let deliveries = match tokio::task::spawn_blocking(move || {
+            crate::webhook_inbound::list_recent_idempotency_keys(&dd, limit)
+        })
+        .await
+        {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(e)) => {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({"error":"webhook_recent_read_failed","detail":e}).to_string(),
+                ));
+            }
+            Err(e) => {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({"error":"webhook_recent_spawn_failed","detail":e.to_string()}).to_string(),
+                ));
+            }
+        };
+        let items: Vec<serde_json::Value> = deliveries
+            .into_iter()
+            .map(|(idk, seen_at)| {
+                serde_json::json!({
+                    "idempotency_key": idk,
+                    "seen_at_unix": seen_at,
+                    "status": "accepted",
+                })
+            })
+            .collect();
+        return Some(json_response(
+            "200 OK",
+            &serde_json::json!({ "deliveries": items, "count": items.len() }).to_string(),
+        ));
+    }
+
     if method == "POST" && path_only == "/api/automation/webhook/direct" {
         let secret = std::env::var("AKASHA_AUTOMATION_WEBHOOK_SECRET").unwrap_or_default();
         let direct = std::env::var("AKASHA_WEBHOOK_DIRECT_BODY_JSON").unwrap_or_default();

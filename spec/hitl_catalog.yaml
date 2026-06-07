@@ -1,0 +1,25 @@
+# Catalogue des actions nécessitant approbation (human-in-the-loop).
+# Complète tools_policy.yaml require_approval.
+
+version: 1
+default_mode: ask_me
+
+actions:
+  - id: create_schedule
+    tools: [schedule_task]
+    description: Création d'une tâche planifiée récurrente
+  - id: wake_in
+    tools: [wake_in, wake_every]
+    description: Rappel agent différé
+  - id: run_command_destructive
+    tools: [run_command]
+    description: Commandes shell (policy tools_policy.yaml)
+  - id: mcp_server_add
+    tools: [add_mcp_server]
+    description: Ajout d'un serveur MCP
+  - id: plugin_install
+    tools: []
+    description: Installation de plugin WASM
+
+limits:
+  max_pending_per_session: 5

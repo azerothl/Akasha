@@ -69,6 +69,9 @@ function isStartupProgressMessage(msg: string): boolean {
   if (!m) return true;
   return (
     m.startsWith("Analyzing your request") ||
+    m.startsWith("Préparation du contexte") ||
+    m.startsWith("Chargement du contexte") ||
+    m.startsWith("Génération de la réponse") ||
     m.startsWith("Still spinning") ||
     m.startsWith("Still working")
   );
@@ -83,6 +86,8 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
   let lastStatus = "";
   let lastMsg = "";
   let stallHintShown = false;
+  let lastLoggedPct = -1;
+  let pollErrors = 0;
 
   for (let i = 0; i < maxWait; i++) {
     await new Promise((r) => setTimeout(r, pollIntervalMs));
@@ -108,6 +113,9 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
       const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
       const msg = status?.progress?.slice(-1)[0]?.message ?? "";
       const currentStatus = normalizeTaskStatus(status?.status);
+      if (pct !== lastLoggedPct || currentStatus !== lastStatus) {
+        lastLoggedPct = pct;
+      }
       if (currentStatus === lastStatus && msg === lastMsg) {
         ticksWithoutChange++;
         if (ticksWithoutChange >= 4 && pollIntervalMs < MAX_INTERVAL) {
@@ -342,8 +350,8 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
         requestAnimationFrame(() => deps.chatInputRef.current?.focus());
         return;
       }
-    } catch {
-      /* ignore */
+    } catch (err) {
+      pollErrors++;
     }
   }
   deps.setRunningTaskChips((prev) => {

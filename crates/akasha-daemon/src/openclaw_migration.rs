@@ -16,6 +16,7 @@ pub struct OpenClawApplyResult {
     pub ok: bool,
     pub skills_copied: Vec<String>,
     pub tools_policy_merged: bool,
+    pub memory_imported: u64,
     pub warnings: Vec<String>,
 }
 
@@ -56,7 +57,7 @@ fn discover(source: &Path) -> OpenClawPreview {
     }
     if memory_export_path.is_some() {
         warnings.push(
-            "Memory export detected but not auto-imported (import entries manually or via memory skill)."
+            "Memory export detected — use apply with import_memory=true to import entries."
                 .to_string(),
         );
     }
@@ -77,7 +78,12 @@ pub fn preview(source_dir: &str) -> Result<OpenClawPreview, String> {
     Ok(discover(&source))
 }
 
-pub fn apply(source_dir: &str, data_dir: &Path, dry_run: bool) -> Result<OpenClawApplyResult, String> {
+pub fn apply(
+    source_dir: &str,
+    data_dir: &Path,
+    dry_run: bool,
+    import_memory: bool,
+) -> Result<OpenClawApplyResult, String> {
     let source = PathBuf::from(source_dir.trim());
     if !source.is_dir() {
         return Err("source_dir_not_found".to_string());
@@ -90,6 +96,7 @@ pub fn apply(source_dir: &str, data_dir: &Path, dry_run: bool) -> Result<OpenCla
             ok: true,
             skills_copied: prev.skills_found,
             tools_policy_merged: prev.tools_policy_path.is_some(),
+            memory_imported: 0,
             warnings,
         });
     }
@@ -126,10 +133,34 @@ pub fn apply(source_dir: &str, data_dir: &Path, dry_run: bool) -> Result<OpenCla
             tools_policy_merged = true;
         }
     }
+    let mut memory_imported = 0u64;
+    if import_memory {
+        if let Some(ref mem_path) = prev.memory_export_path {
+            let path = PathBuf::from(mem_path);
+            let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let bundle: crate::memory_export::MemoryExportBundle =
+                serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            let db = data_dir.join("memory.db");
+            let embedding_cache_dir = data_dir.join("embedding_model");
+            match crate::memory_export::import_memory_with_embedder(&db, &bundle, Some(&embedding_cache_dir)) {
+                Ok((entries, _facts)) => memory_imported = entries,
+                Err(e) => {
+                    warnings.push(format!(
+                        "memory import re-embedding failed, fallback to placeholder embeddings: {e}"
+                    ));
+                    match crate::memory_export::import_memory(&db, &bundle) {
+                        Ok((entries, _facts)) => memory_imported = entries,
+                        Err(e) => warnings.push(format!("memory import failed: {e}")),
+                    }
+                }
+            }
+        }
+    }
     Ok(OpenClawApplyResult {
         ok: true,
         skills_copied,
         tools_policy_merged,
+        memory_imported,
         warnings,
     })
 }

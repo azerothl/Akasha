@@ -76,6 +76,12 @@ impl ShortTermStore {
         *g.entry(session_id.to_string()).or_insert(0) += 1;
     }
 
+    /// Reset compaction counter (continuous session mode — avoid forcing a new session).
+    pub async fn reset_compaction_count(&self, session_id: &str) {
+        let mut g = self.compaction_count.write().await;
+        g.insert(session_id.to_string(), 0);
+    }
+
     /// Rough token estimate (chars / 4) — legacy default when provider/model unknown.
     pub fn estimate_tokens(s: &str) -> usize {
         Self::estimate_tokens_calibrated("default", "default", s)

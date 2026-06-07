@@ -1654,6 +1654,49 @@ pub async fn web_search(
     Ok((text, result))
 }
 
+#[cfg(feature = "web")]
+fn web_crawl_domain_denied_summary(url: &str, policy: &crate::policy::ToolsPolicy) -> String {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .unwrap_or_else(|| "?".to_string());
+    let allow_hint = if policy
+        .allowed_web_domains
+        .iter()
+        .any(|d| d.trim() == "*")
+    {
+        "allowed_web_domains contains '*' but host may be in blocked_web_domains".to_string()
+    } else if policy.allowed_web_domains.is_empty() {
+        "allowed_web_domains is empty (deny by default)".to_string()
+    } else {
+        format!("allowed_web_domains: {}", policy.allowed_web_domains.join(", "))
+    };
+    let block_hint = if policy.blocked_web_domains.is_empty() {
+        String::new()
+    } else {
+        format!("; blocked_web_domains: {}", policy.blocked_web_domains.join(", "))
+    };
+    format!(
+        "url host '{host}' not allowed by policy ({allow_hint}{block_hint}). Add '{host}' to allowed_web_domains in tools_policy.yaml and set web_crawl_enabled: true with cloudflare_account_id + vault cloudflare_api_token."
+    )
+}
+
+#[cfg(feature = "web")]
+fn web_crawl_timeout_hint(op: &str, secs: u64) -> String {
+    format!(
+        "{op} timed out after {secs}s — Cloudflare Browser Rendering can be slow. If a job_id was returned, poll with TOOL: web_crawl_status <job_id>; otherwise retry with a lower limit or check Cloudflare dashboard."
+    )
+}
+
+#[cfg(feature = "web")]
+fn web_crawl_retries() -> u32 {
+    std::env::var("AKASHA_WEB_CRAWL_RETRIES")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .map(|n| n.min(5))
+        .unwrap_or(1)
+}
+
 /// Start a Cloudflare Browser Rendering crawl job. Feature "web". See spec/53.
 #[cfg(feature = "web")]
 pub async fn web_crawl_start(
@@ -1700,11 +1743,12 @@ pub async fn web_crawl_start(
             ToolResult {
                 tool: "web_crawl".to_string(),
                 success: false,
-                summary: "url host not allowed by policy (allowed_web_domains / blocked_web_domains)".to_string(),
+                summary: web_crawl_domain_denied_summary(url, policy),
                 detail: Some(url.to_string()),
             },
         ));
     }
+    const CRAWL_START_TIMEOUT_SECS: u64 = 60;
     let endpoint = format!(
         "https://api.cloudflare.com/client/v4/accounts/{}/browser-rendering/crawl",
         account
@@ -1717,16 +1761,37 @@ pub async fn web_crawl_start(
         "render": true
     });
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(CRAWL_START_TIMEOUT_SECS))
         .build()
         .context("web_crawl build client")?;
-    let res = client
-        .post(&endpoint)
-        .header("Authorization", format!("Bearer {}", token))
-        .json(&body)
-        .send()
-        .await
-        .context("web_crawl send")?;
+    let max_retries = web_crawl_retries();
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut res_opt = None;
+    for _attempt in 0..=max_retries {
+        match client
+            .post(&endpoint)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(res) => {
+                res_opt = Some(res);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(if e.is_timeout() {
+                    anyhow::anyhow!(web_crawl_timeout_hint("web_crawl start", CRAWL_START_TIMEOUT_SECS))
+                } else {
+                    anyhow::anyhow!("web_crawl send: {e}")
+                });
+            }
+        }
+    }
+    let res = match res_opt {
+        Some(r) => r,
+        None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("web_crawl send failed"))),
+    };
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     let v: serde_json::Value =
@@ -1832,16 +1897,41 @@ pub async fn web_crawl_status(job_id: &str, policy: &crate::policy::ToolsPolicy)
         "https://api.cloudflare.com/client/v4/accounts/{}/browser-rendering/crawl/{}",
         account, job_id
     );
+    const CRAWL_STATUS_TIMEOUT_SECS: u64 = 60;
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(CRAWL_STATUS_TIMEOUT_SECS))
         .build()
         .context("web_crawl_status build client")?;
-    let res = client
-        .get(&endpoint)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-        .context("web_crawl_status send")?;
+    let max_retries = web_crawl_retries();
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut res_opt = None;
+    for _attempt in 0..=max_retries {
+        match client
+            .get(&endpoint)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+        {
+            Ok(res) => {
+                res_opt = Some(res);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(if e.is_timeout() {
+                    anyhow::anyhow!(web_crawl_timeout_hint(
+                        "web_crawl_status poll",
+                        CRAWL_STATUS_TIMEOUT_SECS
+                    ))
+                } else {
+                    anyhow::anyhow!("web_crawl_status send: {e}")
+                });
+            }
+        }
+    }
+    let res = match res_opt {
+        Some(r) => r,
+        None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("web_crawl_status send failed"))),
+    };
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -1850,17 +1940,55 @@ pub async fn web_crawl_status(job_id: &str, policy: &crate::policy::ToolsPolicy)
             ToolResult {
                 tool: "web_crawl_status".to_string(),
                 success: false,
-                summary: format!("HTTP {}", status),
+                summary: format!(
+                    "HTTP {} — verify job_id, Cloudflare token scopes (Browser Rendering), and account id",
+                    status
+                ),
                 detail: Some(job_id.to_string()),
             },
         ));
     }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "raw": &*text }));
+    let job_status = v
+        .pointer("/result/status")
+        .or_else(|| v.get("status"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let partial_count = v
+        .pointer("/result/crawled_count")
+        .or_else(|| v.pointer("/result/pages_crawled"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let summary = match job_status.to_ascii_lowercase().as_str() {
+        "running" | "queued" | "pending" | "in_progress" => {
+            format!(
+                "crawl job {job_status} — partial pages: {partial_count}. Poll again with TOOL: web_crawl_status {job_id} (Cloudflare may take minutes for large limits)"
+            )
+        }
+        "failed" | "error" => {
+            let err = v
+                .pointer("/result/error")
+                .or_else(|| v.pointer("/errors"))
+                .map(|x| x.to_string())
+                .unwrap_or_else(|| "see response body".to_string());
+            format!("crawl job failed: {err}")
+        }
+        "complete" | "completed" | "success" => "crawl job completed".to_string(),
+        "" => "crawl status".to_string(),
+        other => format!("crawl job status: {other}"),
+    };
+    let status_lower = job_status.to_ascii_lowercase();
+    let success = matches!(
+        status_lower.as_str(),
+        "complete" | "completed" | "success" | "running" | "queued" | "pending" | "in_progress" | ""
+    ) && !matches!(status_lower.as_str(), "failed" | "error");
     Ok((
         text.chars().take(120_000).collect(),
         ToolResult {
             tool: "web_crawl_status".to_string(),
-            success: true,
-            summary: "crawl status".to_string(),
+            success,
+            summary,
             detail: Some(job_id.to_string()),
         },
     ))

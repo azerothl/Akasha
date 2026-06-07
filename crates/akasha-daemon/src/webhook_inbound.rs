@@ -137,6 +137,27 @@ fn webhook_idem_disk_try_insert(data_dir: &Path, key: &str, ttl: Duration) -> Re
     Ok(n == 1)
 }
 
+/// Recent idempotency keys from SQLite (newest first), for operator cockpit.
+pub fn list_recent_idempotency_keys(data_dir: &Path, limit: usize) -> Result<Vec<(String, i64)>, String> {
+    let path = webhook_idempotency_db_path(data_dir);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let cap = limit.clamp(1, 100);
+    let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT idk, seen_at FROM webhook_idempotency ORDER BY seen_at DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![cap as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
 /// Returns `true` if the request should proceed (first time for this key), `false` if duplicate.
 pub async fn check_automation_idempotency(
     data_dir: &Path,

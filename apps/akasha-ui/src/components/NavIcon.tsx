@@ -48,6 +48,13 @@ export function NavIcon({ id }: Props) {
           <path d="M8 7h8M8 11h8" />
         </svg>
       );
+    case "notes":
+      return (
+        <svg {...svgProps}>
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <path d="M14 2v6h6M8 13h6M8 17h4" />
+        </svg>
+      );
     case "tasks":
       return (
         <svg {...svgProps}>

@@ -1,33 +1,32 @@
+> **Archive:** Ce document est archivé. Statut : **Livré / Archivé** (2026-06-06). Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+
 # Partial domains roadmap — operator parity (Phase 4)
+
+**Statut : Livré / Archivé** — tous les sous-domaines ci-dessous ont une preuve opérateur ou une décision Reporter documentée dans le registre final.
 
 This file tracks domains that remain **Partiel** in [`reference-products-parity-matrix.md`](./reference-products-parity-matrix.md) and gives an operator-focused closure path.
 
-## 1) Git worktree
+## 1) Git worktree — **Livré**
 
-- CLI baseline exists: `akasha worktree list|add|remove`.
-- Add diagnostics path (`akasha worktree doctor`) so operators can validate branch, cleanliness, and worktree topology before action.
-- Exit target for matrix: clear “happy path” + failure hints in CLI/docs.
+- CLI: `akasha worktree list|add|remove|doctor` (diagnostics: branch, cleanliness, worktree count).
+- Doc happy path : `Akasha_app` + guide opérateur.
 
-## 2) Browser phase 2
+## 2) Browser phase 2 — **Livré**
 
-- Keep Playwright runner as primary backend (`scripts/playwright-runner/run.mjs`).
-- Harden with:
-  - explicit timeout diagnostics,
-  - actionable install guidance (`install_playwright`),
-  - safer domain policy messaging.
+- Playwright runner: explicit timeout diagnostics + `install_playwright` guidance (`scripts/playwright-runner/run.mjs`).
+- Panneau erreurs domain policy TUI (optionnel) : **Reporter**.
 
-## 3) Web crawl (Cloudflare)
+## 3) Web crawl (Cloudflare) — **Livré**
 
-- Stabilize by standardizing retries/timeouts and surfacing job-state diagnostics in operator surfaces.
-- Keep `web_crawl` / `web_crawl_status` policy-first (deny by default unless configured).
+- Retries via `AKASHA_WEB_CRAWL_RETRIES`; job-state in tool status output.
+- Policy-first unchanged.
 
-## 4) Migration OpenClaw-like
+## 4) Migration OpenClaw-like — **Livré**
 
-- Move from documentation-only to a guided operator flow:
-  - config validation,
-  - mapping preview,
-  - safe apply.
-- Keep secrets migration vault-only.
+- API: `POST /api/migrate/openclaw/preview|apply`
+- CLI: `akasha migrate openclaw preview|apply --source-dir …`
+- UI: `OpenClawMigrationPanel` (Tauri Settings → System)
+- Docs: [`openclaw-migration.md`](../integrations/openclaw-migration.md), `Akasha_app/docs.html`
 
 ## Validation checklist
 

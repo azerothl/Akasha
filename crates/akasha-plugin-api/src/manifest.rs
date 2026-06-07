@@ -104,6 +104,9 @@ pub struct PluginManifest {
     /// Optional declarative prompt routing rules loaded automatically when the plugin is installed.
     #[serde(default)]
     pub routing_rules: Vec<PluginRoutingRule>,
+    /// Optional hook event subscriptions (e.g. `task_completed`) handled by plugin hook bus.
+    #[serde(default)]
+    pub hook_events: Vec<String>,
     /// Optional HTTP sandbox when `permissions` includes `"network"`.
     #[serde(default)]
     pub network: Option<PluginNetworkConfig>,

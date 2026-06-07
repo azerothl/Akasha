@@ -1294,6 +1294,7 @@ pre,
   border: 1px solid color-mix(in srgb, var(--akasha-accent) 28%, var(--akasha-border));
   border-radius: 10px;
   overflow: hidden;
+  flex-shrink: 0;
   box-shadow: 0 1px 0 color-mix(in srgb, var(--akasha-accent) 12%, transparent);
 }
 
@@ -1333,7 +1334,11 @@ pre,
 .chat-subagents-detail {
   padding: 0.75rem 1rem;
   max-height: min(42vh, 22rem);
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   font-size: 0.8125rem;
 }
 
@@ -1341,7 +1346,7 @@ pre,
   margin-bottom: 0.75rem;
   border: 1px solid var(--akasha-border);
   border-radius: 6px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .chat-subagents-discussion:last-child {
@@ -5292,6 +5297,39 @@ a.settings-link-btn.refresh-btn {
   border-bottom: 1px solid var(--akasha-border);
   padding-bottom: 0.25rem;
 }
+
+.calendar-wakeups-panel { margin-top: 0.5rem; }
+.calendar-wakeups-hint { margin-bottom: 0.75rem; font-size: 0.875rem; }
+.calendar-wakeup-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  margin-bottom: 1rem;
+}
+.calendar-wakeup-field { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8125rem; }
+.calendar-wakeup-field-grow { flex: 1; min-width: 12rem; }
+.calendar-wakeup-field input {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.875rem;
+  background: var(--akasha-bg-surface);
+  border: 1px solid var(--akasha-border);
+  border-radius: 6px;
+  color: var(--akasha-text);
+}
+.calendar-wakeup-list { list-style: none; padding: 0; margin: 0; }
+.calendar-wakeup-item {
+  border: 1px solid var(--akasha-border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--akasha-bg-surface);
+}
+.calendar-wakeup-meta { display: flex; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; }
+.calendar-wakeup-status { font-size: 0.75rem; text-transform: uppercase; color: var(--akasha-text-dim); }
+.calendar-wakeup-message { margin: 0 0 0.5rem; font-size: 0.875rem; }
+.calendar-wakeup-delete { font-size: 0.8125rem; }
+.calendar-wakeup-item--fired { opacity: 0.65; }
 .calendar-subtabs button {
   padding: 0.4rem 0.75rem;
   font-size: 0.875rem;
@@ -6320,6 +6358,11 @@ a.settings-link-btn.refresh-btn {
   display: flex;
   flex-direction: column;
   align-items: center;
+  min-height: 0;
+}
+
+.chat-panel > .chat-subagents-panel {
+  flex-shrink: 0;
 }
 
 .chat-messages-column {
@@ -6340,6 +6383,227 @@ a.settings-link-btn.refresh-btn {
 }
 
 .chat-incognito-banner {
+  margin: 0.5rem 1rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--akasha-warning);
+  background: color-mix(in srgb, var(--akasha-warning) 12%, transparent);
+  border-inline-start: 2px solid var(--akasha-warning);
+}
+
+/* Notes panel (Wave 4 Odysseus) */
+.notes-panel-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.notes-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--akasha-space-md);
+  height: 100%;
+  min-height: 0;
+}
+
+.notes-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--akasha-space-md);
+}
+
+.notes-tab-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.notes-tab-item {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--akasha-border);
+  border-radius: var(--akasha-radius, 0);
+}
+
+.notes-tab-item.active {
+  border-color: var(--akasha-accent);
+}
+
+.notes-tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--akasha-text-muted);
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+
+.notes-tab-item.active .notes-tab-btn {
+  color: var(--akasha-accent);
+}
+
+.notes-tab-close {
+  background: transparent;
+  border: none;
+  color: var(--akasha-text-dim);
+  padding: 0 0.4rem;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.notes-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--akasha-space-sm);
+  flex: 1;
+  min-height: 0;
+}
+
+.notes-content {
+  flex: 1;
+  min-height: 12rem;
+  resize: vertical;
+}
+
+.theme-editor-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--akasha-space-sm);
+}
+
+.theme-editor-vars {
+  margin: 0;
+}
+
+.theme-editor-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 12rem) 1fr;
+  gap: var(--akasha-space-sm);
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.theme-editor-input {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.8125rem;
+}
+
+.theme-editor-details {
+  margin: 0;
+}
+
+.theme-editor-details > summary.theme-editor-summary {
+  cursor: pointer;
+  font-weight: 600;
+  list-style: disclosure-closed;
+  margin-bottom: var(--akasha-space-sm);
+}
+
+.theme-editor-details[open] > summary.theme-editor-summary {
+  list-style: disclosure-open;
+}
+
+.theme-editor-badge {
+  margin-left: 0.35rem;
+  font-size: 0.85em;
+  color: var(--akasha-text-muted);
+  font-weight: normal;
+}
+
+.settings-theme-editor-cell {
+  grid-column: 1 / -1;
+}
+
+.tools-policy-panel,
+.connectors-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--akasha-space-md);
+}
+
+.tools-policy-section {
+  border: 1px solid var(--akasha-border);
+  padding: var(--akasha-space-sm) var(--akasha-space-md);
+  margin-bottom: var(--akasha-space-sm);
+}
+
+.tools-policy-section > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.tools-policy-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.tools-policy-section-help {
+  margin: 0.35rem 0 0.75rem;
+  padding-left: 0.25rem;
+  border-left: 2px solid var(--akasha-border);
+}
+
+.connectors-section {
+  border: 1px solid var(--akasha-border);
+  padding: var(--akasha-space-sm) var(--akasha-space-md);
+  margin-bottom: var(--akasha-space-sm);
+}
+
+.connectors-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.connectors-section-help {
+  margin: 0.35rem 0 0.75rem;
+}
+
+.connectors-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--akasha-space-sm);
+  margin-top: var(--akasha-space-sm);
+}
+
+.connectors-field,
+.connectors-secret-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.connectors-field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 500;
+}
+
+.tools-policy-list-editor .settings-string-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--akasha-space-sm);
+}
+
+.connectors-restart-hint {
+  color: var(--akasha-warning-hover, var(--akasha-warning));
+}
+
+.settings-identity-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.onboarding-doctor-output {
   font-size: 0.8rem;
   padding: 0.35rem 0.75rem;
   margin: 0 0 0.75rem;
@@ -6415,6 +6679,84 @@ a.settings-link-btn.refresh-btn {
   font-size: 1.25rem;
   line-height: 1;
   padding: 0 0.35rem;
+}
+
+.steering-queue-bell-wrap {
+  position: relative;
+}
+
+.steering-queue-bell-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-radius: var(--akasha-radius, 0);
+  border: 1px solid var(--akasha-border);
+  background: var(--akasha-bg-elevated);
+  color: var(--akasha-text-muted);
+  cursor: pointer;
+}
+
+.steering-queue-bell-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 0.25rem;
+  font-size: 0.65rem;
+  line-height: 1rem;
+  text-align: center;
+  border-radius: 999px;
+  background: var(--akasha-accent);
+  color: var(--akasha-bg, #000);
+}
+
+.steering-queue-bell-drawer {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 120;
+  width: min(22rem, 90vw);
+  max-height: 20rem;
+  overflow: auto;
+  padding: 0.75rem;
+  border: 1px solid var(--akasha-border);
+  background: var(--akasha-bg-elevated);
+  box-shadow: var(--akasha-shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.2));
+}
+
+.steering-queue-panel ul {
+  margin: 0.35rem 0 0.75rem;
+  padding-left: 1.1rem;
+}
+
+.steering-queue-text {
+  display: block;
+  font-size: 0.875rem;
+}
+
+.steering-queue-meta {
+  font-size: 0.7rem;
+  color: var(--akasha-text-muted);
+}
+
+.steering-queue-flush {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+.steering-queue-empty,
+.steering-queue-error {
+  font-size: 0.875rem;
+  color: var(--akasha-text-muted);
+}
+
+.steering-queue-error {
+  color: var(--akasha-danger, #c00);
 }
 
 .workspace-panel {
@@ -8010,14 +8352,6 @@ a.settings-link-btn.refresh-btn {
 }
 
 .chat-composition-toggle {
-  border-radius: var(--akasha-radius, 0);
-}
-
-.chat-incognito-banner {
-  border-radius: var(--akasha-radius, 0);
-}
-
-.permissions-bell-drawer {
   border-radius: var(--akasha-radius, 0);
 }
 

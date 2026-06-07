@@ -1,5 +1,6 @@
 //! Phase 5 — Plugin framework: registry, WASM host, reputation, catalog.
 
+pub mod memory_delegate;
 pub mod metrics;
 pub mod registry;
 pub mod reputation;

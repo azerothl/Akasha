@@ -1,3 +1,5 @@
+> **Archive:** Ce document est archivé. Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+
 # Matrice d'inspiration — Odysseus ↔ Akasha
 
 **Version:** 1.0.0  
@@ -59,9 +61,9 @@ Document de suivi des idées empruntées à Odysseus sans diluer le positionneme
 | PWA / mobile | Responsive, SW | Tauri desktop | Absent | D+ | — |
 | Auth multi-user | Comptes, 2FA | Single-user local | Absent | D | — |
 | Permissions outils | Admin-gated | File queue API | **Existe · haute** (`PermissionsBell`) | A | `PermissionsBell.tsx` |
-| Setup in-app | `/setup` wizard | `akasha init`, `doctor` | Partiel · moyenne | B | Wizard Tauri (roadmap) |
-| Incognito | Sans mémoire/historique | — | **Plan · B** | B | Flag session |
-| Floutage secrets | Masque tokens en sortie | — | **Plan · B** | B | Post-traitement UI |
+| Setup in-app | `/setup` wizard | `akasha init`, `doctor`, wizard Tauri 4 étapes | Partiel · moyenne | B | `OnboardingWizard.tsx` (doctor --fix, profil) ; pas parité `/setup` Odysseus |
+| Incognito | Sans mémoire/historique | — | **Existe · haute** (wave 7) | — | `incognito` / `no_memory` on `POST /api/message` ; bannière Tauri `App.tsx` |
+| Floutage secrets | Masque tokens en sortie | — | **Existe · haute** (wave 7) | — | `blurSecrets` in `ChatRenderer.tsx` |
 
 ---
 
@@ -95,3 +97,5 @@ Document de suivi des idées empruntées à Odysseus sans diluer le positionneme
 - **1.0.0** (2026-06-03): création initiale ; liens implémentation Phase A–C.
 - **1.0.1** (2026-06-03): états mis à jour après livraison Phase A/B/C (UI modulaire, routes workspace, évaluation CalDAV/email).
 - **1.0.2** (2026-06-03): Deep Research IterResearch (moteur daemon, poll UI, viz sous-agents, export HTML enrichi).
+- **1.0.3** (2026-06-06): resync setup in-app — wizard Tauri `OnboardingWizard.tsx` (4 étapes) documenté ; reste Partiel vs `/setup` Odysseus.
+- **1.0.4** (2026-06-06): incognito + floutage secrets → **Existe · haute** (wave 7) — `App.tsx` incognito banner, `ChatRenderer.tsx` `blurSecrets`, `POST /api/message` flags.

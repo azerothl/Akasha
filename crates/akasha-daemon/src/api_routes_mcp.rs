@@ -111,21 +111,7 @@ data: {}\n\n",
             Ok(v) => v,
             Err(_) => return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#)),
         };
-        let provider = v
-            .get("provider")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("unknown")
-            .to_string();
-        let status = v
-            .get("status")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("configured")
-            .to_string();
-        match crate::mcp_runtime::oauth_put(data_dir, provider, status).await {
+        match crate::mcp_runtime::oauth_put(data_dir, &v).await {
             Ok(j) => return Some(json_response("200 OK", &j.to_string())),
             Err(e) => {
                 return Some(json_response(
@@ -137,8 +123,13 @@ data: {}\n\n",
     }
 
     if method == "GET" && path_only == "/api/lifecycle/hooks" {
+        if let Some(cached) = crate::http_get_cache::cache_get_lifecycle_hooks() {
+            return Some(json_response("200 OK", &cached));
+        }
         let j = crate::lifecycle_hooks::lifecycle_hooks_summary(data_dir);
-        return Some(json_response("200 OK", &j.to_string()));
+        let body = j.to_string();
+        crate::http_get_cache::cache_put_lifecycle_hooks(&body);
+        return Some(json_response("200 OK", &body));
     }
 
     None

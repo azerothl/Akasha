@@ -2,7 +2,8 @@
 
 use akasha_core::{EventEnvelope, EventType};
 use akasha_store::{
-    Schedule, ScheduleExceptionType, ScheduleStore, Task, TaskRun, TaskRunStatus, TaskStatus, TaskStore,
+    platform_extras::WakeupStore, Schedule, ScheduleExceptionType, ScheduleStore, Task, TaskRun,
+    TaskRunStatus, TaskStatus, TaskStore,
 };
 use chrono::{Duration, Utc};
 use rrule::{RRuleSet, Tz as RruleTz};
@@ -181,6 +182,21 @@ async fn tick(
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("."));
                 crate::lifecycle_hooks::fire_on_schedule_fire_async(&data_dir, schedule.id, task_id);
+                let hook_payload = serde_json::json!({
+                    "schedule_id": schedule.id.to_string(),
+                    "task_id": task_id.to_string(),
+                    "planned_for": planned_for.to_rfc3339(),
+                    "dedup_key": dedup_key,
+                });
+                let hook_data_dir = data_dir.clone();
+                let payload = hook_payload.to_string();
+                tokio::task::spawn_blocking(move || {
+                    crate::plugin_hook_bus::dispatch_hook_event(
+                        &hook_data_dir,
+                        "on_schedule_fire",
+                        &payload,
+                    );
+                });
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::TaskRunCreated,
@@ -212,6 +228,7 @@ async fn tick(
                 image_data_urls: None,
                 execution_mode: None,
                 preferred_task_type: None,
+                incognito: false,
             })
             .await
         {
@@ -239,6 +256,58 @@ async fn tick(
         }
     }
 
+    process_due_wakeups(store_path, orch_tx, bus, now).await?;
+
+    Ok(())
+}
+
+/// Fire pending wakeups: inject orchestrator message into session (lighter than full schedule).
+async fn process_due_wakeups(
+    store_path: &PathBuf,
+    orch_tx: &mpsc::Sender<OrchestratorTask>,
+    bus: &crate::agents::EventBus,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let due = {
+        let store = WakeupStore::open(store_path)?;
+        store.list_pending_before(now)?
+    };
+    for w in due {
+        let task_id = Uuid::new_v4();
+        let msg = format!("[Agent wakeup] {}", w.message);
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "message": msg,
+                    "session_id": w.session_id,
+                    "wakeup_id": w.id.to_string()
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        let _ = orch_tx
+            .send(OrchestratorTask {
+                task_id,
+                message: msg.clone(),
+                session_id: w.session_id.clone(),
+                image_data_urls: None,
+                execution_mode: None,
+                preferred_task_type: None,
+                incognito: false,
+            })
+            .await;
+        let store = WakeupStore::open(store_path)?;
+        store.mark_fired(&w.id)?;
+        crate::api_routes_kinbot::insert_notification(
+            store_path,
+            "agent_wakeup",
+            "Rappel agent",
+            &w.message,
+            Some(task_id),
+        );
+    }
     Ok(())
 }
 

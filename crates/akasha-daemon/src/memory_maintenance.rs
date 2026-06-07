@@ -7,14 +7,35 @@ static CONFIDENCE_BOOST: AtomicU64 = AtomicU64::new(0);
 static CONFIDENCE_DECAY: AtomicU64 = AtomicU64::new(0);
 static GAP_MARKERS: AtomicU64 = AtomicU64::new(0);
 static MERGE_SUGGESTIONS: AtomicU64 = AtomicU64::new(0);
+static RETRIEVAL_CANDIDATES: AtomicU64 = AtomicU64::new(0);
+static RETRIEVAL_USED: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_retrieval_metrics(candidates: u64, used: u64) {
+    if candidates > 0 {
+        RETRIEVAL_CANDIDATES.fetch_add(candidates, Ordering::Relaxed);
+    }
+    if used > 0 {
+        RETRIEVAL_USED.fetch_add(used, Ordering::Relaxed);
+    }
+}
 
 pub fn metrics_snapshot() -> serde_json::Value {
+    let candidates = RETRIEVAL_CANDIDATES.load(Ordering::Relaxed);
+    let used = RETRIEVAL_USED.load(Ordering::Relaxed);
+    let usefulness_ratio = if candidates > 0 {
+        used as f64 / candidates as f64
+    } else {
+        0.0
+    };
     serde_json::json!({
         "maintenance_runs": MAINTENANCE_RUNS.load(Ordering::Relaxed),
         "memory_confidence_boost_total": CONFIDENCE_BOOST.load(Ordering::Relaxed),
         "memory_confidence_decay_total": CONFIDENCE_DECAY.load(Ordering::Relaxed),
         "memory_gap_markers_total": GAP_MARKERS.load(Ordering::Relaxed),
         "merge_suggestions": MERGE_SUGGESTIONS.load(Ordering::Relaxed),
+        "memory_retrieval_candidates_total": candidates,
+        "memory_retrieval_used_total": used,
+        "memory_retrieval_usefulness_ratio": usefulness_ratio,
         "schema_version": 2
     })
 }
@@ -72,6 +93,7 @@ pub fn schedule_post_retrieval(
         if hits.is_empty() {
             return;
         }
+        record_retrieval_metrics(hits.len() as u64, hits.len() as u64);
         let ids: Vec<String> = hits.iter().map(|(id, _)| id.clone()).collect();
         if hits.len() >= 2 {
             MERGE_SUGGESTIONS.fetch_add(1, Ordering::Relaxed);

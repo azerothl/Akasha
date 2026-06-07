@@ -1,3 +1,5 @@
+> **Archive:** Ce document est archivé. Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+
 # Déplacé — matrice multi-produits
 
 Le suivi de parité **centralisé** (Hermes Agent, OpenClaw, Claude Code, Cursor, Mercury Agent, colonne RFC jcode, satellites) vit dans :

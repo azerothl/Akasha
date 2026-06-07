@@ -859,12 +859,41 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         seen.insert(key)
     });
 
-    // Studio swarm MVP: synthesize worker lifecycle events from existing delegation/task events.
-    // This keeps backward compatibility while exposing stable status nodes to Code Studio Cockpit.
+    // Studio swarm: prefer native worker_started/worker_completed when persisted; synthesize otherwise.
+    let has_native_worker_events = list.iter().any(|e| {
+        e.event_type == "worker_started" || e.event_type == "worker_completed"
+    });
     let mut synthetic: Vec<TaskEventEntry> = Vec::new();
     let mut spawned_workers: Vec<String> = Vec::new();
     let mut saw_failed = false;
+    if has_native_worker_events {
+        for entry in &list {
+            if entry.event_type == "worker_started" {
+                if let Some(w) = entry
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("worker_task_id"))
+                    .and_then(|v| v.as_str())
+                {
+                    spawned_workers.push(w.to_string());
+                }
+            } else if entry.event_type == "worker_completed" {
+                let failed = entry
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("success"))
+                    .and_then(|v| v.as_bool())
+                    == Some(false);
+                if failed {
+                    saw_failed = true;
+                }
+            }
+        }
+    }
     for entry in &list {
+        if has_native_worker_events {
+            continue;
+        }
         if entry.event_type == "sub_agent_spawned" {
             let worker_task_id = entry
                 .payload
@@ -1512,6 +1541,7 @@ pub async fn run_delegation_handler(
                 image_data_urls: None,
                 execution_mode: None,
                 preferred_task_type: None,
+                incognito: false,
             })
             .await
             .is_err()
@@ -1728,6 +1758,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("web_crawl_status", "web_crawl_status <job_id> — statut / résultat d’un job crawl Cloudflare (même config que web_crawl)."),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
+    ("user_rag_search", "user_rag_search <query> [top_k] — rechercher dans les documents utilisateur indexés (user RAG)"),
     ("workspace_graph_search", "workspace_graph_search <query> [--workspace <uuid>] — rechercher dans les graphes projet indexés (nœuds label/chemin) ; limite ~20 lignes ; --workspace pour un espace enregistré uniquement"),
     ("memory_store", "memory_store <content> <source> [link_to: uuid1+kind1,uuid2+kind2,...] [link_kind: default_kind] — mémoire long terme. Types recommandés : similar, relates_to, related, updates, supersedes, excludes, contradicts, supports, derived_from, same_as, spouse, child, birth_date, … ; par cible utiliser uuid+kind, ou uuid seuls avec link_kind (défaut related)."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
@@ -1741,6 +1772,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("schedule_task", "schedule_task <cron> <prompt> [title] — créer une tâche planifiée active."),
     ("list_scheduled_tasks", "list_scheduled_tasks [limit] — lister les schedules actifs."),
     ("cancel_scheduled_task", "cancel_scheduled_task <schedule_id> — supprimer un schedule par UUID."),
+    ("wake_in", "wake_in <minutes> <message> — programmer un rappel agent unique dans la session courante (plus léger que schedule_task)."),
     ("budget_status", "budget_status [session_id] — état budget (usage tokens/coût, seuil, auto-concise)."),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
     ("browser", "browser navigate <url> — navigate (http/https; domain allowed). browser snapshot — texte + liens. browser screenshot | browser click <css> | browser fill <css> <texte> | browser wait <css_selector|ms> — automation Playwright (spec 39)."),
@@ -1772,6 +1804,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("graph_stats", "graph_stats <json_or_args...> — via plugin graph, calcule min/max/moyenne/compte par série et retourne une vue table."),
     ("sim_run", "sim_run <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, exécute une simulation déterministe et retourne une vue timeseries + métriques."),
     ("sim_compare", "sim_compare <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, compare scénario de base et alternatif, retourne delta + tableau de résultats."),
+    ("mcp_server_add", "mcp_server_add <name> <command> [args...] — ajouter ou remplacer une entrée dans data_dir/mcp.json (stdio MCP). Exemple: mcp_server_add demo npx -y @modelcontextprotocol/server-filesystem /tmp"),
+    ("mcp_server_remove", "mcp_server_remove <name> — supprimer un serveur MCP de mcp.json."),
 ];
 
 /// Tools advertised in the Code Studio prompt: dev/repo tools only (policy still gates execution).
@@ -2730,6 +2764,34 @@ fn captured_media_suitable_for_vision_injection(s: &str) -> bool {
     !s.starts_with("data:") && !s.is_empty()
 }
 
+fn guess_image_mime_from_path(path: &Path) -> &'static str {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .map(|e| match e.as_str() {
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "svg" => "image/svg+xml",
+            "jpg" | "jpeg" => "image/jpeg",
+            _ => "application/octet-stream",
+        })
+        .unwrap_or("application/octet-stream")
+}
+
+/// Best-effort tool name from a streaming `TOOL:` delta chunk (partial lines allowed).
+fn parse_tool_name_from_toolcall_delta(delta: &str) -> Option<String> {
+    let idx = delta.find("TOOL:")?;
+    let rest = delta[idx + 5..].trim_start();
+    let name = rest.split_whitespace().next()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 fn normalize_captured_media_for_vision_turn(s: &str) -> String {
     if s.starts_with("data:image/")
         || (s.starts_with("data:") && !s.starts_with("data:audio/"))
@@ -3681,6 +3743,7 @@ async fn execute_tool_call(
     workspace_store: Option<&TaskWorkspaceStore>,
     browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
     workspace_root: Option<&std::path::Path>,
+    session_id: Option<&str>,
 ) -> (bool, String, Option<String>) {
     crate::api_tool_dispatch::execute_tool_call(
         crate::api_tool_dispatch::ToolCallContext {
@@ -3695,6 +3758,7 @@ async fn execute_tool_call(
             workspace_store,
             browser_registry,
             workspace_root,
+            session_id,
         },
         executor,
         tool_name,
@@ -3718,6 +3782,7 @@ pub(crate) async fn execute_tool_call_impl(
     workspace_store: Option<&TaskWorkspaceStore>,
     browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
     workspace_root: Option<&std::path::Path>,
+    session_id: Option<&str>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
     let is_studio_workspace =
@@ -3907,6 +3972,60 @@ pub(crate) async fn execute_tool_call_impl(
                         None,
                     ),
                 }
+            }
+        }
+        "user_rag_search" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (
+                    false,
+                    "[user_rag_search] no data dir".to_string(),
+                    None,
+                );
+            };
+            let data_dir = data_dir.to_path_buf();
+            let mut top_k = 5usize;
+            let mut rest: Vec<String> = Vec::new();
+            for a in args {
+                if let Ok(k) = a.parse::<usize>() {
+                    top_k = k.clamp(1, 20);
+                } else {
+                    rest.push(a.clone());
+                }
+            }
+            let query = rest.join(" ").trim().to_string();
+            if query.is_empty() {
+                return (
+                    false,
+                    "[user_rag_search] usage: user_rag_search <query> [top_k]".to_string(),
+                    None,
+                );
+            }
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::user_rag::UserRagStore::new(&data_dir);
+                store.retrieve(&query, top_k)
+            })
+            .await
+            {
+                Ok(Ok(chunks)) if chunks.is_empty() => (
+                    true,
+                    "[user_rag_search] no matching excerpts".to_string(),
+                    None,
+                ),
+                Ok(Ok(chunks)) => (
+                    true,
+                    format!(
+                        "[user_rag_search]\n{}",
+                        chunks
+                            .iter()
+                            .enumerate()
+                            .map(|(i, c)| format!("{}. {}", i + 1, c))
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    ),
+                    None,
+                ),
+                Ok(Err(e)) => (false, format!("[user_rag_search] {}", e), None),
+                Err(e) => (false, format!("[user_rag_search] join: {}", e), None),
             }
         }
         "studio_list_tickets" => {
@@ -4775,6 +4894,7 @@ pub(crate) async fn execute_tool_call_impl(
                                     image_data_urls: None,
                                     execution_mode: None,
                                     preferred_task_type: None,
+                                    incognito: false,
                                 })
                                 .await
                                 .is_err()
@@ -4929,6 +5049,119 @@ pub(crate) async fn execute_tool_call_impl(
                 ),
             }
         }
+        "mcp_server_add" => {
+            let name = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let command = args.get(1).map(String::as_str).unwrap_or("").trim();
+            if name.is_empty() || command.is_empty() {
+                return (
+                    false,
+                    "[mcp_server_add] usage: mcp_server_add <name> <command> [args...]".to_string(),
+                    None,
+                );
+            }
+            let mcp_args: Vec<serde_json::Value> = args
+                .get(2..)
+                .unwrap_or(&[])
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect();
+            let entry = if mcp_args.is_empty() {
+                serde_json::json!({ "command": command })
+            } else {
+                serde_json::json!({ "command": command, "args": mcp_args })
+            };
+            match store_path.and_then(|sp| sp.parent()) {
+                Some(data_dir) => match crate::mcp::add_mcp_server(data_dir, name, &entry) {
+                    Ok(msg) => {
+                        crate::http_get_cache::invalidate_mcp_status();
+                        (true, format!("[mcp_server_add] {msg}"), None)
+                    }
+                    Err(e) => (false, format!("[mcp_server_add] {e}"), None),
+                },
+                None => (false, "[mcp_server_add] data directory not available".to_string(), None),
+            }
+        }
+        "mcp_server_remove" => {
+            let name = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if name.is_empty() {
+                return (
+                    false,
+                    "[mcp_server_remove] usage: mcp_server_remove <name>".to_string(),
+                    None,
+                );
+            }
+            match store_path.and_then(|sp| sp.parent()) {
+                Some(data_dir) => match crate::mcp::remove_mcp_server(data_dir, name) {
+                    Ok(msg) => {
+                        crate::http_get_cache::invalidate_mcp_status();
+                        (true, format!("[mcp_server_remove] {msg}"), None)
+                    }
+                    Err(e) => (false, format!("[mcp_server_remove] {e}"), None),
+                },
+                None => (
+                    false,
+                    "[mcp_server_remove] data directory not available".to_string(),
+                    None,
+                ),
+            }
+        }
+        "wake_in" => {
+            let minutes = args
+                .get(0)
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|&m| m > 0 && m <= 525_600);
+            let message = if args.len() > 1 {
+                args[1..].join(" ")
+            } else {
+                String::new()
+            };
+            let message = message.trim().to_string();
+            if minutes.is_none() || message.is_empty() {
+                return (
+                    false,
+                    "[wake_in] usage: wake_in <minutes> <message>".to_string(),
+                    None,
+                );
+            }
+            let minutes = minutes.unwrap();
+            match store_path {
+                Some(path) => {
+                    use akasha_store::platform_extras::{Wakeup, WakeupStore};
+                    let sid = session_id
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("task:{}", task_id));
+                    let fire_at =
+                        chrono::Utc::now() + chrono::Duration::minutes(minutes);
+                    let w = Wakeup {
+                        id: Uuid::new_v4(),
+                        session_id: sid,
+                        fire_at,
+                        message: message.clone(),
+                        status: "pending".into(),
+                        created_by_task_id: Some(task_id),
+                        rrule: None,
+                        created_at: chrono::Utc::now(),
+                    };
+                    match WakeupStore::open(path) {
+                        Ok(store) => match store.insert(&w) {
+                            Ok(()) => (
+                                true,
+                                format!(
+                                    "[wake_in] scheduled wakeup {} in {} min (at {})",
+                                    w.id,
+                                    minutes,
+                                    fire_at.to_rfc3339()
+                                ),
+                                None,
+                            ),
+                            Err(e) => (false, format!("[wake_in] {}", e), None),
+                        },
+                        Err(e) => (false, format!("[wake_in] store error: {}", e), None),
+                    }
+                }
+                None => (false, "[wake_in] store not available".to_string(), None),
+            }
+        }
         "budget_status" => {
             let session_id = args.get(0).cloned().unwrap_or_default();
             let settings = match store_path {
@@ -5025,7 +5258,12 @@ pub(crate) async fn execute_tool_call_impl(
                 }
                 let host = url.parse::<url::Url>().ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
                 if !executor.policy.can_use_browser_domain(&host) {
-                    return (false, format!("[browser] Domain not allowed: {}", host), None);
+                    let hint = crate::browser::format_domain_denied(
+                        &host,
+                        &executor.policy.browser_allowed_domains,
+                        &executor.policy.browser_blocked_domains,
+                    );
+                    return (false, format!("[browser] {}", hint), None);
                 }
                 let mut g = registry.write().await;
                 let session = if let Some(mut s) = g.remove(&task_id) {
@@ -5049,7 +5287,14 @@ pub(crate) async fn execute_tool_call_impl(
                             }
                             res
                         }
-                        Err(e) => return (false, format!("[browser] error: {}", e), None),
+                        Err(e) => {
+                            let msg = crate::browser::format_runner_error(
+                                &e,
+                                action_timeout,
+                                session_timeout,
+                            );
+                            return (false, format!("[browser] error: {}", msg), None);
+                        }
                     }
                 };
                 match session {
@@ -5069,10 +5314,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, msg, None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("Navigate failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "snapshot" {
                 let mut g = registry.write().await;
@@ -5103,10 +5352,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, msg, None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("Snapshot failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "screenshot" {
                 let mut g = registry.write().await;
@@ -5163,10 +5416,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, msg, captured_for_llm)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("screenshot failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "click" {
                 let selector = args[1..].join(" ").trim().to_string();
@@ -5192,10 +5449,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, "[browser] Click OK.".to_string(), None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("click failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "fill" {
                 let Some(sel) = args.get(1).map(|s| s.as_str()) else {
@@ -5233,10 +5494,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, "[browser] Fill OK.".to_string(), None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("fill failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "wait" {
                 let arg = args[1..].join(" ").trim().to_string();
@@ -5270,10 +5535,14 @@ pub(crate) async fn execute_tool_call_impl(
                             (true, "[browser] Wait completed.".to_string(), None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("wait failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else {
                 (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot | browser click <selector> | browser fill <selector> <text> | browser wait <selector|ms>".to_string(), None)
@@ -5314,11 +5583,57 @@ pub(crate) async fn execute_tool_call_impl(
             }
         }
         "image" => {
-            let path_or_url = args.get(0).map(String::as_str).unwrap_or("").trim();
-            if path_or_url.is_empty() {
-                (false, "[image] usage: image <path|url> [prompt]. For vision analysis attach the image in chat (vision-capable model in llm_router) or use a local path.".to_string(), None)
+            let path_str = path_arg_joined(args);
+            let path_str = path_str.trim();
+            if path_str.is_empty() {
+                (
+                    false,
+                    "[image] usage: image <path> [prompt] — read a local image (allowed_read_paths / workspace:/) and return metadata + data URL for vision.".to_string(),
+                    None,
+                )
+            } else if path_str.starts_with("http://") || path_str.starts_with("https://") {
+                (
+                    false,
+                    "[image] remote URLs are not supported — use a local path in allowed_read_paths or workspace:/".to_string(),
+                    None,
+                )
             } else {
-                (true, "[image] Vision analysis: use image as attachment in chat with a vision-capable model (llm_router). Local path metadata not yet implemented (spec 33).".to_string(), None)
+                let disk_path = resolve_tool_disk_path(path_str, workspace_root);
+                if !executor.policy.can_read(&disk_path) {
+                    (
+                        false,
+                        "[image] path not allowed by policy (allowed_read_paths)".to_string(),
+                        None,
+                    )
+                } else {
+                    match tokio::fs::read(&disk_path).await {
+                        Ok(bytes) => {
+                            let mime = guess_image_mime_from_path(&disk_path);
+                            let b64 = base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &bytes,
+                            );
+                            let data_url = format!("data:{mime};base64,{b64}");
+                            (
+                                true,
+                                format!(
+                                    "[image {}] {} bytes, mime={mime} — data URL ready for vision injection",
+                                    disk_path.display(),
+                                    bytes.len()
+                                ),
+                                Some(data_url),
+                            )
+                        }
+                        Err(e) => (
+                            false,
+                            format!(
+                                "[image] read failed: {e} (ensure file exists at {})",
+                                disk_path.display()
+                            ),
+                            None,
+                        ),
+                    }
+                }
             }
         }
         "pdf" => {
@@ -6398,7 +6713,19 @@ pub(crate) async fn execute_tool_call_impl(
                 }
                 vec![interface.to_string()]
             };
+            if !interface.is_empty()
+                && !matches!(interface, "local_media" | "system" | "synthetic_input")
+            {
+                return (
+                    false,
+                    format!(
+                        "[device_discover] interface '{interface}' is not supported (available: local_media, system, synthetic_input). Configure allowed_device_interfaces in tools_policy.yaml — see GET /api/docs."
+                    ),
+                    None,
+                );
+            }
             let mut devices: Vec<serde_json::Value> = Vec::new();
+            let mut unsupported: Vec<String> = Vec::new();
             for iface in &interfaces_to_list {
                 match iface.as_str() {
                     "local_media" => {
@@ -6413,12 +6740,14 @@ pub(crate) async fn execute_tool_call_impl(
                         devices.push(serde_json::json!({ "interface": "synthetic_input", "id": "keyboard", "name": "Keyboard (shortcuts, type)" }));
                         devices.push(serde_json::json!({ "interface": "synthetic_input", "id": "mouse", "name": "Mouse (move, click, scroll, drag)" }));
                     }
-                    _ => {
-                        devices.push(serde_json::json!({ "interface": iface, "id": "default", "name": format!("{} (discovery stub)", iface) }));
-                    }
+                    _ => unsupported.push(iface.clone()),
                 }
             }
-            let body = serde_json::json!({ "devices": devices });
+            let body = if unsupported.is_empty() {
+                serde_json::json!({ "devices": devices })
+            } else {
+                serde_json::json!({ "devices": devices, "unsupported_interfaces": unsupported })
+            };
             (true, format!("[device_discover] {} device(s): {}", devices.len(), body.to_string()), None)
         }
         "device_invoke" => {
@@ -6524,7 +6853,11 @@ pub(crate) async fn execute_tool_call_impl(
                     }
                 }
             } else if interface == "system" {
-                (false, "[device_invoke] system interface (e.g. print) not yet implemented".to_string(), None)
+                (
+                    false,
+                    "[device_invoke] system interface (printer/print) is not supported — OS-level printing is out of scope for Akasha. See GET /api/docs and tools_policy.yaml (allowed_device_interfaces).".to_string(),
+                    None,
+                )
             } else {
                 (false, format!("[device_invoke] interface '{}' handler not yet implemented", interface), None)
             }
@@ -6670,6 +7003,15 @@ pub(crate) async fn execute_tool_call_impl(
 
 /// Compact short-term memory when it would exceed context: summarize oldest turns via LLM and replace in store.
 /// Optionally promote the summary to long-term memory (embed + store).
+/// KinBot-style continuous session: never force a new session when compaction ceiling is hit.
+fn session_continuous_mode() -> bool {
+    std::env::var("AKASHA_SESSION_CONTINUOUS")
+        .ok()
+        .as_deref()
+        .map(|s| matches!(s, "1" | "true" | "yes" | "on" | "TRUE" | "YES" | "ON"))
+        .unwrap_or(false)
+}
+
 /// Refuses compaction beyond MAX_COMPACTIONS_PER_SESSION per session to avoid costly loops.
 async fn compact_short_term_if_needed(
     short_term: &Arc<ShortTermStore>,
@@ -6679,12 +7021,21 @@ async fn compact_short_term_if_needed(
     long_term_client: Option<&LongTermMemoryClient>,
     tokenizer_provider: &str,
     tokenizer_model: &str,
+    tasks_db_path: &std::path::Path,
 ) {
     if short_term.get_compaction_count(session_id).await
         >= crate::memory::MAX_COMPACTIONS_PER_SESSION
     {
-        tracing::info!(session_id, "Short-term compaction skipped: max compactions per session reached (start a new session if context is too long)");
-        return;
+        if session_continuous_mode() {
+            short_term.reset_compaction_count(session_id).await;
+            tracing::debug!(
+                session_id,
+                "Continuous session: compaction counter reset (AKASHA_SESSION_CONTINUOUS)"
+            );
+        } else {
+            tracing::info!(session_id, "Short-term compaction skipped: max compactions per session reached (start a new session if context is too long)");
+            return;
+        }
     }
     const MAX_CONTEXT_DEFAULT: usize = 8192;
     let max_context_tokens = std::env::var("AKASHA_MAX_CONTEXT_TOKENS")
@@ -6702,6 +7053,22 @@ async fn compact_short_term_if_needed(
 
     let to_summarize = turns.len() / 2;
     let old_turns: Vec<_> = turns.into_iter().take(to_summarize).collect();
+    let archive_batch: Vec<(usize, String, String)> = old_turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, t.role.clone(), t.content.clone()))
+        .collect();
+    if !archive_batch.is_empty() {
+        let sp = tasks_db_path.to_path_buf();
+        let sid = session_id.to_string();
+        let batch = archive_batch.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(store) = akasha_store::ConversationArchiveStore::open(&sp) {
+                let _ = store.archive_turns(&sid, &batch);
+            }
+        })
+        .await;
+    }
     let blob = ShortTermStore::turns_to_context(&old_turns);
     let summary_prompt = format!(
         "Summarize in a short paragraph in English, keeping important facts and decisions:\n\n{}",
@@ -7038,8 +7405,29 @@ fn memory_profile_for_task(
     is_subagent: bool,
     orch_disk_deliverables: bool,
 ) -> MemoryProfile {
+    fn env_usize(name: &str) -> Option<usize> {
+        std::env::var(name).ok().and_then(|s| s.parse::<usize>().ok())
+    }
+    fn env_u8(name: &str) -> Option<u8> {
+        std::env::var(name).ok().and_then(|s| s.parse::<u8>().ok())
+    }
+    let apply_env_overrides = |mut profile: MemoryProfile| -> MemoryProfile {
+        if let Some(v) = env_usize("AKASHA_MEMORY_SEMANTIC_TOP_K") {
+            profile.semantic_top_k = v.min(50);
+        }
+        if let Some(v) = env_u8("AKASHA_MEMORY_GRAPH_EXPAND_HOPS") {
+            profile.graph_expand_hops = v.min(4);
+        }
+        if let Some(v) = env_usize("AKASHA_MEMORY_USER_RAG_TOP_K") {
+            profile.user_rag_top_k = v.min(50);
+        }
+        if let Some(v) = env_usize("AKASHA_MEMORY_WORKSPACE_GRAPH_TOP_K") {
+            profile.workspace_graph_top_k = v.min(50);
+        }
+        profile
+    };
     if is_subagent {
-        return MemoryProfile {
+        return apply_env_overrides(MemoryProfile {
             recent_turns_limit: 0,
             recent_context_max_chars: 0,
             semantic_top_k: 0,
@@ -7052,7 +7440,7 @@ fn memory_profile_for_task(
             compact_before_prompt: false,
             allow_project_recall: false,
             allow_identity_lookup: false,
-        };
+        });
     }
 
     let enriched = !memory_fast_path_enabled()
@@ -7062,7 +7450,7 @@ fn memory_profile_for_task(
         || message.chars().count() > 280;
 
     if enriched {
-        MemoryProfile {
+        apply_env_overrides(MemoryProfile {
             recent_turns_limit: 15,
             recent_context_max_chars: 2_000,
             semantic_top_k: 5,
@@ -7079,9 +7467,9 @@ fn memory_profile_for_task(
             compact_before_prompt: true,
             allow_project_recall: true,
             allow_identity_lookup: true,
-        }
+        })
     } else {
-        MemoryProfile {
+        apply_env_overrides(MemoryProfile {
             recent_turns_limit: 6,
             recent_context_max_chars: 800,
             semantic_top_k: 2,
@@ -7094,7 +7482,7 @@ fn memory_profile_for_task(
             compact_before_prompt: false,
             allow_project_recall: false,
             allow_identity_lookup: true,
-        }
+        })
     }
 }
 
@@ -7104,6 +7492,14 @@ fn task_stall_timeout_secs() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&s| s >= 30)
         .unwrap_or(180)
+}
+
+fn memory_recall_timeout_secs() -> u64 {
+    std::env::var("AKASHA_MEMORY_RECALL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s >= 5)
+        .unwrap_or(45)
 }
 
 /// Fails the task when no meaningful progress occurred within the stall timeout (worker hang, LLM never responds).
@@ -7180,21 +7576,28 @@ fn spawn_task_stall_watchdog(
 
 fn spawn_progress_watchdog(
     bus: EventBus,
+    store_path: std::path::PathBuf,
     correlation_id: Uuid,
     task_id: Uuid,
     mut cancel_rx: oneshot::Receiver<()>,
 ) {
     tokio::spawn(async move {
         let checkpoints = [
-            (2_u64, 12_u8, "Still spinning up the worker…"),
-            (5_u64, 18_u8, "Still working — routing tools and context…"),
+            (2_u64, 12_u8, "pipeline_warmup", "Initialisation du worker…"),
+            (
+                5_u64,
+                18_u8,
+                "pipeline_context",
+                "Assemblage du contexte et routage des outils…",
+            ),
             (
                 10_u64,
                 24_u8,
-                "Still working — using a fallback path if needed…",
+                "pipeline_llm_pending",
+                "Appel au modèle LLM en cours (fallback possible)…",
             ),
         ];
-        for (secs, pct, message) in checkpoints {
+        for (secs, pct, stage, message) in checkpoints {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {
                     let _ = bus.send(
@@ -7207,6 +7610,16 @@ fn spawn_progress_watchdog(
                             })),
                         )
                         .with_correlation(correlation_id),
+                    );
+                    insert_task_tracking_event(
+                        store_path.as_path(),
+                        task_id,
+                        "pipeline_checkpoint",
+                        serde_json::json!({
+                            "stage": stage,
+                            "progress_pct": pct,
+                            "message": message,
+                        }),
                     );
                 }
                 _ = &mut cancel_rx => return,
@@ -8162,6 +8575,7 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                     workspace_store,
                     browser_registry,
                     Some(tool_disk_root),
+                    None,
                 )
                 .await;
                 let write_like = matches!(
@@ -8308,6 +8722,7 @@ The compiler output already signals what is wrong: apply a minimal fix with `TOO
                     workspace_store,
                     browser_registry,
                     Some(tool_disk_root),
+                    None,
                 )
                 .await;
                 if ok {
@@ -8381,6 +8796,7 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                     workspace_store,
                                     browser_registry,
                                     Some(tool_disk_root),
+                                    None,
                                 )
                                 .await;
                                 if success
@@ -8400,6 +8816,44 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
         }
     }
     any_write_success
+}
+
+// #region agent log
+fn agent_debug_log(location: &str, message: &str, hypothesis_id: &str, data: serde_json::Value) {
+    let payload = serde_json::json!({
+        "sessionId": "0d82aa",
+        "timestamp": chrono::Utc::now().timestamp_millis(),
+        "location": location,
+        "message": message,
+        "hypothesisId": hypothesis_id,
+        "data": data,
+    });
+    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-0d82aa.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", payload);
+    }
+}
+// #endregion
+
+fn insert_task_tracking_event(
+    store_path: &std::path::Path,
+    task_id: Uuid,
+    event_type: &str,
+    payload: serde_json::Value,
+) {
+    if let Ok(store) = TaskStore::open(store_path) {
+        let _ = store.insert_event(
+            task_id,
+            event_type,
+            Some(&payload),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+    }
 }
 
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
@@ -8438,22 +8892,11 @@ pub(crate) async fn run_message_via_llm(
     autonomous_mission: Option<Arc<RwLock<AutonomousMissionConfig>>>,
     studio_disk_registry: crate::studio::StudioDiskRootRegistry,
     studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
+    incognito: bool,
 ) {
-    let store = match TaskStore::open(&store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(task_id = %task_id, error_kind = "store_open", error = %e, "LLM task: store open failed");
-            if let Some(reg) = &browser_registry {
-                crate::browser::close_task(reg, task_id).await;
-            }
-            if let Some(ref sq) = steering_queue {
-                sq.unregister_active(task_id).await;
-            }
-            notify_task_completion(&task_completion_registry, task_id).await;
-            return;
-        }
-    };
-    let _ = store.update_status(task_id, TaskStatus::Running);
+    if let Ok(store) = TaskStore::open(&store_path) {
+        let _ = store.update_status(task_id, TaskStatus::Running);
+    }
     let _ = bus.send(
         EventEnvelope::new(
             EventType::ProgressUpdate,
@@ -8464,6 +8907,40 @@ pub(crate) async fn run_message_via_llm(
             })),
         )
         .with_correlation(task_id),
+    );
+    // #region agent log
+    agent_debug_log(
+        "api.rs:run_message_via_llm",
+        "progress_5_sent",
+        "A",
+        serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+    );
+    // #endregion
+    // Start stall/progress watchdogs immediately after the first progress line so a hang in
+    // studio setup, session_state I/O, or context assembly still surfaces updates and can fail the task.
+    let meaningful_progress_flag =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timeline_correlation = task_id;
+    let (watchdog_tx, watchdog_rx) = oneshot::channel();
+    let mut watchdog_cancel = Some(watchdog_tx);
+    let (stall_tx, stall_rx) = oneshot::channel();
+    let mut stall_cancel = Some(stall_tx);
+    spawn_progress_watchdog(
+        bus.clone(),
+        store_path.clone(),
+        timeline_correlation,
+        task_id,
+        watchdog_rx,
+    );
+    spawn_task_stall_watchdog(
+        bus.clone(),
+        store_path.clone(),
+        timeline_correlation,
+        task_id,
+        meaningful_progress_flag.clone(),
+        task_completion_registry.clone(),
+        steering_queue.clone(),
+        stall_rx,
     );
     let (message, embedded_studio_acceptance) =
         crate::api_studio::strip_embedded_acceptance_json(&message);
@@ -8480,10 +8957,9 @@ pub(crate) async fn run_message_via_llm(
         } else {
             drop(reg);
             let mut resolved: Option<std::path::PathBuf> = None;
-            if let Some(pid) = store
-                .get(lineage_for_studio)
+            if let Some(pid) = TaskStore::open(&store_path)
                 .ok()
-                .flatten()
+                .and_then(|s| s.get(lineage_for_studio).ok().flatten())
                 .and_then(|t| t.studio_project_id.clone())
             {
                 if let Ok(dir) = crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags, &pid) {
@@ -8514,7 +8990,21 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     // NOTE: interpret_message is called below, after guardrail extraction, so it uses clean_message.
-    let task_snapshot = store.get(task_id).ok().flatten();
+    let task_snapshot = TaskStore::open(&store_path)
+        .ok()
+        .and_then(|s| s.get(task_id).ok().flatten());
+    // #region agent log
+    agent_debug_log(
+        "api.rs:run_message_via_llm",
+        "tool_disk_setup_done",
+        "A",
+        serde_json::json!({
+            "task_id": task_id.to_string(),
+            "session_id": session_id,
+            "code_studio_disk_task": code_studio_disk_task,
+        }),
+    );
+    // #endregion
     let assigned_agent = task_snapshot
         .as_ref()
         .map(|t| t.assigned_agent.clone())
@@ -8529,28 +9019,73 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .and_then(|t| t.parent_task_id)
         .is_some();
+    let router_task_type_early = if preferred_task_type_override.as_deref()
+        == Some("image_generation")
+        || assigned_agent == "image_generation"
+    {
+        llm_router.resolve_task_type_for_agent("conversation")
+    } else {
+        preferred_task_type_override
+            .clone()
+            .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
+    };
+    if let Some((provider, model)) =
+        llm_router.primary_route_for_task_type(&router_task_type_early)
+    {
+        insert_task_tracking_event(
+            store_path.as_path(),
+            task_id,
+            "llm_route_planned",
+            serde_json::json!({
+                "task_type": router_task_type_early,
+                "provider": provider,
+                "model": model,
+                "phase": "pre_context",
+            }),
+        );
+    }
     if let Some(ref sq) = steering_queue {
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "steering_register_start",
+            "B",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
         sq.register_active(task_id, session_id.clone(), !is_subagent)
             .await;
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "steering_register_done",
+            "B",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
     }
     if code_studio_disk_task && !is_subagent {
         let dd = data_dir_for_studio_flags.to_path_buf();
         let root = tool_disk_workspace_root.clone();
         let tid = task_id;
-        match tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             let snap_path = dd.join("studio-task-snapshots").join(format!("{tid}.json"));
             if snap_path.exists() {
                 return Ok(false);
             }
             crate::studio_task_snapshot::capture_task_snapshot(&dd, tid, &root)?;
             Ok(true)
-        })
+        }),
+        )
         .await
         {
-            Ok(Ok(true)) => {}
-            Ok(Ok(false)) => tracing::debug!(task_id = %tid, "studio task snapshot already captured; skipping"),
-            Ok(Err(e)) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot capture failed"),
-            Err(e) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot join failed"),
+            Ok(Ok(Ok(true))) => {}
+            Ok(Ok(Ok(false))) => tracing::debug!(task_id = %tid, "studio task snapshot already captured; skipping"),
+            Ok(Ok(Err(e))) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot capture failed"),
+            Ok(Err(e)) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot join failed"),
+            Err(_) => tracing::warn!(task_id = %tid, "studio task snapshot timed out"),
         }
     }
     // When main_agent prepends a guardrail block on selector timeout, extract the real user message.
@@ -8577,39 +9112,45 @@ pub(crate) async fn run_message_via_llm(
     // Anchor the CLEAN user goal (without guardrail prefix) in session state at task start.
     // Skip for orchestrated task messages — their [Task]\nObjective text is not a user goal.
     if !is_subagent && !is_orchestrated_task_msg && !clean_message.trim().is_empty() {
-        let data_dir_goal = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+        let data_dir_goal = store_path.parent().unwrap_or_else(|| store_path.as_ref()).to_path_buf();
         let goal_text = clean_message.chars().take(240).collect::<String>();
-        let _ = crate::session_state::merge(data_dir_goal, &session_id, |s| {
-            if s.goals.iter().all(|g| g != &goal_text) {
-                s.goals.push(goal_text);
-            }
-        });
+        let session_id_goal = session_id.clone();
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "session_state_merge_start",
+            "A",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
+        let merge_outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            tokio::task::spawn_blocking(move || {
+                crate::session_state::merge(&data_dir_goal, &session_id_goal, |s| {
+                    if s.goals.iter().all(|g| g != &goal_text) {
+                        s.goals.push(goal_text);
+                    }
+                })
+            }),
+        )
+        .await;
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "session_state_merge_done",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "ok": matches!(merge_outcome, Ok(Ok(Ok(_)))),
+                "timed_out": matches!(merge_outcome, Err(_)),
+            }),
+        );
+        // #endregion
     }
     let timeline_correlation = resolve_root_task_id(&store_path, task_id)
         .or_else(|| task_snapshot.as_ref().and_then(|t| t.parent_task_id))
         .unwrap_or(task_id);
-    let meaningful_progress_flag =
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (watchdog_tx, watchdog_rx) = oneshot::channel();
-    let mut watchdog_cancel = Some(watchdog_tx);
-    let (stall_tx, stall_rx) = oneshot::channel();
-    let mut stall_cancel = Some(stall_tx);
-    spawn_progress_watchdog(
-        bus.clone(),
-        timeline_correlation,
-        task_id,
-        watchdog_rx,
-    );
-    spawn_task_stall_watchdog(
-        bus.clone(),
-        store_path.clone(),
-        timeline_correlation,
-        task_id,
-        meaningful_progress_flag.clone(),
-        task_completion_registry.clone(),
-        steering_queue.clone(),
-        stall_rx,
-    );
 
     // All intent detection / classification uses clean_message so a guardrail prefix never
     // breaks fast-lane matching or memory profile selection.
@@ -8662,6 +9203,19 @@ pub(crate) async fn run_message_via_llm(
             orch_disk_deliverables,
         )
     };
+    if incognito {
+        memory_profile.recent_turns_limit = 0;
+        memory_profile.recent_context_max_chars = 0;
+        memory_profile.semantic_top_k = 0;
+        memory_profile.episodic_limit = 0;
+        memory_profile.facts_limit = 0;
+        memory_profile.user_rag_top_k = 0;
+        memory_profile.workspace_graph_top_k = 0;
+        memory_profile.graph_expand_hops = 0;
+        memory_profile.expand_by_graph = false;
+        memory_profile.allow_project_recall = false;
+        memory_profile.allow_identity_lookup = false;
+    }
     // For external/transport/general-knowledge queries, always isolate from recent context.
     // Loading previous dev/Akasha-specific turns from short-term history actively misleads
     // small local models: they latch onto the most recent topic (e.g. Akasha CLI discussion)
@@ -8906,6 +9460,11 @@ pub(crate) async fn run_message_via_llm(
         Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
         None => AgentProfile::load(data_dir),
     };
+    let completion_temperature = agent_profile
+        .temperature
+        .filter(|t| *t >= 0.0 && *t <= 2.0)
+        .map(|t| t as f32)
+        .unwrap_or(0.7);
     let profile_block = if code_studio_disk_task {
         String::new()
     } else {
@@ -9022,9 +9581,34 @@ pub(crate) async fn run_message_via_llm(
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
     };
+    // #region agent log
+    {
+        let turn_count = if let Some(st) = &short_term {
+            st.get_turns(&session_id).await.len()
+        } else {
+            0usize
+        };
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "session_turns_snapshot",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "turns_empty": turns_empty,
+                "turn_count": turn_count,
+                "semantic_top_k": memory_profile.semantic_top_k,
+            }),
+        );
+    }
+    // #endregion
+    let process_id_for_recall = resolve_root_task_id(store_path.as_path(), task_id)
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| task_id.to_string());
     let user_profile = UserProfile::load(data_dir);
     let user_identity_prefix = user_profile.format_for_prompt();
-    let recall_params = crate::memory_orchestrator::RecallParams {
+    let constitution = crate::constitution::Constitution::load(data_dir);
+    let mut recall_params = crate::memory_orchestrator::RecallParams {
         message: message.clone(),
         session_id: session_id.clone(),
         semantic_top_k: memory_profile.semantic_top_k,
@@ -9039,7 +9623,7 @@ pub(crate) async fn run_message_via_llm(
             && !code_studio_disk_task,
         expand_by_graph: memory_profile.expand_by_graph,
         graph_expand_hops: memory_profile.graph_expand_hops,
-        process_id: Some(task_id.to_string()),
+        process_id: Some(process_id_for_recall),
         task_id: Some(task_id.to_string()),
         user_identity_prefix: if user_identity_prefix.is_empty()
             || !memory_profile.allow_identity_lookup
@@ -9048,20 +9632,157 @@ pub(crate) async fn run_message_via_llm(
         } else {
             Some(user_identity_prefix)
         },
-        task_outcomes_limit: if code_studio_disk_task { 6 } else { 8 },
-        task_outcomes_scope_session: code_studio_disk_task,
+        task_outcomes_limit: if incognito {
+            0
+        } else if code_studio_disk_task {
+            6
+        } else {
+            8
+        },
+        task_outcomes_scope_session: code_studio_disk_task || !turns_empty,
         include_preference_and_personality_episodic: !code_studio_disk_task,
+        constitution: if constitution.is_configured() {
+            Some(constitution)
+        } else {
+            None
+        },
         ..Default::default()
     };
+    if memory_profile.semantic_top_k > 0
+        && !is_small_talk_fast_lane
+        && !code_studio_disk_task
+    {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 6,
+                    "message": "Préparation du contexte…"
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        let mut search_queries =
+            crate::memory_retrieval_enhance::expand_queries(&llm_router, &message).await;
+        if let Some(hyde) =
+            crate::memory_retrieval_enhance::hyde_document(&llm_router, &message).await
+        {
+            search_queries.push(hyde);
+        }
+        recall_params.search_queries = search_queries;
+    }
+    let mut workspace_registry_lines: Vec<String> = Vec::new();
+    if memory_profile.workspace_graph_top_k > 0 {
+        let graph_query = message.clone();
+        let graph_k = memory_profile.workspace_graph_top_k;
+        let sp = store_path.clone();
+        if let Some((workspace_lines, graph_lines)) = tokio::task::spawn_blocking(move || {
+            let store = WorkspaceGraphStore::open(&sp)?;
+            let workspaces = store.list_workspaces()?;
+            let workspace_lines: Vec<String> = workspaces
+                .iter()
+                .map(|w| format!("- \"{}\" — id {} — {}", w.name, w.id, w.root_path))
+                .collect();
+            let graph_lines = store.search_graph_context(&graph_query, graph_k, None)?;
+            Ok::<_, anyhow::Error>((workspace_lines, graph_lines))
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        {
+            workspace_registry_lines = workspace_lines;
+            recall_params.workspace_graph_lines = graph_lines;
+        }
+    }
     if memory_profile.semantic_top_k > 0
         || memory_profile.episodic_limit > 0
         || memory_profile.facts_limit > 0
         || recall_params.user_identity_prefix.is_some()
         || recall_params.task_outcomes_limit > 0
+        || !recall_params.workspace_graph_lines.is_empty()
     {
-        let fused =
-            crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params)
-                .await;
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 8,
+                    "message": "Chargement du contexte et de la mémoire…"
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        let recall_timeout = std::time::Duration::from_secs(memory_recall_timeout_secs());
+        insert_task_tracking_event(
+            store_path.as_path(),
+            task_id,
+            "memory_recall_started",
+            serde_json::json!({
+                "timeout_secs": recall_timeout.as_secs(),
+                "semantic_top_k": memory_profile.semantic_top_k,
+            }),
+        );
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "memory_recall_start",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "timeout_secs": recall_timeout.as_secs(),
+            }),
+        );
+        // #endregion
+        let (fused, recall_timed_out) = match tokio::time::timeout(
+            recall_timeout,
+            crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params),
+        )
+        .await
+        {
+            Ok(ctx) => (ctx, false),
+            Err(_) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    timeout_secs = recall_timeout.as_secs(),
+                    "memory recall timed out; continuing without long-term context"
+                );
+                // #region agent log
+                agent_debug_log(
+                    "api.rs:run_message_via_llm",
+                    "memory_recall_timeout",
+                    "A",
+                    serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+                );
+                // #endregion
+                (
+                    crate::memory_orchestrator::FusedMemoryContext::default(),
+                    true,
+                )
+            }
+        };
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "memory_recall_done",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "had_results": !fused.to_context_string().is_empty(),
+            }),
+        );
+        // #endregion
+        insert_task_tracking_event(
+            store_path.as_path(),
+            task_id,
+            "memory_recall_finished",
+            serde_json::json!({
+                "had_results": !fused.to_context_string().is_empty(),
+                "timed_out": recall_timed_out,
+            }),
+        );
         let fused_str = fused.to_context_string();
         if !fused_str.is_empty() {
             user_prefix.push_str(&fused_str);
@@ -9078,8 +9799,19 @@ pub(crate) async fn run_message_via_llm(
         let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
         let rag_query = message.clone();
         let rag_top_k = memory_profile.user_rag_top_k;
+        let data_dir_rag = data_dir.to_path_buf();
         let chunks =
-            tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, rag_top_k))
+            tokio::task::spawn_blocking(move || {
+                #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+                let query_embedding = {
+                    use akasha_embeddings::Embedder;
+                    let cache_dir = data_dir_rag.join("embedding_model");
+                    Embedder::new(&cache_dir).embed_one(&rag_query).ok()
+                };
+                #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+                let query_embedding: Option<Vec<f32>> = None;
+                user_rag_store.retrieve_hybrid(&rag_query, query_embedding.as_deref(), rag_top_k)
+            })
                 .await
                 .ok()
                 .and_then(|res| res.ok())
@@ -9094,59 +9826,24 @@ pub(crate) async fn run_message_via_llm(
             user_prefix.push_str("\n");
         }
     }
-    if memory_profile.workspace_graph_top_k > 0 {
-        let graph_query = message.clone();
-        let graph_k = memory_profile.workspace_graph_top_k;
-        let sp = store_path.clone();
-        let (workspace_lines, graph_lines) = tokio::task::spawn_blocking(move || {
-            let store = WorkspaceGraphStore::open(&sp)?;
-            let workspaces = store.list_workspaces()?;
-            let workspace_lines: Vec<String> = workspaces
-                .iter()
-                .map(|w| {
-                    format!(
-                        "- \"{}\" — id {} — {}",
-                        w.name, w.id, w.root_path
-                    )
-                })
-                .collect();
-            let graph_lines = store.search_graph_context(&graph_query, graph_k, None)?;
-            Ok::<_, anyhow::Error>((workspace_lines, graph_lines))
-        })
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
-        if workspace_lines.len() > 1 {
-            const MAX_WORKSPACE_LINES: usize = 8;
-            user_prefix.push_str(
-                "[Project knowledge graphs — registered workspaces (use id with workspace_graph_search --workspace)]\n",
-            );
-            for line in workspace_lines.iter().take(MAX_WORKSPACE_LINES) {
-                user_prefix.push_str(line);
-                user_prefix.push_str("\n");
-            }
-            if workspace_lines.len() > MAX_WORKSPACE_LINES {
-                user_prefix.push_str(&format!(
-                    "- … ({} more workspaces not shown)\n",
-                    workspace_lines.len() - MAX_WORKSPACE_LINES
-                ));
-            }
-            user_prefix.push_str(
-                "To fetch more symbols or files from the index, call: workspace_graph_search <keywords> [--workspace <id>]\n\n",
-            );
-        }
-        if !graph_lines.is_empty() {
-            user_prefix.push_str(
-                "[Project knowledge graphs — excerpts matching this message (indexed folders)]\n",
-            );
-            for line in &graph_lines {
-                user_prefix.push_str("- ");
-                user_prefix.push_str(line);
-                user_prefix.push_str("\n");
-            }
+    if workspace_registry_lines.len() > 1 {
+        const MAX_WORKSPACE_LINES: usize = 8;
+        user_prefix.push_str(
+            "[Project knowledge graphs — registered workspaces (use id with workspace_graph_search --workspace)]\n",
+        );
+        for line in workspace_registry_lines.iter().take(MAX_WORKSPACE_LINES) {
+            user_prefix.push_str(line);
             user_prefix.push_str("\n");
         }
+        if workspace_registry_lines.len() > MAX_WORKSPACE_LINES {
+            user_prefix.push_str(&format!(
+                "- … ({} more workspaces not shown)\n",
+                workspace_registry_lines.len() - MAX_WORKSPACE_LINES
+            ));
+        }
+        user_prefix.push_str(
+            "To fetch more symbols or files from the index, call: workspace_graph_search <keywords> [--workspace <id>]\n\n",
+        );
     }
     let router_task_type_for_compact = if preferred_task_type_override.as_deref()
         == Some("image_generation")
@@ -9162,7 +9859,7 @@ pub(crate) async fn run_message_via_llm(
         .primary_route_for_task_type(&router_task_type_for_compact)
         .unwrap_or_else(|| ("default".to_string(), "default".to_string()));
     if let Some(ref st) = short_term {
-        if memory_profile.compact_before_prompt {
+        if memory_profile.compact_before_prompt && !incognito {
             let new_msg_tokens = ShortTermStore::estimate_tokens_calibrated(
                 tok_prov.as_str(),
                 tok_model.as_str(),
@@ -9176,6 +9873,7 @@ pub(crate) async fn run_message_via_llm(
                 long_term_client.as_ref(),
                 tok_prov.as_str(),
                 tok_model.as_str(),
+                &store_path,
             )
             .await;
         }
@@ -9207,6 +9905,17 @@ pub(crate) async fn run_message_via_llm(
             }
         }
     }
+    let store = match TaskStore::open(&store_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(task_id = %task_id, error_kind = "store_open", error = %e, "LLM task: store open failed before prompt assembly");
+            if let Some(ref sq) = steering_queue {
+                sq.unregister_active(task_id).await;
+            }
+            notify_task_completion(&task_completion_registry, task_id).await;
+            return;
+        }
+    };
     if !is_small_talk_fast_lane {
         if let Ok(todos) = store.get_todos(task_id) {
             if let Some(block) = format_todos_plan_block(&todos) {
@@ -9480,6 +10189,25 @@ pub(crate) async fn run_message_via_llm(
             log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
         }
     } else {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 12,
+                    "message": "Génération de la réponse…"
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "progress_12_llm_loop_start",
+            "A",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
         let mut max_tool_rounds = std::env::var("AKASHA_MAX_TOOL_ROUNDS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -9641,10 +10369,26 @@ pub(crate) async fn run_message_via_llm(
             } else {
                 Some(merged_image_urls)
             };
+            if let Some((provider, model)) = preferred_task_type
+                .as_deref()
+                .and_then(|tt| llm_router.primary_route_for_task_type(tt))
+            {
+                insert_task_tracking_event(
+                    store_path.as_path(),
+                    task_id,
+                    "llm_call_started",
+                    serde_json::json!({
+                        "round": round + 1,
+                        "task_type": preferred_task_type,
+                        "provider": provider,
+                        "model": model,
+                    }),
+                );
+            }
             let request = CompletionRequest {
                 prompt: format!("{}{}", current_prompt, tool_instruction),
                 max_tokens: Some(completion_max_tokens),
-                temperature: Some(0.7),
+                temperature: Some(completion_temperature),
                 preferred_task_type,
                 system_prompt: system_prompt.clone(),
                 image_data_urls: merged_image_data_urls,
@@ -9760,6 +10504,33 @@ pub(crate) async fn run_message_via_llm(
                                 })),
                                 &chrono::Utc::now().to_rfc3339(),
                             );
+                            if chunk_ref.contains("TOOL:") || chunk_ref.contains("<tool_call") {
+                                let tool_name = parse_tool_name_from_toolcall_delta(chunk_ref);
+                                let _ = bus.send(
+                                    EventEnvelope::new(
+                                        EventType::ProgressUpdate,
+                                        Some(serde_json::json!({
+                                            "task_id": task_id.to_string(),
+                                            "event_type": "toolcall_delta",
+                                            "delta": chunk_ref,
+                                            "delta_raw": chunk_ref,
+                                            "tool_name": tool_name
+                                        })),
+                                    )
+                                    .with_correlation(task_id),
+                                );
+                                let _ = store.insert_event(
+                                    task_id,
+                                    "toolcall_delta",
+                                    Some(&serde_json::json!({
+                                        "delta": chunk_ref,
+                                        "delta_raw": chunk_ref,
+                                        "tool_name": tool_name,
+                                        "schema_version": 1
+                                    })),
+                                    &chrono::Utc::now().to_rfc3339(),
+                                );
+                            }
                         }
                     }
                     Ok(None) => break,
@@ -9789,6 +10560,26 @@ pub(crate) async fn run_message_via_llm(
                 match tokio::time::timeout(remaining, stream_join).await {
                     Ok(Ok(Ok(resp))) => {
                         last_llm_model_used = Some(resp.model_used.clone());
+                        insert_task_tracking_event(
+                            store_path.as_path(),
+                            task_id,
+                            "llm_call_finished",
+                            serde_json::json!({
+                                "round": round + 1,
+                                "success": true,
+                                "model_used": resp.model_used,
+                                "latency_ms": resp
+                                    .total_duration_ns
+                                    .map(|ns| ns / 1_000_000)
+                                    .unwrap_or(0),
+                                "prompt_tokens": resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                                "completion_tokens": resp
+                                    .usage
+                                    .as_ref()
+                                    .map(|u| u.completion_tokens)
+                                    .unwrap_or(0),
+                            }),
+                        );
                         if let Some(ref store) = task_usage_store {
                             let prompt_tokens =
                                 resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0);
@@ -9818,6 +10609,16 @@ pub(crate) async fn run_message_via_llm(
                     }
                     Ok(Ok(Err(e))) => {
                         tracing::warn!(error = %e, "LLM completion failed");
+                        insert_task_tracking_event(
+                            store_path.as_path(),
+                            task_id,
+                            "llm_call_finished",
+                            serde_json::json!({
+                                "round": round + 1,
+                                "success": false,
+                                "error": e.to_string(),
+                            }),
+                        );
                         reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
                         break;
                     }
@@ -10981,6 +11782,7 @@ pub(crate) async fn run_message_via_llm(
                                         workspace_store.as_ref(),
                                         browser_registry.as_ref(),
                                         Some(tool_disk_workspace_root.as_path()),
+                                        Some(session_id.as_str()),
                                     )
                                     .await;
                                     (s, r, None)
@@ -11031,6 +11833,7 @@ pub(crate) async fn run_message_via_llm(
                                     workspace_store.as_ref(),
                                     browser_registry.as_ref(),
                                     Some(tool_disk_workspace_root.as_path()),
+                                    Some(session_id.as_str()),
                                 )
                                 .await
                             };
@@ -11877,7 +12680,7 @@ pub(crate) async fn run_message_via_llm(
     // Persist this exchange in short-term memory (spec 06)
     // Skip orchestrated task messages ([Task]\n prefix): they are internal planner artefacts,
     // not real user/assistant turns. Storing them pollutes future context with unrelated content.
-    if !is_small_talk_fast_lane && !is_orchestrated_task_msg {
+    if !incognito && !is_small_talk_fast_lane && !is_orchestrated_task_msg {
         if let Some(ref st) = short_term {
             // Store the clean user message (without any guardrail prefix) so history is human-readable.
             st.append(&session_id, "user", clean_message.to_string())
@@ -11888,7 +12691,7 @@ pub(crate) async fn run_message_via_llm(
     }
 
     // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
-    if !is_small_talk_fast_lane {
+    if !incognito && !is_small_talk_fast_lane {
         if let Some(ref long_term) = long_term_client {
             // Heuristic: capture obvious name/intro from user message. Promote these *immediately* so they appear in Memory tab right away.
             // Case-insensitive matching on lowercased text, but extract from original message to preserve casing.
@@ -12294,6 +13097,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             obj.insert("reason".to_string(), serde_json::Value::String(reason_text));
         }
     }
+    let failure_reason = final_payload.get("reason").cloned();
     let _ = bus.send(
         EventEnvelope::new(final_event_type, Some(final_payload)).with_correlation(task_id),
     );
@@ -12304,13 +13108,59 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         "task_completed",
         Some(serde_json::json!({ "status": final_status_str })),
     );
+    if final_status_str == "completed" || final_status_str == "failed" {
+        let hook_event = if final_status_str == "completed" {
+            "task_completed"
+        } else {
+            "task_failed"
+        };
+        let mut hook_payload = serde_json::json!({
+            "task_id": task_id.to_string(),
+            "session_id": session_id,
+            "status": final_status_str,
+            "model_used": last_llm_model_used,
+            "reply_preview": reply_text.chars().take(800).collect::<String>(),
+        });
+        if final_status_str == "failed" {
+            if let (Some(obj), Some(reason)) = (hook_payload.as_object_mut(), failure_reason.as_ref()) {
+                obj.insert("reason".to_string(), reason.clone());
+            }
+        }
+        let hook_data_dir = store_path.parent().unwrap_or_else(|| store_path.as_path());
+        crate::plugin_hook_bus::dispatch_hook_event(
+            hook_data_dir,
+            hook_event,
+            &hook_payload.to_string(),
+        );
+    }
     clear_task_milestones(task_id, Some(store_path.as_path()));
+
+    if let Some(data_dir) = store_path.parent().map(|p| p.to_path_buf()) {
+        let sp = store_path.to_path_buf();
+        let tid = task_id;
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::session_transcript::write_task_transcript(&data_dir, &sp, tid);
+        })
+        .await;
+    }
 
     // Phase 2 AI OS: do not overwrite Paused / Cancelled / Interrupted with Completed.
     if !halted_user {
         if studio_verify_error.is_some() {
             let _ = store.update_status(task_id, TaskStatus::Failed);
         } else {
+            // #region agent log
+            agent_debug_log(
+                "api.rs:run_message_via_llm",
+                "task_completed",
+                "A",
+                serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "session_id": session_id,
+                    "final_status": final_status_str,
+                }),
+            );
+            // #endregion
             let _ = store.update_status(task_id, TaskStatus::Completed);
             if let Ok(events) = store.get_events(task_id) {
                 if let Some(ticket_id) = events
@@ -12504,8 +13354,72 @@ pub(crate) async fn learn_from_task_outcome_async(
 /// Optional channel to trigger daemon shutdown (for POST /api/restart).
 pub type RestartTx = Option<tokio::sync::mpsc::Sender<()>>;
 
+/// Optional filters for GET /api/events (`?task_id=` and/or `?types=` comma-separated).
+#[derive(Debug, Clone, Default)]
+pub struct SseEventFilter {
+    pub task_id: Option<uuid::Uuid>,
+    pub event_types: Option<std::collections::HashSet<String>>,
+}
+
+/// Parse `task_id` and `types` / `event_types` from a query string (without leading `?`).
+pub fn parse_sse_event_filter(query: &str) -> SseEventFilter {
+    let mut filter = SseEventFilter::default();
+    for pair in query.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = k.trim().to_lowercase();
+        let val = urlencoding::decode(v.trim()).unwrap_or_else(|_| v.trim().into());
+        match key.as_str() {
+            "task_id" | "correlation_id" => {
+                if let Ok(id) = uuid::Uuid::parse_str(val.trim()) {
+                    filter.task_id = Some(id);
+                }
+            }
+            "types" | "event_types" => {
+                let set: std::collections::HashSet<String> = val
+                    .split(',')
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !set.is_empty() {
+                    filter.event_types = Some(set);
+                }
+            }
+            _ => {}
+        }
+    }
+    filter
+}
+
+fn sse_event_matches_filter(envelope: &EventEnvelope, filter: &SseEventFilter) -> bool {
+    if let Some(tid) = filter.task_id {
+        let corr = envelope.correlation_id == Some(tid);
+        let payload_tid = envelope
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("task_id"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            == Some(tid);
+        if !corr && !payload_tid {
+            return false;
+        }
+    }
+    if let Some(ref types) = filter.event_types {
+        if !types.contains(&envelope.event_type.as_str().to_lowercase()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Stream event-bus events as Server-Sent Events (GET /api/events). Keeps connection open until client disconnects.
-pub async fn stream_sse_events<W>(bus: &EventBus, stream: &mut W) -> std::io::Result<()>
+pub async fn stream_sse_events<W>(
+    bus: &EventBus,
+    stream: &mut W,
+    filter: SseEventFilter,
+) -> std::io::Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -12516,6 +13430,9 @@ where
     loop {
         match rx.recv().await {
             Ok(envelope) => {
+                if !sse_event_matches_filter(&envelope, &filter) {
+                    continue;
+                }
                 let payload = serde_json::json!({
                     "id": envelope.id.to_string(),
                     "event_type": envelope.event_type.as_str(),
@@ -12648,14 +13565,41 @@ pub async fn handle_api(
         return resp;
     }
 
+    if let Some(resp) = crate::api_routes_kinbot::try_handle(
+        method,
+        path_only,
+        Some(query_str),
+        body.as_deref(),
+        &crate::api_routes_kinbot::KinbotRouteCtx {
+            store_path,
+            data_dir,
+            user_rag_store,
+            plugin_registry: Some(plugin_registry),
+        },
+    )
+    .await
+    {
+        return resp;
+    }
+
     if method == "GET" && path_only == "/api/process/watch/recent" {
-        let limit = crate::api_security::parse_query_param(query_str, "limit")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(50);
+        let limit_opt = crate::api_security::parse_query_param(query_str, "limit")
+            .and_then(|s| s.parse::<usize>().ok());
+        let can_cache = limit_opt.unwrap_or(50) == 50;
+        if can_cache {
+            if let Some(cached) = crate::http_get_cache::cache_get_process_watch_recent() {
+                return json_response("200 OK", &cached);
+            }
+        }
+        let limit = limit_opt.unwrap_or(50);
         let ev = crate::process_watch::recent(limit).await;
+        let body = serde_json::to_string(&ev).unwrap_or_else(|_| "[]".to_string());
+        if can_cache {
+            crate::http_get_cache::cache_put_process_watch_recent(&body);
+        }
         return json_response(
             "200 OK",
-            &serde_json::to_string(&ev).unwrap_or_else(|_| "[]".to_string()),
+            &body,
         );
     }
 
@@ -12996,6 +13940,82 @@ pub async fn handle_api(
     }
 
     // Second brain controls: settings, overview and clear.
+    if method == "GET" && path == "/api/agent-identity" {
+        let identity = crate::memory_agent_identity::AgentIdentityManifest::load(data_dir);
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "identity": identity }).to_string(),
+        );
+    }
+    if method == "POST" && path == "/api/agent-identity" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mut identity = body_json
+            .as_ref()
+            .and_then(|v| v.get("identity"))
+            .and_then(|v| serde_json::from_value::<crate::memory_agent_identity::AgentIdentityManifest>(v.clone()).ok())
+            .unwrap_or_else(|| crate::memory_agent_identity::AgentIdentityManifest::load(data_dir));
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("name")).and_then(|x| x.as_str()) {
+            identity.name = Some(v.to_string());
+        }
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("role")).and_then(|x| x.as_str()) {
+            identity.role = Some(v.to_string());
+        }
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("tone")).and_then(|x| x.as_str()) {
+            identity.tone = Some(v.to_string());
+        }
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("values")).and_then(|x| x.as_array()) {
+            identity.values = Some(
+                v.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+            );
+        }
+        if let Some(v) = body_json
+            .as_ref()
+            .and_then(|j| j.get("constraints"))
+            .and_then(|x| x.as_array())
+        {
+            identity.constraints = Some(
+                v.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+            );
+        }
+        match crate::memory_agent_identity::save(data_dir, &identity) {
+            Ok(()) => {
+                crate::memory_agent_identity::bootstrap_agent_identity(data_dir, long_term_client.as_ref());
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "identity": identity }).to_string(),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+    if method == "GET" && path == "/api/memory/advanced-settings" {
+        let settings = crate::memory_retrieval_enhance::advanced_settings_snapshot();
+        return json_response("200 OK", &serde_json::json!({ "settings": settings }).to_string());
+    }
+    if method == "POST" && path == "/api/memory/advanced-settings" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        if let Some(ref j) = body_json {
+            crate::memory_retrieval_enhance::apply_advanced_settings(j);
+        }
+        let settings = crate::memory_retrieval_enhance::advanced_settings_snapshot();
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "settings": settings }).to_string(),
+        );
+    }
     if method == "GET" && path == "/api/memory/second-brain/settings" {
         let settings = load_second_brain_settings(data_dir);
         let body = serde_json::json!({ "settings": settings });
@@ -13102,6 +14122,98 @@ pub async fn handle_api(
         );
     }
 
+    // GET /api/memory/branch/:session_id — branch overview (E3)
+    if method == "GET" && path.starts_with("/api/memory/branch/") {
+        let session_id = path
+            .trim_start_matches("/api/memory/branch/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if session_id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"session_id_required"}"#);
+        }
+        let db = data_dir.join("memory.db");
+        match crate::memory_branch::branch_overview(&db, session_id) {
+            Ok(v) => return json_response("200 OK", &v.to_string()),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+
+    // POST /api/memory/branch/:session_id — clone session memory to target branch (E3)
+    if method == "POST" && path.starts_with("/api/memory/branch/") {
+        let source_session = path
+            .trim_start_matches("/api/memory/branch/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if source_session.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"session_id_required"}"#);
+        }
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let target_session = body_json
+            .as_ref()
+            .and_then(|j| j.get("target_session_id").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if target_session.is_empty() {
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"target_session_id_required"}"#,
+            );
+        }
+        let Some(ref client) = long_term_client else {
+            return json_response(
+                "503 Service Unavailable",
+                r#"{"error":"long_term_memory_unavailable"}"#,
+            );
+        };
+        let db = data_dir.join("memory.db");
+        let client = client.clone();
+        let source = source_session.to_string();
+        let target_for_clone = target_session.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::memory_branch::clone_branch(&client, &db, &source, &target_for_clone)
+        })
+        .await;
+        match result {
+            Ok(Ok((lt, ep))) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({
+                        "ok": true,
+                        "source_session_id": source_session,
+                        "target_session_id": target_session,
+                        "long_term_cloned": lt,
+                        "episodic_cloned": ep,
+                    })
+                    .to_string(),
+                );
+            }
+            Ok(Err(e)) => {
+                return json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+
     if method == "GET" && path == "/api/memory/export" {
         let db = data_dir.join("memory.db");
         match crate::memory_export::export_memory(&db) {
@@ -13180,10 +14292,14 @@ pub async fn handle_api(
             .as_ref()
             .and_then(|v| v.get("dry_run").and_then(|x| x.as_bool()))
             .unwrap_or(false);
+        let import_memory = parsed
+            .as_ref()
+            .and_then(|v| v.get("import_memory").and_then(|x| x.as_bool()))
+            .unwrap_or(false);
         if source_dir.trim().is_empty() {
             return json_response("400 Bad Request", r#"{"error":"missing_source_dir"}"#);
         }
-        match crate::openclaw_migration::apply(&source_dir, data_dir, dry_run) {
+        match crate::openclaw_migration::apply(&source_dir, data_dir, dry_run, import_memory) {
             Ok(r) => {
                 return json_response("200 OK", &serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()));
             }
@@ -13198,6 +14314,9 @@ pub async fn handle_api(
 
     // GET /api/memory/recall-metrics — counters from memory orchestrator (semantic recall hits/empty).
     if method == "GET" && path == "/api/memory/recall-metrics" {
+        if let Some(cached) = crate::http_get_cache::cache_get_recall_metrics() {
+            return json_response("200 OK", &cached);
+        }
         let mut body = crate::memory_orchestrator::memory_recall_metrics_snapshot();
         if let Some(obj) = body.as_object_mut() {
             if let Some(m) = crate::memory_maintenance::metrics_snapshot().as_object() {
@@ -13211,10 +14330,9 @@ pub async fn handle_api(
                 }
             }
         }
-        return json_response(
-            "200 OK",
-            &serde_json::to_string(&body).unwrap_or_else(|_| "{}".into()),
-        );
+        let body_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+        crate::http_get_cache::cache_put_recall_metrics(&body_str);
+        return json_response("200 OK", &body_str);
     }
 
     // GET /api/memory/short-term?session_id=... — turns for session (default: day-YYYY-MM-DD)
@@ -13710,6 +14828,13 @@ pub async fn handle_api(
 
     // GET /api/doctor — health checks from daemon (for slash /doctor)
     if method == "GET" && path == "/api/doctor" {
+        if let Some(cached) = crate::http_get_cache::cache_get_doctor() {
+            return format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                cached.len(),
+                cached
+            );
+        }
         let mut checks: Vec<serde_json::Value> = Vec::new();
         checks.push(
             serde_json::json!({ "id": "daemon", "ok": true, "description": "Daemon running" }),
@@ -13928,6 +15053,7 @@ pub async fn handle_api(
         let body_json =
             serde_json::json!({ "ok": all_ok, "checks": checks, "playwright": playwright_json })
                 .to_string();
+        crate::http_get_cache::cache_put_doctor(&body_json);
         return format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body_json.len(),
@@ -14023,6 +15149,50 @@ pub async fn handle_api(
             body_json.len(),
             body_json
         );
+    }
+
+    // POST /api/vault — set one secret (body: {"key": "KEY_NAME", "value": "secret"})
+    if method == "POST" && path == "/api/vault" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let key = body_json
+            .as_ref()
+            .and_then(|j| j.get("key"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let value = body_json
+            .as_ref()
+            .and_then(|j| j.get("value"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        match (key, value) {
+            (Some(k), Some(v)) if !k.is_empty() && !v.is_empty() => {
+                match akasha_vault::open_vault(data_dir) {
+                    Ok(vault) => match vault.set(&k, &v) {
+                        Ok(()) => {
+                            return json_response(
+                                "200 OK",
+                                &serde_json::json!({ "ok": true, "key": k }).to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            return json_response(
+                                "500 Internal Server Error",
+                                &serde_json::json!({ "error": e.to_string() }).to_string(),
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        return json_response(
+                            "503 Service Unavailable",
+                            &serde_json::json!({ "error": e.to_string() }).to_string(),
+                        );
+                    }
+                }
+            }
+            _ => return json_response("400 Bad Request", r#"{"error":"missing key or value"}"#),
+        }
     }
 
     // DELETE /api/vault — remove one key (body: {"key": "KEY_NAME"})
@@ -14138,6 +15308,132 @@ pub async fn handle_api(
             ).await;
         }
         return json_response("404 Not Found", r#"{"error":"teams_not_configured"}"#);
+    }
+
+    if method == "POST" && path == "/api/session/handoff" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let Some(body_json) = body_json else {
+            return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
+        };
+        let session_id = body_json
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let Some(session_id) = session_id else {
+            return json_response("400 Bad Request", r#"{"error":"missing_session_id"}"#);
+        };
+        let target_model = body_json
+            .get("target_model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let target_provider = body_json
+            .get("target_provider")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let task_id_filter = body_json
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let task_uuid = match task_id_filter {
+            Some(ref s) => match Uuid::parse_str(s) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    return json_response("400 Bad Request", r#"{"error":"invalid_task_id"}"#);
+                }
+            },
+            None => None,
+        };
+        let transcript_ctx = if let Some(tid) = task_uuid {
+            let transcript_path = data_dir.join("transcripts").join(format!("{tid}.json"));
+            if let Ok(raw) = std::fs::read_to_string(&transcript_path) {
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .map(|v| {
+                        let status = v
+                            .get("status")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("unknown");
+                        let summary = v
+                            .get("summary")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .chars()
+                            .take(1800)
+                            .collect::<String>();
+                        let actions = v
+                            .get("actions")
+                            .and_then(|x| x.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .take(8)
+                                    .filter_map(|a| a.get("summary").and_then(|s| s.as_str()))
+                                    .map(|s| format!("- {}", s.trim()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            "[Handoff transcript]\n- source_task_id: {tid}\n- status: {status}\n- summary: {summary}\n{}",
+                            if actions.is_empty() {
+                                String::new()
+                            } else {
+                                format!("\n[Recent actions]\n{actions}\n")
+                            }
+                        )
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        let model_route = match (&target_provider, &target_model) {
+            (Some(p), Some(m)) => format!("{p}/{m}"),
+            (Some(p), None) => p.clone(),
+            (None, Some(m)) => m.clone(),
+            (None, None) => "auto".to_string(),
+        };
+        let route_hint = if target_provider.is_some() || target_model.is_some() {
+            format!(
+                "[Handoff route request]\n- target_provider: {}\n- target_model: {}\nUse this route preference if configured; otherwise fall back to the nearest available route and mention the fallback.\n\n",
+                target_provider.as_deref().unwrap_or(""),
+                target_model.as_deref().unwrap_or("")
+            )
+        } else {
+            String::new()
+        };
+        let handoff_prompt = format!(
+            "{}{}\n[Instruction]\nContinue the conversation from this handoff context and produce the next actionable response.",
+            route_hint, transcript_ctx
+        );
+        let envelope = crate::gateway::MessageEnvelope::api(
+            session_id.clone(),
+            handoff_prompt,
+            None,
+            TaskPriority::UserNormal,
+            false,
+        );
+        match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
+            Ok(task_id) => {
+                let body = serde_json::json!({
+                    "schema_version": 2,
+                    "task_id": task_id.to_string(),
+                    "session_id": session_id,
+                    "model": model_route
+                });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(_) => {
+                return json_response("500 Internal Server Error", r#"{"error":"handle_failed"}"#)
+            }
+        }
     }
 
     if method == "POST" && path == "/api/message" {
@@ -14295,6 +15591,17 @@ pub async fn handle_api(
                 }
             })
             .unwrap_or(TaskPriority::UserNormal);
+        let incognito = body_json
+            .as_ref()
+            .map(|v| {
+                v.get("incognito")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false)
+                    || v.get("no_memory")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false);
         let studio_code_mode = body_json
             .as_ref()
             .and_then(|v| v.get("studio_code_mode").and_then(|x| x.as_str()))
@@ -14552,6 +15859,18 @@ pub async fn handle_api(
                         "session_id": session_id,
                         "message": "Message mis en file pour la tâche en cours."
                     });
+                    // #region agent log
+                    agent_debug_log(
+                        "api.rs:post_message",
+                        "message_queued_to_running_task",
+                        "B",
+                        serde_json::json!({
+                            "task_id": tid.to_string(),
+                            "session_id": session_id,
+                            "queue_mode": queued.mode,
+                        }),
+                    );
+                    // #endregion
                     return json_response("200 OK", &body.to_string());
                 }
             }
@@ -14709,6 +16028,7 @@ pub async fn handle_api(
             message_for_llm,
             image_data_urls,
             priority,
+            incognito,
         );
         envelope.studio_disk_root = studio_disk_root.clone();
         envelope.studio_forced_agent = studio_forced_agent;
@@ -14983,15 +16303,40 @@ pub async fn handle_api(
 
     // Phase 5: Plugins
     if method == "GET" && path == "/api/plugins" {
+        if let Some(cached) = crate::http_get_cache::cache_get_plugins() {
+            return json_response("200 OK", &cached);
+        }
         let list = plugin_registry.list();
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+        crate::http_get_cache::cache_put_plugins(&body);
         return json_response("200 OK", &body);
     }
+    if method == "GET" && (path == "/api/plugins/catalog" || path.starts_with("/api/plugins/catalog?")) {
+        match crate::plugin_install::fetch_remote_catalog(None).await {
+            Ok(catalog) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::to_string(&catalog).unwrap_or_else(|_| "{}".to_string()),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "502 Bad Gateway",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
     if method == "GET" && path == "/api/plugins/metrics" {
+        if let Some(cached) = crate::http_get_cache::cache_get_plugins_metrics() {
+            return json_response("200 OK", &cached);
+        }
         let m = crate::plugins::metrics::snapshot();
+        let body = serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string());
+        crate::http_get_cache::cache_put_plugins_metrics(&body);
         return json_response(
             "200 OK",
-            &serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string()),
+            &body,
         );
     }
     // GET /api/plugins/routing_rules[?message=...] — debug dynamic plugin routing rules
@@ -15142,6 +16487,55 @@ pub async fn handle_api(
         plugin_registry.reload();
         return json_response("200 OK", r#"{"reloaded":true}"#);
     }
+    if method == "GET" && path == "/api/tools/policy" {
+        let policy_path = data_dir.join("tools_policy.yaml");
+        let policy = akasha_tools::ToolsPolicy::load_from_path(&policy_path).unwrap_or_default();
+        let body = serde_json::json!({
+            "policy": policy,
+            "path": policy_path.display().to_string(),
+            "exists": policy_path.is_file(),
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/tools/policy" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let policy_value = body_json
+            .as_ref()
+            .and_then(|j| j.get("policy").cloned())
+            .or_else(|| body_json.clone());
+        let Some(policy_value) = policy_value else {
+            return json_response("400 Bad Request", r#"{"error":"missing policy"}"#);
+        };
+        let policy: akasha_tools::ToolsPolicy = match serde_json::from_value(policy_value) {
+            Ok(p) => p,
+            Err(e) => {
+                let body = serde_json::json!({
+                    "error": "invalid_policy",
+                    "detail": e.to_string()
+                });
+                return json_response("400 Bad Request", &body.to_string());
+            }
+        };
+        let policy_path = data_dir.join("tools_policy.yaml");
+        if let Err(e) = policy.save_to_path(&policy_path) {
+            let body = serde_json::json!({
+                "error": "save_failed",
+                "detail": e.to_string()
+            });
+            return json_response("500 Internal Server Error", &body.to_string());
+        }
+        let reloaded = match tools_executor {
+            Some(exec) => reload_tools_executor_policy(exec, policy_path.as_path(), data_dir)
+                .await
+                .is_ok(),
+            None => false,
+        };
+        tracing::info!(path = %policy_path.display(), reloaded, "Tools policy saved from settings");
+        let body = serde_json::json!({ "ok": true, "reloaded": reloaded });
+        return json_response("200 OK", &body.to_string());
+    }
     if method == "POST" && path == "/api/tools/reload" {
         let policy_path = data_dir.join("tools_policy.yaml");
         match tools_executor {
@@ -15163,6 +16557,52 @@ pub async fn handle_api(
             None => {
                 let body = serde_json::json!({ "error": "tools_executor_unavailable" }).to_string();
                 return json_response("503 Service Unavailable", &body);
+            }
+        }
+    }
+    if method == "GET" && path == "/api/connectors" {
+        let connectors = crate::connectors_config::connectors_status(data_dir);
+        let config = crate::connectors_config::connectors_config_view(data_dir);
+        let restart_required = connectors
+            .iter()
+            .any(|c| c.enabled_in_file != c.active_in_process);
+        let body = serde_json::json!({
+            "connectors": connectors,
+            "config": config,
+            "restart_required": restart_required,
+            "matrix_note": "Matrix uses plugin matrix-channel sidecar and MATRIX_* env vars (manual setup)."
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/connectors" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let Some(ref j) = body_json else {
+            return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
+        };
+        let update: crate::connectors_config::ConnectorsUpdate =
+            match serde_json::from_value(j.clone()) {
+                Ok(u) => u,
+                Err(e) => {
+                    let body = serde_json::json!({
+                        "error": "invalid_body",
+                        "detail": e.to_string()
+                    });
+                    return json_response("400 Bad Request", &body.to_string());
+                }
+            };
+        match crate::connectors_config::apply_connectors_update(data_dir, &update) {
+            Ok(()) => {
+                let body = serde_json::json!({ "ok": true, "restart_required": true });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                let body = serde_json::json!({
+                    "error": "save_failed",
+                    "detail": e.to_string()
+                });
+                return json_response("500 Internal Server Error", &body.to_string());
             }
         }
     }
@@ -15770,6 +17210,38 @@ pub async fn handle_api(
             }
         }
     }
+    if method == "POST"
+        && (path_only.starts_with("/api/permissions/queue/") && path_only.ends_with("/expire"))
+    {
+        let id = path_only
+            .trim_start_matches("/api/permissions/queue/")
+            .trim_end_matches("/expire")
+            .trim_matches('/');
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        match crate::permissions_queue::update_status(
+            data_dir,
+            id,
+            crate::permissions_queue::QueueStatus::Expired,
+            Some("expired by operator".to_string()),
+            Some("api".to_string()),
+        ) {
+            Ok(Some(item)) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "item": item }).to_string(),
+                );
+            }
+            Ok(None) => return json_response("404 Not Found", r#"{"error":"request_not_found"}"#),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
     if method == "POST" && path_only == "/api/permissions/decisions" {
         let body_json = body
             .as_deref()
@@ -15998,8 +17470,10 @@ pub async fn handle_api(
         let store = user_rag_store.lock().await;
         match store.add_document(&content_base64, &name, &mime_type) {
             Ok(id) => {
+                let data_dir = store_path.parent().unwrap_or(store_path).to_path_buf();
+                crate::api_routes_kinbot::spawn_user_rag_index(data_dir, id.clone());
                 let body =
-                    serde_json::json!({ "id": id, "name": name, "message": "Document ajouté." });
+                    serde_json::json!({ "id": id, "name": name, "message": "Document ajouté.", "index_status": "pending" });
                 return json_response("200 OK", &body.to_string());
             }
             Err(e) => {
@@ -16886,14 +18360,19 @@ async fn get_task_status(
                 .collect()
         })
         .unwrap_or_default();
-    // Prefer persisted progress when available; fall back to in-memory progress if none is stored.
+    // Merge in-memory progress (live bus updates) with DB rows so polling shows watchdog/LLM
+    // progress even when the persistence writer is contending on SQLite.
+    let mem_entries: Vec<ProgressEntry> = {
+        let g = progress.read().await;
+        g.get(&id)
+            .map(|q| q.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let db_last_pct = progress_list.last().map(|e| e.progress_pct).unwrap_or(0);
+    let mem_last_pct = mem_entries.last().map(|e| e.progress_pct).unwrap_or(0);
     if progress_list.is_empty() {
-        let mem_entries: Vec<ProgressEntry> = {
-            let g = progress.read().await;
-            g.get(&id)
-                .map(|q| q.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
-        };
+        progress_list = mem_entries;
+    } else if mem_last_pct > db_last_pct || mem_entries.len() > progress_list.len() {
         progress_list = mem_entries;
     }
     // For a root task with children, aggregate child progress so the UI shows intermediate percentages.
@@ -17416,6 +18895,7 @@ async fn schedule_run_now(
             None,
             None,
             None,
+            false,
         )
         .await
     {
@@ -17667,7 +19147,7 @@ mod tests {
         ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, packaged_spec_check_ok, parse_content_length,
-        parse_device_invoke_params, parse_generate_image_tool_args,
+        parse_device_invoke_params, parse_generate_image_tool_args, parse_sse_event_filter,
         parse_memory_store_explicit_links, parse_plugin_reputation_reset_body, parse_run_command_args,
         parse_skill_install_url, parse_tool_calls, parse_write_file_request,
         resolve_run_command_working_dir, strip_markdown_fences_from_write_content,
@@ -17678,6 +19158,18 @@ mod tests {
     };
     use akasha_store::TaskStatus;
     use uuid::Uuid;
+
+    #[test]
+    fn parse_sse_event_filter_task_id_and_types() {
+        let tid = Uuid::new_v4();
+        let q = format!(
+            "task_id={}&types=progress_update,task_completed",
+            tid
+        );
+        let f = parse_sse_event_filter(&q);
+        assert_eq!(f.task_id, Some(tid));
+        assert!(f.event_types.as_ref().unwrap().contains("progress_update"));
+    }
 
     #[test]
     fn parse_content_length_returns_header_end_and_content_length() {

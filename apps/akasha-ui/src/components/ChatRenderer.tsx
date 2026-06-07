@@ -3,6 +3,14 @@ import { ModelUsageBadge } from "./ModelUsageBadge";
 import { preprocessDataUrlImages } from "../preprocessDataUrlImages";
 import { preprocessMessagePaths } from "../preprocessMessagePaths";
 import type { ModelUsageStats } from "../modelUsage";
+import { redactDisplaySecrets } from "../utils/redactDisplay";
+
+function blurSecrets(text: string): string {
+  return text
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "sk-••••••••")
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{10,}\b/gi, "Bearer ••••••••")
+    .replace(/\bAKASHA_[A-Z0-9_]{4,}\b/g, "AKASHA_••••");
+}
 
 const LazyMarkdownContent = lazy(() => import("../MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -97,7 +105,13 @@ export function ChatRenderer({
               <div className="text markdown-rendered">
                 <Suspense fallback={<span className="markdown-rendered">…</span>}>
                   <LazyMarkdownContent onPathClick={onPathClick}>
-                    {preprocessMessagePaths(preprocessDataUrlImages(m.text))}
+                    {preprocessMessagePaths(
+                      preprocessDataUrlImages(
+                        m.role === "assistant"
+                          ? blurSecrets(redactDisplaySecrets(m.text))
+                          : blurSecrets(m.text),
+                      ),
+                    )}
                   </LazyMarkdownContent>
                 </Suspense>
                 {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}

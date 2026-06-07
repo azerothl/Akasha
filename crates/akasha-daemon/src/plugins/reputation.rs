@@ -15,7 +15,13 @@ pub struct PluginReputation {
     pub plugin_id: String,
     pub score: u32,
     pub disabled: bool,
+    /// Unix epoch seconds for recent failures (circuit breaker: 3 in 1h → auto-disable).
+    #[serde(default)]
+    pub recent_failure_at: Vec<i64>,
 }
+
+const CIRCUIT_BREAKER_WINDOW_SECS: i64 = 3600;
+const CIRCUIT_BREAKER_MAX_FAILURES: usize = 3;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ReputationFile {
@@ -77,11 +83,20 @@ impl ReputationStore {
             plugin_id: plugin_id.to_string(),
             score: DEFAULT_SCORE,
             disabled: false,
+            recent_failure_at: Vec::new(),
         });
         let new_score = (entry.score as i32 + delta).max(0).min(100) as u32;
         entry.score = new_score;
         if new_score < MIN_SCORE {
             entry.disabled = true;
+        }
+        if delta < 0 {
+            let now = chrono::Utc::now().timestamp();
+            entry.recent_failure_at.push(now);
+            entry.recent_failure_at.retain(|t| now - *t <= CIRCUIT_BREAKER_WINDOW_SECS);
+            if entry.recent_failure_at.len() >= CIRCUIT_BREAKER_MAX_FAILURES {
+                entry.disabled = true;
+            }
         }
         drop(guard);
         let _ = self.save();
@@ -101,9 +116,11 @@ impl ReputationStore {
                 plugin_id: plugin_id.to_string(),
                 score: DEFAULT_SCORE,
                 disabled: false,
+                recent_failure_at: Vec::new(),
             });
         entry.score = DEFAULT_SCORE;
         entry.disabled = false;
+        entry.recent_failure_at.clear();
         drop(guard);
         self.save()
     }
@@ -113,6 +130,7 @@ impl ReputationStore {
         for entry in guard.plugins.values_mut() {
             entry.score = DEFAULT_SCORE;
             entry.disabled = false;
+            entry.recent_failure_at.clear();
         }
         drop(guard);
         self.save()

@@ -338,6 +338,33 @@ impl PluginRegistry {
         out
     }
 
+    /// Call a memory plugin: fulfill [`MemoryDelegateRequest`] via loopback `/api/memory/*`, else WASM `run`.
+    pub fn call_memory(&self, plugin_id: &str, input: &str) -> Result<String, akasha_plugin_api::PluginError> {
+        if self.state.is_disabled(plugin_id) {
+            return Err(akasha_plugin_api::PluginError::Disabled);
+        }
+        if self.reputation.is_disabled(plugin_id) {
+            return Err(akasha_plugin_api::PluginError::Disabled);
+        }
+        let guard = self.plugins.read().unwrap();
+        let loaded = guard
+            .get(plugin_id)
+            .ok_or_else(|| akasha_plugin_api::PluginError::Message("plugin not found".into()))?;
+        if loaded.manifest.kind != PluginKind::Memory {
+            return Err(akasha_plugin_api::PluginError::Message("not a memory plugin".into()));
+        }
+        let result = loaded
+            .wasm
+            .run_with_memory_delegate(input, super::memory_delegate::fulfill_memory_delegate);
+        drop(guard);
+        match &result {
+            Ok(_) => self.reputation.record_success(plugin_id),
+            Err(akasha_plugin_api::PluginError::Crashed) => self.reputation.record_crash(plugin_id),
+            Err(_) => self.reputation.record_failure(plugin_id),
+        }
+        result
+    }
+
     /// Call a tool plugin by id. Updates reputation on success/failure/crash.
     pub fn call_tool(&self, plugin_id: &str, input: &str) -> Result<String, akasha_plugin_api::PluginError> {
         // #region agent log

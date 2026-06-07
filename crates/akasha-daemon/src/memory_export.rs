@@ -91,21 +91,45 @@ pub fn export_memory(db_path: &Path) -> anyhow::Result<MemoryExportBundle> {
 }
 
 pub fn import_memory(db_path: &Path, bundle: &MemoryExportBundle) -> anyhow::Result<(u64, u64)> {
+    import_memory_with_embedder(db_path, bundle, None)
+}
+
+pub fn import_memory_with_embedder(
+    db_path: &Path,
+    bundle: &MemoryExportBundle,
+    embedding_cache_dir: Option<&Path>,
+) -> anyhow::Result<(u64, u64)> {
     if bundle.schema_version > EXPORT_SCHEMA_VERSION {
         anyhow::bail!("unsupported export schema version {}", bundle.schema_version);
     }
     let store = LongTermStore::open(db_path)?;
     let facts = FactsStore::open(db_path)?;
     let episodic = EpisodicStore::open(db_path)?;
+    #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+    let embedder = embedding_cache_dir.map(akasha_embeddings::Embedder::new);
     let mut entries_imported = 0u64;
     for e in &bundle.entries {
         if store.content_exists(&e.content)? {
             continue;
         }
-        let placeholder_emb = vec![0u8; 4];
+        let emb_bytes = match embedding_cache_dir {
+            #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+            Some(_) => {
+                let embedder = embedder
+                    .as_ref()
+                    .expect("embedder initialized when cache dir provided");
+                let vec = embedder.embed_one(&e.content)?;
+                akasha_embeddings::embedding_to_bytes(&vec)
+            }
+            #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+            Some(_) => {
+                anyhow::bail!("re-embedding on import requires feature 'embeddings' or 'embeddings-tract'")
+            }
+            None => vec![0u8; 4],
+        };
         store.insert_with_attribution(
             &e.content,
-            &placeholder_emb,
+            &emb_bytes,
             &e.source,
             None,
             None,

@@ -95,6 +95,126 @@ pub async fn summary() -> Value {
     })
 }
 
+fn oauth_expires_at_past(state: &Value) -> bool {
+    let Some(raw) = state.get("expires_at") else {
+        return false;
+    };
+    if let Some(secs) = raw.as_i64() {
+        let now = chrono::Utc::now().timestamp();
+        return secs <= now;
+    }
+    if let Some(s) = raw.as_str() {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            return dt <= chrono::Utc::now();
+        }
+    }
+    false
+}
+
+async fn oauth_refresh_if_needed(data_dir: &Path, state: &mut Value) {
+    let refresh_token = state
+        .get("refresh_token")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let Some(refresh_token) = refresh_token else {
+        return;
+    };
+    if !oauth_expires_at_past(state) {
+        return;
+    }
+    let token_endpoint = state
+        .get("token_endpoint")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let Some(token_endpoint) = token_endpoint else {
+        state["refresh_error"] = json!("missing token_endpoint");
+        return;
+    };
+    let client_id = state
+        .get("client_id")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut form: Vec<(String, String)> = vec![
+        ("grant_type".into(), "refresh_token".into()),
+        ("refresh_token".into(), refresh_token),
+    ];
+    if !client_id.is_empty() {
+        form.push(("client_id".into(), client_id));
+    }
+    if let Some(secret) = state.get("client_secret").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+        form.push(("client_secret".into(), secret.to_string()));
+    }
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            state["refresh_error"] = json!(format!("http client: {e}"));
+            return;
+        }
+    };
+    let resp = match client.post(&token_endpoint).form(&form).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            state["refresh_error"] = json!(format!("token request failed: {e}"));
+            return;
+        }
+    };
+    let status = resp.status();
+    let body: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            state["refresh_error"] = json!(format!("token response parse failed: {e}"));
+            return;
+        }
+    };
+    if !status.is_success() {
+        state["refresh_error"] = json!({
+            "http_status": status.as_u16(),
+            "body": body,
+        });
+        return;
+    }
+    if let Some(at) = body.get("access_token").and_then(|x| x.as_str()) {
+        state["access_token"] = json!(at);
+    }
+    if let Some(rt) = body.get("refresh_token").and_then(|x| x.as_str()) {
+        state["refresh_token"] = json!(rt);
+    }
+    if let Some(exp) = body.get("expires_in").and_then(|x| x.as_i64()) {
+        let at = chrono::Utc::now().timestamp() + exp;
+        state["expires_at"] = json!(at);
+    }
+    state["status"] = json!("refreshed");
+    state["updated_at"] = json!(chrono::Utc::now().to_rfc3339());
+    if let Some(o) = state.as_object_mut() {
+        o.remove("refresh_error");
+    }
+    let out = state.clone();
+    let _ = oauth_persist(data_dir, &out).await;
+}
+
+async fn oauth_persist(data_dir: &Path, out: &Value) -> Result<(), String> {
+    let p = oauth_state_path(data_dir);
+    let raw = serde_json::to_string_pretty(out).map_err(|e| e.to_string())?;
+    let tmp = p.with_extension("json.tmp");
+    tokio::fs::write(&tmp, raw)
+        .await
+        .map_err(|e| format!("write {}: {}", tmp.display(), e))?;
+    #[cfg(windows)]
+    let _ = tokio::fs::remove_file(&p).await;
+    tokio::fs::rename(&tmp, &p)
+        .await
+        .map_err(|e| format!("rename {} -> {}: {}", tmp.display(), p.display(), e))?;
+    Ok(())
+}
+
 pub async fn oauth_get(data_dir: &Path) -> Value {
     let disk = oauth_load_from_disk(data_dir).await;
     let mut g = oauth_cell().lock().await;
@@ -104,33 +224,46 @@ pub async fn oauth_get(data_dir: &Path) -> Value {
     {
         *g = disk;
     }
+    oauth_refresh_if_needed(data_dir, &mut g).await;
     g.clone()
 }
 
-pub async fn oauth_put(data_dir: &Path, provider: String, status: String) -> Result<Value, String> {
+pub async fn oauth_put(data_dir: &Path, body: &Value) -> Result<Value, String> {
+    let provider = body
+        .get("provider")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown")
+        .to_string();
+    let status = body
+        .get("status")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("configured")
+        .to_string();
     let mut g = oauth_cell().lock().await;
-    *g = json!({
+    let mut next = json!({
         "status": status,
         "provider": provider,
         "updated_at": chrono::Utc::now().to_rfc3339(),
     });
+    for key in [
+        "access_token",
+        "refresh_token",
+        "expires_at",
+        "token_endpoint",
+        "client_id",
+        "client_secret",
+    ] {
+        if let Some(v) = body.get(key) {
+            next[key] = v.clone();
+        }
+    }
+    *g = next;
     let out = g.clone();
-    let p = oauth_state_path(data_dir);
-    let raw = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?;
-    // Write atomically: write to a temp file then rename so a crash can never leave a
-    // partially-written state file (same pattern as session_state.rs / autonomous_mission_config.rs).
-    let tmp = p.with_extension("json.tmp");
-    tokio::fs::write(&tmp, raw)
-        .await
-        .map_err(|e| format!("write {}: {}", tmp.display(), e))?;
-    // On Windows, rename fails when the destination exists — remove it first.
-    // On POSIX the rename is atomic and the pre-remove step is not needed (and would create a
-    // window where the file is absent), so this is cfg-gated.
-    #[cfg(windows)]
-    let _ = tokio::fs::remove_file(&p).await;
-    tokio::fs::rename(&tmp, &p)
-        .await
-        .map_err(|e| format!("rename {} -> {}: {}", tmp.display(), p.display(), e))?;
+    oauth_persist(data_dir, &out).await?;
     Ok(out)
 }
 

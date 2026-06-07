@@ -54,10 +54,18 @@ pub struct MessageEnvelope {
     pub studio_forced_agent: Option<String>,
     /// Optional git branch hint prepended to the user message for agents.
     pub studio_evolution_branch: Option<String>,
+    /// When true, skip long-term memory promotion for this message.
+    pub incognito: bool,
 }
 
 impl MessageEnvelope {
-    pub fn api<S, M>(session_id: S, raw_message: M, image_data_urls: Option<Vec<String>>, priority: TaskPriority) -> Self
+    pub fn api<S, M>(
+        session_id: S,
+        raw_message: M,
+        image_data_urls: Option<Vec<String>>,
+        priority: TaskPriority,
+        incognito: bool,
+    ) -> Self
     where
         S: Into<String>,
         M: Into<String>,
@@ -74,6 +82,7 @@ impl MessageEnvelope {
             studio_disk_root: None,
             studio_forced_agent: None,
             studio_evolution_branch: None,
+            incognito,
         }
     }
 
@@ -94,6 +103,7 @@ impl MessageEnvelope {
             studio_disk_root: None,
             studio_forced_agent: None,
             studio_evolution_branch: None,
+            incognito: false,
         }
     }
 
@@ -114,6 +124,7 @@ impl MessageEnvelope {
             studio_disk_root: None,
             studio_forced_agent: None,
             studio_evolution_branch: None,
+            incognito: false,
         }
     }
 }
@@ -125,6 +136,20 @@ pub async fn handle_envelope(
     store_path: &Path,
     envelope: MessageEnvelope,
 ) -> anyhow::Result<Uuid> {
+    if let Some(data_dir) = store_path.parent() {
+        let hook_payload = serde_json::json!({
+            "channel_type": envelope.channel_type.as_str(),
+            "channel_id": envelope.channel_id,
+            "session_id": envelope.session_id,
+            "user_id": envelope.user_id,
+            "message_preview": envelope.raw_message.chars().take(800).collect::<String>(),
+        });
+        let data_dir = data_dir.to_path_buf();
+        let payload = hook_payload.to_string();
+        tokio::task::spawn_blocking(move || {
+            crate::plugin_hook_bus::dispatch_hook_event(&data_dir, "on_channel_message", &payload);
+        });
+    }
     main_agent
         .handle_message(
         store_path,
@@ -137,6 +162,7 @@ pub async fn handle_envelope(
         envelope.studio_disk_root.clone(),
         envelope.studio_forced_agent.clone(),
         envelope.studio_evolution_branch.clone(),
+        envelope.incognito,
     )
         .await
 }

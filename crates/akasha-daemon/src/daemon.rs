@@ -20,9 +20,98 @@ use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
 use crate::latency::env_usize;
+use akasha_store::TaskStatus;
+use uuid::Uuid;
 
 const HEALTHCHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 3876;
+
+// #region agent log
+fn agent_debug_log_daemon(location: &str, message: &str, hypothesis_id: &str, data: serde_json::Value) {
+    let payload = serde_json::json!({
+        "sessionId": "0d82aa",
+        "timestamp": chrono::Utc::now().timestamp_millis(),
+        "location": location,
+        "message": message,
+        "hypothesisId": hypothesis_id,
+        "data": data,
+    });
+    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-0d82aa.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", payload);
+    }
+}
+// #endregion
+
+fn is_recoverable_direct_agent(agent: &str) -> bool {
+    // Only re-queue lightweight chat tasks — not studio/orchestrator specialists (would flood conv_rx).
+    agent == "conversation" || agent == "llm"
+}
+
+/// Fail stale pending/running chat tasks after daemon restart (in-memory conv queue is lost).
+fn recover_orphaned_conversation_tasks(store_path: PathBuf) {
+    tokio::spawn(async move {
+        let Ok(store) = TaskStore::open(store_path.as_path()) else {
+            return;
+        };
+        let Ok(candidates) = store.get_pending_or_running() else {
+            return;
+        };
+        let stale_fail_age = chrono::Duration::minutes(5);
+        let now = chrono::Utc::now();
+        for task in candidates {
+            if task.parent_task_id.is_some() || !is_recoverable_direct_agent(&task.assigned_agent) {
+                continue;
+            }
+            let age = now.signed_duration_since(task.created_at);
+            if age <= stale_fail_age {
+                continue;
+            }
+            let _ = store.update_status(task.id, TaskStatus::Failed);
+            let _ = store.insert_event(
+                task.id,
+                "task_failed",
+                Some(&serde_json::json!({
+                    "reason": "stale_pending_on_startup",
+                    "message": "Tâche interrompue (daemon redémarré). Renvoyez votre message."
+                })),
+                &now.to_rfc3339(),
+            );
+            // #region agent log
+            agent_debug_log_daemon(
+                "daemon.rs:recover_orphaned",
+                "fail_stale_pending_task",
+                "D",
+                serde_json::json!({ "task_id": task.id.to_string(), "age_secs": age.num_seconds() }),
+            );
+            // #endregion
+        }
+    });
+}
+
+fn fail_task_on_worker_slot_timeout(
+    store_path: &std::path::Path,
+    task_id: Uuid,
+    reason: &str,
+) {
+    if let Ok(store) = TaskStore::open(store_path) {
+        let _ = store.update_status(task_id, TaskStatus::Failed);
+        let _ = store.insert_event(
+            task_id,
+            "task_failed",
+            Some(&serde_json::json!({
+                "reason": reason,
+                "message": "Trop de tâches en parallèle — réessayez dans quelques instants."
+            })),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+    }
+}
 
 fn bind_loopback_listener(port: u16) -> std::io::Result<TcpListener> {
     let addr = format!("127.0.0.1:{port}").parse().map_err(|e| {
@@ -67,6 +156,29 @@ fn log_bind_port_failure(port: u16, err: &std::io::Error) {
     );
 }
 
+fn log_upgrade_heritage_reminder(data_dir: &std::path::Path) {
+    let marker = data_dir.join(".daemon-version");
+    let current = env!("CARGO_PKG_VERSION");
+    match std::fs::read_to_string(&marker) {
+        Ok(prev) => {
+            let prev_trimmed = prev.trim();
+            if !prev_trimmed.is_empty() && prev_trimmed != current {
+                info!(
+                    previous_version = prev_trimmed,
+                    current_version = current,
+                    "Daemon version changed; heritage reminder: review migrations and memory continuity notes."
+                );
+            }
+        }
+        Err(_) => {
+            // First run or marker missing: nothing to compare.
+        }
+    }
+    if let Err(e) = std::fs::write(&marker, format!("{current}\n")) {
+        warn!(error = %e, path = %marker.display(), "Failed to persist daemon version marker");
+    }
+}
+
 /// Outcome of a daemon run. Used so that main can exit with the right code (e.g. 85 for restart).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
@@ -96,6 +208,7 @@ impl Daemon {
 
     /// Run the daemon (blocks until shutdown)
     pub async fn run(&self) -> anyhow::Result<RunOutcome> {
+        log_upgrade_heritage_reminder(&self.data_dir);
         // Load specs at startup
         match load_specs(&self.spec_dir) {
             Ok(specs) => {
@@ -646,7 +759,7 @@ impl Daemon {
                     client
                 });
             if let Some(ref lt) = long_term_client {
-                crate::memory_hygiene::spawn_scheduler(Some(lt.clone()));
+                crate::memory_hygiene::spawn_scheduler(Some(lt.clone()), Some(llm_router.clone()));
                 crate::memory_agent_identity::bootstrap_agent_identity(&data_dir, Some(lt));
             }
             if long_term_client.is_some() {
@@ -784,6 +897,17 @@ impl Daemon {
                 let steering_queue = steering_queue.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
+                        // #region agent log
+                        agent_debug_log_daemon(
+                            "daemon.rs:conv_worker",
+                            "conv_worker_dequeued",
+                            "D",
+                            serde_json::json!({
+                                "task_id": task.task_id.to_string(),
+                                "session_id": task.session_id,
+                            }),
+                        );
+                        // #endregion
                         // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
                         // Phase 2 AI OS: skip if task was paused.
                         if let Ok(store) = akasha_store::TaskStore::open(store_path.as_path()) {
@@ -815,10 +939,7 @@ impl Daemon {
                             .map(|t| t.parent_task_id.is_some())
                             .unwrap_or(false);
                         if is_subagent {
-                            let permit = match subtask_llm_sem.clone().acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
+                            let subtask_llm_sem = subtask_llm_sem.clone();
                             let bus = bus.clone();
                             let llm_router = llm_router.clone();
                             let store_path = store_path.clone();
@@ -847,8 +968,47 @@ impl Daemon {
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
                             let preferred_task_type_override = task.preferred_task_type.clone();
+                            let incognito = task.incognito;
                             let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
+                                // #region agent log
+                                agent_debug_log_daemon(
+                                    "daemon.rs:conv_worker",
+                                    "conv_worker_sem_wait_start",
+                                    "D",
+                                    serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": true }),
+                                );
+                                // #endregion
+                                let permit = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(120),
+                                    subtask_llm_sem.acquire_owned(),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(p)) => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_acquired",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": true }),
+                                        );
+                                        p
+                                    }
+                                    _ => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_timeout",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": true }),
+                                        );
+                                        fail_task_on_worker_slot_timeout(
+                                            store_path.as_path(),
+                                            task_id,
+                                            "subtask_llm_sem_timeout",
+                                        );
+                                        return;
+                                    }
+                                };
                                 run_message_via_llm(
                                     bus,
                                     llm_router,
@@ -879,16 +1039,14 @@ impl Daemon {
                                     autonomous_mission,
                                     studio_reg,
                                     studio_worktree_registry,
+                                    incognito,
                                 )
                                 .instrument(span)
                                 .await;
                                 drop(permit);
                             });
                         } else {
-                            let permit = match root_llm_sem.clone().acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
+                            let root_llm_sem = root_llm_sem.clone();
                             let bus = bus.clone();
                             let llm_router = llm_router.clone();
                             let store_path = store_path.clone();
@@ -917,8 +1075,47 @@ impl Daemon {
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
                             let preferred_task_type_override = task.preferred_task_type.clone();
+                            let incognito = task.incognito;
                             let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
+                                // #region agent log
+                                agent_debug_log_daemon(
+                                    "daemon.rs:conv_worker",
+                                    "conv_worker_sem_wait_start",
+                                    "D",
+                                    serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": false }),
+                                );
+                                // #endregion
+                                let permit = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(120),
+                                    root_llm_sem.acquire_owned(),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(p)) => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_acquired",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": false }),
+                                        );
+                                        p
+                                    }
+                                    _ => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_timeout",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": false }),
+                                        );
+                                        fail_task_on_worker_slot_timeout(
+                                            store_path.as_path(),
+                                            task_id,
+                                            "root_llm_sem_timeout",
+                                        );
+                                        return;
+                                    }
+                                };
                                 run_message_via_llm(
                                     bus,
                                     llm_router,
@@ -949,6 +1146,7 @@ impl Daemon {
                                     autonomous_mission,
                                     studio_reg,
                                     studio_worktree_registry,
+                                    incognito,
                                 )
                                 .instrument(span)
                                 .await;
@@ -958,6 +1156,7 @@ impl Daemon {
                     }
                 }
             });
+            recover_orphaned_conversation_tasks(db_path.clone());
             tokio::spawn({
                 let bus = bus.clone();
                 let progress = progress.clone();
@@ -1285,8 +1484,13 @@ impl Daemon {
                                         _ => buf,
                                     };
                                     let (method, path, body, headers) = parse_request(&full_buf);
-                                    if method == "GET" && path == "/api/events" {
-                                        let _ = crate::api::stream_sse_events(&bus_clone, &mut stream).await;
+                                    let (path_only, _) = crate::api_security::split_path_query(&path);
+                                    if method == "GET" && path_only == "/api/events" {
+                                        let (_, query) = crate::api_security::split_path_query(&path);
+                                        let filter = crate::api::parse_sse_event_filter(query);
+                                        let _ =
+                                            crate::api::stream_sse_events(&bus_clone, &mut stream, filter)
+                                                .await;
                                         return;
                                     }
                                     let response = if method == "OPTIONS" {

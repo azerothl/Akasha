@@ -202,6 +202,7 @@ mod tests {
                 instruction: String::new(),
                 priority: 100,
             }],
+            hook_events: vec![],
             network: None,
         };
         let s = build_plugin_catalog_block(std::slice::from_ref(&m));

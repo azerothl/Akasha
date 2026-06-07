@@ -100,10 +100,64 @@ fn composite_score(
     weights: &MemoryScoreWeights,
 ) -> f32 {
     let sim_norm = ((cosine + 1.0) / 2.0).clamp(0.0, 1.0);
+    let recency = recency_score(created_at) * temporal_decay_multiplier(created_at);
     weights.sim * sim_norm
-        + weights.recency * recency_score(created_at)
+        + weights.recency * recency
         + weights.importance * importance_score(importance)
         + weights.confidence * confidence.clamp(0.0, 1.0)
+}
+
+use std::sync::OnceLock;
+
+struct TemporalDecayConfig {
+    lambda: f32,
+    floor: f32,
+}
+
+static TEMPORAL_DECAY_CONFIG: OnceLock<TemporalDecayConfig> = OnceLock::new();
+
+fn temporal_decay_config() -> &'static TemporalDecayConfig {
+    TEMPORAL_DECAY_CONFIG.get_or_init(|| {
+        let lambda = std::env::var("AKASHA_MEMORY_TEMPORAL_DECAY_LAMBDA")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        let floor = std::env::var("AKASHA_MEMORY_TEMPORAL_DECAY_FLOOR")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.7);
+        TemporalDecayConfig { lambda, floor }
+    })
+}
+
+fn temporal_decay_multiplier(created_at: &DateTime<Utc>) -> f32 {
+    let config = temporal_decay_config();
+    if config.lambda <= 0.0 {
+        return 1.0;
+    }
+    let days = (Utc::now() - *created_at).num_days().max(0) as f32;
+    (f32::exp(-config.lambda * days)).max(config.floor)
+}
+
+fn adaptive_k_cutoff(scores: &[f32], top_k: usize) -> usize {
+    if !memory_adaptive_k_enabled() || scores.is_empty() {
+        return top_k;
+    }
+    let ratio = std::env::var("AKASHA_MEMORY_ADAPTIVE_K_MIN_SCORE_RATIO")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(0.3);
+    let max_score = scores[0];
+    let min_score = max_score * ratio;
+    let k = scores.iter().take(top_k).filter(|&&s| s >= min_score).count();
+    k.max(1).min(top_k)
+}
+
+fn memory_adaptive_k_enabled() -> bool {
+    std::env::var("AKASHA_MEMORY_ADAPTIVE_K")
+        .ok()
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// Hybrid search: keyword + embedding lists, optional RRF, composite re-rank.
@@ -179,9 +233,11 @@ pub fn hybrid_memory_search(
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let score_vals: Vec<f32> = scored.iter().map(|(s, _, _)| *s).collect();
+    let take_k = adaptive_k_cutoff(&score_vals, top_k);
     Ok(scored
         .into_iter()
-        .take(top_k)
+        .take(take_k)
         .map(|(_, id, content)| (id, content))
         .collect())
 }

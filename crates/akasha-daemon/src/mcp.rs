@@ -41,9 +41,76 @@ pub fn validate_mcp_config_json(root: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Path to `mcp.json` under the daemon data directory.
+pub fn mcp_config_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("mcp.json")
+}
+
+/// Load `mcp.json` or return an empty `mcpServers` object.
+pub fn load_mcp_config(data_dir: &Path) -> Result<Value, String> {
+    let path = mcp_config_path(data_dir);
+    if !path.is_file() {
+        return Ok(json!({ "mcpServers": {} }));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read mcp.json: {}", e))?;
+    let mut root: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse mcp.json: {}", e))?;
+    if root.get("mcpServers").and_then(|v| v.as_object()).is_none() {
+        root["mcpServers"] = json!({});
+    }
+    Ok(root)
+}
+
+/// Persist validated MCP config to `mcp.json`.
+pub fn save_mcp_config(data_dir: &Path, root: &Value) -> Result<(), String> {
+    validate_mcp_config_json(root)?;
+    let path = mcp_config_path(data_dir);
+    let pretty = serde_json::to_string_pretty(root)
+        .map_err(|e| format!("serialize mcp.json: {}", e))?;
+    std::fs::write(&path, pretty).map_err(|e| format!("write mcp.json: {}", e))?;
+    Ok(())
+}
+
+/// Add or replace one MCP server entry in `mcp.json`.
+pub fn add_mcp_server(data_dir: &Path, name: &str, entry: &Value) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("server name required".to_string());
+    }
+    validate_mcp_server_entry(entry)?;
+    let mut root = load_mcp_config(data_dir)?;
+    let servers = root
+        .get_mut("mcpServers")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| "missing mcpServers object".to_string())?;
+    servers.insert(name.to_string(), entry.clone());
+    let count = servers.len();
+    save_mcp_config(data_dir, &root)?;
+    Ok(format!("mcp server {:?} added ({} total)", name, count))
+}
+
+/// Remove one MCP server from `mcp.json`.
+pub fn remove_mcp_server(data_dir: &Path, name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("server name required".to_string());
+    }
+    let mut root = load_mcp_config(data_dir)?;
+    let servers = root
+        .get_mut("mcpServers")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| "missing mcpServers object".to_string())?;
+    if servers.remove(name).is_none() {
+        return Err(format!("server {:?} not found", name));
+    }
+    let remaining = servers.len();
+    save_mcp_config(data_dir, &root)?;
+    Ok(format!("mcp server {:?} removed ({} remaining)", name, remaining))
+}
+
 /// JSON for `GET /api/mcp/status` — validates `mcp.json` under the daemon data dir if present.
 pub fn mcp_operator_status(data_dir: &Path) -> Value {
-    let path = data_dir.join("mcp.json");
+    let path = mcp_config_path(data_dir);
     let present = path.is_file();
     let mut out = json!({
         "config_path": path.display().to_string(),
@@ -119,5 +186,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = super::mcp_operator_status(dir.path());
         assert_eq!(s["config_present"], false);
+    }
+
+    #[test]
+    fn add_remove_mcp_server_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = serde_json::json!({ "command": "node", "args": ["server.js"] });
+        super::add_mcp_server(dir.path(), "demo", &entry).unwrap();
+        let root = super::load_mcp_config(dir.path()).unwrap();
+        assert!(root["mcpServers"]["demo"].is_object());
+        super::remove_mcp_server(dir.path(), "demo").unwrap();
+        let root2 = super::load_mcp_config(dir.path()).unwrap();
+        assert_eq!(root2["mcpServers"].as_object().unwrap().len(), 0);
     }
 }

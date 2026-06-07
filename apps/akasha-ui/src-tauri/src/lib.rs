@@ -112,6 +112,7 @@ async fn send_message_ack(
     queue_mode: Option<String>,
     target_task_id: Option<String>,
     priority: Option<String>,
+    incognito: Option<bool>,
     port: Option<u16>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
@@ -166,6 +167,9 @@ async fn send_message_ack(
         if p == "high" {
             body["priority"] = serde_json::Value::String("high".to_string());
         }
+    }
+    if incognito == Some(true) {
+        body["incognito"] = serde_json::Value::Bool(true);
     }
     let resp = client
         .post(&url)
@@ -515,6 +519,29 @@ async fn get_doctor(port: Option<u16>) -> Result<serde_json::Value, String> {
     Ok(json)
 }
 
+/// Run `akasha doctor --fix` for first-launch setup wizard.
+#[tauri::command]
+async fn run_akasha_doctor_fix(port: Option<u16>) -> Result<String, String> {
+    let _port = port.unwrap_or(DAEMON_PORT);
+    let output = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("akasha")
+            .args(["doctor", "--fix"])
+            .output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.stderr.is_empty() {
+        text.push_str("\n");
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    if !output.status.success() && text.trim().is_empty() {
+        return Err(format!("akasha doctor --fix exited with {}", output.status));
+    }
+    Ok(text)
+}
+
 /// GET /api/update/status — cached latest version info from daemon (for update banner).
 #[tauri::command]
 async fn get_update_status(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -724,6 +751,67 @@ async fn daemon_request(
     Ok(serde_json::json!({ "ok": ok, "status": status, "text": text }))
 }
 
+/// POST /api/migrate/openclaw/preview
+#[tauri::command]
+async fn migrate_openclaw_preview(source_dir: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "source_dir": source_dir });
+    daemon_request(
+        "POST".to_string(),
+        "/api/migrate/openclaw/preview".to_string(),
+        Some(body.to_string()),
+        port,
+    )
+    .await
+}
+
+/// POST /api/migrate/openclaw/apply
+#[tauri::command]
+async fn migrate_openclaw_apply(
+    source_dir: String,
+    dry_run: Option<bool>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({
+        "source_dir": source_dir,
+        "dry_run": dry_run.unwrap_or(false),
+    });
+    daemon_request(
+        "POST".to_string(),
+        "/api/migrate/openclaw/apply".to_string(),
+        Some(body.to_string()),
+        port,
+    )
+    .await
+}
+
+/// POST /api/session/handoff
+#[tauri::command]
+async fn session_handoff(
+    session_id: String,
+    target_model: Option<String>,
+    target_provider: Option<String>,
+    task_id: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let mut body = serde_json::json!({ "session_id": session_id });
+    if let Some(m) = target_model.filter(|x| !x.trim().is_empty()) {
+        body["target_model"] = serde_json::Value::String(m);
+    }
+    if let Some(p) = target_provider.filter(|x| !x.trim().is_empty()) {
+        body["target_provider"] = serde_json::Value::String(p);
+    }
+    if let Some(tid) = task_id.filter(|x| !x.trim().is_empty()) {
+        body["task_id"] = serde_json::Value::String(tid);
+    }
+    daemon_request(
+        "POST".to_string(),
+        "/api/session/handoff".to_string(),
+        Some(body.to_string()),
+        port,
+    )
+    .await
+}
+
 /// GET /api/plugins (for slash /plugins).
 #[tauri::command]
 async fn get_plugins(port: Option<u16>) -> Result<Vec<serde_json::Value>, String> {
@@ -781,6 +869,97 @@ async fn reload_tools_policy(port: Option<u16>) -> Result<serde_json::Value, Str
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(json)
+}
+
+/// GET /api/tools/policy — read tools_policy.yaml as structured JSON.
+#[tauri::command]
+async fn get_tools_policy(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tools/policy", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// POST /api/tools/policy — save tools_policy.yaml and hot-reload.
+#[tauri::command]
+async fn post_tools_policy(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tools/policy", daemon_base_url(port));
+    let client = http_client();
+    let payload = serde_json::json!({ "policy": body });
+    let resp = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// GET /api/connectors — connector enable flags from connectors.env.
+#[tauri::command]
+async fn get_connectors(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/connectors", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// POST /api/connectors — update connector flags and configuration.
+#[tauri::command]
+async fn post_connectors(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/connectors", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// POST /api/vault — store a secret key in vault.
+#[tauri::command]
+async fn set_vault_key(key: String, value: String, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/vault", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "key": key, "value": value }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    Ok(())
 }
 
 /// POST /api/plugins/{id}/enable or /disable — user-controlled plugin load.
@@ -2104,6 +2283,7 @@ pub fn run() {
             get_router_models,
             restart_daemon,
             get_doctor,
+            run_akasha_doctor_fix,
             get_update_status,
             get_app_version,
             open_url,
@@ -2113,10 +2293,18 @@ pub fn run() {
             get_advice,
             daemon_get_text,
             daemon_request,
+            migrate_openclaw_preview,
+            migrate_openclaw_apply,
+            session_handoff,
             get_plugins,
             reload_plugins,
             reload_router,
             reload_tools_policy,
+            get_tools_policy,
+            post_tools_policy,
+            get_connectors,
+            post_connectors,
+            set_vault_key,
             set_plugin_enabled,
             uninstall_plugin,
             get_skills,

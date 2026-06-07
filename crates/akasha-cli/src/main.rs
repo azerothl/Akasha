@@ -46,6 +46,9 @@ enum Commands {
         /// Fix missing or minimal config: create missing files in data_dir (llm_router.yaml, tools_policy.yaml, connectors.env, akasha.env, agent_profile.json)
         #[arg(long)]
         fix: bool,
+        /// With --fix: set AKASHA_MEMORY_ENCRYPT=1 in akasha.env (SQLCipher / field-at-rest encryption foundation; see memory_encryption_rfc.md)
+        #[arg(long)]
+        encrypt_memory: bool,
     },
     /// Vault: manage secrets (Phase 3)
     Vault {
@@ -56,6 +59,11 @@ enum Commands {
     Plugin {
         #[command(subcommand)]
         sub: PluginSub,
+    },
+    /// Review pending tool permission requests
+    Permissions {
+        #[command(subcommand)]
+        sub: PermissionsSub,
     },
     /// LLM Router: metrics, complete (Phase 6)
     Router {
@@ -101,6 +109,11 @@ enum Commands {
     Mcp {
         #[command(subcommand)]
         sub: McpSub,
+    },
+    /// Migration helpers (OpenClaw compatibility)
+    Migrate {
+        #[command(subcommand)]
+        sub: MigrateSub,
     },
     /// Terminal / PTY: capabilities from daemon (requires daemon on AKASHA_PORT)
     Terminal {
@@ -162,6 +175,53 @@ enum TaskSub {
         /// Task UUID
         task_id: String,
     },
+    /// Inspect or clear steering / follow-up message queue
+    Queue {
+        #[command(subcommand)]
+        sub: TaskQueueSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskQueueSub {
+    /// GET /api/tasks/:id/queue
+    List { task_id: String },
+    /// DELETE /api/tasks/:id/queue
+    Clear { task_id: String },
+}
+
+#[derive(Subcommand)]
+enum PermissionsSub {
+    /// Permission review queue (daemon must be running)
+    Queue {
+        #[command(subcommand)]
+        sub: PermissionsQueueSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermissionsQueueSub {
+    /// List queue items (`GET /api/permissions/queue`)
+    List {
+        #[arg(long, default_value = "pending")]
+        status: String,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Approve a pending request
+    Approve {
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Deny a pending request
+    Deny {
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Expire a pending request (operator)
+    Expire { id: String },
 }
 
 #[derive(Subcommand)]
@@ -243,6 +303,31 @@ enum McpSub {
         /// Timeout per I/O phase (seconds)
         #[arg(long, default_value_t = 8)]
         timeout_secs: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateSub {
+    /// OpenClaw pack migration helpers (preview/apply through daemon API)
+    Openclaw {
+        #[command(subcommand)]
+        sub: OpenclawMigrateSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum OpenclawMigrateSub {
+    /// Preview OpenClaw migration (no files copied)
+    Preview {
+        #[arg(long)]
+        source_dir: PathBuf,
+    },
+    /// Apply OpenClaw migration (optionally dry-run)
+    Apply {
+        #[arg(long)]
+        source_dir: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -416,8 +501,14 @@ enum PluginSub {
     List,
     /// Reload plugins (no daemon restart)
     Reload,
-    /// Install a plugin from a directory (manifest + .wasm)
-    Install { path: PathBuf },
+    /// Install a plugin from a directory (manifest + .wasm) or from the remote catalog
+    Install {
+        /// Install from catalog by plugin id (POST /api/plugins/install on daemon)
+        #[arg(long)]
+        catalog: Option<String>,
+        /// Local directory containing manifest.toml and plugin.wasm
+        path: Option<PathBuf>,
+    },
     /// Uninstall a plugin by id
     Uninstall { id: String },
     /// Show local catalog of available plugins
@@ -543,9 +634,15 @@ fn main() -> anyhow::Result<()> {
         Commands::Up => cmd_up(),
         Commands::Start { foreground } => cmd_start(foreground),
         Commands::Stop => cmd_stop(),
-        Commands::Doctor { json, advice, fix } => cmd_doctor(json, advice, fix),
+        Commands::Doctor {
+            json,
+            advice,
+            fix,
+            encrypt_memory,
+        } => cmd_doctor(json, advice, fix, encrypt_memory),
         Commands::Vault { sub } => cmd_vault(sub),
         Commands::Plugin { sub } => cmd_plugin(sub),
+        Commands::Permissions { sub } => cmd_permissions(sub),
         Commands::Router { sub } => cmd_router(sub),
         Commands::Init { defaults } => cmd_init(defaults),
         Commands::Tui => cmd_tui(),
@@ -556,6 +653,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Toolset { sub } => cmd_toolset(sub),
         Commands::Worktree { sub } => cmd_worktree(sub),
         Commands::Mcp { sub } => cmd_mcp(sub),
+        Commands::Migrate { sub } => cmd_migrate(sub),
         Commands::Terminal { sub } => cmd_terminal(sub),
         Commands::Task { sub } => cmd_task(sub),
         Commands::Telegram { sub } => cmd_telegram(sub),
@@ -710,6 +808,83 @@ fn cmd_task(sub: TaskSub) -> anyhow::Result<()> {
             }
             println!("{}", body);
         }
+        TaskSub::Queue { sub } => match sub {
+            TaskQueueSub::List { task_id } => {
+                let resp = client
+                    .get(format!("{}/api/tasks/{}/queue", base, task_id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", serde_json::to_string_pretty(&resp.json::<serde_json::Value>()?)?);
+            }
+            TaskQueueSub::Clear { task_id } => {
+                let resp = client
+                    .delete(format!("{}/api/tasks/{}/queue", base, task_id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+        },
+    }
+    Ok(())
+}
+
+fn cmd_permissions(sub: PermissionsSub) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    match sub {
+        PermissionsSub::Queue { sub } => match sub {
+            PermissionsQueueSub::List { status, limit } => {
+                let resp = client
+                    .get(format!(
+                        "{}/api/permissions/queue?status={}&limit={}",
+                        base, status, limit
+                    ))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", serde_json::to_string_pretty(&resp.json::<serde_json::Value>()?)?);
+            }
+            PermissionsQueueSub::Approve { id, note } => {
+                let body = note.map(|n| serde_json::json!({ "note": n }));
+                let mut req = client.post(format!("{}/api/permissions/queue/{}/approve", base, id));
+                if let Some(b) = body {
+                    req = req.json(&b);
+                }
+                let resp = req.send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+            PermissionsQueueSub::Deny { id, note } => {
+                let body = note.map(|n| serde_json::json!({ "note": n }));
+                let mut req = client.post(format!("{}/api/permissions/queue/{}/deny", base, id));
+                if let Some(b) = body {
+                    req = req.json(&b);
+                }
+                let resp = req.send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+            PermissionsQueueSub::Expire { id } => {
+                let resp = client
+                    .post(format!("{}/api/permissions/queue/{}/expire", base, id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+        },
     }
     Ok(())
 }
@@ -1021,6 +1196,50 @@ fn cmd_mcp(sub: McpSub) -> anyhow::Result<()> {
     }
 }
 
+fn cmd_migrate(sub: MigrateSub) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()?;
+    match sub {
+        MigrateSub::Openclaw { sub } => match sub {
+            OpenclawMigrateSub::Preview { source_dir } => {
+                let body = serde_json::json!({
+                    "source_dir": source_dir,
+                });
+                let resp = client
+                    .post(format!("{}/api/migrate/openclaw/preview", base))
+                    .json(&body)
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                let j: serde_json::Value = resp.json()?;
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            }
+            OpenclawMigrateSub::Apply {
+                source_dir,
+                dry_run,
+            } => {
+                let body = serde_json::json!({
+                    "source_dir": source_dir,
+                    "dry_run": dry_run,
+                });
+                let resp = client
+                    .post(format!("{}/api/migrate/openclaw/apply", base))
+                    .json(&body)
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                let j: serde_json::Value = resp.json()?;
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            }
+        },
+    }
+    Ok(())
+}
+
 fn cmd_router(sub: RouterSub) -> anyhow::Result<()> {
     let base = daemon_base_url();
     let client = reqwest::blocking::Client::new();
@@ -1330,7 +1549,40 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
             }
             println!("Plugins reloaded.");
         }
-        PluginSub::Install { path } => {
+        PluginSub::Install { catalog, path } => {
+            if let Some(id) = catalog {
+                if path.is_some() {
+                    anyhow::bail!("Use either --catalog <id> or a local path, not both");
+                }
+                let resp = client
+                    .post(format!("{}/api/plugins/install", base))
+                    .json(&serde_json::json!({ "id": id }))
+                    .timeout(std::time::Duration::from_secs(120))
+                    .send()?;
+                let status = resp.status();
+                let j: serde_json::Value = resp.json().unwrap_or(serde_json::json!({}));
+                if !status.is_success() {
+                    let err = j
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("install failed");
+                    anyhow::bail!("Catalog install failed: {}", err);
+                }
+                let installed = j.get("id").and_then(|v| v.as_str()).unwrap_or(&id);
+                println!(
+                    "Installed plugin {} from catalog.",
+                    installed
+                );
+                if let Some(msg) = j.get("message").and_then(|v| v.as_str()) {
+                    println!("{}", msg);
+                }
+                return Ok(());
+            }
+            let Some(path) = path else {
+                anyhow::bail!(
+                    "Provide --catalog <id> or a local directory path (manifest.toml + plugin.wasm)"
+                );
+            };
             if !path.is_dir() {
                 anyhow::bail!(
                     "Install path must be a directory containing manifest.toml and plugin.wasm"
@@ -2797,7 +3049,7 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
                     || apply.eq_ignore_ascii_case("o")
                     || apply.eq_ignore_ascii_case("y")
                 {
-                    let fixes = run_doctor_fixes(&data_dir)?;
+                    let fixes = run_doctor_fixes(&data_dir, false)?;
                     if !fixes.is_empty() {
                         println!("\nFichiers créés ou réparés :");
                         for f in &fixes {
@@ -3274,7 +3526,8 @@ command_timeout_secs: 60
     // --- 5. RAG / Memory ---
     println!("\n--- RAG & Memory ---");
     println!("  RAG : le dossier spec/ (et spec/runbooks/) du projet est utilisé par défaut.");
-    println!("  Memory : non configuré en MVP (à venir).");
+    println!("  Memory : configurez via l'assistant de premier lancement (OnboardingWizard Tauri),");
+    println!("           `akasha doctor --fix`, ou le profil mémoire dans Paramètres avancés Tauri.");
 
     // --- 5b. Services Docker (optionnel) ---
     if !use_defaults {
@@ -3649,8 +3902,9 @@ fn embedded_tools_policy_example_value(data_dir: &Path) -> anyhow::Result<serde_
 
 /// Apply fixes for missing or minimal config when `akasha doctor --fix` is run.
 /// Templates are embedded at compile time (`embedded_spec`); user values are preserved via merge.
+/// When `encrypt_memory` is true, sets `AKASHA_MEMORY_ENCRYPT=1` in akasha.env (foundation for field-at-rest encryption).
 /// Returns a list of messages describing what was fixed.
-fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
+fn run_doctor_fixes(data_dir: &Path, encrypt_memory: bool) -> anyhow::Result<Vec<String>> {
     let mut fixes = Vec::new();
 
     if !data_dir.exists() {
@@ -3794,6 +4048,35 @@ OLLAMA_HOST=http://localhost:11434
             &mut fixes,
         )?;
     }
+    let memory_encrypt_requested = encrypt_memory
+        || std::env::var("AKASHA_MEMORY_ENCRYPT")
+            .ok()
+            .as_deref()
+            == Some("1");
+    if memory_encrypt_requested {
+        doctor_fix_env_file(
+            &akasha_env_path,
+            "akasha.env",
+            &["AKASHA_MEMORY_ENCRYPT"],
+            "# Memory encryption foundation (S-MEM-05): field-at-rest path — SQLCipher memory.db OR per-row content+embedding AES-GCM (see spec/dev/roadmap/memory_encryption_rfc.md). Full SQLCipher integration is deferred pending bench.",
+            &mut fixes,
+        )?;
+        let env_content = std::fs::read_to_string(&akasha_env_path).unwrap_or_default();
+        let (env_map, _) = parse_env_file_content(&env_content);
+        if env_map.get("AKASHA_MEMORY_ENCRYPT").map(String::as_str) != Some("1") {
+            let mut out = env_content.trim_end().to_string();
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str("# Field-at-rest encryption spike: scripts/bench-memory-encryption.ps1\n");
+            out.push_str("AKASHA_MEMORY_ENCRYPT=1\n");
+            std::fs::write(&akasha_env_path, out)?;
+            fixes.push("akasha.env: set AKASHA_MEMORY_ENCRYPT=1.".to_string());
+        }
+        fixes.push(
+            "Memory encryption foundation enabled: AKASHA_MEMORY_ENCRYPT=1 (field-at-rest path documented in memory_encryption_rfc.md; run scripts/bench-memory-encryption.ps1 for SQLCipher spike steps).".to_string(),
+        );
+    }
 
     let agent_profile_path = data_dir.join("agent_profile.json");
     {
@@ -3907,7 +4190,7 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
     out
 }
 
-fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
+fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyhow::Result<()> {
     let port: u16 = std::env::var("AKASHA_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -3919,7 +4202,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
 
     let data_dir = akasha_data_dir();
     if fix {
-        let fixes = run_doctor_fixes(&data_dir)?;
+        let fixes = run_doctor_fixes(&data_dir, encrypt_memory)?;
         if !json && !fixes.is_empty() {
             println!("--fix applied:");
             for msg in &fixes {
@@ -4337,7 +4620,7 @@ mod tests {
     fn doctor_fix_creates_missing_akasha_env() {
         let data_dir = make_temp_dir("doctor-fix-env");
 
-        let fixes = run_doctor_fixes(&data_dir).unwrap();
+        let fixes = run_doctor_fixes(&data_dir, false).unwrap();
         let akasha_env_path = data_dir.join("akasha.env");
         let akasha_env = std::fs::read_to_string(&akasha_env_path).unwrap();
         let akasha_env_check = run_config_checks(&data_dir)
@@ -4363,7 +4646,7 @@ mod tests {
         )
         .unwrap();
 
-        let fixes = run_doctor_fixes(&data_dir).expect("doctor --fix");
+        let fixes = run_doctor_fixes(&data_dir, false).expect("doctor --fix");
         assert!(fixes.iter().any(|m| m.contains("llm_router.yaml")));
         let cfg =
             akasha_llm::RoutingConfig::load_from_path(&data_dir.join("llm_router.yaml")).unwrap();

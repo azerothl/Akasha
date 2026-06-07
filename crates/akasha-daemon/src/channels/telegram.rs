@@ -2,8 +2,15 @@
 //! Commands: `/akasha` (and `/akasha@BotName` in groups), plain text in private DMs, `/start` for help.
 //! Same task_id visible from UI/Slack/Discord/Telegram (GET /api/tasks/:id).
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tracing::{info, warn};
+
+fn telegram_hitl_pending() -> &'static Mutex<HashMap<i64, String>> {
+    static P: OnceLock<Mutex<HashMap<i64, String>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 /// Shown when Telegram returns 401 (invalid/revoked token, typo, or trailing space in vault).
@@ -399,6 +406,36 @@ pub async fn run_telegram_bot(
             }
 
             info!(chat_id = %chat_id, "Telegram: forwarding message to daemon");
+            let hitl_reply = if let Ok(mut pending) = telegram_hitl_pending().lock() {
+                pending.remove(&chat_id)
+            } else {
+                None
+            };
+            if let Some(task_id) = hitl_reply {
+                let reply_url = format!("{}/api/tasks/{}/human-reply", daemon_base_url, task_id);
+                let body = serde_json::json!({ "response": payload });
+                match client.post(&reply_url).json(&body).send().await {
+                        Ok(r) if r.status().is_success() => {
+                            let _ = send_telegram(
+                                &client,
+                                &send_message_url,
+                                chat_id,
+                                "Réponse enregistrée — l'agent reprend la tâche.",
+                            )
+                            .await;
+                        }
+                        _ => {
+                            let _ = send_telegram(
+                                &client,
+                                &send_message_url,
+                                chat_id,
+                                "Impossible d'enregistrer la réponse human-in-the-loop.",
+                            )
+                            .await;
+                        }
+                    }
+                continue;
+            }
             let url_post = format!("{}/api/message", daemon_base_url);
             let body = serde_json::json!({ "message": payload });
             let resp = match client.post(&url_post).json(&body).send().await {
@@ -452,6 +489,30 @@ pub async fn run_telegram_bot(
                     Err(_) => continue,
                 };
                 let task_status = json.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                if task_status == "waiting_user_input" {
+                    let hi_url = format!("{}/api/tasks/{}/human-input", daemon_base_url, task_id);
+                    if let Ok(hi_resp) = client.get(&hi_url).send().await {
+                        if hi_resp.status().is_success() {
+                            if let Ok(hi_json) = hi_resp.json::<serde_json::Value>().await {
+                                let question = hi_json
+                                    .get("question")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("L'agent attend votre réponse.");
+                                let _ = send_telegram(
+                                    &client,
+                                    &send_message_url,
+                                    chat_id,
+                                    &format!("❓ {question}\n\nRépondez ici pour continuer."),
+                                )
+                                .await;
+                                if let Ok(mut pending) = telegram_hitl_pending().lock() {
+                                    pending.insert(chat_id, task_id.clone());
+                                }
+                                break "En attente de votre réponse (human-in-the-loop).".to_string();
+                            }
+                        }
+                    }
+                }
                 if task_status == "completed" || task_status == "failed" {
                     let progress_msg = json
                         .get("progress")

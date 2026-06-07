@@ -9,6 +9,7 @@ pub mod long_term_memory;
 pub mod memory_fusion;
 pub mod metrics;
 pub mod pipeline;
+pub mod platform_extras;
 pub mod schedules;
 pub mod tasks;
 pub mod todos;
@@ -35,6 +36,10 @@ pub use memory_fusion::{
     hybrid_memory_search, memory_rrf_enabled, parse_score_weights_from_env,
     reciprocal_rank_fusion, HybridSearchOptions, MemoryScoreWeights, DEFAULT_CANDIDATE_TOP_K,
     DEFAULT_RRF_K,
+};
+pub use platform_extras::{
+    ArchivedTurn, Contact, ContactStore, ConversationArchiveStore, NotificationRow,
+    NotificationStore, Wakeup, WakeupStore,
 };
 pub use pipeline::{PipelineContext, PipelineState, PipelineStore};
 pub use schedules::{

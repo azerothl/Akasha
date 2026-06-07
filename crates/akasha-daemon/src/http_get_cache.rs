@@ -29,6 +29,12 @@ const MAX_BODY_BYTES: usize = 256 * 1024;
 const ROUTER_MODELS_KEY: &str = "GET|/api/router/models|";
 const ROUTER_ROUTES_KEY: &str = "GET|/api/router/routes|";
 const MCP_STATUS_KEY: &str = "GET|/api/mcp/status|";
+const DOCTOR_KEY: &str = "GET|/api/doctor|";
+const RECALL_METRICS_KEY: &str = "GET|/api/memory/recall-metrics|";
+const LIFECYCLE_HOOKS_KEY: &str = "GET|/api/lifecycle/hooks|";
+const PLUGINS_KEY: &str = "GET|/api/plugins|";
+const PLUGINS_METRICS_KEY: &str = "GET|/api/plugins/metrics|";
+const PROCESS_WATCH_RECENT_KEY: &str = "GET|/api/process/watch/recent|";
 
 /// Return cached JSON body for `GET /api/router/models` if still valid.
 pub fn cache_get_router_models() -> Option<String> {
@@ -63,6 +69,72 @@ pub fn cache_get_mcp_status() -> Option<String> {
 
 pub fn cache_put_mcp_status(body: &str) {
     put(MCP_STATUS_KEY, body);
+}
+
+pub fn cache_get_doctor() -> Option<String> {
+    get(DOCTOR_KEY)
+}
+
+pub fn cache_put_doctor(body: &str) {
+    put(DOCTOR_KEY, body);
+}
+
+pub fn cache_get_recall_metrics() -> Option<String> {
+    get(RECALL_METRICS_KEY)
+}
+
+pub fn cache_put_recall_metrics(body: &str) {
+    put(RECALL_METRICS_KEY, body);
+}
+
+pub fn cache_get_lifecycle_hooks() -> Option<String> {
+    get(LIFECYCLE_HOOKS_KEY)
+}
+
+pub fn cache_put_lifecycle_hooks(body: &str) {
+    put(LIFECYCLE_HOOKS_KEY, body);
+}
+
+pub fn cache_get_plugins() -> Option<String> {
+    get(PLUGINS_KEY)
+}
+
+pub fn cache_put_plugins(body: &str) {
+    put(PLUGINS_KEY, body);
+}
+
+pub fn invalidate_plugins() {
+    if let Ok(mut g) = cache().lock() {
+        g.pop(PLUGINS_KEY);
+    }
+}
+
+pub fn invalidate_mcp_status() {
+    if let Ok(mut g) = cache().lock() {
+        g.pop(MCP_STATUS_KEY);
+    }
+}
+
+pub fn invalidate_lifecycle_hooks() {
+    if let Ok(mut g) = cache().lock() {
+        g.pop(LIFECYCLE_HOOKS_KEY);
+    }
+}
+
+pub fn cache_get_plugins_metrics() -> Option<String> {
+    get(PLUGINS_METRICS_KEY)
+}
+
+pub fn cache_put_plugins_metrics(body: &str) {
+    put(PLUGINS_METRICS_KEY, body);
+}
+
+pub fn cache_get_process_watch_recent() -> Option<String> {
+    get(PROCESS_WATCH_RECENT_KEY)
+}
+
+pub fn cache_put_process_watch_recent(body: &str) {
+    put(PROCESS_WATCH_RECENT_KEY, body);
 }
 
 pub fn invalidate_router_models() {

@@ -1,47 +1,51 @@
-# Priorités d’alignement (inspiration pi-mono vs Akasha)
+> **Archive:** Ce document est archivé. Statut : **Livré / Archivé** (2026-06-06). Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
 
-Document de **décision produit / technique** suite à l’analyse [pi-mono](https://github.com/badlogic/pi-mono). Il ne modifie pas le code ; il cadrage les **1–2 axes** retenus pour des tickets ou plans d’implémentation ultérieurs.
+# Priorités d'alignement (inspiration pi-mono vs Akasha)
 
-## Axes retenus pour la prochaine vague
+**Statut : Livré / Archivé**
 
-### 1. File « steering » / « follow-up » pendant tâches longues
+Document de **décision produit / technique** suite à l'analyse [pi-mono](https://github.com/badlogic/pi-mono). Tous les axes prioritaires sont livrés ou reclassés Reporter.
 
-**Référence Pi** : `@mariozechner/pi-agent-core` — `steer()` vs `followUp()`, modes `one-at-a-time` | `all` ; dans le CLI, file d’attente (Enter vs Alt+Enter).
+## Axes livrés (2026-06)
 
-**Problème utilisateur Akasha** : pendant une tâche longue (outils, orchestration), un second message est soit bloquant, soit traité de façon ambiguë selon le canal (Tauri, TUI, Code Studio).
+### 1. File « steering » / « follow-up » pendant tâches longues — **Livré**
 
-**Décision** : traiter ce sujet comme **priorité 1** côté produit.
+**Référence Pi** : `@mariozechner/pi-agent-core` — `steer()` vs `followUp()`.
 
-**Livrables cibles (à découper en tickets)** :
+**Livré Akasha** :
 
-- Contrat API : champs ou endpoint pour **injecter** un message « après le tour assistant courant » vs « après fin complète du travail » (aligné conceptuellement sur steer / follow-up, sans imposer les noms Pi).
-- UI : file visible + annulation (équivalent `clearSteeringQueue` / `clearFollowUpQueue`).
-- Voir aussi [agent_client_event_contract.md](../runtime/agent_client_event_contract.md) pour exposer ces transitions côté client.
+- **API daemon** : `message_delivery_mode` (`steering` | `follow_up`) sur `POST /api/message` ; `GET/DELETE /api/tasks/:id/queue` — `crates/akasha-daemon/src/steering_queue.rs`.
+- **CLI** : `akasha task queue list|clear <task_id>`.
+- **Tauri** : sélecteur de mode livraison + raccourcis Entrée=steering (tâche active) / Alt+Entrée=follow-up — `apps/akasha-ui/src/App.tsx`.
+- **Code Studio** : sélecteur steering / follow-up — `akasha-code-studio/src/App.tsx`.
+- **TUI** : envoi avec `message_delivery_mode` steering ou follow_up.
+- **Événements** : `user_steering_queued`, `user_follow_up_queued`, `user_steering_applied`, `user_follow_up_applied` — [agent_client_event_contract.md](../runtime/agent_client_event_contract.md).
 
-**Hors périmètre immédiat** : parité exacte des raccourcis clavier avec `pi` ; support `transport` sse/ws côté provider (déjà géré différemment par Akasha).
-
-### 2. Fork de session dans Code Studio (branche depuis un message)
+### 2. Fork de session dans Code Studio (branche depuis un message) — **Livré**
 
 **Référence Pi** : `coding-agent` — `/fork`, `/tree`, sessions JSONL avec `parentId`.
 
-**Problème utilisateur** : repartir d’un état antérieur de la conversation **sans** perdre l’historique complet côté audit, tout en reprenant le contexte utile pour l’agent.
+**Statut (2026-06)** : v1 implémentée — action UI « Fork à partir d'ici », nouvelle tâche + `session_id` fille, événement `session_fork_created` côté daemon. Voir [`docs/SESSION_FORK_SPEC.md`](../../../../akasha-code-studio/docs/SESSION_FORK_SPEC.md).
 
-**Décision** : traiter ce sujet comme **priorité 2** (après ou en parallèle limité de la file steering, selon capacité).
+**Reporter v2** : arbre interactif `/tree` ; export HTML gist ; fusion de branches.
 
-**Spécification UX / API** : dépôt **akasha-code-studio**, fichier [`docs/SESSION_FORK_SPEC.md`](../../../../akasha-code-studio/docs/SESSION_FORK_SPEC.md) (chemin relatif valide si `Akasha` et `akasha-code-studio` sont voisins sous le même parent ; sinon ouvrir ce fichier dans le repo Code Studio).
+### 3. Handoff modèle explicite — **Livré**
 
-**Hors périmètre v1** : arbre interactif complet type `/tree` Pi ; export HTML gist.
+`POST /api/session/handoff` avec `target_model` / `target_provider` ; réponse `schema_version: 2`. UI handoff Code Studio + routeur daemon.
 
 ## Axes reportés (justification courte)
 
 | Axe | Report |
 |-----|--------|
-| **Handoff modèle explicite** (reprendre le transcript avec un autre modèle) | Utile ; dépend d’une sérialisation de contexte stable et de l’UI routeur — **phase suivante** après file + fork. |
-| **Streaming JSON partiel des tool calls** (`toolcall_delta`) | Voir [pi_mono_backend_parity_check.md](../integrations/pi_mono_backend_parity_check.md) : aujourd’hui les outils sont surtout dérivés du texte assistant final ; évolution **backend + contrat événements**. |
-| **CSI 2026 / TUI différentiel** (`pi-tui`) | Gain UX terminal ; **faible priorité** vs file et fork. |
-| **RPC stdio JSONL** (`pi --mode rpc`) | HTTP + tâches couvrent l’intégration IDE ; RPC **optionnel** si partenaire IDE l’exige. |
+| **Streaming JSON partiel des tool calls** (`toolcall_delta`) | **Production** (S-EVT-01) — voir [pi_mono_backend_parity_check.md](../integrations/pi_mono_backend_parity_check.md). |
+| **CSI 2026 / TUI différentiel** (`pi-tui`) | **Reporter** — faible priorité. |
+| **RPC stdio JSONL** (`pi --mode rpc`) | **Reporter** — HTTP + tâches suffisent. |
+| **Fork tree UI v2** | **Reporter** — trace événementielle v1 suffit. |
 
 ## Références croisées
 
 - Vérification backend (tokens, coût, streaming outils) : [pi_mono_backend_parity_check.md](../integrations/pi_mono_backend_parity_check.md)
-- Contrat d’événements client (cible SSE/WebSocket) : [agent_client_event_contract.md](../runtime/agent_client_event_contract.md)
+- Contrat d'événements client (cible SSE/WebSocket) : [agent_client_event_contract.md](../runtime/agent_client_event_contract.md)
+- Veille consolidée : [wave6_veille_backlog.md](./wave6_veille_backlog.md)
+
+**Dernière mise à jour :** 2026-06-06 (clôture roadmap — registre v1.1.0).

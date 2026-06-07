@@ -28,6 +28,19 @@ function send(obj) {
   console.log(JSON.stringify(obj));
 }
 
+function formatPlaywrightError(e, action, timeoutSecs) {
+  const msg = e?.message || String(e);
+  const looksLikeTimeout = /timed out|timeout/i.test(msg);
+  const looksLikeMissingBrowser = /Executable doesn't exist|browserType\.launch|playwright install/i.test(msg);
+  if (looksLikeMissingBrowser) {
+    return `${action}: Playwright browser is not installed. Run "npx playwright install chromium" (or use install_playwright in Akasha tools).`;
+  }
+  if (looksLikeTimeout) {
+    return `${action}: timed out after ${timeoutSecs}s. Retry with a higher timeout_secs. If browser binaries are missing, run "npx playwright install chromium" (install_playwright).`;
+  }
+  return msg;
+}
+
 async function handleInit(params = {}) {
   try {
     if (browser) {
@@ -58,16 +71,18 @@ async function handleNavigate(params) {
   }
   try {
     const url = params.url || '';
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      send({ ok: false, error: 'Only http and https URLs are allowed.' });
+    const allowHttp = !!params.allow_http;
+    if (!url.startsWith('https://') && !(allowHttp && url.startsWith('http://'))) {
+      send({ ok: false, error: allowHttp ? 'Invalid URL: expected http(s) URL.' : 'Domain policy: only https URLs are allowed by default (set allow_http=true only for trusted local/test domains).' });
       return;
     }
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: (params.timeout_secs ?? 30) * 1000 });
+    const timeoutSecs = params.timeout_secs ?? 30;
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutSecs * 1000 });
     const title = await page.title();
     const status = response ? response.status() : 0;
     send({ ok: true, result: { title, status: status, url: page.url() } });
   } catch (e) {
-    send({ ok: false, error: e.message || String(e) });
+    send({ ok: false, error: formatPlaywrightError(e, 'navigate', params.timeout_secs ?? 30) });
   }
 }
 
@@ -99,7 +114,7 @@ async function handleSnapshot() {
     });
     send({ ok: true, result: { text: text.slice(0, 100000), links } });
   } catch (e) {
-    send({ ok: false, error: e.message || String(e) });
+    send({ ok: false, error: formatPlaywrightError(e, 'snapshot', 30) });
   }
 }
 
@@ -118,7 +133,7 @@ async function handleClick(params) {
     await page.click(sel, { timeout });
     send({ ok: true, result: { clicked: true, selector: sel } });
   } catch (e) {
-    send({ ok: false, error: e.message || String(e) });
+    send({ ok: false, error: formatPlaywrightError(e, 'click', params.timeout_secs ?? 30) });
   }
 }
 
@@ -138,7 +153,7 @@ async function handleFill(params) {
     await page.fill(sel, value, { timeout });
     send({ ok: true, result: { filled: true, selector: sel } });
   } catch (e) {
-    send({ ok: false, error: e.message || String(e) });
+    send({ ok: false, error: formatPlaywrightError(e, 'fill', params.timeout_secs ?? 30) });
   }
 }
 

@@ -235,6 +235,7 @@ pub async fn fire_triggers(
                 image_data_urls: None,
                 execution_mode: exec_mode,
                 preferred_task_type: trigger.assigned_agent.clone(),
+                incognito: false,
             })
             .await
             .is_err()

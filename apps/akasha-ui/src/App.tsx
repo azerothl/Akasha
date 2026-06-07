@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type MutableRefObject, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./chatTranscriptExport";
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
@@ -6,7 +6,6 @@ import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "rela
 import {
   collapseStreamedProgressEvents,
   isTaskActiveStatus,
-  isTaskTerminalStatus,
   mergeTaskEvents,
   normalizeTaskStatus,
 } from "./taskEvents";
@@ -16,8 +15,16 @@ import { GeoMapView } from "./GeoMapView";
 import { SystemHealthPanel } from "./SystemHealthPanel";
 import { AppNavigation } from "./components/AppNavigation";
 import { PermissionsBell } from "./components/PermissionsBell";
+import { SteeringQueueBell } from "./components/SteeringQueueBell";
+import { OnboardingWizard, readSetupWizardPending } from "./components/OnboardingWizard";
+import { UserRagPanel } from "./components/UserRagPanel";
+import { PluginCatalogPanel } from "./components/PluginCatalogPanel";
+import { OpenClawMigrationPanel } from "./components/OpenClawMigrationPanel";
+import { ToolsPolicyPanel } from "./components/ToolsPolicyPanel";
+import { ConnectorsPanel } from "./components/ConnectorsPanel";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { AppNotificationsSync } from "./components/AppNotificationsSync";
+import { useNotify } from "./notifications/useNotifyOnMessage";
 import { InfoTip, Tooltip } from "./components/Tooltip";
 import { ChatRenderer } from "./components/ChatRenderer";
 import { ChatCompositionBar } from "./components/ChatCompositionBar";
@@ -36,15 +43,19 @@ import {
   buildCookbookPricingLookup,
   lookupPriceRates,
   parseUsageFromEventPayload,
-  parseUsageFromTaskStatus,
   type ModelPriceRates,
   type ModelUsageStats,
 } from "./modelUsage";
 import { ModelUsageBadge } from "./components/ModelUsageBadge";
 import { TaskExecutionSteps } from "./components/TaskExecutionSteps";
 import { CreateTaskDialog } from "./components/CreateTaskDialog";
+import { NotesPanel } from "./components/NotesPanel";
+import { ThemeEditorPanel, applyThemeOverrides, loadThemeOverrides } from "./components/ThemeEditorPanel";
 import { buildExecutionSteps } from "./tasks/buildExecutionSteps";
 import { pollTaskUntilDone, type PollTaskUntilDoneDeps } from "./tasks/pollTaskUntilDone";
+import { THEME_IDS, THEME_STORAGE_KEY, type ThemeId } from "./themeTypes";
+
+export type { ThemeId } from "./themeTypes";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -57,7 +68,6 @@ function e2eDaemonHttpUrl(path: string): string {
   if (E2E_WEB) return `/__e2e_daemon${p}`;
   return `http://127.0.0.1:${DAEMON_PORT}${p}`;
 }
-const THEME_STORAGE_KEY = "akasha_theme";
 const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
@@ -72,6 +82,42 @@ const CHAT_AGENT_MODE_KEY = "akasha_chat_agent_mode";
 const CHAT_WEB_SEARCH_KEY = "akasha_chat_web_search";
 const CHAT_INCOGNITO_KEY = "akasha_chat_incognito";
 const CHAT_COMPANION_OPEN_KEY = "akasha_companion_open";
+const AKASHA_TASK_SESSIONS_KEY = "akasha_task_sessions_v1";
+
+function loadTaskSessionMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(AKASHA_TASK_SESSIONS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function persistTaskSession(taskId: string, sessionId: string) {
+  if (!taskId.trim() || !sessionId.trim()) return;
+  try {
+    const map = loadTaskSessionMap();
+    map[taskId] = sessionId;
+    const keys = Object.keys(map);
+    if (keys.length > 64) {
+      for (const k of keys.slice(0, keys.length - 64)) {
+        delete map[k];
+      }
+    }
+    localStorage.setItem(AKASHA_TASK_SESSIONS_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore */
+  }
+}
+
+function isGenericTaskLabel(label: string | undefined, taskId: string): boolean {
+  if (!label?.trim()) return true;
+  const suffix = taskId.length >= 8 ? taskId.slice(-8) : taskId;
+  return label.includes(`…${suffix}`) || label.includes(`...${suffix}`);
+}
 
 export type ChatThreadEntry = {
   id: string;
@@ -79,6 +125,9 @@ export type ChatThreadEntry = {
   createdAt: string;
   updatedAt: string;
   pendingTitle?: boolean;
+  lastSnippet?: string;
+  /** Optional session folder label for sidebar grouping (localStorage only). */
+  folder?: string;
 };
 
 function loadChatThreadsInitial(): ChatThreadEntry[] {
@@ -99,10 +148,8 @@ function loadChatThreadsInitial(): ChatThreadEntry[] {
   return [];
 }
 
-export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
-type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
-const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
+type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
 function shouldChatStreamProgress(message: string): boolean {
   const m = message?.trim() ?? "";
@@ -1384,13 +1431,7 @@ function App() {
   >([]);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [uiMode, setUiMode] = useState<UiMode>(loadSavedUiMode);
-  const [showOnboarding, setShowOnboarding] = useState(() => {
-    try {
-      return localStorage.getItem("akasha_onboarding_dismissed") !== "1";
-    } catch {
-      return true;
-    }
-  });
+  const [showOnboarding, setShowOnboarding] = useState(() => readSetupWizardPending());
   const eventLabel = useCallback(
     (typ: string) => {
       const key = "events." + typ;
@@ -1434,6 +1475,54 @@ function App() {
       }
       if ((event.event_type === "task_completed" || event.event_type === "task_failed") && payload && typeof payload === "object" && "model_used" in payload && (payload as { model_used?: string | null }).model_used) {
         return `${t("tasks.model_used")}: ${String((payload as { model_used: string }).model_used)}`;
+      }
+      if (event.event_type === "llm_route_planned" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const provider = typeof p.provider === "string" ? p.provider : "?";
+        const model = typeof p.model === "string" ? p.model : "?";
+        return `${t("tasks.route_planned_summary")}: ${provider}/${model}`;
+      }
+      if (event.event_type === "llm_call_started" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const provider = typeof p.provider === "string" ? p.provider : "?";
+        const model = typeof p.model === "string" ? p.model : "?";
+        const round = typeof p.round === "number" ? p.round : undefined;
+        const base = `${t("tasks.llm_call_summary")}: ${provider}/${model}`;
+        return round != null ? `${base} · #${round}` : base;
+      }
+      if (event.event_type === "llm_call_finished" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const success = p.success === true;
+        const model = typeof p.model_used === "string" ? p.model_used : undefined;
+        const err = typeof p.error === "string" ? p.error : undefined;
+        const latency = typeof p.latency_ms === "number" ? p.latency_ms : undefined;
+        if (success && model) {
+          return latency != null
+            ? `${t("tasks.model_used")}: ${model} · ${latency} ms`
+            : `${t("tasks.model_used")}: ${model}`;
+        }
+        return err ? `${t("tasks.llm_call_summary")}: ${trimPreview(err, 120)}` : t("tasks.llm_call_summary");
+      }
+      if (event.event_type === "memory_recall_started" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const topK = typeof p.semantic_top_k === "number" ? p.semantic_top_k : undefined;
+        return topK != null ? `${t("events.memory_recall_started")} (top_k=${topK})` : t("events.memory_recall_started");
+      }
+      if (event.event_type === "memory_recall_finished" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const had = p.had_results === true;
+        const timedOut = p.timed_out === true;
+        if (timedOut) return `${t("events.memory_recall_finished")} · timeout`;
+        return had
+          ? `${t("events.memory_recall_finished")} · ${t("common.yes")}`
+          : `${t("events.memory_recall_finished")} · ${t("common.no")}`;
+      }
+      if (event.event_type === "pipeline_checkpoint" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const msg = typeof p.message === "string" ? p.message : "";
+        const pct = typeof p.progress_pct === "number" ? p.progress_pct : undefined;
+        if (msg) return trimPreview(msg, 160);
+        if (pct != null) return t("tasks.progress_pct_summary").replace("{{pct}}", String(pct));
       }
       if (event.event_type === "deterministic_preferred_tool_attempt" && payload && typeof payload === "object") {
         const p = payload as Record<string, unknown>;
@@ -1601,6 +1690,19 @@ function App() {
   const [chatResearchContext, setChatResearchContext] = useState<ChatResearchContext | null>(null);
   const [chatDeliveryMode, setChatDeliveryMode] = useState<"immediate" | "steering" | "follow_up">("immediate");
   const [memoryHygieneHint, setMemoryHygieneHint] = useState<string | null>(null);
+  type MemoryAdvancedSettings = {
+    multi_query?: boolean;
+    hyde?: boolean;
+    rrf?: boolean;
+    rollup_days?: number;
+    semantic_top_k?: number;
+    graph_expand_hops?: number;
+    user_rag_top_k?: number;
+    workspace_graph_top_k?: number;
+  };
+  const [memoryAdvancedSettings, setMemoryAdvancedSettings] = useState<MemoryAdvancedSettings | null>(null);
+  const [memoryAdvancedSaving, setMemoryAdvancedSaving] = useState(false);
+  const [memoryAdvancedMessage, setMemoryAdvancedMessage] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
   const [modelPricingLookup, setModelPricingLookup] = useState<Map<string, ModelPriceRates>>(new Map());
 
@@ -1761,6 +1863,10 @@ function App() {
   const fetchTasksEventsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
   const trackTaskUntilDoneRef = useRef<(taskId: string) => void>(() => {});
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
+  const activeSteeringTaskId = useMemo(() => {
+    const ids = Object.keys(runningTaskChips);
+    return ids.length > 0 ? ids[ids.length - 1]! : null;
+  }, [runningTaskChips]);
   /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
   const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
   const chatToolBatchSummary = useMemo(() => {
@@ -1864,8 +1970,13 @@ function App() {
   const [calendarGridEvents, setCalendarGridEvents] = useState<CalendarGridEvent[]>([]);
   const [calendarGridDate, setCalendarGridDate] = useState(() => new Date());
   const [calendarCellDetail, setCalendarCellDetail] = useState<{ slotKey: string; slotLabel: string; events: CalendarGridEvent[] } | null>(null);
-  type CalendarSubTab = "grid" | "recent" | "schedules";
+  type CalendarSubTab = "grid" | "recent" | "schedules" | "wakeups";
   const [calendarSubTab, setCalendarSubTab] = useState<CalendarSubTab>("grid");
+  type WakeupRow = { id: string; session_id: string; fire_at: string; message: string; status: string; created_at?: string };
+  const [wakeups, setWakeups] = useState<WakeupRow[]>([]);
+  const [wakeupFormMinutes, setWakeupFormMinutes] = useState("60");
+  const [wakeupFormMessage, setWakeupFormMessage] = useState("");
+  const [wakeupSaving, setWakeupSaving] = useState(false);
   const calendarEventLabel = (ev: { label?: string; task_id: string }) => (ev.label && ev.label.trim()) ? ev.label : `Tâche …${ev.task_id.slice(-8)}`;
   const calendarGetParentKey = (ev: CalendarGridEvent) => ev.schedule_id ?? `task_${ev.task_id}`;
   const calendarGetEventStatusClass = (status: string) => {
@@ -2115,7 +2226,16 @@ function App() {
     }
   });
   const [chatThreads, setChatThreads] = useState<ChatThreadEntry[]>(() => loadChatThreadsInitial());
-  const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
+  const [chatThreadSearch, setChatThreadSearch] = useState("");
+  const [chatThreadFolderFilter, setChatThreadFolderFilter] = useState("");
+  const [handoffDialogOpen, setHandoffDialogOpen] = useState(false);
+  const [handoffTargetModel, setHandoffTargetModel] = useState("");
+  const [handoffTargetProvider, setHandoffTargetProvider] = useState("");
+  const [handoffTaskId, setHandoffTaskId] = useState("");
+  const [handoffModels, setHandoffModels] = useState<Array<{ provider: string; model: string }>>([]);
+  const [handoffBusy, setHandoffBusy] = useState(false);
+  const [handoffStatus, setHandoffStatus] = useState<string | null>(null);
+  const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string; index_status?: string; indexed_at?: string | null; index_error?: string | null }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
   const [dataSourcesSubTab, setDataSourcesSubTab] = useState<"rag" | "project_graph">("rag");
@@ -2138,7 +2258,6 @@ function App() {
   const [newProjectWsPath, setNewProjectWsPath] = useState("");
   const [projectWsBusyId, setProjectWsBusyId] = useState<string | null>(null);
   const [newProjectWsSubmitting, setNewProjectWsSubmitting] = useState(false);
-  const userRagFileInputRef = useRef<HTMLInputElement>(null);
   const agentAvatarFileInputRef = useRef<HTMLInputElement>(null);
   const userAvatarFileInputRef = useRef<HTMLInputElement>(null);
   /** Agent profile (name, role, gender, avatar, personality, rules, can_do, cannot_do, traits_override, preferred_mode) for Settings panel. */
@@ -2154,6 +2273,8 @@ function App() {
     cannot_do: string[];
     traits_override: Record<string, number>;
     preferred_mode: string;
+    temperature: string;
+    system_prompt: string;
   }>({
     name: "",
     role: "",
@@ -2166,6 +2287,8 @@ function App() {
     cannot_do: [],
     traits_override: {},
     preferred_mode: "",
+    temperature: "",
+    system_prompt: "",
   });
   /** User avatar (data URL) for chat display. Stored in localStorage. */
   const [userAvatar, setUserAvatar] = useState<string>(() => {
@@ -2191,15 +2314,24 @@ function App() {
   const [userProfileSaving, setUserProfileSaving] = useState(false);
   const [userProfileError, setUserProfileError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
-  const [systemSubTab, setSystemSubTab] = useState<"general" | "plugins" | "health">("general");
+  const [systemSubTab, setSystemSubTab] = useState<"general" | "plugins" | "policy" | "connectors" | "health">("general");
   const [pluginTableBusyId, setPluginTableBusyId] = useState<string | null>(null);
+  const [skillsCatalogText, setSkillsCatalogText] = useState<string | null>(null);
+  const [skillsCatalogLoading, setSkillsCatalogLoading] = useState(false);
   const [agentProfileSubTab, setAgentProfileSubTab] = useState<AgentProfileSubTab>("identity");
+  /** Constitution layer (agent_identity.yaml): tone, values, constraints. Name/role shared with agentProfile. */
+  const [agentConstitution, setAgentConstitution] = useState<{
+    tone: string;
+    values: string[];
+    constraints: string[];
+  }>({ tone: "", values: [], constraints: [] });
   const [rulesDraft, setRulesDraft] = useState("");
   const [canDoDraft, setCanDoDraft] = useState("");
   const [cannotDoDraft, setCannotDoDraft] = useState("");
   /** Attachments for the next message: images (vision) and documents (text appended to message). */
   const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const subagentsDetailRef = useRef<HTMLDivElement>(null);
   const chatInlineReplyRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2643,6 +2775,40 @@ function App() {
     [t],
   );
 
+  const chatThreadFolders = useMemo(() => {
+    const folders = new Set<string>();
+    for (const th of chatThreads) {
+      const f = th.folder?.trim();
+      if (f) folders.add(f);
+    }
+    return [...folders].sort((a, b) => a.localeCompare(b));
+  }, [chatThreads]);
+
+  const setActiveThreadFolder = useCallback((folder: string) => {
+    const sid = sessionIdRef.current?.trim();
+    if (!sid) return;
+    const trimmed = folder.trim();
+    setChatThreads((prev) =>
+      prev.map((th) =>
+        th.id === sid ? { ...th, folder: trimmed || undefined, updatedAt: new Date().toISOString() } : th,
+      ),
+    );
+  }, []);
+
+  const filteredChatThreads = useMemo(() => {
+    const q = chatThreadSearch.trim().toLowerCase();
+    const folderQ = chatThreadFolderFilter.trim().toLowerCase();
+    const base = [...chatThreads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return base.filter((th) => {
+      if (folderQ && (th.folder ?? "").trim().toLowerCase() !== folderQ) return false;
+      if (!q) return true;
+      const label = chatThreadLabel(th).toLowerCase();
+      const snippet = (th.lastSnippet ?? "").toLowerCase();
+      const folder = (th.folder ?? "").toLowerCase();
+      return label.includes(q) || snippet.includes(q) || th.id.toLowerCase().includes(q) || folder.includes(q);
+    });
+  }, [chatThreads, chatThreadLabel, chatThreadSearch, chatThreadFolderFilter]);
+
   const createChatThread = useCallback(() => {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
@@ -2720,6 +2886,7 @@ function App() {
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.setAttribute("data-ui-mode", uiMode);
     document.documentElement.setAttribute("data-density", uiDensity);
+    applyThemeOverrides(theme, loadThemeOverrides());
   }, [theme, uiMode, uiDensity]);
 
   const setThemeAndSave = useCallback((next: ThemeId) => {
@@ -2748,6 +2915,15 @@ function App() {
       });
     }
   }, [messages, loading, tab]);
+  // Keep sub-agent activity scrolled to latest events inside the detail panel
+  useEffect(() => {
+    if (tab !== "chat" || subAgentPanelCollapsed) return;
+    const el = subagentsDetailRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }, [runningTaskEvents, subAgentPanelCollapsed, tab]);
   // When a reply is pending and modal is not open, scroll the inline reply form into view
   const pendingHumanInputKeys = Object.keys(pendingHumanInput);
   useEffect(() => {
@@ -3203,10 +3379,17 @@ function App() {
     if (!selectedTask) return null;
     const runningChip = selectedTask.status === "running" ? runningTaskChips[selectedTask.id] : undefined;
     const latestEvent = tasksEvents.length > 0 ? tasksEvents[tasksEvents.length - 1] : null;
+    const routeEvent = [...tasksEvents].reverse().find((e) => e.event_type === "llm_route_planned");
+    const llmEvent = [...tasksEvents].reverse().find((e) => e.event_type === "llm_call_started" || e.event_type === "llm_call_finished");
+    const routeHint =
+      (llmEvent ? summarizeTaskEvent(llmEvent) : "") ||
+      (routeEvent ? summarizeTaskEvent(routeEvent) : "");
     return {
       runningChip,
       latestEvent,
       latestSummary: latestEvent ? summarizeTaskEvent(latestEvent) : "",
+      routeHint: routeHint || undefined,
+      progressPct: runningChip?.pct,
     };
   }, [selectedTask, runningTaskChips, tasksEvents, summarizeTaskEvent]);
 
@@ -3526,6 +3709,17 @@ function App() {
     }
   }, []);
 
+  const fetchWakeups = useCallback(async () => {
+    try {
+      const res = await fetch(e2eDaemonHttpUrl("/api/wakeups"));
+      if (!res.ok) throw new Error(String(res.status));
+      const data = (await res.json()) as { wakeups?: WakeupRow[] };
+      setWakeups(data.wakeups ?? []);
+    } catch {
+      setWakeups([]);
+    }
+  }, []);
+
   const fetchCalendarGridEvents = useCallback(async () => {
     const d = calendarGridDate;
     let from: Date;
@@ -3560,6 +3754,10 @@ function App() {
   useEffect(() => {
     if (tab === "calendar") fetchCalendarGridEvents();
   }, [tab, fetchCalendarGridEvents]);
+
+  useEffect(() => {
+    if (tab === "calendar" && calendarSubTab === "wakeups") void fetchWakeups();
+  }, [tab, calendarSubTab, fetchWakeups]);
 
   useEffect(() => {
     if (tab !== "tasks") return;
@@ -3610,28 +3808,74 @@ function App() {
   }, []);
 
   // SSE: subscribe to daemon events for real-time updates (< 1s) when daemon is healthy.
+  // On disconnect, fall back to polling task list every 5s (see agent_client_event_contract.md).
   useEffect(() => {
     if (!health?.ok) return;
-    const url = E2E_WEB
+    const sseTypes =
+      "progress_update,task_completed,task_failed,task_cancelled,todo_list_updated,user_steering_queued,user_follow_up_queued,user_steering_applied,user_follow_up_applied,user_queue_flushed";
+    const base = E2E_WEB
       ? e2eDaemonHttpUrl("/api/events")
       : `http://127.0.0.1:${health.port ?? DAEMON_PORT}/api/events`;
+    const url = `${base}?types=${encodeURIComponent(sseTypes)}`;
     let es: EventSource | null = null;
+    let pollFallbackId: number | null = null;
+    const startPollFallback = () => {
+      if (pollFallbackId != null) return;
+      pollFallbackId = window.setInterval(() => {
+        void fetchTasksList({ silent: true });
+        void fetchPendingHumanInput();
+      }, 5000);
+    };
+    const stopPollFallback = () => {
+      if (pollFallbackId != null) {
+        window.clearInterval(pollFallbackId);
+        pollFallbackId = null;
+      }
+    };
     try {
       es = new EventSource(url);
+      es.onopen = () => stopPollFallback();
       es.onmessage = (msgEv) => {
-        void fetchTasksList({ silent: true });
-        fetchPendingHumanInput();
         try {
           const d = JSON.parse(msgEv.data) as {
             event_type?: string;
-            payload?: { task_id?: string; message?: string } | Record<string, unknown>;
+            payload?: { task_id?: string; message?: string; text?: string } | Record<string, unknown>;
             correlation_id?: string | null;
           };
+          const shouldRefreshTaskList =
+            d.event_type === "task_completed" ||
+            d.event_type === "task_failed" ||
+            d.event_type === "task_cancelled" ||
+            d.event_type === "user_steering_queued" ||
+            d.event_type === "user_follow_up_queued" ||
+            d.event_type === "user_steering_applied" ||
+            d.event_type === "user_follow_up_applied" ||
+            d.event_type === "todo_list_updated";
+          if (shouldRefreshTaskList) void fetchTasksList({ silent: true });
+          if (d.event_type === "task_completed" || d.event_type === "task_failed" || d.event_type === "task_cancelled") {
+            void fetchPendingHumanInput();
+          }
           if (d.event_type === "progress_update" && d.payload && typeof d.payload === "object") {
             const p = d.payload as Record<string, unknown>;
             const tid = typeof p.task_id === "string" ? p.task_id : "";
             const streamMsg = typeof p.message === "string" ? p.message : "";
             if (tid && streamMsg) applyChatStreamProgress(tid, streamMsg);
+          }
+          if (
+            d.event_type === "user_steering_queued" ||
+            d.event_type === "user_follow_up_queued" ||
+            d.event_type === "user_steering_applied" ||
+            d.event_type === "user_follow_up_applied"
+          ) {
+            const p = d.payload && typeof d.payload === "object" ? (d.payload as Record<string, unknown>) : null;
+            const tid =
+              (p && typeof p.task_id === "string" ? p.task_id : "") ||
+              (typeof d.correlation_id === "string" ? d.correlation_id : "");
+            const hint =
+              (p && typeof p.text === "string" ? p.text : "") ||
+              (p && typeof p.message === "string" ? p.message : "") ||
+              d.event_type;
+            if (tid && hint) applyChatStreamProgress(tid, `[queue] ${hint}`);
           }
           if (d.event_type === "task_completed" || d.event_type === "task_failed" || d.event_type === "task_cancelled") {
             const p = d.payload && typeof d.payload === "object" ? (d.payload as Record<string, unknown>) : null;
@@ -3664,12 +3908,14 @@ function App() {
       es.onerror = () => {
         es?.close();
         es = null;
+        startPollFallback();
       };
     } catch {
-      /* ignore */
+      startPollFallback();
     }
     return () => {
       es?.close();
+      stopPollFallback();
     };
   }, [health?.ok, health?.port, fetchTasksList, fetchPendingHumanInput, applyChatStreamProgress]);
 
@@ -4083,6 +4329,130 @@ function App() {
     [fetchSystemEndpoint],
   );
 
+  const notify = useNotify();
+  const [resumeBriefBusy, setResumeBriefBusy] = useState(false);
+
+  const handleResumeBrief = useCallback(async () => {
+    const sid = sessionId?.trim();
+    if (!sid) {
+      notify({
+        level: "warning",
+        title: locale === "en" ? "No active session" : "Aucune session active",
+        source: "resume",
+      });
+      return;
+    }
+    setResumeBriefBusy(true);
+    try {
+      const q = new URLSearchParams({ session_id: sid });
+      const res = await fetchSystemEndpoint(`/api/session/resume-brief?${q.toString()}`);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+      }
+      let summary = res.text;
+      try {
+        const j = JSON.parse(res.text) as {
+          short_term_turn_count?: number;
+          compaction_count?: number;
+          session_state?: { goals?: unknown; constraints?: unknown };
+        };
+        const turns = j.short_term_turn_count ?? 0;
+        const comp = j.compaction_count ?? 0;
+        summary =
+          locale === "en"
+            ? `Session resume: ${turns} turn(s), ${comp} compaction(s).`
+            : `Reprise session : ${turns} tour(s), ${comp} compaction(s).`;
+        const st = j.session_state;
+        if (st && (st.goals != null || st.constraints != null)) {
+          summary += `\n\n${JSON.stringify({ goals: st.goals, constraints: st.constraints }, null, 2)}`;
+        }
+      } catch {
+        /* keep raw text */
+      }
+      if (tab === "chat") {
+        setMessages((prev) => [...prev, { role: "system", text: summary }]);
+      } else {
+        notify({
+          level: "info",
+          title: locale === "en" ? "Session brief" : "Brief session",
+          detail: summary.slice(0, 600),
+          source: "resume",
+        });
+      }
+    } catch (e) {
+      notify({
+        level: "error",
+        title: locale === "en" ? "Resume failed" : "Échec reprise",
+        detail: String(e),
+        source: "resume",
+      });
+    } finally {
+      setResumeBriefBusy(false);
+    }
+  }, [sessionId, fetchSystemEndpoint, locale, notify, tab]);
+
+  const loadInstalledSkills = useCallback(async () => {
+    setSkillsCatalogLoading(true);
+    setSkillsCatalogText(null);
+    try {
+      const res = await fetchSystemEndpoint("/api/skills");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const list = JSON.parse(res.text) as Array<{ name?: string; description?: string }>;
+      if (!Array.isArray(list) || list.length === 0) {
+        setSkillsCatalogText(locale === "en" ? "No skills installed." : "Aucun skill installé.");
+      } else {
+        setSkillsCatalogText(
+          list
+            .map((s) => `• ${s.name ?? "?"}${s.description ? ` — ${s.description}` : ""}`)
+            .join("\n"),
+        );
+      }
+    } catch (e) {
+      setSkillsCatalogText(String(e));
+    } finally {
+      setSkillsCatalogLoading(false);
+    }
+  }, [fetchSystemEndpoint, locale]);
+
+  const loadHandoffModels = useCallback(async () => {
+    try {
+      const providers = await invoke<Record<string, string[]>>("get_router_models", { port: DAEMON_PORT });
+      const rows: Array<{ provider: string; model: string }> = [];
+      for (const [provider, models] of Object.entries(providers ?? {})) {
+        for (const model of models ?? []) rows.push({ provider, model });
+      }
+      setHandoffModels(rows);
+    } catch (e) {
+      setHandoffStatus(String(e));
+      setHandoffModels([]);
+    }
+  }, []);
+
+  const submitSessionHandoff = useCallback(async () => {
+    const sid = sessionId?.trim();
+    if (!sid) {
+      setHandoffStatus(locale === "en" ? "No active session." : "Aucune session active.");
+      return;
+    }
+    setHandoffBusy(true);
+    setHandoffStatus(null);
+    try {
+      const body = JSON.stringify({
+        session_id: sid,
+        target_model: handoffTargetModel || undefined,
+        target_provider: handoffTargetProvider || undefined,
+        task_id: handoffTaskId.trim() || undefined,
+      });
+      const res = await requestSystemEndpoint("POST", "/api/session/handoff", body);
+      if (!res.ok) throw new Error(res.text || `HTTP ${res.status}`);
+      setHandoffStatus(locale === "en" ? "Handoff sent." : "Handoff envoyé.");
+    } catch (e) {
+      setHandoffStatus(String(e));
+    } finally {
+      setHandoffBusy(false);
+    }
+  }, [handoffTargetModel, handoffTargetProvider, handoffTaskId, locale, requestSystemEndpoint, sessionId]);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -4146,6 +4516,48 @@ function App() {
       cancelled = true;
     };
   }, [tab, fetchSystemEndpoint, locale]);
+
+  useEffect(() => {
+    if (tab !== "memory") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchSystemEndpoint("/api/memory/advanced-settings");
+        if (cancelled || !res.ok) return;
+        const j = JSON.parse(res.text) as { settings?: MemoryAdvancedSettings };
+        if (j.settings) setMemoryAdvancedSettings(j.settings);
+      } catch {
+        if (!cancelled) setMemoryAdvancedSettings(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, fetchSystemEndpoint]);
+
+  const saveMemoryAdvancedSettings = useCallback(async () => {
+    if (!memoryAdvancedSettings) return;
+    setMemoryAdvancedSaving(true);
+    setMemoryAdvancedMessage(null);
+    try {
+      const res = await fetchSystemEndpoint(
+        "/api/memory/advanced-settings",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(memoryAdvancedSettings),
+        },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j = JSON.parse(res.text) as { settings?: MemoryAdvancedSettings };
+      if (j.settings) setMemoryAdvancedSettings(j.settings);
+      setMemoryAdvancedMessage(locale === "en" ? "Advanced memory settings saved." : "Paramètres mémoire avancés enregistrés.");
+    } catch (e) {
+      setMemoryAdvancedMessage(String(e));
+    } finally {
+      setMemoryAdvancedSaving(false);
+    }
+  }, [memoryAdvancedSettings, fetchSystemEndpoint, locale]);
 
   const fetchUserRagDocuments = useCallback(async () => {
     setUserRagLoading(true);
@@ -4218,6 +4630,8 @@ function App() {
         cannot_do?: string[];
         traits_override?: Record<string, number> | null;
         preferred_mode?: string | null;
+        temperature?: number | null;
+        system_prompt?: string | null;
       }>("get_agent_profile", { port: DAEMON_PORT });
       const to = data?.traits_override;
       const f = data?.formality;
@@ -4233,13 +4647,43 @@ function App() {
         cannot_do: Array.isArray(data?.cannot_do) ? data.cannot_do : [],
         traits_override: to && typeof to === "object" ? { ...to } : {},
         preferred_mode: data?.preferred_mode ?? "",
+        temperature: typeof data?.temperature === "number" ? String(data.temperature) : "",
+        system_prompt: data?.system_prompt ?? "",
       });
+      try {
+        const idRes = await requestSystemEndpoint("GET", "/api/agent-identity");
+        if (idRes.ok) {
+          const parsed = JSON.parse(idRes.text) as {
+            identity?: {
+              name?: string;
+              role?: string;
+              tone?: string;
+              values?: string[];
+              constraints?: string[];
+            };
+          };
+          const id = parsed.identity ?? {};
+          setAgentConstitution({
+            tone: id.tone ?? "",
+            values: Array.isArray(id.values) ? id.values : [],
+            constraints: Array.isArray(id.constraints) ? id.constraints : [],
+          });
+          if (id.name && !data?.name) {
+            setAgentProfile((p) => ({ ...p, name: id.name ?? p.name }));
+          }
+          if (id.role && !data?.role) {
+            setAgentProfile((p) => ({ ...p, role: id.role ?? p.role }));
+          }
+        }
+      } catch {
+        /* constitution optional */
+      }
     } catch (e) {
       setAgentProfileError(String(e));
     } finally {
       setAgentProfileLoading(false);
     }
-  }, []);
+  }, [requestSystemEndpoint]);
 
   const fetchUserProfile = useCallback(async () => {
     setUserProfileLoading(true);
@@ -4900,8 +5344,8 @@ function App() {
   const pollTaskDeps = useMemo(
     (): PollTaskUntilDoneDeps => ({
       daemonPort: DAEMON_PORT,
-      sessionId,
-      sessionIdRef,
+      sessionId: sessionId ?? "",
+      sessionIdRef: sessionIdRef as unknown as MutableRefObject<string>,
       taskIdToSessionIdRef,
       ackTextByTaskRef,
       chatMapByTaskIdRef,
@@ -4909,12 +5353,12 @@ function App() {
       replyWithTtsRef,
       selectedTaskIdForTodosRef,
       fetchTasksEventsRef,
-      chatInputRef,
+      chatInputRef: chatInputRef as unknown as MutableRefObject<HTMLTextAreaElement | null>,
       akashaSessionIdKey: AKASHA_SESSION_ID_KEY,
       normalizeTaskEventsInvokeResponse,
       extractChatMapVisualFromTaskEvents,
       extractChatMapVisualFromAssistantText,
-      findLastChatAssistantIndex,
+      findLastChatAssistantIndex: findLastChatAssistantIndex as PollTaskUntilDoneDeps["findLastChatAssistantIndex"],
       chatMapMessageCacheKey,
       applyChatStreamProgress,
       fetchTasksList,
@@ -4925,7 +5369,7 @@ function App() {
       setPendingHumanInput,
       setHumanInputModalTaskId,
       setChatMapByTaskId,
-      setMessages,
+      setMessages: setMessages as PollTaskUntilDoneDeps["setMessages"],
       voiceTtsConfigured: !!voiceStatus?.tts_configured,
     }),
     [
@@ -4948,6 +5392,47 @@ function App() {
     trackTaskUntilDoneRef.current = trackTaskUntilDone;
   }, [trackTaskUntilDone]);
 
+  const resumedActiveTasksRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    Object.assign(taskIdToSessionIdRef.current, loadTaskSessionMap());
+  }, []);
+
+  useEffect(() => {
+    if (!health?.ok || !sessionId?.trim()) return;
+    Object.assign(taskIdToSessionIdRef.current, loadTaskSessionMap());
+    if (tasksList.length === 0) {
+      void fetchTasksList({ silent: true });
+      return;
+    }
+    for (const task of tasksList) {
+      if (!isTaskActiveStatus(task.status)) continue;
+      if (taskIdToSessionIdRef.current[task.id] !== sessionId) continue;
+      if (resumedActiveTasksRef.current.has(task.id)) continue;
+      resumedActiveTasksRef.current.add(task.id);
+      setRunningTaskChips((prev) =>
+        prev[task.id] !== undefined ? prev : { ...prev, [task.id]: { pct: 5, message: "en cours…" } },
+      );
+      setMessages((prev) => {
+        if (prev.some((m) => m.taskId === task.id)) return prev;
+        const label = task.label?.trim();
+        const userText = label && !isGenericTaskLabel(label, task.id) ? label : null;
+        const next = [...prev];
+        if (userText && !prev.some((m) => m.role === "user" && m.text === userText)) {
+          next.push({ role: "user", text: userText });
+        }
+        next.push({
+          role: "assistant",
+          text: "Reprise de la tâche en cours…",
+          taskId: task.id,
+          streaming: true,
+        });
+        return next;
+      });
+      trackTaskUntilDone(task.id);
+    }
+  }, [health?.ok, sessionId, tasksList, trackTaskUntilDone, fetchTasksList]);
+
   const handleSend = async (overrideMessage?: string, fromVoice?: boolean) => {
     const content = (overrideMessage ?? message).trim();
     const hasContent = content || attachments.length > 0;
@@ -4964,6 +5449,15 @@ function App() {
       const cleaned = prev.filter((m) => !(m.role === "assistant" && m.streaming));
       return [...cleaned, { role: "user", text: userMessage }];
     });
+    if (sessionId) {
+      setChatThreads((prev) =>
+        prev.map((th) =>
+          th.id === sessionId
+            ? { ...th, lastSnippet: userMessage.slice(0, 140), updatedAt: new Date().toISOString() }
+            : th,
+        ),
+      );
+    }
     if (overrideMessage === undefined) setMessage("");
     chatInputRef.current?.focus();
 
@@ -5010,6 +5504,7 @@ function App() {
         newSession: useNewSession ? true : undefined,
         queueMode: steerTarget ? chatDeliveryMode : undefined,
         targetTaskId: steerTarget,
+        incognito: chatIncognito ? true : undefined,
         port: DAEMON_PORT,
       });
       if (ack?.queued) {
@@ -5073,9 +5568,32 @@ function App() {
       }
       const ackText = ack?.message ?? "Request received. You can follow progress in the Tasks tab.";
       if (ack?.task_id) {
+        // #region agent log
+        fetch("http://127.0.0.1:7708/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "0d82aa" },
+          body: JSON.stringify({
+            sessionId: "0d82aa",
+            location: "App.tsx:handleSend",
+            message: "message_ack",
+            hypothesisId: "B",
+            data: {
+              taskId: ack.task_id,
+              sessionId: ack.session_id,
+              queued: !!ack.queued,
+              steerTarget: steerTarget ?? null,
+              runningTaskIds: runningIds,
+              chatDeliveryMode,
+              sessionAtSend,
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+        // #endregion
         const sidResolved = (ack.session_id || sessionAtSend || "").trim();
         if (sidResolved) {
           taskIdToSessionIdRef.current[ack.task_id] = sidResolved;
+          persistTaskSession(ack.task_id, sidResolved);
         }
         lastChatTaskIdRef.current = ack.task_id;
         ackTextByTaskRef.current[ack.task_id] = ackText;
@@ -5087,6 +5605,7 @@ function App() {
       if (ack?.task_id) {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
+        setCollapsedRootTasks((prev) => ({ ...prev, [ack.task_id]: false }));
         setSubAgentPanelCollapsed(false);
         void fetchTasksList({ silent: true });
         trackTaskUntilDone(ack.task_id);
@@ -5182,6 +5701,15 @@ function App() {
                 <span>{t("sidebar.daemon_disconnected")} <code>akasha start</code></span>
               )}
             </div>
+            <button
+              type="button"
+              className="btn-secondary sidebar-resume-btn"
+              disabled={!health?.ok || resumeBriefBusy || !sessionId?.trim()}
+              onClick={() => void handleResumeBrief()}
+              title={locale === "en" ? "Fetch session resume brief from daemon" : "Charger le brief de reprise depuis le daemon"}
+            >
+              {resumeBriefBusy ? "…" : locale === "en" ? "Resume" : "Reprendre"}
+            </button>
             {Object.keys(pendingHumanInput).length > 0 && (
               <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label={t("pending_actions.region_label")}>
                 <button
@@ -5248,6 +5776,11 @@ function App() {
                 </button>
                 <NotificationCenter />
                 <PermissionsBell fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+                <SteeringQueueBell
+                  taskId={activeSteeringTaskId}
+                  fetchEndpoint={fetchSystemEndpoint}
+                  locale={locale}
+                />
                 <Tooltip content={uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}>
                   <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
                 </Tooltip>
@@ -5278,29 +5811,12 @@ function App() {
       <main className="main" id="main-content" tabIndex={-1}>
         {/* Onboarding: first steps modal (dismissible, "Ne plus afficher" stored in localStorage) */}
         {showOnboarding && (
-          <div className="human-input-overlay onboarding-overlay" role="dialog" aria-labelledby="onboarding-title" aria-modal="true">
-            <div className="human-input-modal onboarding-modal">
-              <h2 id="onboarding-title">{t("onboarding.title")}</h2>
-              <p className="onboarding-intro">{t("onboarding.intro")}</p>
-              <ul className="onboarding-steps">
-                <li>{t("onboarding.step0")}</li>
-                <li>{t("onboarding.step1")}</li>
-                <li>{t("onboarding.step2")}</li>
-                <li>{t("onboarding.step3")}</li>
-              </ul>
-              <div className="onboarding-actions">
-                <button type="button" className="onboarding-doc-btn" onClick={() => { setTab("docs"); setShowOnboarding(false); }}>
-                  {t("onboarding.open_doc")}
-                </button>
-                <button type="button" className="onboarding-dismiss" onClick={() => { try { localStorage.setItem("akasha_onboarding_dismissed", "1"); } catch { /* ignore */ } setShowOnboarding(false); }}>
-                  {t("onboarding.dismiss")}
-                </button>
-                <button type="button" className="human-input-close" onClick={() => setShowOnboarding(false)} aria-label={t("common.close")}>
-                  ×
-                </button>
-              </div>
-            </div>
-          </div>
+          <OnboardingWizard
+            locale={locale}
+            daemonOk={!!health?.ok}
+            onComplete={() => setShowOnboarding(false)}
+            t={t}
+          />
         )}
         {/* Human-in-the-loop: visible on all tabs */}
         {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (
@@ -5375,6 +5891,56 @@ function App() {
               <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label={t("common.close")}>
                 ×
               </button>
+            </div>
+          </div>
+        )}
+        {handoffDialogOpen && (
+          <div className="human-input-overlay" role="dialog" aria-modal="true">
+            <div className="human-input-modal">
+              <h2>{locale === "en" ? "Resume with another model" : "Reprendre avec un autre modèle"}</h2>
+              <label>
+                {locale === "en" ? "Provider" : "Provider"}
+                <input
+                  className="settings-input"
+                  value={handoffTargetProvider}
+                  onChange={(e) => setHandoffTargetProvider(e.target.value)}
+                  placeholder={locale === "en" ? "optional" : "optionnel"}
+                />
+              </label>
+              <label>
+                {locale === "en" ? "Model" : "Modèle"}
+                <input
+                  className="settings-input"
+                  list="handoff-models"
+                  value={handoffTargetModel}
+                  onChange={(e) => setHandoffTargetModel(e.target.value)}
+                  placeholder="provider/model"
+                />
+                <datalist id="handoff-models">
+                  {handoffModels.map((row) => (
+                    <option key={`${row.provider}:${row.model}`} value={row.model}>
+                      {row.provider}
+                    </option>
+                  ))}
+                </datalist>
+              </label>
+              <label>
+                task_id ({locale === "en" ? "optional" : "optionnel"})
+                <input
+                  className="settings-input"
+                  value={handoffTaskId}
+                  onChange={(e) => setHandoffTaskId(e.target.value)}
+                />
+              </label>
+              <div className="onboarding-actions">
+                <button type="button" className="btn-secondary" onClick={() => setHandoffDialogOpen(false)}>
+                  {locale === "en" ? "Close" : "Fermer"}
+                </button>
+                <button type="button" className="btn-primary" disabled={handoffBusy} onClick={() => void submitSessionHandoff()}>
+                  {handoffBusy ? "…" : locale === "en" ? "Send handoff" : "Envoyer le handoff"}
+                </button>
+              </div>
+              {handoffStatus ? <p className="muted">{handoffStatus}</p> : null}
             </div>
           </div>
         )}
@@ -5591,6 +6157,17 @@ function App() {
                     </button>
                   ) : null}
                   <div className="chat-panel-toolbar-actions">
+                    <button
+                      type="button"
+                      className="btn-secondary chat-toolbar-btn"
+                      onClick={() => {
+                        setHandoffDialogOpen(true);
+                        setHandoffStatus(null);
+                        void loadHandoffModels();
+                      }}
+                    >
+                      {locale === "en" ? "Resume with another model" : "Reprendre avec un autre modèle"}
+                    </button>
                     {messages.length > 0 && (
                       <button type="button" className="btn-secondary chat-toolbar-btn" onClick={exportChatTranscript}>
                         {t("chat.export_transcript")}
@@ -5747,7 +6324,9 @@ function App() {
                   {chatToolBatchSummary}
                 </div>
               )}
-              {Object.keys(runningTaskChips).length > 0 && (
+              <div ref={chatEndRef} aria-hidden />
+            </div>
+            {Object.keys(runningTaskChips).length > 0 && (
                 <div className="chat-subagents-panel">
                   <button
                     type="button"
@@ -5769,7 +6348,7 @@ function App() {
                     </span>
                   </button>
                   {!subAgentPanelCollapsed && (
-                    <div id="subagents-detail" className="chat-subagents-detail" role="region" aria-label={t("chat.agent_activity_region")}>
+                    <div ref={subagentsDetailRef} id="subagents-detail" className="chat-subagents-detail" role="region" aria-label={t("chat.agent_activity_region")}>
                       {Object.entries(runningTaskEvents).filter(([, ev]) => ev.length > 0).length === 0 ? (
                         <p className="chat-subagents-empty">
                           {t("chat.no_events_yet")}
@@ -5934,8 +6513,6 @@ function App() {
                   )}
                 </div>
               )}
-              <div ref={chatEndRef} aria-hidden />
-            </div>
             {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (() => {
               const pendingTaskId = Object.keys(pendingHumanInput)[0];
               const pending = pendingTaskId ? pendingHumanInput[pendingTaskId] : null;
@@ -6178,7 +6755,18 @@ function App() {
                   className="input-group-field"
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleSend()}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" || e.shiftKey) return;
+                    e.preventDefault();
+                    if (e.altKey) {
+                      setChatDeliveryMode("follow_up");
+                    } else if (runningTaskChips && Object.keys(runningTaskChips).length > 0) {
+                      setChatDeliveryMode("steering");
+                    } else {
+                      setChatDeliveryMode("immediate");
+                    }
+                    void handleSend();
+                  }}
                   placeholder={locale === "en" ? "Your message…" : "Votre message…"}
                   disabled={loading}
                   aria-describedby="send-hint"
@@ -6197,7 +6785,9 @@ function App() {
               </div>
             </div>
             <p id="send-hint" className="hint sr-only">
-              Entrée pour envoyer
+              {locale === "en"
+                ? "Enter to send (steering when a task is running; Alt+Enter for follow-up)"
+                : "Entrée pour envoyer (steering si tâche active ; Alt+Entrée pour follow-up)"}
             </p>
           </section>
         )}
@@ -6226,6 +6816,12 @@ function App() {
         {tab === "cookbook" && (
           <section id="panel-cookbook" role="tabpanel" aria-labelledby="tab-cookbook" className="panel cookbook-panel-wrap">
             <CookbookPanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+          </section>
+        )}
+
+        {tab === "notes" && (
+          <section id="panel-notes" role="tabpanel" aria-labelledby="tab-notes" className="panel notes-panel-wrap">
+            <NotesPanel t={t} />
           </section>
         )}
 
@@ -6459,9 +7055,17 @@ function App() {
                       <div className="task-center-selected-meta">
                         <span className={"activity-task-status-pill status-" + selectedTask.status}>{selectedTask.status}</span>
                         {selectedTask.assigned_agent && <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(selectedTask.assigned_agent)}>{selectedTask.assigned_agent}</span>}
+                        {selectedTaskSummary?.progressPct != null && selectedTask.status === "running" && (
+                          <span className="task-live-progress-pill">
+                            {t("tasks.progress_pct_summary").replace("{{pct}}", String(selectedTaskSummary.progressPct))}
+                          </span>
+                        )}
                         {selectedTask.created_at && <span>{formatRelativeTimeLabel(selectedTask.created_at, locale)}</span>}
                       </div>
                     </div>
+                    {selectedTaskSummary?.routeHint ? (
+                      <p className="task-center-selected-route">{selectedTaskSummary.routeHint}</p>
+                    ) : null}
                     {selectedTaskSummary?.latestSummary ? (
                       <p className="task-center-selected-text">{selectedTaskSummary.latestSummary}</p>
                     ) : selectedTaskSummary?.runningChip?.message ? (
@@ -6873,6 +7477,15 @@ function App() {
                 onClick={() => setCalendarSubTab("schedules")}
               >
                 {t("calendar.recurring")}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={calendarSubTab === "wakeups"}
+                className={calendarSubTab === "wakeups" ? "active" : ""}
+                onClick={() => setCalendarSubTab("wakeups")}
+              >
+                Rappels agent
               </button>
             </div>
             <button
@@ -7315,6 +7928,104 @@ function App() {
                 )}
               </div>
             )}
+            {!calendarLoading && calendarSubTab === "wakeups" && (
+              <div className="calendar-wakeups-panel">
+                <h3>Rappels agent (wakeups)</h3>
+                <p className="calendar-wakeups-hint muted">
+                  Messages programmés que l&apos;agent enverra dans la session courante à l&apos;heure prévue.
+                </p>
+                <form
+                  className="calendar-wakeup-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void (async () => {
+                      const minutes = parseInt(wakeupFormMinutes, 10);
+                      if (!sessionId || !wakeupFormMessage.trim() || !Number.isFinite(minutes) || minutes <= 0) return;
+                      setWakeupSaving(true);
+                      try {
+                        const fire_at = new Date(Date.now() + minutes * 60_000).toISOString();
+                        const res = await fetch(e2eDaemonHttpUrl("/api/wakeups"), {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            session_id: sessionId,
+                            message: wakeupFormMessage.trim(),
+                            fire_at,
+                          }),
+                        });
+                        if (res.ok) {
+                          setWakeupFormMessage("");
+                          await fetchWakeups();
+                        }
+                      } finally {
+                        setWakeupSaving(false);
+                      }
+                    })();
+                  }}
+                >
+                  <label className="calendar-wakeup-field">
+                    <span>Dans (minutes)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={525600}
+                      value={wakeupFormMinutes}
+                      onChange={(e) => setWakeupFormMinutes(e.target.value)}
+                      disabled={wakeupSaving}
+                    />
+                  </label>
+                  <label className="calendar-wakeup-field calendar-wakeup-field-grow">
+                    <span>Message</span>
+                    <input
+                      type="text"
+                      value={wakeupFormMessage}
+                      onChange={(e) => setWakeupFormMessage(e.target.value)}
+                      placeholder="Ex. Relancer la revue du PR"
+                      disabled={wakeupSaving}
+                    />
+                  </label>
+                  <button type="submit" className="refresh-btn" disabled={wakeupSaving || !sessionId}>
+                    {wakeupSaving ? "…" : "Programmer"}
+                  </button>
+                </form>
+                {!sessionId && (
+                  <p className="muted">Ouvrez ou démarrez une session de chat pour créer un rappel.</p>
+                )}
+                {wakeups.length === 0 ? (
+                  <p className="empty-state">Aucun rappel programmé.</p>
+                ) : (
+                  <ul className="calendar-wakeup-list" role="list">
+                    {wakeups.map((w) => (
+                      <li key={w.id} className={`calendar-wakeup-item calendar-wakeup-item--${w.status}`}>
+                        <div className="calendar-wakeup-meta">
+                          <strong>{new Date(w.fire_at).toLocaleString()}</strong>
+                          <span className="calendar-wakeup-status">{w.status}</span>
+                        </div>
+                        <p className="calendar-wakeup-message">{w.message}</p>
+                        {w.status === "pending" && (
+                          <button
+                            type="button"
+                            className="calendar-wakeup-delete"
+                            onClick={() => {
+                              void (async () => {
+                                try {
+                                  await fetch(e2eDaemonHttpUrl(`/api/wakeups/${encodeURIComponent(w.id)}`), { method: "DELETE" });
+                                  await fetchWakeups();
+                                } catch {
+                                  /* ignore */
+                                }
+                              })();
+                            }}
+                          >
+                            {t("settings.delete")}
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
             {calendarSelectedTaskId && (
                   <div
                     className="calendar-detail-modal-overlay"
@@ -7564,6 +8275,135 @@ function App() {
               <p className="memory-hygiene-hint" role="status">
                 {memoryHygieneHint}
               </p>
+            ) : null}
+            {memoryAdvancedSettings ? (
+              <details className="memory-advanced-settings">
+                <summary>{t("memory.advanced_settings_title")}</summary>
+                <div className="settings-list memory-advanced-settings-body">
+                  <label className="memory-advanced-toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAdvancedSettings.multi_query ?? false}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({ ...s!, multi_query: e.target.checked }))
+                      }
+                    />
+                    {t("memory.advanced_multi_query")}
+                  </label>
+                  <label className="memory-advanced-toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAdvancedSettings.hyde ?? false}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({ ...s!, hyde: e.target.checked }))
+                      }
+                    />
+                    {t("memory.advanced_hyde")}
+                  </label>
+                  <label className="memory-advanced-toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAdvancedSettings.rrf ?? true}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({ ...s!, rrf: e.target.checked }))
+                      }
+                    />
+                    {t("memory.advanced_rrf")}
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>{t("memory.advanced_rollup_days")}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={3650}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.rollup_days ?? 90}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          rollup_days: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>semantic_top_k</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.semantic_top_k ?? 8}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          semantic_top_k: Math.max(1, parseInt(e.target.value, 10) || 1),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>graph_expand_hops</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={8}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.graph_expand_hops ?? 2}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          graph_expand_hops: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>user_rag_top_k</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={50}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.user_rag_top_k ?? 6}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          user_rag_top_k: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>workspace_graph_top_k</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={50}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.workspace_graph_top_k ?? 6}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          workspace_graph_top_k: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={memoryAdvancedSaving}
+                    onClick={() => void saveMemoryAdvancedSettings()}
+                  >
+                    {memoryAdvancedSaving ? t("common.loading") : t("memory.advanced_save")}
+                  </button>
+                  {memoryAdvancedMessage ? (
+                    <p className="muted" role="status">{memoryAdvancedMessage}</p>
+                  ) : null}
+                  <p className="settings-doc muted">{t("memory.advanced_settings_hint")}</p>
+                </div>
+              </details>
             ) : null}
             <button
               type="button"
@@ -8473,6 +9313,9 @@ function App() {
                 </select>
                 <span className="settings-theme-hint">{t("settings.theme_saved")}</span>
               </dd>
+              <dd className="settings-theme-editor-cell">
+                <ThemeEditorPanel theme={theme} t={t} />
+              </dd>
               <dt>{t("settings.ui_mode")}</dt>
               <dd>
                 <select
@@ -8611,6 +9454,24 @@ function App() {
                   <button
                     type="button"
                     role="tab"
+                    aria-selected={systemSubTab === "policy"}
+                    className={systemSubTab === "policy" ? "active" : ""}
+                    onClick={() => setSystemSubTab("policy")}
+                  >
+                    {t("settings.system_subtab_policy")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={systemSubTab === "connectors"}
+                    className={systemSubTab === "connectors" ? "active" : ""}
+                    onClick={() => setSystemSubTab("connectors")}
+                  >
+                    {t("settings.system_subtab_connectors")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
                     aria-selected={systemSubTab === "health"}
                     className={systemSubTab === "health" ? "active" : ""}
                     onClick={() => setSystemSubTab("health")}
@@ -8620,27 +9481,82 @@ function App() {
                 </div>
 
                 {systemSubTab === "general" && (
-                  <dl className="settings-list">
-                    <dt>{t("settings.daemon_port")}</dt>
-                    <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
-                    <dt>{t("settings.data_dir")}</dt>
-                    <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
-                    <dt>{t("settings.documentation")}</dt>
-                    <dd>
-                      <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
-                        {t("settings.open_docs_tab")}
-                      </button>
-                      <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
-                    </dd>
-                    <dt>{t("settings.utility_model")}</dt>
-                    <dd>
-                      <p className="settings-doc muted">{t("settings.utility_model_hint")}</p>
-                    </dd>
-                  </dl>
+                  <>
+                    <dl className="settings-list">
+                      <dt>{t("settings.daemon_port")}</dt>
+                      <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
+                      <dt>{t("settings.data_dir")}</dt>
+                      <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
+                      <dt>{t("settings.documentation")}</dt>
+                      <dd>
+                        <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
+                          {t("settings.open_docs_tab")}
+                        </button>
+                        <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
+                      </dd>
+                      <dt>{t("settings.utility_model")}</dt>
+                      <dd>
+                        <p className="settings-doc muted">{t("settings.utility_model_hint")}</p>
+                      </dd>
+                    </dl>
+                    <OpenClawMigrationPanel locale={locale} fetchEndpoint={fetchSystemEndpoint} />
+                  </>
                 )}
+
+                {systemSubTab === "policy" && <ToolsPolicyPanel t={t} />}
+
+                {systemSubTab === "connectors" && <ConnectorsPanel t={t} />}
 
                 {systemSubTab === "plugins" && (
                   <>
+                    <section className="settings-card">
+                      <h4>{locale === "en" ? "Skills catalog" : "Catalogue skills"}</h4>
+                      <p className="settings-doc muted">
+                        {locale === "en"
+                          ? "Browse community skills or list locally installed skills from the daemon."
+                          : "Parcourir le catalogue communautaire ou lister les skills installés via le daemon."}
+                      </p>
+                      <div className="settings-row-actions">
+                        <a
+                          className="btn-secondary"
+                          href="https://azerothl.github.io/Akasha_app/skills.html"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {locale === "en" ? "Open gallery" : "Ouvrir la galerie"}
+                        </a>
+                        <a
+                          className="btn-secondary"
+                          href="https://github.com/azerothl/Akasha_skills"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          GitHub
+                        </a>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={skillsCatalogLoading}
+                          onClick={() => void loadInstalledSkills()}
+                        >
+                          {skillsCatalogLoading
+                            ? t("common.loading")
+                            : locale === "en"
+                              ? "List installed"
+                              : "Lister installés"}
+                        </button>
+                      </div>
+                      {skillsCatalogText ? (
+                        <pre className="onboarding-doctor-output">{skillsCatalogText}</pre>
+                      ) : null}
+                    </section>
+                    <PluginCatalogPanel
+                      fetchEndpoint={fetchSystemEndpoint}
+                      requestEndpoint={requestSystemEndpoint}
+                      installedIds={new Set(pluginStatusList.map((p) => p.id ?? "").filter(Boolean))}
+                      onInstalled={() => void fetchPluginStatus()}
+                      locale={locale}
+                    />
                     <h3 className="settings-subtitle">{t("settings.plugins_status_title")}</h3>
                     <p className="settings-doc muted">{t("settings.plugin_reputation_desc")}</p>
                     <div className="settings-plugin-status-header">
@@ -8832,6 +9748,11 @@ function App() {
                       loadError: t("settings.system_health_load_error"),
                       detailsToggle: t("settings.system_health_details_toggle"),
                       summaryUnavailable: t("settings.system_health_summary_unavailable"),
+                      editPolicy: t("settings.system_health_edit_policy"),
+                    }}
+                    onEditToolsPolicy={() => {
+                      setSettingsSection("system");
+                      setSystemSubTab("policy");
                     }}
                   />
                 )}
@@ -8858,6 +9779,10 @@ function App() {
                     <div className="settings-agent-tab-content">
                       {agentProfileSubTab === "identity" && (
                         <>
+                          <p className="settings-doc muted settings-identity-hint">
+                            {t("settings.agent_identity_constitution_hint")}
+                            <InfoTip label={t("settings.agent_subtab_identity")} content={t("settings.agent_identity_constitution_hint")} />
+                          </p>
                           <dl className="settings-list">
                             <dt>{t("settings.agent_profile_name")}</dt>
                             <dd>
@@ -8917,6 +9842,112 @@ function App() {
                                 </div>
                               </div>
                             </dd>
+                            <dt>{t("settings.agent_constitution_tone")}</dt>
+                            <dd>
+                              <input
+                                type="text"
+                                aria-label={t("settings.agent_constitution_tone")}
+                                className="settings-input"
+                                maxLength={256}
+                                value={agentConstitution.tone}
+                                onChange={(e) => setAgentConstitution((c) => ({ ...c, tone: e.target.value.slice(0, 256) }))}
+                                placeholder={t("settings.agent_constitution_tone_placeholder")}
+                              />
+                            </dd>
+                            <dt>{t("settings.agent_constitution_values")}</dt>
+                            <dd>
+                              <div className="settings-list-editor">
+                                {agentConstitution.values.length === 0 ? (
+                                  <p className="settings-doc muted">{t("settings.agent_list_empty")}</p>
+                                ) : (
+                                  <ul className="settings-string-list">
+                                    {agentConstitution.values.map((line, i) => (
+                                      <li key={i} className="settings-list-item">
+                                        <input
+                                          type="text"
+                                          className="settings-input"
+                                          value={line}
+                                          onChange={(e) => {
+                                            const next = [...agentConstitution.values];
+                                            next[i] = e.target.value;
+                                            setAgentConstitution((c) => ({ ...c, values: next }));
+                                          }}
+                                        />
+                                        <button
+                                          type="button"
+                                          className="settings-list-item-delete"
+                                          onClick={() =>
+                                            setAgentConstitution((c) => ({
+                                              ...c,
+                                              values: c.values.filter((_, j) => j !== i),
+                                            }))
+                                          }
+                                          aria-label={t("settings.agent_delete_line")}
+                                        >
+                                          ×
+                                        </button>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  onClick={() =>
+                                    setAgentConstitution((c) => ({ ...c, values: [...c.values, ""] }))
+                                  }
+                                >
+                                  {t("settings.agent_add_line")}
+                                </button>
+                              </div>
+                            </dd>
+                            <dt>{t("settings.agent_constitution_constraints")}</dt>
+                            <dd>
+                              <div className="settings-list-editor">
+                                {agentConstitution.constraints.length === 0 ? (
+                                  <p className="settings-doc muted">{t("settings.agent_list_empty")}</p>
+                                ) : (
+                                  <ul className="settings-string-list">
+                                    {agentConstitution.constraints.map((line, i) => (
+                                      <li key={i} className="settings-list-item">
+                                        <input
+                                          type="text"
+                                          className="settings-input"
+                                          value={line}
+                                          onChange={(e) => {
+                                            const next = [...agentConstitution.constraints];
+                                            next[i] = e.target.value;
+                                            setAgentConstitution((c) => ({ ...c, constraints: next }));
+                                          }}
+                                        />
+                                        <button
+                                          type="button"
+                                          className="settings-list-item-delete"
+                                          onClick={() =>
+                                            setAgentConstitution((c) => ({
+                                              ...c,
+                                              constraints: c.constraints.filter((_, j) => j !== i),
+                                            }))
+                                          }
+                                          aria-label={t("settings.agent_delete_line")}
+                                        >
+                                          ×
+                                        </button>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  onClick={() =>
+                                    setAgentConstitution((c) => ({ ...c, constraints: [...c.constraints, ""] }))
+                                  }
+                                >
+                                  {t("settings.agent_add_line")}
+                                </button>
+                              </div>
+                            </dd>
                           </dl>
                         </>
                       )}
@@ -8926,6 +9957,16 @@ function App() {
                           <dd>
                             <textarea aria-label={t("settings.agent_profile_personality")} className="settings-textarea" rows={8} maxLength={AGENT_PROFILE_LIMITS.personality} value={agentProfile.personality} onChange={(e) => setAgentProfile((p) => ({ ...p, personality: e.target.value.slice(0, AGENT_PROFILE_LIMITS.personality) }))} placeholder={t("settings.agent_profile_personality")} />
                             <span className="settings-char-count">{agentProfile.personality.length} / {AGENT_PROFILE_LIMITS.personality}</span>
+                          </dd>
+                          <dt>{t("settings.agent_profile_system_prompt")}</dt>
+                          <dd>
+                            <textarea aria-label={t("settings.agent_profile_system_prompt")} className="settings-textarea" rows={6} maxLength={4000} value={agentProfile.system_prompt} onChange={(e) => setAgentProfile((p) => ({ ...p, system_prompt: e.target.value.slice(0, 4000) }))} placeholder={t("settings.agent_profile_system_prompt_hint")} />
+                            <span className="settings-char-count">{agentProfile.system_prompt.length} / 4000</span>
+                          </dd>
+                          <dt>{t("settings.agent_profile_temperature")}</dt>
+                          <dd>
+                            <input type="number" aria-label={t("settings.agent_profile_temperature")} className="settings-input" min={0} max={2} step={0.05} value={agentProfile.temperature} onChange={(e) => setAgentProfile((p) => ({ ...p, temperature: e.target.value }))} placeholder="0.7" />
+                            <span className="settings-doc muted">{t("settings.agent_profile_temperature_hint")}</span>
                           </dd>
                         </dl>
                       )}
@@ -9158,7 +10199,7 @@ function App() {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; const formality = agentProfile.formality === "formal" || agentProfile.formality === "informal" ? agentProfile.formality : null; await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, formality, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; const formality = agentProfile.formality === "formal" || agentProfile.formality === "informal" ? agentProfile.formality : null; const tempRaw = agentProfile.temperature.trim(); const temperature = tempRaw ? Math.min(2, Math.max(0, parseFloat(tempRaw))) : undefined; const profileName = agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name); const profileRole = agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role); await invoke("post_agent_profile", { body: { name: profileName || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: profileRole || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, formality, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined, system_prompt: agentProfile.system_prompt.trim().slice(0, 4000) || undefined, temperature: Number.isFinite(temperature) ? temperature : undefined }, port: DAEMON_PORT }); const idBody = JSON.stringify({ name: profileName || undefined, role: profileRole || undefined, tone: agentConstitution.tone.trim() || undefined, values: agentConstitution.values.map((v) => v.trim()).filter(Boolean), constraints: agentConstitution.constraints.map((v) => v.trim()).filter(Boolean) }); const idRes = await requestSystemEndpoint("POST", "/api/agent-identity", idBody); if (!idRes.ok) throw new Error(idRes.text.slice(0, 200)); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
                   </>
                 )}
               </div>
@@ -9248,71 +10289,18 @@ function App() {
                 </div>
                 <div className="settings-data-scroll">
                   {dataSourcesSubTab === "rag" && (
-                    <>
-                      <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
-                      <p className="settings-doc muted">{t("settings.user_rag_desc")}</p>
-                      <input
-                        ref={userRagFileInputRef}
-                        type="file"
-                        accept=".txt,.md,.csv,.json,text/*"
-                        className="sr-only"
-                        aria-hidden
-                        onChange={async (e) => {
-                          const file = e.target.files?.[0];
-                          if (!file) return;
-                          try {
-                            const { content_base64, mime_type } = await readFileAsBase64(file);
-                            await invoke("add_user_rag_document", {
-                              name: file.name,
-                              content_base64: content_base64,
-                              mime_type: mime_type,
-                              port: DAEMON_PORT,
-                            });
-                            fetchUserRagDocuments();
-                          } catch (err) {
-                            setUserRagError(String(err));
-                          }
-                          e.target.value = "";
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="refresh-btn"
-                        onClick={() => userRagFileInputRef.current?.click()}
-                        disabled={userRagLoading}
-                      >
-                        {t("settings.add_document")}
-                      </button>
-                      {userRagLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
-                      {!userRagLoading && userRagDocuments.length === 0 && (
-                        <p className="empty-state">{t("settings.no_documents")}</p>
-                      )}
-                      {!userRagLoading && userRagDocuments.length > 0 && (
-                        <ul className="settings-doc-list" role="list">
-                          {userRagDocuments.map((d) => (
-                            <li key={d.id} className="settings-doc-item">
-                              <span className="settings-doc-name">{d.name}</span>
-                              <span className="settings-doc-meta">{d.added_at.slice(0, 10)}</span>
-                              <button
-                                type="button"
-                                className="settings-doc-delete"
-                                aria-label={`Supprimer ${d.name}`}
-                                onClick={async () => {
-                                  try {
-                                    await invoke("delete_user_rag_document", { id: d.id, port: DAEMON_PORT });
-                                    fetchUserRagDocuments();
-                                  } catch (err) {
-                                    setUserRagError(String(err));
-                                  }
-                                }}
-                              >
-                                {t("settings.delete")}
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </>
+                    <UserRagPanel
+                      t={t}
+                      locale={locale}
+                      daemonPort={DAEMON_PORT}
+                      documents={userRagDocuments}
+                      loading={userRagLoading}
+                      error={userRagError}
+                      onError={setUserRagError}
+                      onRefresh={fetchUserRagDocuments}
+                      fetchEndpoint={fetchSystemEndpoint}
+                      readFileAsBase64={readFileAsBase64}
+                    />
                   )}
                   {dataSourcesSubTab === "project_graph" && (
                     <>
@@ -9515,12 +10503,56 @@ function App() {
                   <button type="button" className="refresh-btn sidebar-right-refresh" onClick={createChatThread}>
                     {t("chat.new_thread")}
                   </button>
-                  {[...chatThreads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).length === 0 ? (
+                  <div className="sidebar-right-search-wrap">
+                    <input
+                      type="search"
+                      className="sidebar-right-search"
+                      placeholder={locale === "en" ? "Search sessions..." : "Rechercher une session..."}
+                      value={chatThreadSearch}
+                      onChange={(e) => setChatThreadSearch(e.target.value)}
+                      aria-label={locale === "en" ? "Search sessions" : "Rechercher une session"}
+                    />
+                  </div>
+                  {chatThreadFolders.length > 0 ? (
+                    <div className="sidebar-right-filters" role="tablist" aria-label={locale === "en" ? "Session folders" : "Dossiers de session"}>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={!chatThreadFolderFilter}
+                        className={!chatThreadFolderFilter ? "selected" : ""}
+                        onClick={() => setChatThreadFolderFilter("")}
+                      >
+                        {locale === "en" ? "All" : "Tous"}
+                      </button>
+                      {chatThreadFolders.map((f) => (
+                        <button
+                          key={f}
+                          type="button"
+                          role="tab"
+                          aria-selected={chatThreadFolderFilter === f}
+                          className={chatThreadFolderFilter === f ? "selected" : ""}
+                          onClick={() => setChatThreadFolderFilter(f)}
+                        >
+                          {f}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="sidebar-right-search-wrap">
+                    <input
+                      type="text"
+                      className="sidebar-right-search"
+                      placeholder={locale === "en" ? "Folder for active session" : "Dossier pour la session active"}
+                      value={chatThreads.find((th) => th.id === sessionId)?.folder ?? ""}
+                      onChange={(e) => setActiveThreadFolder(e.target.value)}
+                      aria-label={locale === "en" ? "Session folder" : "Dossier de session"}
+                    />
+                  </div>
+                  {filteredChatThreads.length === 0 ? (
                     <p className="empty-state">{t("chat.threads_empty")}</p>
                   ) : (
                     <ul className="sidebar-right-task-list" role="list">
-                      {[...chatThreads]
-                        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                      {filteredChatThreads
                         .map((th) => {
                           const active = sessionId === th.id;
                           return (
@@ -9543,6 +10575,9 @@ function App() {
                                   </span>
                                 </div>
                                 <div className="sidebar-right-task-meta">
+                                  {th.folder?.trim() ? (
+                                    <span className="sidebar-right-task-folder">{th.folder.trim()}</span>
+                                  ) : null}
                                   <span className="sidebar-right-task-relative">{formatRelativeTimeLabel(th.updatedAt, locale)}</span>
                                 </div>
                               </div>
@@ -9761,11 +10796,12 @@ function App() {
       <CreateTaskDialog
         open={createTaskDialogOpen}
         onClose={() => setCreateTaskDialogOpen(false)}
-        sessionId={sessionId}
+        sessionId={sessionId ?? ""}
         t={t}
         eventTriggersEnabled
         onImmediateCreated={(taskId) => {
-          taskIdToSessionIdRef.current[taskId] = sessionId;
+          taskIdToSessionIdRef.current[taskId] = sessionId ?? "";
+          persistTaskSession(taskId, sessionId ?? "");
           setRunningTaskChips((prev) => ({ ...prev, [taskId]: { pct: 0, message: "en cours…" } }));
           setRunningTaskEvents((prev) => (prev[taskId] ? prev : { ...prev, [taskId]: [] }));
           trackTaskUntilDone(taskId);
