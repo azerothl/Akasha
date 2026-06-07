@@ -43,6 +43,7 @@ pub mod browser;
 pub mod channels;
 pub mod channel_access;
 pub mod code_rag;
+pub mod connectors_config;
 pub mod constitution;
 pub mod studio_task_snapshot;
 pub mod daemon;

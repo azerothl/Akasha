@@ -14859,6 +14859,50 @@ pub async fn handle_api(
         );
     }
 
+    // POST /api/vault — set one secret (body: {"key": "KEY_NAME", "value": "secret"})
+    if method == "POST" && path == "/api/vault" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let key = body_json
+            .as_ref()
+            .and_then(|j| j.get("key"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let value = body_json
+            .as_ref()
+            .and_then(|j| j.get("value"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        match (key, value) {
+            (Some(k), Some(v)) if !k.is_empty() && !v.is_empty() => {
+                match akasha_vault::open_vault(data_dir) {
+                    Ok(vault) => match vault.set(&k, &v) {
+                        Ok(()) => {
+                            return json_response(
+                                "200 OK",
+                                &serde_json::json!({ "ok": true, "key": k }).to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            return json_response(
+                                "500 Internal Server Error",
+                                &serde_json::json!({ "error": e.to_string() }).to_string(),
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        return json_response(
+                            "503 Service Unavailable",
+                            &serde_json::json!({ "error": e.to_string() }).to_string(),
+                        );
+                    }
+                }
+            }
+            _ => return json_response("400 Bad Request", r#"{"error":"missing key or value"}"#),
+        }
+    }
+
     // DELETE /api/vault — remove one key (body: {"key": "KEY_NAME"})
     if method == "DELETE" && path == "/api/vault" {
         let body_json = body
@@ -16139,6 +16183,55 @@ pub async fn handle_api(
         plugin_registry.reload();
         return json_response("200 OK", r#"{"reloaded":true}"#);
     }
+    if method == "GET" && path == "/api/tools/policy" {
+        let policy_path = data_dir.join("tools_policy.yaml");
+        let policy = akasha_tools::ToolsPolicy::load_from_path(&policy_path).unwrap_or_default();
+        let body = serde_json::json!({
+            "policy": policy,
+            "path": policy_path.display().to_string(),
+            "exists": policy_path.is_file(),
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/tools/policy" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let policy_value = body_json
+            .as_ref()
+            .and_then(|j| j.get("policy").cloned())
+            .or_else(|| body_json.clone());
+        let Some(policy_value) = policy_value else {
+            return json_response("400 Bad Request", r#"{"error":"missing policy"}"#);
+        };
+        let policy: akasha_tools::ToolsPolicy = match serde_json::from_value(policy_value) {
+            Ok(p) => p,
+            Err(e) => {
+                let body = serde_json::json!({
+                    "error": "invalid_policy",
+                    "detail": e.to_string()
+                });
+                return json_response("400 Bad Request", &body.to_string());
+            }
+        };
+        let policy_path = data_dir.join("tools_policy.yaml");
+        if let Err(e) = policy.save_to_path(&policy_path) {
+            let body = serde_json::json!({
+                "error": "save_failed",
+                "detail": e.to_string()
+            });
+            return json_response("500 Internal Server Error", &body.to_string());
+        }
+        let reloaded = match tools_executor {
+            Some(exec) => reload_tools_executor_policy(exec, policy_path.as_path(), data_dir)
+                .await
+                .is_ok(),
+            None => false,
+        };
+        tracing::info!(path = %policy_path.display(), reloaded, "Tools policy saved from settings");
+        let body = serde_json::json!({ "ok": true, "reloaded": reloaded });
+        return json_response("200 OK", &body.to_string());
+    }
     if method == "POST" && path == "/api/tools/reload" {
         let policy_path = data_dir.join("tools_policy.yaml");
         match tools_executor {
@@ -16160,6 +16253,52 @@ pub async fn handle_api(
             None => {
                 let body = serde_json::json!({ "error": "tools_executor_unavailable" }).to_string();
                 return json_response("503 Service Unavailable", &body);
+            }
+        }
+    }
+    if method == "GET" && path == "/api/connectors" {
+        let connectors = crate::connectors_config::connectors_status(data_dir);
+        let config = crate::connectors_config::connectors_config_view(data_dir);
+        let restart_required = connectors
+            .iter()
+            .any(|c| c.enabled_in_file != c.active_in_process);
+        let body = serde_json::json!({
+            "connectors": connectors,
+            "config": config,
+            "restart_required": restart_required,
+            "matrix_note": "Matrix uses plugin matrix-channel sidecar and MATRIX_* env vars (manual setup)."
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/connectors" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let Some(ref j) = body_json else {
+            return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
+        };
+        let update: crate::connectors_config::ConnectorsUpdate =
+            match serde_json::from_value(j.clone()) {
+                Ok(u) => u,
+                Err(e) => {
+                    let body = serde_json::json!({
+                        "error": "invalid_body",
+                        "detail": e.to_string()
+                    });
+                    return json_response("400 Bad Request", &body.to_string());
+                }
+            };
+        match crate::connectors_config::apply_connectors_update(data_dir, &update) {
+            Ok(()) => {
+                let body = serde_json::json!({ "ok": true, "restart_required": true });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                let body = serde_json::json!({
+                    "error": "save_failed",
+                    "detail": e.to_string()
+                });
+                return json_response("500 Internal Server Error", &body.to_string());
             }
         }
     }
