@@ -38,6 +38,11 @@ import {
   buildMessageWithResearchContext,
   type ChatResearchContext,
 } from "./chatResearchContext";
+import {
+  buildMessageWithNoteContext,
+  type ChatNoteContext,
+} from "./chatNoteContext";
+import { getNote, listNotes } from "./notesApi";
 import type { ResearchReportDocument } from "./researchReportExport";
 import {
   buildCookbookPricingLookup,
@@ -1688,6 +1693,10 @@ function App() {
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
   const [chatResearchContext, setChatResearchContext] = useState<ChatResearchContext | null>(null);
+  const [chatNoteContext, setChatNoteContext] = useState<ChatNoteContext | null>(null);
+  const [notePickerOpen, setNotePickerOpen] = useState(false);
+  const [notePickerItems, setNotePickerItems] = useState<Array<{ id: string; title: string }>>([]);
+  const [notePickerLoading, setNotePickerLoading] = useState(false);
   const [chatDeliveryMode, setChatDeliveryMode] = useState<"immediate" | "steering" | "follow_up">("immediate");
   const [memoryHygieneHint, setMemoryHygieneHint] = useState<string | null>(null);
   type MemoryAdvancedSettings = {
@@ -1718,6 +1727,7 @@ function App() {
   const discussResearchReport = useCallback(
     (doc: ResearchReportDocument) => {
       if (!doc.reportMarkdown.trim()) return;
+      setChatNoteContext(null);
       setChatResearchContext({
         topic: doc.topic,
         reportMarkdown: doc.reportMarkdown,
@@ -1727,6 +1737,44 @@ function App() {
     },
     [setTab],
   );
+
+  const discussNote = useCallback(
+    (ctx: ChatNoteContext) => {
+      setChatResearchContext(null);
+      setChatNoteContext(ctx);
+      setTab("chat");
+    },
+    [setTab],
+  );
+
+  const openNotePicker = useCallback(async () => {
+    setNotePickerLoading(true);
+    setNotePickerOpen(true);
+    try {
+      const notes = await listNotes(DAEMON_PORT);
+      setNotePickerItems(notes.map((n) => ({ id: n.id, title: n.title })));
+    } catch {
+      setNotePickerItems([]);
+    } finally {
+      setNotePickerLoading(false);
+    }
+  }, []);
+
+  const attachNoteToChat = useCallback(async (noteId: string) => {
+    try {
+      const doc = await getNote(noteId, DAEMON_PORT);
+      setChatResearchContext(null);
+      setChatNoteContext({
+        noteId: doc.id,
+        title: doc.title,
+        markdown: doc.content,
+        intent: "discuss",
+      });
+      setNotePickerOpen(false);
+    } catch {
+      /* ignore */
+    }
+  }, []);
   const exportChatTranscript = useCallback(() => {
     const body = exportChatPlainText(messages);
     const base = defaultExportBasename(messages);
@@ -5441,10 +5489,15 @@ function App() {
     if (fromVoice) replyWithTtsRef.current = true;
     const userMessage = content || "(Pièce(s) jointe(s))";
     const researchCtx = chatResearchContext;
-    const messageToSend = researchCtx
-      ? buildMessageWithResearchContext(userMessage, researchCtx, locale)
-      : userMessage;
+    const noteCtx = chatNoteContext;
+    let messageToSend = userMessage;
+    if (researchCtx) {
+      messageToSend = buildMessageWithResearchContext(userMessage, researchCtx, locale);
+    } else if (noteCtx) {
+      messageToSend = buildMessageWithNoteContext(userMessage, noteCtx, locale);
+    }
     if (researchCtx) setChatResearchContext(null);
+    if (noteCtx) setChatNoteContext(null);
     setMessages((prev) => {
       const cleaned = prev.filter((m) => !(m.role === "assistant" && m.streaming));
       return [...cleaned, { role: "user", text: userMessage }];
@@ -6603,6 +6656,48 @@ function App() {
                 </button>
               </div>
             ) : null}
+            {chatNoteContext ? (
+              <div className="chat-note-context-banner" role="status">
+                <span>
+                  {locale === "en"
+                    ? `Note context: ${chatNoteContext.title}`
+                    : `Contexte note : ${chatNoteContext.title}`}
+                </span>
+                <button
+                  type="button"
+                  className="chat-research-context-dismiss"
+                  onClick={() => setChatNoteContext(null)}
+                  aria-label={locale === "en" ? "Clear note context" : "Retirer le contexte de la note"}
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
+            {notePickerOpen ? (
+              <div className="chat-note-picker" role="dialog" aria-label={t("notes.picker_title")}>
+                <div className="chat-note-picker-header">
+                  <strong>{t("notes.picker_title")}</strong>
+                  <button type="button" className="chat-research-context-dismiss" onClick={() => setNotePickerOpen(false)}>
+                    ×
+                  </button>
+                </div>
+                {notePickerLoading ? (
+                  <p>{t("common.loading")}</p>
+                ) : notePickerItems.length === 0 ? (
+                  <p>{t("notes.picker_empty")}</p>
+                ) : (
+                  <ul className="chat-note-picker-list">
+                    {notePickerItems.map((n) => (
+                      <li key={n.id}>
+                        <button type="button" onClick={() => void attachNoteToChat(n.id)}>
+                          {n.title.trim() || t("notes.untitled")}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : null}
             {attachments.length > 0 && (
               <div className="chat-attachments">
                 {attachments.map((a) => (
@@ -6720,6 +6815,16 @@ function App() {
                     <MonoIcon name="paperclip" />
                     <span className="input-group-btn-label">{locale === "en" ? "Attach" : "Joindre"}</span>
                   </button>
+                  <button
+                    type="button"
+                    className="input-group-btn btn-secondary"
+                    onClick={() => void openNotePicker()}
+                    aria-label={t("notes.insert_in_chat")}
+                    title={t("notes.insert_in_chat")}
+                  >
+                    <MonoIcon name="note" />
+                    <span className="input-group-btn-label">{t("notes.insert_in_chat_short")}</span>
+                  </button>
                   {voiceStatus?.stt_configured ? (
                     <button
                       type="button"
@@ -6821,7 +6926,7 @@ function App() {
 
         {tab === "notes" && (
           <section id="panel-notes" role="tabpanel" aria-labelledby="tab-notes" className="panel notes-panel-wrap">
-            <NotesPanel t={t} />
+            <NotesPanel t={t} locale={locale} daemonPort={DAEMON_PORT} onDiscussNote={discussNote} />
           </section>
         )}
 
