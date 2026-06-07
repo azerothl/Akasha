@@ -1294,6 +1294,7 @@ pre,
   border: 1px solid color-mix(in srgb, var(--akasha-accent) 28%, var(--akasha-border));
   border-radius: 10px;
   overflow: hidden;
+  flex-shrink: 0;
   box-shadow: 0 1px 0 color-mix(in srgb, var(--akasha-accent) 12%, transparent);
 }
 
@@ -1333,7 +1334,11 @@ pre,
 .chat-subagents-detail {
   padding: 0.75rem 1rem;
   max-height: min(42vh, 22rem);
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   font-size: 0.8125rem;
 }
 
@@ -1341,7 +1346,7 @@ pre,
   margin-bottom: 0.75rem;
   border: 1px solid var(--akasha-border);
   border-radius: 6px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .chat-subagents-discussion:last-child {
@@ -6353,6 +6358,11 @@ a.settings-link-btn.refresh-btn {
   display: flex;
   flex-direction: column;
   align-items: center;
+  min-height: 0;
+}
+
+.chat-panel > .chat-subagents-panel {
+  flex-shrink: 0;
 }
 
 .chat-messages-column {

@@ -2283,6 +2283,7 @@ function App() {
   /** Attachments for the next message: images (vision) and documents (text appended to message). */
   const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const subagentsDetailRef = useRef<HTMLDivElement>(null);
   const chatInlineReplyRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2866,6 +2867,15 @@ function App() {
       });
     }
   }, [messages, loading, tab]);
+  // Keep sub-agent activity scrolled to latest events inside the detail panel
+  useEffect(() => {
+    if (tab !== "chat" || subAgentPanelCollapsed) return;
+    const el = subagentsDetailRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }, [runningTaskEvents, subAgentPanelCollapsed, tab]);
   // When a reply is pending and modal is not open, scroll the inline reply form into view
   const pendingHumanInputKeys = Object.keys(pendingHumanInput);
   useEffect(() => {
@@ -5540,6 +5550,7 @@ function App() {
       if (ack?.task_id) {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
+        setCollapsedRootTasks((prev) => ({ ...prev, [ack.task_id]: false }));
         setSubAgentPanelCollapsed(false);
         void fetchTasksList({ silent: true });
         trackTaskUntilDone(ack.task_id);
@@ -6258,7 +6269,9 @@ function App() {
                   {chatToolBatchSummary}
                 </div>
               )}
-              {Object.keys(runningTaskChips).length > 0 && (
+              <div ref={chatEndRef} aria-hidden />
+            </div>
+            {Object.keys(runningTaskChips).length > 0 && (
                 <div className="chat-subagents-panel">
                   <button
                     type="button"
@@ -6280,7 +6293,7 @@ function App() {
                     </span>
                   </button>
                   {!subAgentPanelCollapsed && (
-                    <div id="subagents-detail" className="chat-subagents-detail" role="region" aria-label={t("chat.agent_activity_region")}>
+                    <div ref={subagentsDetailRef} id="subagents-detail" className="chat-subagents-detail" role="region" aria-label={t("chat.agent_activity_region")}>
                       {Object.entries(runningTaskEvents).filter(([, ev]) => ev.length > 0).length === 0 ? (
                         <p className="chat-subagents-empty">
                           {t("chat.no_events_yet")}
@@ -6445,8 +6458,6 @@ function App() {
                   )}
                 </div>
               )}
-              <div ref={chatEndRef} aria-hidden />
-            </div>
             {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (() => {
               const pendingTaskId = Object.keys(pendingHumanInput)[0];
               const pending = pendingTaskId ? pendingHumanInput[pendingTaskId] : null;
