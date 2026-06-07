@@ -871,6 +871,97 @@ async fn reload_tools_policy(port: Option<u16>) -> Result<serde_json::Value, Str
     Ok(json)
 }
 
+/// GET /api/tools/policy — read tools_policy.yaml as structured JSON.
+#[tauri::command]
+async fn get_tools_policy(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tools/policy", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// POST /api/tools/policy — save tools_policy.yaml and hot-reload.
+#[tauri::command]
+async fn post_tools_policy(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tools/policy", daemon_base_url(port));
+    let client = http_client();
+    let payload = serde_json::json!({ "policy": body });
+    let resp = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// GET /api/connectors — connector enable flags from connectors.env.
+#[tauri::command]
+async fn get_connectors(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/connectors", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// POST /api/connectors — update connector flags and configuration.
+#[tauri::command]
+async fn post_connectors(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/connectors", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// POST /api/vault — store a secret key in vault.
+#[tauri::command]
+async fn set_vault_key(key: String, value: String, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/vault", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "key": key, "value": value }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    Ok(())
+}
+
 /// POST /api/plugins/{id}/enable or /disable — user-controlled plugin load.
 #[tauri::command]
 async fn set_plugin_enabled(plugin_id: String, enabled: bool, port: Option<u16>) -> Result<(), String> {
@@ -2209,6 +2300,11 @@ pub fn run() {
             reload_plugins,
             reload_router,
             reload_tools_policy,
+            get_tools_policy,
+            post_tools_policy,
+            get_connectors,
+            post_connectors,
+            set_vault_key,
             set_plugin_enabled,
             uninstall_plugin,
             get_skills,
