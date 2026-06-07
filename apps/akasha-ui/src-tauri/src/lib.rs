@@ -1702,6 +1702,126 @@ async fn delete_user_rag_document(id: String, port: Option<u16>) -> Result<(), S
     Ok(())
 }
 
+/// Notes: GET /api/notes
+#[tauri::command]
+async fn get_notes(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/notes", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// Notes: GET /api/notes/:id
+#[tauri::command]
+async fn get_note(id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/notes/{}", daemon_base_url(port), id.trim());
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// Notes: POST /api/notes
+#[tauri::command]
+async fn create_note(
+    title: String,
+    content: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/notes", daemon_base_url(port));
+    let client = http_client();
+    let body = serde_json::json!({
+        "title": title,
+        "content": content.unwrap_or_default()
+    });
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// Notes: PUT /api/notes/:id
+#[tauri::command]
+async fn update_note(
+    id: String,
+    title: Option<String>,
+    content: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/notes/{}", daemon_base_url(port), id.trim());
+    let client = http_client();
+    let mut body = serde_json::Map::new();
+    if let Some(t) = title {
+        body.insert("title".into(), serde_json::Value::String(t));
+    }
+    if let Some(c) = content {
+        body.insert("content".into(), serde_json::Value::String(c));
+    }
+    let resp = client
+        .put(&url)
+        .json(&serde_json::Value::Object(body))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// Notes: DELETE /api/notes/:id
+#[tauri::command]
+async fn delete_note(id: String, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/notes/{}", daemon_base_url(port), id.trim());
+    let client = http_client();
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    Ok(())
+}
+
+/// Notes: POST /api/notes/:id/assets
+#[tauri::command]
+async fn upload_note_asset(
+    id: String,
+    filename: String,
+    content_base64: String,
+    mime_type: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/notes/{}/assets", daemon_base_url(port), id.trim());
+    let client = http_client();
+    let body = serde_json::json!({
+        "filename": filename,
+        "content_base64": content_base64,
+        "mime_type": mime_type.unwrap_or_else(|| "application/octet-stream".to_string())
+    });
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 /// Workspace knowledge graph status via modern endpoint: GET /api/workspace-graph/workspaces
 #[tauri::command]
 async fn get_workspace_graph_status(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -2255,6 +2375,12 @@ pub fn run() {
             get_user_rag_documents,
             add_user_rag_document,
             delete_user_rag_document,
+            get_notes,
+            get_note,
+            create_note,
+            update_note,
+            delete_note,
+            upload_note_asset,
             get_workspace_graph_status,
             put_workspace_graph_config,
             post_workspace_graph_rebuild,
