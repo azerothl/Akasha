@@ -1476,6 +1476,54 @@ function App() {
       if ((event.event_type === "task_completed" || event.event_type === "task_failed") && payload && typeof payload === "object" && "model_used" in payload && (payload as { model_used?: string | null }).model_used) {
         return `${t("tasks.model_used")}: ${String((payload as { model_used: string }).model_used)}`;
       }
+      if (event.event_type === "llm_route_planned" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const provider = typeof p.provider === "string" ? p.provider : "?";
+        const model = typeof p.model === "string" ? p.model : "?";
+        return `${t("tasks.route_planned_summary")}: ${provider}/${model}`;
+      }
+      if (event.event_type === "llm_call_started" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const provider = typeof p.provider === "string" ? p.provider : "?";
+        const model = typeof p.model === "string" ? p.model : "?";
+        const round = typeof p.round === "number" ? p.round : undefined;
+        const base = `${t("tasks.llm_call_summary")}: ${provider}/${model}`;
+        return round != null ? `${base} · #${round}` : base;
+      }
+      if (event.event_type === "llm_call_finished" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const success = p.success === true;
+        const model = typeof p.model_used === "string" ? p.model_used : undefined;
+        const err = typeof p.error === "string" ? p.error : undefined;
+        const latency = typeof p.latency_ms === "number" ? p.latency_ms : undefined;
+        if (success && model) {
+          return latency != null
+            ? `${t("tasks.model_used")}: ${model} · ${latency} ms`
+            : `${t("tasks.model_used")}: ${model}`;
+        }
+        return err ? `${t("tasks.llm_call_summary")}: ${trimPreview(err, 120)}` : t("tasks.llm_call_summary");
+      }
+      if (event.event_type === "memory_recall_started" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const topK = typeof p.semantic_top_k === "number" ? p.semantic_top_k : undefined;
+        return topK != null ? `${t("events.memory_recall_started")} (top_k=${topK})` : t("events.memory_recall_started");
+      }
+      if (event.event_type === "memory_recall_finished" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const had = p.had_results === true;
+        const timedOut = p.timed_out === true;
+        if (timedOut) return `${t("events.memory_recall_finished")} · timeout`;
+        return had
+          ? `${t("events.memory_recall_finished")} · ${t("common.yes")}`
+          : `${t("events.memory_recall_finished")} · ${t("common.no")}`;
+      }
+      if (event.event_type === "pipeline_checkpoint" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const msg = typeof p.message === "string" ? p.message : "";
+        const pct = typeof p.progress_pct === "number" ? p.progress_pct : undefined;
+        if (msg) return trimPreview(msg, 160);
+        if (pct != null) return t("tasks.progress_pct_summary").replace("{{pct}}", String(pct));
+      }
       if (event.event_type === "deterministic_preferred_tool_attempt" && payload && typeof payload === "object") {
         const p = payload as Record<string, unknown>;
         const tool = typeof p.tool === "string" ? p.tool : "?";
@@ -3331,10 +3379,17 @@ function App() {
     if (!selectedTask) return null;
     const runningChip = selectedTask.status === "running" ? runningTaskChips[selectedTask.id] : undefined;
     const latestEvent = tasksEvents.length > 0 ? tasksEvents[tasksEvents.length - 1] : null;
+    const routeEvent = [...tasksEvents].reverse().find((e) => e.event_type === "llm_route_planned");
+    const llmEvent = [...tasksEvents].reverse().find((e) => e.event_type === "llm_call_started" || e.event_type === "llm_call_finished");
+    const routeHint =
+      (llmEvent ? summarizeTaskEvent(llmEvent) : "") ||
+      (routeEvent ? summarizeTaskEvent(routeEvent) : "");
     return {
       runningChip,
       latestEvent,
       latestSummary: latestEvent ? summarizeTaskEvent(latestEvent) : "",
+      routeHint: routeHint || undefined,
+      progressPct: runningChip?.pct,
     };
   }, [selectedTask, runningTaskChips, tasksEvents, summarizeTaskEvent]);
 
@@ -7000,9 +7055,17 @@ function App() {
                       <div className="task-center-selected-meta">
                         <span className={"activity-task-status-pill status-" + selectedTask.status}>{selectedTask.status}</span>
                         {selectedTask.assigned_agent && <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(selectedTask.assigned_agent)}>{selectedTask.assigned_agent}</span>}
+                        {selectedTaskSummary?.progressPct != null && selectedTask.status === "running" && (
+                          <span className="task-live-progress-pill">
+                            {t("tasks.progress_pct_summary").replace("{{pct}}", String(selectedTaskSummary.progressPct))}
+                          </span>
+                        )}
                         {selectedTask.created_at && <span>{formatRelativeTimeLabel(selectedTask.created_at, locale)}</span>}
                       </div>
                     </div>
+                    {selectedTaskSummary?.routeHint ? (
+                      <p className="task-center-selected-route">{selectedTaskSummary.routeHint}</p>
+                    ) : null}
                     {selectedTaskSummary?.latestSummary ? (
                       <p className="task-center-selected-text">{selectedTaskSummary.latestSummary}</p>
                     ) : selectedTaskSummary?.runningChip?.message ? (

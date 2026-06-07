@@ -7576,21 +7576,28 @@ fn spawn_task_stall_watchdog(
 
 fn spawn_progress_watchdog(
     bus: EventBus,
+    store_path: std::path::PathBuf,
     correlation_id: Uuid,
     task_id: Uuid,
     mut cancel_rx: oneshot::Receiver<()>,
 ) {
     tokio::spawn(async move {
         let checkpoints = [
-            (2_u64, 12_u8, "Still spinning up the worker…"),
-            (5_u64, 18_u8, "Still working — routing tools and context…"),
+            (2_u64, 12_u8, "pipeline_warmup", "Initialisation du worker…"),
+            (
+                5_u64,
+                18_u8,
+                "pipeline_context",
+                "Assemblage du contexte et routage des outils…",
+            ),
             (
                 10_u64,
                 24_u8,
-                "Still working — using a fallback path if needed…",
+                "pipeline_llm_pending",
+                "Appel au modèle LLM en cours (fallback possible)…",
             ),
         ];
-        for (secs, pct, message) in checkpoints {
+        for (secs, pct, stage, message) in checkpoints {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {
                     let _ = bus.send(
@@ -7603,6 +7610,16 @@ fn spawn_progress_watchdog(
                             })),
                         )
                         .with_correlation(correlation_id),
+                    );
+                    insert_task_tracking_event(
+                        store_path.as_path(),
+                        task_id,
+                        "pipeline_checkpoint",
+                        serde_json::json!({
+                            "stage": stage,
+                            "progress_pct": pct,
+                            "message": message,
+                        }),
                     );
                 }
                 _ = &mut cancel_rx => return,
@@ -8823,6 +8840,22 @@ fn agent_debug_log(location: &str, message: &str, hypothesis_id: &str, data: ser
 }
 // #endregion
 
+fn insert_task_tracking_event(
+    store_path: &std::path::Path,
+    task_id: Uuid,
+    event_type: &str,
+    payload: serde_json::Value,
+) {
+    if let Ok(store) = TaskStore::open(store_path) {
+        let _ = store.insert_event(
+            task_id,
+            event_type,
+            Some(&payload),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+    }
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 /// preferred_task_type_override: when set (e.g. system selector task_type), overrides routing/reminders vs. assigned_agent alone.
@@ -8894,6 +8927,7 @@ pub(crate) async fn run_message_via_llm(
     let mut stall_cancel = Some(stall_tx);
     spawn_progress_watchdog(
         bus.clone(),
+        store_path.clone(),
         timeline_correlation,
         task_id,
         watchdog_rx,
@@ -9639,6 +9673,15 @@ pub(crate) async fn run_message_via_llm(
             .with_correlation(task_id),
         );
         let recall_timeout = std::time::Duration::from_secs(memory_recall_timeout_secs());
+        insert_task_tracking_event(
+            store_path.as_path(),
+            task_id,
+            "memory_recall_started",
+            serde_json::json!({
+                "timeout_secs": recall_timeout.as_secs(),
+                "semantic_top_k": memory_profile.semantic_top_k,
+            }),
+        );
         // #region agent log
         agent_debug_log(
             "api.rs:run_message_via_llm",
@@ -9651,13 +9694,13 @@ pub(crate) async fn run_message_via_llm(
             }),
         );
         // #endregion
-        let fused = match tokio::time::timeout(
+        let (fused, recall_timed_out) = match tokio::time::timeout(
             recall_timeout,
             crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params),
         )
         .await
         {
-            Ok(ctx) => ctx,
+            Ok(ctx) => (ctx, false),
             Err(_) => {
                 tracing::warn!(
                     task_id = %task_id,
@@ -9672,7 +9715,10 @@ pub(crate) async fn run_message_via_llm(
                     serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
                 );
                 // #endregion
-                crate::memory_orchestrator::FusedMemoryContext::default()
+                (
+                    crate::memory_orchestrator::FusedMemoryContext::default(),
+                    true,
+                )
             }
         };
         // #region agent log
@@ -9687,6 +9733,15 @@ pub(crate) async fn run_message_via_llm(
             }),
         );
         // #endregion
+        insert_task_tracking_event(
+            store_path.as_path(),
+            task_id,
+            "memory_recall_finished",
+            serde_json::json!({
+                "had_results": !fused.to_context_string().is_empty(),
+                "timed_out": recall_timed_out,
+            }),
+        );
         let fused_str = fused.to_context_string();
         if !fused_str.is_empty() {
             user_prefix.push_str(&fused_str);
@@ -10164,6 +10219,31 @@ pub(crate) async fn run_message_via_llm(
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or_else(|| llm_router.default_timeout_secs());
+        let router_task_type_for_llm = if preferred_task_type_override.as_deref()
+            == Some("image_generation")
+            || assigned_agent == "image_generation"
+        {
+            llm_router.resolve_task_type_for_agent("conversation")
+        } else {
+            preferred_task_type_override
+                .clone()
+                .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
+        };
+        if let Some((provider, model)) =
+            llm_router.primary_route_for_task_type(&router_task_type_for_llm)
+        {
+            insert_task_tracking_event(
+                store_path.as_path(),
+                task_id,
+                "llm_route_planned",
+                serde_json::json!({
+                    "task_type": router_task_type_for_llm,
+                    "provider": provider,
+                    "model": model,
+                    "timeout_secs": llm_timeout_secs,
+                }),
+            );
+        }
         let idle_timeout_secs = std::env::var("AKASHA_LLM_STREAM_IDLE_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -10273,6 +10353,22 @@ pub(crate) async fn run_message_via_llm(
             } else {
                 Some(merged_image_urls)
             };
+            if let Some((provider, model)) = preferred_task_type
+                .as_deref()
+                .and_then(|tt| llm_router.primary_route_for_task_type(tt))
+            {
+                insert_task_tracking_event(
+                    store_path.as_path(),
+                    task_id,
+                    "llm_call_started",
+                    serde_json::json!({
+                        "round": round + 1,
+                        "task_type": preferred_task_type,
+                        "provider": provider,
+                        "model": model,
+                    }),
+                );
+            }
             let request = CompletionRequest {
                 prompt: format!("{}{}", current_prompt, tool_instruction),
                 max_tokens: Some(completion_max_tokens),
@@ -10448,6 +10544,26 @@ pub(crate) async fn run_message_via_llm(
                 match tokio::time::timeout(remaining, stream_join).await {
                     Ok(Ok(Ok(resp))) => {
                         last_llm_model_used = Some(resp.model_used.clone());
+                        insert_task_tracking_event(
+                            store_path.as_path(),
+                            task_id,
+                            "llm_call_finished",
+                            serde_json::json!({
+                                "round": round + 1,
+                                "success": true,
+                                "model_used": resp.model_used,
+                                "latency_ms": resp
+                                    .total_duration_ns
+                                    .map(|ns| ns / 1_000_000)
+                                    .unwrap_or(0),
+                                "prompt_tokens": resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                                "completion_tokens": resp
+                                    .usage
+                                    .as_ref()
+                                    .map(|u| u.completion_tokens)
+                                    .unwrap_or(0),
+                            }),
+                        );
                         if let Some(ref store) = task_usage_store {
                             let prompt_tokens =
                                 resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0);
@@ -10477,6 +10593,16 @@ pub(crate) async fn run_message_via_llm(
                     }
                     Ok(Ok(Err(e))) => {
                         tracing::warn!(error = %e, "LLM completion failed");
+                        insert_task_tracking_event(
+                            store_path.as_path(),
+                            task_id,
+                            "llm_call_finished",
+                            serde_json::json!({
+                                "round": round + 1,
+                                "success": false,
+                                "error": e.to_string(),
+                            }),
+                        );
                         reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
                         break;
                     }
