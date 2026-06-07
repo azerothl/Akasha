@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type MutableRefObject, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type CSSProperties, type MutableRefObject, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./chatTranscriptExport";
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
@@ -2034,6 +2034,26 @@ function App() {
     if (s === "queued" || s === "skipped") return "calendar-event--upcoming";
     if (s === "failed" || s === "cancelled") return "calendar-event--failed";
     return "calendar-event--upcoming";
+  };
+  const calendarSlotAverageStatusClass = (events: CalendarGridEvent[]) => {
+    if (events.length === 0) return "";
+    let completed = 0;
+    let running = 0;
+    let failed = 0;
+    let upcoming = 0;
+    for (const ev of events) {
+      const s = (ev.status ?? "").toLowerCase();
+      if (s === "completed") completed++;
+      else if (s === "running") running++;
+      else if (s === "failed" || s === "cancelled") failed++;
+      else upcoming++;
+    }
+    const total = events.length;
+    if (running > 0) return "calendar-cell-view-all--running";
+    if (failed / total >= 0.5) return "calendar-cell-view-all--failed";
+    if (completed / total >= 0.5) return "calendar-cell-view-all--completed";
+    if (failed > 0) return "calendar-cell-view-all--failed";
+    return "calendar-cell-view-all--upcoming";
   };
   const calendarDedupeByParent = (list: CalendarGridEvent[]): { representative: CalendarGridEvent; count: number }[] => {
     const byParent = new Map<string, CalendarGridEvent[]>();
@@ -7608,7 +7628,7 @@ function App() {
               </p>
             )}
             {!calendarLoading && calendarSubTab === "grid" && (
-              <>
+              <div className="calendar-grid-panel">
                 <h3 className="calendar-grid-header">Vue calendrier (tâches lancées)</h3>
                 <div className="calendar-grid-toolbar">
                   <select
@@ -7644,8 +7664,6 @@ function App() {
                         const h = date.getHours();
                         byHour[h].push(ev);
                       });
-                      const gd = calendarGridDate;
-                      const todayKey = `${gd.getFullYear()}-${String(gd.getMonth() + 1).padStart(2, "0")}-${String(gd.getDate()).padStart(2, "0")}`;
                       return (
                         <table className="calendar-grid-table calendar-grid-day" role="grid" aria-label="Calendrier jour">
                           <thead>
@@ -7655,26 +7673,26 @@ function App() {
                             </tr>
                           </thead>
                           <tbody>
-                            {Array.from({ length: 24 }, (_, h) => (
-                              <tr key={h} className="calendar-grid-row">
-                                <td className="calendar-grid-cell-time">{h}h00</td>
-                                <td className="calendar-grid-cell-events">
-                                  <div className="calendar-cell-content">
-                                    <div className="calendar-cell-inner">
-                                      <ul className="calendar-grid-slot-events" role="list">
-                                        {(calendarGridDedupedBySlot.byHour.get(`${todayKey}-${h}`) ?? []).slice(0, 2).map(({ representative: e, count }, i) => (
-                                          <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} role="button" tabIndex={0} onClick={() => setCalendarSelectedTaskId(e.task_id)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setCalendarSelectedTaskId(e.task_id); } }}>
-                                            <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
-                                            <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-                                    <button type="button" className="calendar-cell-view-all" onClick={() => openCellDetail(`${h}h00`, `day-${h}`, byHour[h])}>Voir tout ({byHour[h].length})</button>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
+                            {Array.from({ length: 24 }, (_, h) => {
+                              const hourEvents = byHour[h];
+                              const hasEvents = hourEvents.length > 0;
+                              return (
+                                <tr key={h} className={`calendar-grid-row${hasEvents ? " calendar-grid-row--active" : " calendar-grid-row--empty"}`}>
+                                  <td className="calendar-grid-cell-time">{h}h00</td>
+                                  <td className={`calendar-grid-cell-events${hasEvents ? " calendar-grid-cell-events--active" : " calendar-grid-cell-events--empty"}`}>
+                                    {hasEvents && (
+                                      <button
+                                        type="button"
+                                        className={`calendar-cell-view-all calendar-cell-view-all--slot ${calendarSlotAverageStatusClass(hourEvents)}`}
+                                        onClick={() => openCellDetail(`${h}h00`, `day-${h}`, hourEvents)}
+                                      >
+                                        Voir tout ({hourEvents.length})
+                                      </button>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
                       );
@@ -7718,32 +7736,33 @@ function App() {
                             </tr>
                           </thead>
                           <tbody>
-                            {Array.from({ length: 24 }, (_, hour) => (
-                              <tr key={hour} className="calendar-grid-row">
-                                <td className="calendar-grid-cell-hour">{hour}h</td>
-                                {dayKeys.map((key) => {
-                                    const cellEvents = (byDay[key] ?? []).filter((e) => new Date(e.at).getHours() === hour);
+                            {Array.from({ length: 24 }, (_, hour) => {
+                              const hourEventsByDay = dayKeys.map((key) => (byDay[key] ?? []).filter((e) => new Date(e.at).getHours() === hour));
+                              const hourHasEvents = hourEventsByDay.some((evs) => evs.length > 0);
+                              return (
+                                <tr key={hour} className={`calendar-grid-row${hourHasEvents ? " calendar-grid-row--active" : " calendar-grid-row--empty"}`}>
+                                  <td className="calendar-grid-cell-hour">{hour}h</td>
+                                  {dayKeys.map((key, dayIndex) => {
+                                    const cellEvents = hourEventsByDay[dayIndex];
+                                    const hasEvents = cellEvents.length > 0;
                                     const slotLabel = `${key} ${hour}h`;
                                     return (
-                                      <td key={key} className="calendar-grid-cell-day">
-                                        <div className="calendar-cell-content">
-                                          <div className="calendar-cell-inner">
-                                            <ul className="calendar-grid-slot-events" role="list">
-                                              {(calendarGridDedupedBySlot.byHour.get(`${key}-${hour}`) ?? []).slice(0, 2).map(({ representative: e, count }, i) => (
-                                                <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} role="button" tabIndex={0} onClick={() => setCalendarSelectedTaskId(e.task_id)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setCalendarSelectedTaskId(e.task_id); } }}>
-                                                  <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
-                                                  <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
-                                                </li>
-                                              ))}
-                                            </ul>
-                                          </div>
-                                          <button type="button" className="calendar-cell-view-all" onClick={() => openCellDetail(slotLabel, `${key}-${hour}`, cellEvents)}>Voir tout ({cellEvents.length})</button>
-                                        </div>
+                                      <td key={key} className={`calendar-grid-cell-day${hasEvents ? " calendar-grid-cell-day--active" : " calendar-grid-cell-day--empty"}`}>
+                                        {hasEvents && (
+                                          <button
+                                            type="button"
+                                            className={`calendar-cell-view-all calendar-cell-view-all--slot ${calendarSlotAverageStatusClass(cellEvents)}`}
+                                            onClick={() => openCellDetail(slotLabel, `${key}-${hour}`, cellEvents)}
+                                          >
+                                            Voir tout ({cellEvents.length})
+                                          </button>
+                                        )}
                                       </td>
                                     );
                                   })}
-                              </tr>
-                            ))}
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
                       );
@@ -7780,45 +7799,46 @@ function App() {
                     }
                     const weekDayNames = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"];
                     return (
-                      <table className="calendar-grid-table calendar-grid-month" role="grid" aria-label="Calendrier mois">
-                        <thead>
-                          <tr>
-                            {weekDayNames.map((wd) => (
-                              <th key={wd} scope="col" className="calendar-grid-col-weekday">{wd}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {weeks.map((weekRow, wi) => (
-                            <tr key={wi} className="calendar-grid-row">
-                              {weekRow.map((key, di) => {
-                                const cellEvents = key ? (byDay[key] ?? []) : [];
-                                const slotLabel = key ? new Date(key + "T12:00:00").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" }) : "";
-                                return (
-                                  <td key={`${wi}-${di}`} className="calendar-grid-cell-month">
-                                    {key ? (
-                                      <div className="calendar-cell-content">
-                                        <span className="calendar-grid-day-num">{new Date(key + "T12:00:00").getDate()}</span>
-                                        <div className="calendar-cell-inner">
-                                          <ul className="calendar-grid-slot-events" role="list">
-                                            {(calendarGridDedupedBySlot.byDate.get(key) ?? []).slice(0, 2).map(({ representative: e, count }, i) => (
-                                              <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} role="button" tabIndex={0} onClick={() => setCalendarSelectedTaskId(e.task_id)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setCalendarSelectedTaskId(e.task_id); } }}>
-                                                <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
-                                                <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
-                                              </li>
-                                            ))}
-                                          </ul>
-                                        </div>
-                                        <button type="button" className="calendar-cell-view-all" onClick={() => openCellDetail(slotLabel, key, cellEvents)}>Voir tout ({cellEvents.length})</button>
-                                      </div>
-                                    ) : null}
-                                  </td>
-                                );
-                              })}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                      <div
+                        className="calendar-grid-month"
+                        role="grid"
+                        aria-label="Calendrier mois"
+                        style={{ "--calendar-month-rows": weeks.length } as CSSProperties}
+                      >
+                        {weekDayNames.map((wd) => (
+                          <div key={wd} role="columnheader" className="calendar-grid-month-weekday">{wd}</div>
+                        ))}
+                        {weeks.map((weekRow, wi) =>
+                          weekRow.map((key, di) => {
+                            const cellEvents = key ? (byDay[key] ?? []) : [];
+                            const slotLabel = key ? new Date(key + "T12:00:00").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" }) : "";
+                            return (
+                              <div
+                                key={`${wi}-${di}`}
+                                role="gridcell"
+                                className={`calendar-grid-cell-month${key ? "" : " calendar-grid-cell-month--empty"}`}
+                              >
+                                {key ? (
+                                  <div className="calendar-cell-content">
+                                    <span className="calendar-grid-day-num">{new Date(key + "T12:00:00").getDate()}</span>
+                                    <div className="calendar-cell-inner">
+                                      <ul className="calendar-grid-slot-events" role="list">
+                                        {(calendarGridDedupedBySlot.byDate.get(key) ?? []).slice(0, 2).map(({ representative: e, count }, i) => (
+                                          <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} role="button" tabIndex={0} onClick={() => setCalendarSelectedTaskId(e.task_id)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setCalendarSelectedTaskId(e.task_id); } }}>
+                                            <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
+                                            <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                    <button type="button" className="calendar-cell-view-all" onClick={() => openCellDetail(slotLabel, key, cellEvents)}>Voir tout ({cellEvents.length})</button>
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
                     );
                   })()}
                 </div>
@@ -7845,7 +7865,7 @@ function App() {
                     </div>
                   </div>
                 )}
-              </>
+              </div>
             )}
             {!calendarLoading && calendarSubTab === "recent" && (
               <div className="calendar-recent-panel">
