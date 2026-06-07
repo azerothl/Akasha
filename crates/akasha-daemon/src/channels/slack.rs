@@ -11,16 +11,46 @@ use tracing::{info, warn};
 const SLACK_POLL_INTERVAL_MS: u64 = 1500;
 const SLACK_MAX_POLL_SECS: u64 = 600;
 
-/// Verify Slack signing signature (X-Slack-Signature: v0=hex).
-pub fn verify_signature(body: &[u8], signature_header: Option<&str>, signing_secret: &str) -> bool {
+/// Verify Slack signing signature (`X-Slack-Signature: v0=<hex>`) using the official base string
+/// `v0:<timestamp>:<body>` when `X-Slack-Request-Timestamp` is present (recommended).
+///
+/// Also enforces a **replay window** of 5 minutes on the request timestamp.
+pub fn verify_signature(
+    body: &[u8],
+    signature_header: Option<&str>,
+    timestamp_header: Option<&str>,
+    signing_secret: &str,
+) -> bool {
     let Some(header) = signature_header else { return false };
     let sig = header.trim().strip_prefix("v0=").unwrap_or(header.trim());
     if sig.len() != 64 {
         return false;
     }
+    let body_str = match std::str::from_utf8(body) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let basestring: String = if let Some(ts) = timestamp_header.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Ok(req_ts) = ts.parse::<u64>() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if now.abs_diff(req_ts) > 300 {
+                warn!(req_ts, now, "Slack: request timestamp outside replay window");
+                return false;
+            }
+        } else {
+            return false;
+        }
+        format!("v0:{}:{}", ts, body_str)
+    } else {
+        // Legacy fallback (not Slack-official): body only. Prefer always sending timestamp.
+        body_str.to_string()
+    };
     let mut mac =
         Hmac::<Sha256>::new_from_slice(signing_secret.as_bytes()).expect("HMAC key length");
-    mac.update(body);
+    mac.update(basestring.as_bytes());
     let result = mac.finalize();
     let hex = hex::encode(result.into_bytes());
     constant_time_eq(hex.as_bytes(), sig.as_bytes())
@@ -56,6 +86,7 @@ pub fn parse_slash_form(body: &[u8]) -> Option<(String, String)> {
 pub fn handle_slack_command(
     body: Option<Vec<u8>>,
     signature_header: Option<&str>,
+    timestamp_header: Option<&str>,
     signing_secret: &str,
     port: u16,
     main_agent: &MainAgent,
@@ -64,25 +95,25 @@ pub fn handle_slack_command(
     let body = match body {
         Some(b) if !b.is_empty() => b,
         _ => {
-            return crate::api::json_response("400 Bad Request", r#"{"error":"missing_body"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"missing_body"}"#);
         }
     };
-    if !verify_signature(&body, signature_header, signing_secret) {
-        return crate::api::json_response("401 Unauthorized", r#"{"error":"invalid_signature"}"#);
+    if !verify_signature(&body, signature_header, timestamp_header, signing_secret) {
+        return crate::api_http::json_response("401 Unauthorized", r#"{"error":"invalid_signature"}"#);
     }
     let (response_url, text) = match parse_slash_form(&body) {
         Some(p) => p,
         None => {
-            return crate::api::json_response("400 Bad Request", r#"{"error":"invalid_form"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"invalid_form"}"#);
         }
     };
     if let Err(e) = akasha_core::check_prompt_injection(&text) {
         let body = serde_json::json!({ "error": "prompt_injection_rejected", "detail": e.to_string() });
-        return crate::api::json_response("400 Bad Request", &body.to_string());
+        return crate::api_http::json_response("400 Bad Request", &body.to_string());
     }
 
     // Respond immediately so Slack gets 200 within 3s
-    let immediate = crate::api::json_response(
+    let immediate = crate::api_http::json_response(
         "200 OK",
         r#"{"response_type":"ephemeral","text":"Processing your request..."}"#,
     );

@@ -1,6 +1,9 @@
 //! Simple HTTP API: POST /api/message, GET /api/tasks/:id, GET / (health)
 
-use crate::agent_profile::AgentProfile;
+pub use crate::agent_profile::{
+    get_or_load_agent_profile, new_agent_profile_cache, set_agent_profile_cache, AgentProfile,
+    AgentProfileCache,
+};
 use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
 use crate::latency::{
     clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric,
@@ -9,85 +12,167 @@ use crate::latency::{
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use crate::protocol_adapter::unknown_external_message_count;
-use crate::autonomous_mission_config::{
-    merge_from_json_partial, persist_config_and_snapshot, AutonomousMissionConfig, Horizon,
-    MissionStatusYaml,
-};
+use crate::autonomous_mission_config::{AutonomousMissionConfig, MissionStatusYaml};
 use crate::user_profile::UserProfile;
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
+use akasha_plugin_api::{PluginKind, PluginManifest};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use akasha_store::{
-    format_todos_plan_block, parse_todos_from_payload, AutonomousMissionStore, Schedule,
+    format_todos_plan_block, parse_todos_from_payload, Schedule,
     ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus,
     TaskStore, TodoStatus, WorkspaceGraphStore,
 };
 use akasha_vault::Vault;
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// On Windows, paths with verbatim prefix `\\?\` can cause "file not found" with some APIs. Return a path without it.
-#[cfg(windows)]
-fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
-    let s = p.to_string_lossy();
-    if s.starts_with(r"\\?\") {
-        PathBuf::from(s.replace(r"\\?\", ""))
-    } else {
-        p
-    }
-}
-#[cfg(not(windows))]
-fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
-    p
-}
-
-/// Normalize common Unicode apostrophes in filenames (e.g. ’ -> ').
-/// LLM tool calls may use typographic quotes, while files on disk typically use ASCII quotes.
-fn normalize_apostrophes(s: &str) -> String {
-    s.replace('’', "'").replace('‘', "'")
-}
-
-/// Lorsque `read_file` est appelé sans `<offset> <limit>` et sans `--full`, on ne renvoie que ces lignes.
-const READ_FILE_DEFAULT_MAX_LINES: usize = 500;
-/// Plafond UTF-8 pour `read_file … --full` (évite les fichiers énormes en mémoire côté prompt).
-const READ_FILE_FULL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
-/// Sous-chaîne présente dans la sortie modèle quand la fenêtre par défaut (500 lignes) a été appliquée.
-const READ_FILE_PARTIAL_DEFAULT_MARKER: &str = "(read_file partial: default window";
-
-/// Retire `--full`, détecte une fenêtre de lignes en fin d'arguments (`offset` `limit` entiers > 0).
-fn parse_read_file_args(args: &[String]) -> (Vec<String>, Option<(usize, usize)>, bool) {
-    let mut want_full = false;
-    let filtered: Vec<String> = args
-        .iter()
-        .filter_map(|a| {
-            if a == "--full" {
-                want_full = true;
-                None
-            } else {
-                Some(a.clone())
-            }
-        })
-        .collect();
-    if filtered.len() >= 3 {
-        let maybe_limit = filtered.last().and_then(|s| s.parse::<usize>().ok());
-        let maybe_offset = filtered
-            .get(filtered.len().saturating_sub(2))
-            .and_then(|s| s.parse::<usize>().ok());
-        if let (Some(off), Some(lim)) = (maybe_offset, maybe_limit) {
-            if off > 0 && lim > 0 {
-                let mut path = filtered;
-                path.pop();
-                path.pop();
-                return (path, Some((off, lim)), want_full);
-            }
-        }
-    }
-    (filtered, None, want_full)
-}
+pub use crate::api_http::{json_response, parse_content_length, parse_request};
+pub use crate::api_path_utils::{
+    normalize_apostrophes, parse_read_file_args, strip_verbatim_prefix, READ_FILE_DEFAULT_MAX_LINES,
+    READ_FILE_FULL_OUTPUT_MAX_BYTES, READ_FILE_PARTIAL_DEFAULT_MARKER,
+};
 
 /// Séparateur recommandé entre l’ancien et le nouveau texte (`TOOL:` est découpé sur les espaces, d’où un token `|` seul).
 const SEARCH_REPLACE_DELIM: &str = " | ";
+
+const BUDGET_SETTINGS_FILE: &str = "budget_settings.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct BudgetSettings {
+    daily_token_limit: u64,
+    warn_ratio: f64,
+    auto_concise: bool,
+}
+
+impl Default for BudgetSettings {
+    fn default() -> Self {
+        Self {
+            daily_token_limit: 1_000_000,
+            warn_ratio: 0.7,
+            auto_concise: true,
+        }
+    }
+}
+
+const SECOND_BRAIN_SETTINGS_FILE: &str = "memory_second_brain.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct SecondBrainSettings {
+    enabled: bool,
+    paused: bool,
+}
+
+impl Default for SecondBrainSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            paused: false,
+        }
+    }
+}
+
+fn load_second_brain_settings(data_dir: &Path) -> SecondBrainSettings {
+    let path = data_dir.join(SECOND_BRAIN_SETTINGS_FILE);
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return SecondBrainSettings::default(),
+    };
+    serde_json::from_str::<SecondBrainSettings>(&raw).unwrap_or_default()
+}
+
+fn save_second_brain_settings(data_dir: &Path, settings: &SecondBrainSettings) -> anyhow::Result<()> {
+    let path = data_dir.join(SECOND_BRAIN_SETTINGS_FILE);
+    std::fs::write(path, serde_json::to_string_pretty(settings)?)?;
+    Ok(())
+}
+
+fn load_budget_settings(data_dir: &Path) -> BudgetSettings {
+    let path = data_dir.join(BUDGET_SETTINGS_FILE);
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return BudgetSettings::default(),
+    };
+    serde_json::from_str::<BudgetSettings>(&raw).unwrap_or_default()
+}
+
+fn save_budget_settings(data_dir: &Path, settings: &BudgetSettings) -> anyhow::Result<()> {
+    let path = data_dir.join(BUDGET_SETTINGS_FILE);
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(settings)?.as_bytes())?;
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(())
+}
+
+fn tool_scope_key(tool: &str, tool_args: &[String]) -> String {
+    match tool {
+        "run_command" | "run_terminal" | "run_command_background" => tool_args
+            .iter()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string(),
+        "write_file" | "write_code" => {
+            // write_file / write_code may receive a JSON payload with a `path` key, or plain args[0]
+            if let Some(path_from_json) = parse_write_file_request(tool_args)
+                .map(|(p, _)| p)
+                .filter(|p| !p.is_empty())
+            {
+                path_from_json
+            } else {
+                tool_args.get(0).cloned().unwrap_or_else(|| "global".to_string())
+            }
+        }
+        "delete_file" => {
+            // delete_file joins all args as a single path (spaces in filenames)
+            let joined = tool_args.join(" ").trim().to_string();
+            if joined.is_empty() { "global".to_string() } else { joined }
+        }
+        "edit_file" | "apply_patch" | "rename_path" | "move_tree" => {
+            tool_args.get(0).cloned().unwrap_or_else(|| "global".to_string())
+        }
+        _ => "global".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct PermissionModeState {
+    mode: String,
+    updated_at: String,
+}
+
+impl Default for PermissionModeState {
+    fn default() -> Self {
+        Self {
+            mode: "ask_me".to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+fn load_permission_mode(data_dir: &Path) -> PermissionModeState {
+    let path = data_dir.join("permissions_mode.json");
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return PermissionModeState::default(),
+    };
+    serde_json::from_str::<PermissionModeState>(&raw).unwrap_or_default()
+}
+
+fn save_permission_mode(data_dir: &Path, state: &PermissionModeState) -> anyhow::Result<()> {
+    let path = data_dir.join("permissions_mode.json");
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(state)?.as_bytes())?;
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(())
+}
 
 /// `args[0]` = chemin ; le reste = « ancien » puis ` | ` (recommandé) ou `|`, puis « nouveau ».
 /// Retire les `|` initiaux issus du découpage (`path | old | new` → `old | new`).
@@ -177,16 +262,21 @@ fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
     (args.join(" "), None)
 }
 
+/// Code Studio prepends retrieved index chunks to the user message unless explicitly disabled.
+/// `AKASHA_STUDIO_CODE_RAG_DISABLED=1|true|yes|on` turns that prefix off; unset or other values keep RAG on.
 fn studio_code_rag_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("AKASHA_STUDIO_CODE_RAG_ENABLED")
+        std::env::var("AKASHA_STUDIO_CODE_RAG_DISABLED")
             .ok()
             .map(|v| {
                 let t = v.trim().to_ascii_lowercase();
-                matches!(t.as_str(), "1" | "true" | "yes" | "on")
+                if t.is_empty() {
+                    return true;
+                }
+                !matches!(t.as_str(), "1" | "true" | "yes" | "on")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -325,6 +415,25 @@ fn strip_markdown_fences_from_write_content(content: &str) -> String {
         break;
     }
     s
+}
+
+/// Relative path for [`crate::api_studio::path_has_agent_code_extension`] (strips `workspace:` prefix).
+fn path_for_agent_write_extension_check(path_str: &str) -> PathBuf {
+    let normalized = normalize_tool_path_hint(path_str.trim());
+    let rel = normalized
+        .strip_prefix("workspace:/")
+        .or_else(|| normalized.strip_prefix("workspace:"))
+        .map(|s| s.trim_start_matches(|c| c == '/' || c == '\\'))
+        .unwrap_or(normalized.as_str());
+    PathBuf::from(rel)
+}
+
+fn policy_allows_primary_disk_write(policy: &akasha_tools::ToolsPolicy) -> bool {
+    policy.can_use_tool("write_file")
+        || policy.can_use_tool("write_code")
+        || policy.can_use_tool("edit_file")
+        || policy.can_use_tool("search_replace")
+        || policy.can_use_tool("apply_patch")
 }
 
 /// Parse `memory_store` optional `link_to:` / `link_kind:` into `(target_uuid, relation_kind)` pairs.
@@ -475,7 +584,7 @@ async fn pdf_extract_message_from_disk(
     }
 }
 
-fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
+pub(crate) fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
     let raw = normalize_tool_path_hint(raw);
     let raw = raw.trim();
     if raw.starts_with("workspace:/") || raw.starts_with("workspace:") {
@@ -514,41 +623,12 @@ use tokio::sync::RwLock;
 use tracing::Instrument;
 use uuid::Uuid;
 
-/// In-memory cache for AgentProfile to avoid repeated disk reads (invalidated on POST /api/agent-profile and after profile save in run_message_via_llm).
-pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
-
 /// Virtual workspace per task (Deep Agents-style). Paths prefixed with "workspace:/" or "workspace:" are read/written here instead of disk.
 pub type TaskWorkspaceStore =
     Arc<RwLock<std::collections::HashMap<Uuid, std::collections::HashMap<String, String>>>>;
 
 pub fn new_task_workspace_store() -> TaskWorkspaceStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
-}
-
-pub fn new_agent_profile_cache() -> AgentProfileCache {
-    Arc::new(RwLock::new(None))
-}
-
-/// Load profile from cache or disk and update cache.
-pub async fn get_or_load_agent_profile(data_dir: &Path, cache: &AgentProfileCache) -> AgentProfile {
-    {
-        let g = cache.read().await;
-        if let Some(ref p) = *g {
-            return p.clone();
-        }
-    }
-    let profile = AgentProfile::load(data_dir);
-    {
-        let mut g = cache.write().await;
-        *g = Some(profile.clone());
-    }
-    profile
-}
-
-/// Update cache after profile save (call after writing to disk).
-pub async fn set_agent_profile_cache(cache: &AgentProfileCache, profile: AgentProfile) {
-    let mut g = cache.write().await;
-    *g = Some(profile);
 }
 
 /// Cached result of fetching api/latest.json from the Akasha_app site (version, download_url, etc.).
@@ -687,6 +767,8 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
             Ok(store) => {
                 if let Ok(persisted) = store.get_events(id) {
                     root_events.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        schema_version: 1,
+                        kind: e.event_type.clone(),
                         event_type: e.event_type,
                         payload: e.payload,
                         at: e.at,
@@ -709,23 +791,33 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         root_events
     };
 
-    let child_ids: Vec<Uuid> = list
-        .iter()
-        .filter(|e| e.event_type == "sub_agent_spawned")
-        .filter_map(|e| {
-            e.payload
-                .as_ref()
-                .and_then(|p| p.get("task_id"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())
-        })
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let mut child_ids: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
+    if let Ok(store) = TaskStore::open(store_path) {
+        if let Ok(children) = store.get_children(id) {
+            for child in children {
+                child_ids.insert(child.id);
+            }
+        }
+    }
+    for entry in &list {
+        if entry.event_type != "sub_agent_spawned" {
+            continue;
+        }
+        let Some(payload) = entry.payload.as_ref() else {
+            continue;
+        };
+        for key in ["task_id", "child_task_id", "subtask_id"] {
+            if let Some(s) = payload.get(key).and_then(|v| v.as_str()) {
+                if let Ok(child_id) = Uuid::parse_str(s) {
+                    child_ids.insert(child_id);
+                }
+            }
+        }
+    }
     if !child_ids.is_empty() {
         let g = events.read().await;
-        for child_id in child_ids {
-            if let Some(q) = g.get(&child_id) {
+        for child_id in &child_ids {
+            if let Some(q) = g.get(child_id) {
                 list.extend(q.iter().map(|e| {
                     let mut e = e.clone();
                     e.task_id = Some(child_id.to_string());
@@ -735,20 +827,11 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         }
         drop(g);
         if let Ok(store) = TaskStore::open(store_path) {
-            for child_id in list
-                .iter()
-                .filter(|e| e.event_type == "sub_agent_spawned")
-                .filter_map(|e| {
-                    e.payload
-                        .as_ref()
-                        .and_then(|p| p.get("task_id"))
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| Uuid::parse_str(s).ok())
-                })
-                .collect::<std::collections::BTreeSet<_>>()
-            {
+            for child_id in child_ids {
                 if let Ok(persisted) = store.get_events(child_id) {
                     list.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        schema_version: 1,
+                        kind: e.event_type.clone(),
                         event_type: e.event_type,
                         payload: e.payload,
                         at: e.at,
@@ -775,8 +858,223 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         );
         seen.insert(key)
     });
+
+    // Studio swarm: prefer native worker_started/worker_completed when persisted; synthesize otherwise.
+    let has_native_worker_events = list.iter().any(|e| {
+        e.event_type == "worker_started" || e.event_type == "worker_completed"
+    });
+    let mut synthetic: Vec<TaskEventEntry> = Vec::new();
+    let mut spawned_workers: Vec<String> = Vec::new();
+    let mut saw_failed = false;
+    if has_native_worker_events {
+        for entry in &list {
+            if entry.event_type == "worker_started" {
+                if let Some(w) = entry
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("worker_task_id"))
+                    .and_then(|v| v.as_str())
+                {
+                    spawned_workers.push(w.to_string());
+                }
+            } else if entry.event_type == "worker_completed" {
+                let failed = entry
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("success"))
+                    .and_then(|v| v.as_bool())
+                    == Some(false);
+                if failed {
+                    saw_failed = true;
+                }
+            }
+        }
+    }
+    for entry in &list {
+        if has_native_worker_events {
+            continue;
+        }
+        if entry.event_type == "sub_agent_spawned" {
+            let worker_task_id = entry
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("task_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let assigned_agent = entry
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("agent"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "spawned",
+                    "worker_task_id": worker_task_id.clone(),
+                    "assigned_agent": assigned_agent.clone(),
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "running",
+                    "worker_task_id": worker_task_id.clone(),
+                    "assigned_agent": assigned_agent,
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+            if let Some(w) = worker_task_id {
+                spawned_workers.push(w);
+            }
+        } else if entry.event_type == "task_completed" {
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "completed",
+                    "worker_task_id": entry.task_id.clone(),
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+        } else if entry.event_type == "task_failed" {
+            saw_failed = true;
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "failed",
+                    "worker_task_id": entry.task_id.clone(),
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+        }
+    }
+    if saw_failed && spawned_workers.len() > 1 {
+        synthetic.push(TaskEventEntry {
+            schema_version: 1,
+            kind: "studio_conflict_notice".to_string(),
+            event_type: "studio_conflict_notice".to_string(),
+            payload: Some(serde_json::json!({
+                "reason": "Concurrent workers ended in failure; review potential file touch conflicts.",
+                "workers": spawned_workers,
+            })),
+            at: chrono::Utc::now().to_rfc3339(),
+            task_id: Some(id.to_string()),
+        });
+    }
+    list.extend(synthetic);
+
     list.sort_by(|a, b| a.at.cmp(&b.at));
     let body = serde_json::json!({ "task_id": id.to_string(), "events": list });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn get_task_report(store_path: &Path, events: &EventsCache, id: Uuid) -> String {
+    let store = match TaskStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let task = match store.get(id) {
+        Ok(Some(t)) => t,
+        Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let persisted_progress = store.get_progress(id).unwrap_or_default();
+    let mut done: Vec<String> = persisted_progress
+        .iter()
+        .filter(|(pct, msg)| *pct >= 100 && !task_progress_is_chat_stub(msg))
+        .map(|(_, msg)| msg.clone())
+        .collect();
+    done.truncate(5);
+
+    let mut failed: Vec<String> = Vec::new();
+    if matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled) {
+        if let Some((_, msg)) = persisted_progress
+            .iter()
+            .rev()
+            .find(|(_, msg)| !task_progress_is_chat_stub(msg))
+        {
+            failed.push(msg.chars().take(1200).collect());
+        } else {
+            failed.push("La tâche a échoué sans détail explicite.".to_string());
+        }
+    }
+
+    let mut needs_review: Vec<String> = Vec::new();
+    let mut saw_approval_request = store
+        .get_events(id)
+        .unwrap_or_default()
+        .iter()
+        .any(|e| e.event_type == "tool_approval_request");
+    if !saw_approval_request {
+        let g = events.read().await;
+        saw_approval_request = g
+            .get(&id)
+            .map(|q| q.iter().any(|e| e.event_type == "tool_approval_request"))
+            .unwrap_or(false);
+    }
+    if saw_approval_request {
+        needs_review.push("Une ou plusieurs actions sensibles ont demandé validation.".to_string());
+    }
+    let pending_queue = store_path
+        .parent()
+        .map(crate::permissions_queue::load)
+        .map(|q| {
+            q.requests
+                .into_iter()
+                .filter(|r| r.task_id == id.to_string() && r.status == crate::permissions_queue::QueueStatus::Pending)
+                .count()
+        })
+        .unwrap_or(0);
+    if pending_queue > 0 {
+        needs_review.push(format!("{pending_queue} demande(s) d'approbation en attente."));
+    }
+
+    let mut next_steps: Vec<String> = match task.status {
+        TaskStatus::Completed => vec![
+            "Relire le diff studio et exécuter une vérification locale.".to_string(),
+            "Si résultat valide, poursuivre avec la prochaine sous-tâche planifiée.".to_string(),
+        ],
+        TaskStatus::WaitingUserInput => vec![
+            "Répondre à la demande d'approbation ou d'information de l'agent.".to_string(),
+        ],
+        TaskStatus::Failed | TaskStatus::Cancelled => vec![
+            "Analyser la cause d'échec puis relancer avec une consigne ciblée.".to_string(),
+        ],
+        _ => vec!["Attendre la fin de la tâche puis relire le rapport.".to_string()],
+    };
+    next_steps.truncate(5);
+
+    let transcript_path = store_path
+        .parent()
+        .map(|d| d.join("transcripts").join(format!("{id}.json")));
+    let transcript = transcript_path
+        .as_ref()
+        .filter(|p| p.is_file())
+        .map(|p| p.to_string_lossy().to_string());
+
+    let body = serde_json::json!({
+        "task_id": id.to_string(),
+        "status": task.status.as_str(),
+        "done": done,
+        "needs_review": needs_review,
+        "failed": failed,
+        "next_steps": next_steps,
+        "transcript_path": transcript
+    });
     json_response("200 OK", &body.to_string())
 }
 
@@ -851,6 +1149,10 @@ pub type ProgressCache = Arc<RwLock<std::collections::HashMap<Uuid, VecDeque<Pro
 
 #[derive(Clone, serde::Serialize)]
 pub struct TaskEventEntry {
+    /// Contract version for client event envelopes.
+    pub schema_version: u8,
+    /// Normalized event kind for clients (kept in sync with event_type).
+    pub kind: String,
     pub event_type: String,
     pub payload: Option<serde_json::Value>,
     pub at: String,
@@ -924,23 +1226,62 @@ pub fn new_process_registry() -> ProcessRegistry {
 pub type TaskCompletionRegistry =
     Arc<RwLock<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>>;
 
+/// Last LLM call stats for a task turn (GET /api/tasks/:id, task_completed events).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LastTurnUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cost_usd: f64,
+    pub latency_ms: u64,
+}
+
 /// Per-task and per-session LLM usage (tokens, cost USD) for GET /api/tasks/:id and cost visibility.
 #[derive(Default)]
 pub struct TaskUsageStore {
     by_task: RwLock<std::collections::HashMap<Uuid, (u64, f64)>>,
     by_session: RwLock<std::collections::HashMap<String, (u64, f64)>>,
+    by_task_last_turn: RwLock<std::collections::HashMap<Uuid, LastTurnUsage>>,
+    by_task_last_model: RwLock<std::collections::HashMap<Uuid, String>>,
 }
 
 impl TaskUsageStore {
     pub fn new() -> Self {
         Self::default()
     }
-    pub async fn add(&self, task_id: Uuid, session_id: &str, tokens: u64, cost_usd: f64) {
+    pub async fn add(
+        &self,
+        task_id: Uuid,
+        session_id: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cost_usd: f64,
+        latency_ms: u64,
+        model_used: Option<&str>,
+    ) {
+        let tokens = prompt_tokens.saturating_add(completion_tokens);
         {
             let mut g = self.by_task.write().await;
             let e = g.entry(task_id).or_insert((0, 0.0));
             e.0 += tokens;
             e.1 += cost_usd;
+        }
+        {
+            let mut g = self.by_task_last_turn.write().await;
+            g.insert(
+                task_id,
+                LastTurnUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    cost_usd,
+                    latency_ms,
+                },
+            );
+        }
+        if let Some(model) = model_used.filter(|m| !m.is_empty()) {
+            self.by_task_last_model
+                .write()
+                .await
+                .insert(task_id, model.to_string());
         }
         if !session_id.is_empty() {
             let mut g = self.by_session.write().await;
@@ -954,6 +1295,23 @@ impl TaskUsageStore {
     }
     pub async fn get_session(&self, session_id: &str) -> Option<(u64, f64)> {
         self.by_session.read().await.get(session_id).copied()
+    }
+    pub async fn get_last_turn(&self, task_id: Uuid) -> Option<LastTurnUsage> {
+        self.by_task_last_turn.read().await.get(&task_id).copied()
+    }
+    pub async fn get_last_model(&self, task_id: Uuid) -> Option<String> {
+        self.by_task_last_model
+            .read()
+            .await
+            .get(&task_id)
+            .cloned()
+    }
+    pub async fn reset_session(&self, session_id: &str) {
+        self.by_session.write().await.remove(session_id);
+    }
+    pub async fn totals(&self) -> (u64, f64) {
+        let g = self.by_session.read().await;
+        g.values().fold((0u64, 0.0f64), |acc, v| (acc.0 + v.0, acc.1 + v.1))
     }
 }
 
@@ -971,6 +1329,8 @@ pub async fn run_delegation_handler(
     progress: ProgressCache,
     task_completion: TaskCompletionRegistry,
     delegation_sem: std::sync::Arc<tokio::sync::Semaphore>,
+    _studio_disk_registry: crate::studio::StudioDiskRootRegistry,
+    studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
 ) {
     while let Some(req) = delegation_rx.recv().await {
         let permit = match delegation_sem.clone().try_acquire_owned() {
@@ -1078,6 +1438,10 @@ pub async fn run_delegation_handler(
         } else {
             Some(delegated_message.clone())
         };
+        let studio_project_id = store
+            .lineage_root_studio_project_id(req.requesting_task_id)
+            .ok()
+            .flatten();
         let child_task = Task {
             id: child_id,
             parent_task_id: Some(req.requesting_task_id),
@@ -1086,10 +1450,56 @@ pub async fn run_delegation_handler(
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             initial_message,
+            studio_project_id,
         };
         if store.insert(&child_task).is_err() {
             let _ = req.reply_tx.send(Err("store insert failed".to_string()));
             continue;
+        }
+        // EnteredSpan is not Send and must not cross await points.
+        drop(span_guard);
+        let lineage_root = store
+            .lineage_root_task_id(req.requesting_task_id)
+            .ok()
+            .unwrap_or(req.requesting_task_id);
+        if crate::studio_worktree::worktree_feature_enabled() {
+            if let Some(ref project_id) = child_task.studio_project_id {
+                if let Some(data_dir) = store_path.parent() {
+                    match crate::studio_worktree::create_worktree_for_child_task(
+                        data_dir,
+                        project_id,
+                        lineage_root,
+                        child_id,
+                    )
+                    .await
+                    {
+                        Ok(wt) => {
+                            crate::studio_worktree::register_worktree(&studio_worktree_registry, wt.clone())
+                                .await;
+                            let worktree_path = wt.worktree_path.to_string_lossy().into_owned();
+                            let _ = bus.send(
+                                EventEnvelope::new(
+                                    EventType::ProgressUpdate,
+                                    Some(serde_json::json!({
+                                        "task_id": child_id.to_string(),
+                                        "event_type": "studio_worktree_created",
+                                        "worktree_branch": wt.worktree_branch,
+                                        "worktree_path": worktree_path,
+                                    })),
+                                )
+                                .with_correlation(req.requesting_task_id),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                child_task_id = %child_id,
+                                error = %e,
+                                "studio worktree creation failed; fallback to shared root"
+                            );
+                        }
+                    }
+                }
+            }
         }
         let _ = bus.send(
             EventEnvelope::new(
@@ -1116,9 +1526,6 @@ pub async fn run_delegation_handler(
             )
             .with_correlation(req.requesting_task_id),
         );
-        // Drop the span guard before any await point: EnteredSpan is not Send and must
-        // not be held across await boundaries in a Send future.
-        drop(span_guard);
         // Register a completion notifier *before* sending to conv_tx so the worker can notify
         // even if it completes before the spawned waiter calls notified().
         let notify = Arc::new(tokio::sync::Notify::new());
@@ -1134,6 +1541,7 @@ pub async fn run_delegation_handler(
                 image_data_urls: None,
                 execution_mode: None,
                 preferred_task_type: None,
+                incognito: false,
             })
             .await
             .is_err()
@@ -1150,6 +1558,7 @@ pub async fn run_delegation_handler(
         let parent_task_id_span = req.requesting_task_id;
         let agent_type_span = agent_type.clone();
         let bus_for_waiter = bus.clone();
+        let studio_worktree_registry = studio_worktree_registry.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let span = tracing::info_span!(
@@ -1212,6 +1621,45 @@ pub async fn run_delegation_handler(
                         }
                     })
             };
+            if crate::studio_worktree::worktree_feature_enabled() {
+                if let Some(wt) = crate::studio_worktree::complete_and_cleanup_worktree(
+                    &studio_worktree_registry,
+                    child_id_span,
+                )
+                .await
+                {
+                    let event_type = match wt.lifecycle_state {
+                        crate::studio_worktree::WorktreeLifecycleState::NeedsUserResolution => {
+                            "studio_worktree_integration_conflict"
+                        }
+                        crate::studio_worktree::WorktreeLifecycleState::Cleaned => {
+                            "studio_worktree_integration_cleaned"
+                        }
+                        crate::studio_worktree::WorktreeLifecycleState::Integrated => {
+                            "studio_worktree_integration_merged"
+                        }
+                        crate::studio_worktree::WorktreeLifecycleState::Failed => {
+                            "studio_worktree_integration_failed"
+                        }
+                        _ => "studio_worktree_integration_state",
+                    };
+                    let worktree_path = wt.worktree_path.to_string_lossy().into_owned();
+                    let _ = bus_for_waiter.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "task_id": child_id_span.to_string(),
+                                "event_type": event_type,
+                                "integration_status": wt.integration_status,
+                                "conflict_state": wt.conflict_state,
+                                "worktree_branch": wt.worktree_branch,
+                                "worktree_path": worktree_path,
+                            })),
+                        )
+                        .with_correlation(parent_task_id_span),
+                    );
+                }
+            }
             let _ = reply_tx.send(match task.status {
                 TaskStatus::Completed => {
                     let _ = bus_for_waiter.send(
@@ -1270,89 +1718,12 @@ pub fn new_human_input_store() -> HumanInputStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
-/// Parse headers from the first chunk to get header length and Content-Length. Returns (header_body_sep_index, content_length).
-/// header_body_sep_index is the index of the start of "\r\n\r\n"; body starts at header_body_sep_index + 4.
-pub fn parse_content_length(buf: &[u8]) -> Option<(usize, usize)> {
-    let sep = b"\r\n\r\n";
-    let header_end = buf.windows(sep.len()).position(|w| w == sep)?;
-    let header_slice = &buf[..header_end];
-    let mut content_length: Option<usize> = None;
-    for line in header_slice.split(|&b| b == b'\n') {
-        let line_str = String::from_utf8_lossy(line).to_string();
-        let line_str = line_str.trim_end_matches('\r');
-        if let Some((name, value)) = line_str.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                if let Ok(n) = value.trim().parse::<usize>() {
-                    content_length = Some(n);
-                }
-                break;
-            }
-        }
-    }
-    content_length.map(|cl| (header_end, cl))
+pub type SteeringQueueStore = crate::steering_queue::SteeringQueueStore;
+
+pub fn new_steering_queue_store() -> SteeringQueueStore {
+    SteeringQueueStore::new()
 }
 
-/// Parsed HTTP request: method, path, body, and lowercase header map.
-pub fn parse_request(
-    buf: &[u8],
-) -> (
-    String,
-    String,
-    Option<Vec<u8>>,
-    std::collections::HashMap<String, String>,
-) {
-    let mut method = String::new();
-    let mut path = String::new();
-    let mut content_length = 0usize;
-    let mut headers = std::collections::HashMap::new();
-    let sep = b"\r\n\r\n";
-    let header_end = buf.windows(sep.len()).position(|w| w == sep);
-    let (header_slice, rest) = if let Some(i) = header_end {
-        (&buf[..i], &buf[i + sep.len()..])
-    } else {
-        (buf as &[u8], &[][..])
-    };
-    let lines: Vec<&[u8]> = header_slice.split(|&b| b == b'\n').collect();
-    for (i, line) in lines.iter().enumerate() {
-        let line_str = String::from_utf8_lossy(line)
-            .trim_end_matches('\r')
-            .to_string();
-        if i == 0 {
-            let parts: Vec<&str> = line_str.splitn(3, ' ').collect();
-            if parts.len() >= 2 {
-                method = parts[0].to_string();
-                path = parts[1].to_string();
-            }
-        } else if let Some((name, value)) = line_str.split_once(':') {
-            let name = name.trim().to_lowercase();
-            let value = value.trim().to_string();
-            if name == "content-length" {
-                if let Ok(n) = value.parse::<usize>() {
-                    content_length = n;
-                }
-            }
-            headers.insert(name, value);
-        }
-    }
-    const MAX_BODY_PARSE: usize = 10 * 1024 * 1024; // 10 MiB — refuse to allocate larger body
-    let will_allocate =
-        content_length > 0 && content_length <= MAX_BODY_PARSE && rest.len() >= content_length;
-    let body = if will_allocate {
-        Some(rest[..content_length].to_vec())
-    } else {
-        None
-    };
-    (method, path, body, headers)
-}
-
-pub fn json_response(status: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-        status,
-        body.len(),
-        body
-    )
-}
 
 /// Liste des outils disponibles (source unique pour le prompt et la doc).
 /// Format: une ligne par outil "nom — usage".
@@ -1360,6 +1731,7 @@ pub fn json_response(status: &str, body: &str) -> String {
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> [--full] [<offset_ligne> <nb_lignes>] — lire un fichier texte. Par défaut : **500 premières lignes** seulement (évite de saturer le contexte). `TOOL: read_file <chemin> --full` pour tout le fichier (plafond octets côté daemon si très gros). Fenêtre explicite : `read_file workspace:/fichier.ts 1 200`. PDF : texte extrait automatiquement. Path réel ou workspace:/<path>."),
     ("write_file", "write_file <path> puis contenu sur les lignes suivantes — écrire un fichier complet (création/remplacement). Format préféré : première ligne `TOOL: write_file workspace:/fichier`, puis le corps du fichier seul sur les lignes suivantes. Ne pas compresser un fichier entier sur la même ligne que le header. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace."),
+    ("write_code", "write_code <path> puis contenu — comme write_file mais **uniquement** pour fichiers source (.ts, .tsx, .js, .jsx, .rs, .py, …). Le daemon rejette markdown parasite / lignes TOOL dans le corps. Pour CODE_STUDIO_PLAN.md, DESIGN.md, JSON, YAML : utiliser write_file."),
     ("delete_file", "delete_file <path> — supprimer un fichier (pas un répertoire). Chemin workspace:/ ou disque autorisé par tools_policy (mêmes règles que write_file). Code Studio : préférer workspace:/chemin/relatif."),
     ("rename_path", "rename_path <from> <to> — renommer ou déplacer un fichier ou un répertoire (rename atomique si possible ; copie+suppression pour un fichier en cross-device). La destination ne doit pas exister. Deux arguments : le chemin source est le premier token ; tout le reste forme le chemin cible (espaces dans <to> OK). Pas d’espaces dans <from> sans utiliser workspace:/…"),
     ("move_tree", "move_tree <from_dir> <to_dir> — déplacer un répertoire et son contenu (rename atomique si possible, sinon copie récursive + suppression). La destination ne doit pas exister. Même convention d’arguments que rename_path (cible = args après le premier token)."),
@@ -1368,7 +1740,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche. Pour GitHub depuis le shell, préférer gh-axi (npm install -g gh-axi ; principes AXI https://axi.md/) s'il est installé — sorties compactes pour l'agent. Pour l'automation navigateur en CLI, chrome-devtools-axi (même dépôt https://github.com/kunchenguid/axi) en complément d'Akasha browser."),
     ("run_terminal", "run_terminal [--cwd <path>] <cmd> [args...] — exécuter une commande (même que run_command)"),
     ("run_command_background", "run_command_background [--cwd <path>] <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
-    ("terminal_session", "terminal_session — session PTY interactive (prévue ultérieurement, spec 43). Pour l’instant utiliser run_command / run_terminal pour une commande, run_command_background + process pour suivi."),
+    ("terminal_session", "terminal_session — PTY interactif: GET /api/terminal/capabilities ; API HTTP /api/terminal/pty/sessions (spec/43_session_terminal.md). Sinon: run_command / run_terminal, run_command_background + process list|poll|kill, GET /api/process/watch/recent."),
     ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers (ligne à ligne)"),
     ("diff_unified", "diff_unified <path_a> <path_b> [context_lines] — diff unifié style patch (défaut context_lines=3) ; chemins réels ou workspace:/"),
@@ -1381,24 +1753,40 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("apply_patch", "apply_patch <path> <patch_content> — appliquer un patch unifié (contenu du patch après le path)"),
     ("search_replace", "search_replace <path> <ancien_texte> | <nouveau_texte> — une seule ligne TOOL:. Séparateur : **espace | espace** (` | `). Après le chemin, mettre tout de suite le texte exact à remplacer (pas un `|` seul : le découpage sur espaces le transforme en token et vide la recherche). Si le motif contient ` | `, utiliser edit_file ou apply_patch. Exemple : TOOL: search_replace workspace:/src/App.tsx const x = 1 | const x = 2"),
     ("web_fetch", "web_fetch <url> — récupérer le contenu d'une URL (domaine autorisé dans tools_policy allowed_web_domains)"),
-    ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
+    ("web_search", "web_search <query> [max_results] — recherche web multi-fournisseurs (Brave, SearXNG, DuckDuckGo, … ; web_search_enabled)"),
+    ("web_crawl", "web_crawl <url> [limit] — lancer un crawl Cloudflare Browser Rendering (web_crawl_enabled, cloudflare_account_id, token vault cloudflare_api_token ou CLOUDFLARE_API_TOKEN ; domaines = allowed_web_domains). Retourne un job_id ; poller avec web_crawl_status."),
+    ("web_crawl_status", "web_crawl_status <job_id> — statut / résultat d’un job crawl Cloudflare (même config que web_crawl)."),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
+    ("user_rag_search", "user_rag_search <query> [top_k] — rechercher dans les documents utilisateur indexés (user RAG)"),
+    ("notes_list", "notes_list — lister les notes utilisateur (id + titre)"),
+    ("notes_read", "notes_read <id> — lire le contenu markdown d'une note"),
+    ("notes_write", "notes_write <id> puis contenu markdown sur les lignes suivantes — mettre à jour une note"),
+    ("notes_search", "notes_search <query> [limit] — rechercher dans les notes utilisateur"),
     ("workspace_graph_search", "workspace_graph_search <query> [--workspace <uuid>] — rechercher dans les graphes projet indexés (nœuds label/chemin) ; limite ~20 lignes ; --workspace pour un espace enregistré uniquement"),
     ("memory_store", "memory_store <content> <source> [link_to: uuid1+kind1,uuid2+kind2,...] [link_kind: default_kind] — mémoire long terme. Types recommandés : similar, relates_to, related, updates, supersedes, excludes, contradicts, supports, derived_from, same_as, spouse, child, birth_date, … ; par cible utiliser uuid+kind, ou uuid seuls avec link_kind (défaut related)."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
+    ("memory_update", "memory_update <id> <new_content> — mettre à jour le contenu d'une entrée (re-embedding automatique)"),
     ("memory_forget", "memory_forget <query> — supprimer les entrées dont le contenu correspond aux mots-clés (plan moyen terme 9)"),
     ("memory_stats", "memory_stats — nombre d'entrées et taille approximative de la mémoire long terme"),
     ("memory_gc", "memory_gc [retention_days] [protect_sources...] — supprimer les entrées plus anciennes que N jours (sources protégées optionnelles, ex. user_fact project)"),
     ("sessions_list", "sessions_list [limit] — lister les tâches/sessions récentes"),
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
+    ("schedule_task", "schedule_task <cron> <prompt> [title] — créer une tâche planifiée active."),
+    ("list_scheduled_tasks", "list_scheduled_tasks [limit] — lister les schedules actifs."),
+    ("cancel_scheduled_task", "cancel_scheduled_task <schedule_id> — supprimer un schedule par UUID."),
+    ("wake_in", "wake_in <minutes> <message> — programmer un rappel agent unique dans la session courante (plus léger que schedule_task)."),
+    ("budget_status", "budget_status [session_id] — état budget (usage tokens/coût, seuil, auto-concise)."),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
-    ("browser", "browser navigate <url> — open URL in managed browser (http/https; domain allowed by tools_policy). browser snapshot — text + links of current page. Phase 2: click, fill, screenshot, wait (see spec 39)."),
+    ("browser", "browser navigate <url> — navigate (http/https; domain allowed). browser snapshot — texte + liens. browser screenshot | browser click <css> | browser fill <css> <texte> | browser wait <css_selector|ms> — automation Playwright (spec 39)."),
     ("install_playwright", "install_playwright — run npm install and npx playwright install chromium in the Playwright runner directory (scripts/playwright-runner or AKASHA_PLAYWRIGHT_RUNNER). Requires browser_enabled. Use after ask_user consent if you need explicit approval before download; optional require_approval in tools_policy."),
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Pour une réponse ouverte (chemin, texte libre, secret), omettre choices ou laisser un tableau vide. Si choices est fourni, l'UI propose quand même une saisie libre en plus des boutons. Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
+    ("studio_list_tickets", "studio_list_tickets — (Code Studio) lister les tickets Kanban du projet (JSON compact : id, titre, statut, prérequis, agents). Réservé au disque projet courant (workspace)."),
+    ("studio_create_ticket", "studio_create_ticket <json> — (Code Studio) créer un ticket. Un seul objet JSON en argument (titre requis, description, assigned_agent, review_agent, depends_on_ticket_ids, status). Réservé studio-projects."),
+    ("studio_update_ticket", "studio_update_ticket <json> — (Code Studio) mettre à jour un ticket (ticket_id ou id requis, champs optionnels comme PATCH HTTP). Réservé studio-projects."),
     ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (Code Studio : réservé à studio_project_manager). agent_type utiles : studio_frontend | studio_backend | studio_fullstack | studio_scaffold | studio_planner | qa | code | conversation | … (voir liste des spécialistes). Un seul niveau depuis la tâche racine : les sous-agents ne rappellent pas delegate_to_agent."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
@@ -1420,6 +1808,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("graph_stats", "graph_stats <json_or_args...> — via plugin graph, calcule min/max/moyenne/compte par série et retourne une vue table."),
     ("sim_run", "sim_run <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, exécute une simulation déterministe et retourne une vue timeseries + métriques."),
     ("sim_compare", "sim_compare <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, compare scénario de base et alternatif, retourne delta + tableau de résultats."),
+    ("mcp_server_add", "mcp_server_add <name> <command> [args...] — ajouter ou remplacer une entrée dans data_dir/mcp.json (stdio MCP). Exemple: mcp_server_add demo npx -y @modelcontextprotocol/server-filesystem /tmp"),
+    ("mcp_server_remove", "mcp_server_remove <name> — supprimer un serveur MCP de mcp.json."),
 ];
 
 /// Tools advertised in the Code Studio prompt: dev/repo tools only (policy still gates execution).
@@ -1429,6 +1819,7 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent
     const STUDIO: &[&str] = &[
         "read_file",
         "write_file",
+        "write_code",
         "delete_file",
         "rename_path",
         "move_tree",
@@ -1476,7 +1867,7 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent
     };
     if out.is_empty() {
         out.extend(
-            ["read_file", "write_file", "grep_content", "run_command", "ask_user"]
+            ["read_file", "write_file", "write_code", "grep_content", "run_command", "ask_user"]
                 .iter()
                 .map(|s| (*s).to_string()),
         );
@@ -1491,6 +1882,38 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent
             .any(|t| t.eq_ignore_ascii_case("delegate_to_agent"))
         {
             out.push("delegate_to_agent".to_string());
+        }
+    }
+    if assigned_agent.eq_ignore_ascii_case("studio_project_manager") {
+        for t in [
+            "studio_list_tickets",
+            "studio_create_ticket",
+            "studio_update_ticket",
+        ] {
+            if !out.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                out.push(t.to_string());
+            }
+        }
+    }
+    if assigned_agent.eq_ignore_ascii_case("studio_reviewer") {
+        out.retain(|t| {
+            !matches!(
+                t.as_str(),
+                "write_file"
+                    | "write_code"
+                    | "delete_file"
+                    | "rename_path"
+                    | "move_tree"
+                    | "edit_file"
+                    | "apply_patch"
+                    | "search_replace"
+                    | "delegate_to_agent"
+            )
+        });
+        for t in ["studio_list_tickets", "studio_update_ticket"] {
+            if !out.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                out.push(t.to_string());
+            }
         }
     }
     out
@@ -1550,108 +1973,8 @@ struct MessageIntentFlags {
     geolocation_distance: bool,
 }
 
-#[derive(Debug, Clone, Default)]
-struct RuntimeToolRoutingEnforcer {
-    preferred_tools: std::collections::HashSet<String>,
-    forbidden_tools: std::collections::HashSet<String>,
-}
-
-impl RuntimeToolRoutingEnforcer {
-    fn from_rules(rules: &[crate::plugins::registry::MatchedRoutingRule]) -> Option<Self> {
-        if rules.is_empty() {
-            return None;
-        }
-        let mut preferred_tools = std::collections::HashSet::new();
-        let mut forbidden_tools = std::collections::HashSet::new();
-        for rule in rules {
-            for tool in &rule.preferred_tools {
-                let t = tool.trim().to_lowercase();
-                if !t.is_empty() {
-                    preferred_tools.insert(t);
-                }
-            }
-            for tool in &rule.forbidden_tools {
-                let t = tool.trim().to_lowercase();
-                if !t.is_empty() {
-                    forbidden_tools.insert(t);
-                }
-            }
-        }
-        Some(Self {
-            preferred_tools,
-            forbidden_tools,
-        })
-    }
-
-    fn is_tool_allowed(&self, tool_name: &str, args: &[String]) -> bool {
-        let tool = canonicalize_tool_name(tool_name).to_lowercase();
-
-        if self.is_forbidden(&tool, args) {
-            return false;
-        }
-
-        // If no preferred list is declared, only forbidden list is enforced.
-        if self.preferred_tools.is_empty() {
-            return true;
-        }
-
-        // Always allow ask_user to unblock missing parameters.
-        if tool == "ask_user" {
-            return true;
-        }
-
-        if self.preferred_tools.contains(&tool) {
-            return true;
-        }
-
-        // Allow plugin.call / plugin.<id> when it targets a preferred plugin/tool family.
-        if tool == "plugin.call" || tool == "plugin_call" {
-            if let Some(plugin_id) = args.first().map(|s| s.trim().to_lowercase()) {
-                if self.preferred_tools.contains(&plugin_id)
-                    || self
-                        .preferred_tools
-                        .iter()
-                        .any(|p| p.starts_with(&(plugin_id.clone() + "_")))
-                {
-                    return true;
-                }
-            }
-        }
-
-        if let Some(plugin_id) = tool.strip_prefix("plugin.") {
-            let plugin_id = plugin_id.trim().to_lowercase();
-            if self.preferred_tools.contains(&plugin_id)
-                || self
-                    .preferred_tools
-                    .iter()
-                    .any(|p| p.starts_with(&(plugin_id.clone() + "_")))
-            {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn is_forbidden(&self, tool_name: &str, args: &[String]) -> bool {
-        if self.forbidden_tools.is_empty() {
-            return false;
-        }
-        if self.forbidden_tools.contains(tool_name) {
-            return true;
-        }
-        if (tool_name == "plugin.call" || tool_name == "plugin_call")
-            && args
-                .first()
-                .map(|s| self.forbidden_tools.contains(&s.trim().to_lowercase()))
-                .unwrap_or(false)
-        {
-            return true;
-        }
-        false
-    }
-}
-
+/// Heuristic intent labels for **debug only** (`GET/POST /api/plugins/routing_rules`).
+/// Runtime tool execution is no longer gated on manifest `routing_rules` / these intents.
 fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
     let mut out = Vec::new();
     if flags.save_file {
@@ -1682,104 +2005,6 @@ fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
         out.push("geolocation_distance");
     }
     out
-}
-
-fn code_studio_disable_plugin_intents(flags: &mut MessageIntentFlags) {
-    // Code Studio requests are code/project scoped; plugin routing intents for travel/geolocation
-    // can hijack tool selection and force unrelated plugins.
-    flags.transport = false;
-    flags.geolocation_distance = false;
-}
-
-fn build_plugin_routing_reminders(
-    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
-    message: &str,
-    flags: &MessageIntentFlags,
-    tools_executor_snapshot: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
-) -> (String, bool) {
-    let Some(registry) = plugin_registry else {
-        return (String::new(), false);
-    };
-    let intents = active_intents_from_flags(flags);
-    if intents.is_empty() {
-        return (String::new(), false);
-    }
-
-    let rules = registry.match_routing_rules(message, &intents, |tool_name| {
-        tools_executor_snapshot
-            .as_ref()
-            .map(|e| e.policy.can_use_tool(tool_name))
-            .unwrap_or(false)
-    });
-    if rules.is_empty() {
-        return (String::new(), false);
-    }
-
-    let matched_plugins: Vec<String> = rules.iter().map(|r| r.plugin_id.clone()).collect();
-    tracing::info!(
-        intents = ?intents,
-        matched_rules = rules.len(),
-        plugins = ?matched_plugins,
-        "Dynamic plugin routing rules matched"
-    );
-
-    let mut seen = std::collections::HashSet::new();
-    let mut lines = Vec::new();
-    let mut geolocation_handled = false;
-    for rule in rules.into_iter().take(4) {
-        if rule
-            .intent
-            .as_deref()
-            .is_some_and(|intent| intent.eq_ignore_ascii_case("geolocation_distance"))
-        {
-            geolocation_handled = true;
-        }
-        let instruction = rule.instruction.trim();
-        if instruction.is_empty() {
-            continue;
-        }
-        if seen.insert(instruction.to_string()) {
-            lines.push(format!("- {}", instruction));
-        }
-    }
-    if lines.is_empty() {
-        return (String::new(), geolocation_handled);
-    }
-
-    let block = format!(
-        "\n[Dynamic plugin routing rules — auto-loaded from installed plugin manifests]\n{}\n\n",
-        lines.join("\n")
-    );
-    (block, geolocation_handled)
-}
-
-fn build_runtime_tool_routing_enforcer(
-    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
-    message: &str,
-    flags: &MessageIntentFlags,
-    tools_executor_snapshot: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
-) -> Option<RuntimeToolRoutingEnforcer> {
-    let registry = plugin_registry?;
-    let intents = active_intents_from_flags(flags);
-    if intents.is_empty() {
-        return None;
-    }
-
-    let rules = registry.match_routing_rules(message, &intents, |tool_name| {
-        tools_executor_snapshot
-            .as_ref()
-            .map(|e| e.policy.can_use_tool(tool_name))
-            .unwrap_or(false)
-    });
-
-    let enforcer = RuntimeToolRoutingEnforcer::from_rules(&rules)?;
-    tracing::info!(
-        intents = ?intents,
-        preferred_tools = ?enforcer.preferred_tools,
-        forbidden_tools = ?enforcer.forbidden_tools,
-        "Runtime tool routing enforcement enabled"
-    );
-    Some(enforcer)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2031,6 +2256,24 @@ fn english_session_recap_word(lower: &str) -> bool {
         .any(|w| w == "recap")
 }
 
+/// French tokens suggesting « remind me / session recap ».
+/// Uses whole-token matching so phrases like « ne **rappellent** pas » do not false-positive
+/// on substring `rappel` (regression: mandatory delegation prefix + session recap fast path).
+fn french_session_recall_word_tokens(lower: &str) -> bool {
+    const TOKENS: &[&str] = &[
+        "rappel",
+        "rappeler",
+        "rappelle",
+        "rappelles",
+        "rappelez",
+        "rappelons",
+    ];
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '\'')
+        .filter(|t| !t.is_empty())
+        .any(|w| TOKENS.contains(&w))
+}
+
 fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
     let lower = message
         .trim()
@@ -2041,9 +2284,6 @@ fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
         return None;
     }
     let asks_recall = [
-        "rappeler",
-        "rappelle",
-        "rappel",
         "ce qu'on a fait",
         "ce qu on a fait",
         "on a fait",
@@ -2054,6 +2294,7 @@ fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
     ]
     .iter()
     .any(|k| lower.contains(k))
+        || french_session_recall_word_tokens(&lower)
         || english_session_recap_word(&lower);
     if !asks_recall {
         return None;
@@ -2507,6 +2748,70 @@ pub(crate) fn build_image_markdown(label: &str, url: &str) -> String {
     format!("\n\n![{}](<{}>)", label, url)
 }
 
+/// Max chars for a single vision attachment on the next completion (`AKASHA_VISION_INJECT_MAX_CHARS`).
+fn vision_inject_max_chars() -> usize {
+    std::env::var("AKASHA_VISION_INJECT_MAX_CHARS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(crate::tool_output::VISION_INJECT_DEFAULT_MAX_CHARS)
+        .max(100_000)
+}
+
+/// True if tool `captured_image` should be forwarded to the multimodal LLM on the following turn (excludes audio TTS).
+fn captured_media_suitable_for_vision_injection(s: &str) -> bool {
+    if s.starts_with("data:audio/") {
+        return false;
+    }
+    if s.starts_with("data:image/") {
+        return true;
+    }
+    !s.starts_with("data:") && !s.is_empty()
+}
+
+fn guess_image_mime_from_path(path: &Path) -> &'static str {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .map(|e| match e.as_str() {
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "svg" => "image/svg+xml",
+            "jpg" | "jpeg" => "image/jpeg",
+            _ => "application/octet-stream",
+        })
+        .unwrap_or("application/octet-stream")
+}
+
+/// Best-effort tool name from a streaming `TOOL:` delta chunk (partial lines allowed).
+fn parse_tool_name_from_toolcall_delta(delta: &str) -> Option<String> {
+    let idx = delta.find("TOOL:")?;
+    let rest = delta[idx + 5..].trim_start();
+    let name = rest.split_whitespace().next()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn normalize_captured_media_for_vision_turn(s: &str) -> String {
+    if s.starts_with("data:image/")
+        || (s.starts_with("data:") && !s.starts_with("data:audio/"))
+    {
+        s.to_string()
+    } else if !s.starts_with("data:") {
+        format!("data:image/jpeg;base64,{}", s)
+    } else {
+        s.to_string()
+    }
+}
+
+fn vision_payload_within_cap(normalized: &str) -> bool {
+    normalized.len() <= vision_inject_max_chars()
+}
+
 /// Returns true if content should be skipped when capturing to long-term memory (noise, loop risk, or too short/long).
 fn should_skip_capture_content(content: &str) -> bool {
     let t = content.trim();
@@ -2581,6 +2886,33 @@ fn is_github_host(host: &str) -> bool {
     INSTALL_SKILL_DEFAULT_HOSTS
         .iter()
         .any(|h| host == *h || host.ends_with(&format!(".{}", *h)))
+}
+
+/// Append one JSON line to `data_dir/skills.lock.jsonl` (supply-chain / pin trail).
+fn append_skills_lock_entry(data_dir: &Path, entry: &serde_json::Value) {
+    let Ok(mut line) = serde_json::to_string(entry) else {
+        eprintln!("failed to serialize skills.lock.jsonl entry");
+        return;
+    };
+    line.push('\n');
+    let path = data_dir.join("skills.lock.jsonl");
+    let write = move || {
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(mut f) => {
+                if let Err(e) = std::io::Write::write_all(&mut f, line.as_bytes()) {
+                    eprintln!("failed to append to {}: {}", path.display(), e);
+                }
+            }
+            Err(e) => {
+                eprintln!("failed to open {}: {}", path.display(), e);
+            }
+        }
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let _ = handle.spawn_blocking(write);
+    } else {
+        std::thread::spawn(write);
+    }
 }
 
 /// Result of parsing a skill install URL: raw SKILL.md URL, skill name, and optional GitHub API path for listing contents.
@@ -2941,6 +3273,24 @@ async fn do_install_skill(
     };
     match skill_registry.reload(data_dir, spec_dir).await {
         Ok(count) => {
+            let pin_ref = parsed
+                .api_path
+                .as_ref()
+                .map(|(_, _, branch, _)| branch.clone())
+                .unwrap_or_default();
+            let digest = hex::encode(Sha256::digest(body.as_bytes()));
+            append_skills_lock_entry(
+                data_dir,
+                &serde_json::json!({
+                    "v": 1,
+                    "skill_name": parsed.skill_name,
+                    "source_url": url,
+                    "raw_skill_url": parsed.raw_skill_url,
+                    "ref": pin_ref,
+                    "skill_md_sha256": digest,
+                    "installed_at": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
             let body_instructions = skill_md_body(&body);
             let total_chars = body_instructions.chars().count();
             let body_preview = if total_chars > 8000 {
@@ -2981,12 +3331,7 @@ async fn do_install_skill(
             };
             if need_hot_reload {
                 if let Some((r, path)) = tools_reload {
-                    if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
-                        if let Ok(v) = akasha_vault::open_vault(data_dir) {
-                            reloaded.brave_api_key = v.get("brave_api_key").ok();
-                        }
-                        *r.write().await =
-                            std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
+                    if reload_tools_executor_policy(r, path, data_dir).await.is_ok() {
                         commands_added_msg = commands_added_msg
                             .replace(" (allowed_commands) :", " ; politique rechargée à chaud :");
                     }
@@ -3087,12 +3432,7 @@ async fn do_uninstall_skill(
     }
     if policy_updated {
         if let Some((r, path)) = tools_reload {
-            if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
-                if let Ok(v) = akasha_vault::open_vault(data_dir) {
-                    reloaded.brave_api_key = v.get("brave_api_key").ok();
-                }
-                *r.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
-            }
+            let _ = reload_tools_executor_policy(r, path, data_dir).await;
         }
     }
     match skill_registry.reload(data_dir, spec_dir).await {
@@ -3133,7 +3473,7 @@ const WEB_SEARCH_FOLLOWUP_REMINDER: &str = "\n[Reminder — page fetch: Search s
 /// Reminder injected when the user asks for external information (weather, news, etc.) but
 /// web_search is not available in the current tools policy. Prevents the model from ignoring
 /// the question and falling back to a generic capability introduction.
-const WEB_SEARCH_UNAVAILABLE_REMINDER: &str = "\n[Note: the user is asking for weather, news, or other live external information. web_search is not currently enabled. Answer as best you can from your training knowledge, clearly state that the data may be outdated, and explain how to enable web search: set web_search_enabled: true in tools_policy.yaml and configure BRAVE_API_KEY. Do NOT respond with a generic capabilities introduction — address the user's question directly.]\n\n";
+const WEB_SEARCH_UNAVAILABLE_REMINDER: &str = "\n[Note: the user is asking for weather, news, or other live external information. web_search is not currently enabled. Answer as best you can from your training knowledge, clearly state that the data may be outdated, and explain how to enable web search: set web_search_enabled: true in tools_policy.yaml (SearXNG/DuckDuckGo work without API keys; optional Brave/Tavily/Serper keys in vault or env). Do NOT respond with a generic capabilities introduction — address the user's question directly.]\n\n";
 
 const TRANSPORT_REMINDER: &str = "\n[Reminder: the user is asking about transport schedules, routes, or travel information. You MUST use TOOL: web_search <query> first (e.g. web_search \"horaires train Angoulême Paris CDG dimanche\"). Do NOT write any files, generate HTML, or ask about project file paths — the user wants travel information only. If web_search is unavailable, say so clearly and suggest the relevant site (e.g. sncf.com, ratp.fr, transilien.com).]\n\n";
 
@@ -3186,9 +3526,9 @@ const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
     "  Suivi des lots : ajouter une **ligne datée courte** dans `## Informations complémentaires` ou `## Demandes d'évolutions utilisateur par phase` plutôt que de réécrire l'ensemble du plan.\n",
     "  Si le fichier est absent (import), le créer avec ce gabarit en synthétisant le dépôt. Remplacement complet réservé à une demande **explicite** de réinitialisation du plan (bouton ou consigne utilisateur).\n",
     "- Premier lot d'un projet Code Studio : après avoir créé ou mis à jour `CODE_STUDIO_PLAN.md`, créer `workspace:/DESIGN.md` **avant** les développements applicatifs si le fichier est absent. `DESIGN.md` doit fixer le contrat design (front matter YAML + sections markdown) à partir de la demande, de la stack et du plan ; ensuite seulement générer/modifier `src/`, configs, tests, etc.\n",
-    "- **Corrections sur le disque (obligatoire quand les outils le permettent)** : pour corriger du code (imports, erreurs TS/build, etc.), utiliser des lignes `TOOL:` — `search_replace` pour des changements localisés, `edit_file` pour un intervalle de lignes, `write_file` seulement si un remplacement de fichier entier est justifié, `apply_patch` si adapté. ",
+    "- **Corrections sur le disque (obligatoire quand les outils le permettent)** : pour corriger du code (imports, erreurs TS/build, etc.), utiliser des lignes `TOOL:` — `search_replace` pour des changements localisés, `edit_file` pour un intervalle de lignes, `write_code` pour créer ou remplacer un **fichier source** entier (.ts, .tsx, .rs, …), `write_file` pour plans Markdown / JSON / config, `apply_patch` si adapté. ",
     "Ne pas faire du **chat** le canal principal de livraison : éviter « voici le fichier corrigé à coller dans workspace:/… », les longs blocs de remplacement manuel ou les résumés à la place d’écritures réelles tant que la politique d’outils autorise les écritures.\n",
-    "- **Si une écriture est impossible** (outil refusé, erreur explicite de `write_file` / `search_replace` / etc., chemin hors périmètre) : indiquer **pourquoi** tu ne peux pas appliquer la correction toi-même (citer le message d’erreur ou la contrainte), puis seulement proposer un secours (diff, extrait à copier).\n\n",
+    "- **Si une écriture est impossible** (outil refusé, erreur explicite de `write_file` / `write_code` / `search_replace` / etc., chemin hors périmètre) : indiquer **pourquoi** tu ne peux pas appliquer la correction toi-même (citer le message d’erreur ou la contrainte), puis seulement proposer un secours (diff, extrait à copier).\n\n",
 );
 
 /// Contexte système court pour les tâches dont le disque outil est sous `studio-projects/` (Code Studio).
@@ -3197,13 +3537,13 @@ const CODE_STUDIO_APP_CONTEXT: &str = concat!(
     "[Code Studio — contexte]\n",
     "Tu travailles sur le dépôt du projet ouvert dans Akasha Code Studio. ",
     "Chemins : préfère `workspace:/…` (racine virtuelle de la tâche) ; les fichiers sont synchronisés sur le disque du projet studio.\n",
-    "Outils usuels : read_file, write_file, delete_file, rename_path, move_tree (si autorisés), search_replace, edit_file, apply_patch, run_command (avec `--cwd workspace:/` pour builds/tests), git_* si exposés, ask_user pour une question bloquante dans la même tâche.\n",
+    "Outils usuels : read_file, write_file, write_code (fichiers source uniquement), delete_file, rename_path, move_tree (si autorisés), search_replace, edit_file, apply_patch, run_command (avec `--cwd workspace:/` pour builds/tests), git_* si exposés, ask_user pour une question bloquante dans la même tâche.\n",
     "Concentre-toi sur le code et la documentation de ce dépôt — pas sur l’interface générale d’Akasha (TUI, onglets, skills hors projet, caméra, météo). ",
     "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
     "Réponds dans la même langue que le dernier message utilisateur. ",
     "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n",
     "Sur le premier lot d’un projet : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant de commencer le développement applicatif si ce fichier est absent.\n",
-    "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_file`, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
+    "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_code` pour le code source, `write_file` pour markdown/json/config, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
     "Si un outil d’écriture échoue ou est interdit, expliquer clairement la raison avant toute solution de secours.\n\n",
 );
 
@@ -3231,7 +3571,7 @@ const APP_CONTEXT: &str = concat!(
     "Never invent data. If you do not have the information to answer, say so clearly (e.g. \"I did not find that information\"). ",
     "For questions about information you do not have (weather, forecasts, news, schedules, etc.), you must use the web_search tool first, then if snippets are insufficient use web_fetch and/or browser navigate plus browser snapshot to read the page itself and reply with the synthesized facts. When you have just received tool results (e.g. web_search, web_fetch, browser snapshot), you must answer immediately with the synthesized result — do not reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"); the task ends after your message, so give the actual answer. ",
     "Do not suggest the user visit a site without having used web_search first if you have access to that tool; do not only list URLs for the user when web_fetch or browser snapshot can retrieve the content. ",
-    "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
+    "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled; keyless SearXNG/DuckDuckGo or optional API keys). ",
     "Playwright / managed browser: the daemon may auto-install Chromium on first browser use unless AKASHA_PLAYWRIGHT_AUTO_INSTALL=0. If browser fails for missing Chromium, the runner is missing, or the user must explicitly approve a large download, use TOOL: ask_user (e.g. choices agreeing to install), then TOOL: install_playwright. List install_playwright in tool_profiles when using a profile. tools_policy require_approval can include install_playwright for UI approval before the install runs. For other dependencies (npm, cargo, etc.), use run_command with allowed_commands after ask_user consent. ",
     "You have access to the write_file tool: you MUST use it whenever the user asks to save, store or write a file (e.g. \"save the code to …\", \"write to file\"). ",
     "Reply ONLY with a header line TOOL: write_file <full_path>, then the file content on the following lines. Do not put the full file content on the same TOOL line. ",
@@ -3268,18 +3608,22 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "system" => Some("You are the system agent. You have full knowledge of the Akasha application: commands (akasha start, init, doctor), interfaces (TUI, Chat, Router, Memory, Doc, Calendar), slash commands, skills, tools, and configuration. You can resolve issues and answer any question about how Akasha works. Be precise and refer to real features only."),
         "image_generation" => Some("You are the image generation agent. Produce images from text prompts using the generate_image tool. Focus on clear, concrete prompts that yield the requested visual. One precise deliverable per request."),
         "studio_project_manager" => Some("You are the Code Studio project manager (chef de projet). Tu coordonnes chaque demande sur le dépôt ouvert (chemins `workspace:/…`).\n\
+Contrainte de stack : la stack active du projet (injectée dans le message) est verrouillée par défaut. Sans demande explicite de l’utilisateur, n’autorise pas de migration d’écosystème/langage (ex. Python -> TypeScript) et refuse toute délégation qui réécrit `CODE_STUDIO_PLAN.md` pour changer la stack.\n\
 Règles d’orchestration :\n\
+- **Kanban / tickets** : après lecture de `CODE_STUDIO_PLAN.md`, `DESIGN.md` et du résumé projet, assure-toi que le tableau Kanban reflète le travail : utilise `TOOL: studio_list_tickets`, puis `TOOL: studio_create_ticket` / `TOOL: studio_update_ticket` avec un **JSON sur une ligne** (ex. `TOOL: studio_create_ticket {\"title\":\"…\",\"description\":\"…\",\"depends_on_ticket_ids\":[\"uuid\"]}`). Crée ou ajuste les tickets **avant** de déléguer l’implémentation aux sous-agents.\n\
 - **Dossier `specs/`** : pour toute demande d’**évolution** (nouvelle fonctionnalité, changement de comportement, refonte ciblée, branche d’évolution active, ou demande explicitement traitée comme évolution), crée un fichier plan dédié `workspace:/specs/<YYYYMMDD>-<slug-court>.md` avant de lancer l’implémentation. Le plan doit contenir : objectif, périmètre, critères d’acceptation, liste d’étapes numérotées, **marquage des étapes parallélisables** (ex. « (parallèle avec 3) »), risques, et une section **Iterations** pour suivre les passes de correction.\n\
-- **Délégation** : tu es le **seul** à appeler `TOOL: delegate_to_agent <agent> <message>` vers des sous-agents (`studio_frontend`, `studio_backend`, `studio_fullstack`, `studio_scaffold`, `studio_planner` pour lecture/plan seul, `qa`, `code`, etc.). Les sous-agents **ne** doivent **pas** rappeler `delegate_to_agent`. Pour plusieurs lots parallèles, enchaîne plusieurs `delegate_to_agent` dans le même tour si la politique d’outils le permet.\n\
+- **Délégation** : tu es le **seul** à appeler `TOOL: delegate_to_agent <agent> <message>` vers des sous-agents (`conversation`, `code`, `studio_frontend`, `studio_backend`, `studio_fullstack`, `studio_scaffold`, `studio_planner` pour lecture/plan seul, `qa`, etc.). Les sous-agents **ne** doivent **pas** rappeler `delegate_to_agent`. **Mode anti-conflit Code Studio** : exécute une délégation **séquentielle** (un seul `delegate_to_agent` à la fois), attends le résultat, relis les fichiers impactés, puis lance le suivant. Quand le runtime injecte une consigne « délégation obligatoire », tu délègue avant toute implémentation applicative.\n\
 - **Boucle de correction** : après chaque vague de sous-agents, lis les résultats / erreurs de build (`run_command --cwd workspace:/` quand autorisé), mets à jour le plan dans `specs/…` et relance des sous-tâches ciblées. **Maximum 5** vagues de retours sous-agents pour la même demande racine ; si au-delà le besoin n’est pas satisfait, réponds à l’utilisateur avec ce qui a été fait, les blocages, et des suggestions concrètes.\n\
+- **Phase review ticket** : si le ticket est en `review`, délègue à `studio_reviewer` (ou au `review_agent` du ticket s’il vaut `studio_reviewer`) pour audit et feedback seulement. En review, ne mandate pas un agent d’implémentation pour réécrire le code ; la sortie attendue est un verdict + commentaires + retour `in_progress` si corrections requises.\n\
 - **Synthèse utilisateur** : une fois le besoin rempli (ou en échec contrôlé), termine par un résumé clair en langage accessible.\n\
 - **Fichiers** : respecte les règles Code Studio existantes pour `CODE_STUDIO_PLAN.md` et `DESIGN.md` ; n’écrase pas le plan global sans nécessité.\n\
 Langue : aligne-toi sur le dernier message utilisateur."),
-        "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. When the user message contains a [Stack technique du projet] block at the top, follow it strictly for languages, frameworks, package manager, and tooling; otherwise align with the stack recorded for the project or keep the skeleton generic. Do not add dead files; keep structure conventional. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (read_file first; section-wise edits only—never replace the whole file for a routine change). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If a previous generation polluted a file with prose, clean it and keep only valid file content. Before finishing: run an appropriate build or typecheck when possible; in your final reply summarize what you created and how to run it in plain language."),
-        "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
-        "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
-        "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
-        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
+        "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. When the user message contains a [Stack technique du projet] block at the top, follow it strictly for languages, frameworks, package manager, and tooling; otherwise align with the stack recorded for the project or keep the skeleton generic. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Do not add dead files; keep structure conventional. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (read_file first; section-wise edits only—never replace the whole file for a routine change). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If a previous generation polluted a file with prose, clean it and keep only valid file content. Before finishing: run an appropriate build or typecheck when possible; in your final reply summarize what you created and how to run it in plain language."),
+        "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Verify dependencies exist in package.json before importing. Use read_file before editing. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
+        "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
+        "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
+        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, write_code, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
+        "studio_reviewer" => Some("You are the Code Studio QA/Review agent. STRICTLY NON-MUTATING: never modify application files and never run write tools (write_file, write_code, edit_file, search_replace, apply_patch, delete_file, rename_path, move_tree). Your job in ticket `review` is to verify that the work linked to the ticket is present and behaves as expected, then post structured feedback on the ticket. Use read-only inspection (read_file, grep_content, git_* and optional diagnostics) and finish by updating the ticket via `studio_update_ticket`: if accepted set review_outcome=approved and status=done; if issues remain set review_outcome=changes_requested, add concrete corrective_steps, and set status=in_progress. Do not rewrite the implementation during review."),
         _ => None,
     }
 }
@@ -3288,6 +3632,7 @@ Langue : aligne-toi sur le dernier message utilisateur."),
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
     const WRITE_TOOLS: &[&str] = &[
         "write_file",
+        "write_code",
         "delete_file",
         "rename_path",
         "move_tree",
@@ -3321,800 +3666,13 @@ async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: 
     }
 }
 
-/// Split by whitespace but keep double-quoted segments as a single token (e.g. -H "Authorization: Bearer $X" -> [-H, "Authorization: Bearer $X"]).
-fn split_whitespace_respecting_quotes(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = s.trim();
-    while !rest.is_empty() {
-        rest = rest.trim_start();
-        if rest.is_empty() {
-            break;
-        }
-        if rest.starts_with('"') {
-            let mut end = 1usize;
-            while end < rest.len() {
-                let b = rest.as_bytes()[end];
-                if b == b'\\' && end + 1 < rest.len() {
-                    end += 2;
-                    continue;
-                }
-                if b == b'"' {
-                    out.push(rest[1..end].replace("\\\"", "\""));
-                    rest = &rest[end + 1..];
-                    break;
-                }
-                end += 1;
-            }
-            if end >= rest.len() {
-                // Unclosed quote: slice only if rest has content after the opening quote (avoid rest[1..] when len==1)
-                let quoted = if rest.len() > 1 { &rest[1..] } else { "" };
-                out.push(quoted.replace("\\\"", "\""));
-                rest = "";
-            }
-        } else {
-            let next_quote = rest.find('"').unwrap_or(rest.len());
-            let word_end = rest[..next_quote]
-                .find(|c: char| c.is_whitespace())
-                .unwrap_or(rest.len());
-            let word = rest[..word_end].trim();
-            if !word.is_empty() {
-                out.push(word.to_string());
-            }
-            rest = &rest[word_end..];
-        }
-    }
-    out
-}
+pub(crate) use crate::api_tool_parser::parse_tool_calls;
 
-/// Strip `- ` / `* ` / `1. ` list prefixes so tool lines can be detected.
-fn strip_optional_list_prefix(line: &str) -> &str {
-    let mut s = line.trim_start();
-    for p in ["- ", "* ", "+ ", "• "] {
-        if let Some(r) = s.strip_prefix(p) {
-            s = r.trim_start();
-            break;
-        }
-    }
-    if s.is_empty() {
-        return s;
-    }
-    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        if let Some(dot) = s.find('.') {
-            if dot > 0 && s[..dot].chars().all(|c| c.is_ascii_digit()) {
-                return s[dot + 1..].trim_start();
-            }
-        }
-    }
-    s
-}
+pub(crate) use crate::api_tool_dispatch::process_ops::{parse_run_command_args, resolve_run_command_working_dir};
 
-/// Strip ATX heading hashes (`### Title` → `Title`).
-fn strip_markdown_heading_hashes(line: &str) -> &str {
-    let mut s = line.trim_start();
-    let mut n = 0usize;
-    while s.starts_with('#') && n < 7 {
-        n += 1;
-        s = &s[1..];
-    }
-    if n > 0 {
-        s = s.trim_start();
-    }
-    s
-}
+pub(crate) use crate::api_tool_dispatch::web_device_memory_ops::parse_device_invoke_params;
 
-/// Leading markdown noise before `TOOL` (table pipes, headings, lists, bold, backticks).
-fn strip_leading_tool_line_noise(line: &str) -> &str {
-    let mut s = line.trim_start();
-    while s.starts_with('|') {
-        s = s[1..].trim_start();
-    }
-    s = strip_markdown_heading_hashes(s);
-    s = strip_optional_list_prefix(s);
-    s = s
-        .trim_start_matches(|c: char| matches!(c, '*' | '`'))
-        .trim_start();
-    s
-}
-
-/// True if `prefix` is only whitespace and common markdown punctuation (no letters/words — avoids matching prose before `TOOL:`).
-fn tool_line_prefix_is_markdown_junk_only(prefix: &str) -> bool {
-    prefix.trim().chars().all(|c| {
-        c.is_whitespace()
-            || matches!(
-                c,
-                '#' | '*'
-                    | '`'
-                    | '|'
-                    | '•'
-                    | '-'
-                    | '+'
-                    | ':'
-                    | '.'
-                    | ';'
-                    | ','
-                    | '/'
-                    | '\\'
-                    | '('
-                    | ')'
-                    | '['
-                    | ']'
-            )
-            || c.is_ascii_digit()
-    })
-}
-
-/// First word after `TOOL:` must match a real tool when using the "inline" heuristic (avoids prose `… TOOL: …`).
-const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
-    "write_file",
-    "read_file",
-    "edit_file",
-    "search_replace",
-    "apply_patch",
-    "list_dir",
-    "grep_content",
-    "web_search",
-    "web_fetch",
-    "run_command",
-    "browser",
-    "install_playwright",
-    "read_skill",
-    "memory_store",
-    "workspace_graph_search",
-    "device_invoke",
-    "ask_user",
-    "generate_image",
-    "pdf",
-];
-
-/// `### Step — TOOL: write_file`, table junk, or other lines where `TOOL:` is not at column 0 after strips.
-fn inline_ascii_tool_colon_rest(line: &str) -> Option<&str> {
-    let t = line.trim();
-    let mut search = t;
-    let mut last_ok: Option<&str> = None;
-    while let Some(pos) = search.find("TOOL:") {
-        let abs = t.len() - search.len() + pos;
-        let prefix = &t[..abs];
-        let rest = t[abs + 5..].trim_start();
-        if let Some(tok) = rest.split_whitespace().next() {
-            let tl = tok.to_lowercase();
-            if ORCH_INLINE_TOOL_FIRST_WORDS
-                .iter()
-                .any(|&n| n == tl.as_str())
-            {
-                if tool_line_prefix_is_markdown_junk_only(prefix) {
-                    last_ok = Some(rest);
-                }
-            }
-        }
-        search = &t[abs + 5..];
-    }
-    last_ok
-}
-
-/// If the line begins with `tool` (case-insensitive) as a keyword followed by optional `*` / `` ` `` and `:`, return the rest.
-/// Handles models that emit `- Tool:`, `**TOOL:**`, table cells `| TOOL: ... |`, etc., when substring `TOOL:` is present but strict parse failed.
-fn line_rest_after_leading_tool(line: &str) -> Option<&str> {
-    line_rest_after_leading_tool_at_start(line).or_else(|| inline_ascii_tool_colon_rest(line))
-}
-
-fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
-    let s = strip_leading_tool_line_noise(line);
-    if s.len() < 4 {
-        return None;
-    }
-    if !s.get(0..4)?.eq_ignore_ascii_case("tool") {
-        return None;
-    }
-    // Reject `tools:` / `toolkit:` — fifth char must not be ASCII letter.
-    if s.as_bytes().get(4).is_some_and(|b| b.is_ascii_alphabetic()) {
-        return None;
-    }
-    let mut rest = &s[4..];
-    rest = rest.trim_start();
-    while rest.starts_with('*') || rest.starts_with('`') {
-        rest = &rest[1..];
-    }
-    rest = rest.strip_prefix(':')?;
-    rest = rest.trim_start();
-    while rest.starts_with('*') || rest.starts_with('`') {
-        rest = &rest[1..];
-    }
-    // Drop trailing table pipe from first cell
-    let rest = rest.trim_end();
-    let rest = rest.strip_suffix('|').map(|x| x.trim_end()).unwrap_or(rest);
-    Some(rest.trim_start())
-}
-
-/// Returns true if `tool_name` (already lower-cased) takes a multiline body argument.
-fn tool_supports_multiline_body(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "apply_patch" | "edit_file" | "write_file" | "ask_user"
-    )
-}
-
-fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
-    !tool_name.is_empty()
-        && tool_name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-}
-
-/// DeepSeek / variantes : balises style `<｜DSML｜tool_calls>…<｜DSML｜invoke name="…">…</｜DSML｜invoke>`.
-/// Le découpage sur espaces ne s’applique pas au XML ; on convertit en lignes `TOOL:` avant `parse_tool_calls`.
-fn normalize_dsml_tool_calls(response: &str) -> String {
-    let lower = response.to_ascii_lowercase();
-    if !lower.contains("dsml") || !lower.contains("invoke") || !response.contains('<') {
-        return response.to_string();
-    }
-    static DSML_TOOL_CALLS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    static DSML_INVOKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    static DSML_PARAM: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let tc = DSML_TOOL_CALLS.get_or_init(|| {
-        regex::Regex::new(
-            r"(?is)<[^>]{0,160}?\bdsml[^>]{0,160}?\btool_calls[^>]*>([\s\S]*?)</[^>]{0,160}?\bdsml[^>]{0,160}?\btool_calls[^>]*>",
-        )
-        .expect("dsml tool_calls regex")
-    });
-    let inv = DSML_INVOKE.get_or_init(|| {
-        regex::Regex::new(
-            r#"(?is)<[^>]{0,160}?\binvoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</[^>]{0,160}?\binvoke[^>]*>"#,
-        )
-        .expect("dsml invoke regex")
-    });
-    let par = DSML_PARAM.get_or_init(|| {
-        regex::Regex::new(
-            r#"(?is)<[^>]{0,160}?\bparameter\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>\s*(.*?)\s*</[^>]{0,160}?\bparameter[^>]*>"#,
-        )
-        .expect("dsml parameter regex")
-    });
-
-    let mut s = tc
-        .replace_all(response, |caps: &regex::Captures| {
-            let inner = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            let lines = dsml_fragment_invokes_to_tool_lines(inner, inv, par);
-            if lines.is_empty() {
-                return caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
-            }
-            lines.join("\n")
-        })
-        .into_owned();
-
-    // Invokes restants (hors bloc tool_calls, ou variante sans wrapper)
-    static DSML_STANDALONE_INVOKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let sinv = DSML_STANDALONE_INVOKE.get_or_init(|| {
-        regex::Regex::new(
-            r#"(?is)<[^>]{0,160}?\bdsml[^>]{0,160}?\binvoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</[^>]{0,160}?\bdsml[^>]{0,160}?\binvoke[^>]*>"#,
-        )
-        .expect("dsml standalone invoke regex")
-    });
-    s = sinv
-        .replace_all(&s, |caps: &regex::Captures| {
-            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
-            let body = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            let params = dsml_parse_parameters(body, par);
-            let args = dsml_params_to_tool_args(name, &params);
-            format!("TOOL: {} {}", name, args.join(" "))
-        })
-        .into_owned();
-
-    s
-}
-
-fn dsml_simple_entity_decode(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-}
-
-fn dsml_truthy_param(v: &str) -> bool {
-    matches!(
-        v.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on" | ""
-    )
-}
-
-fn dsml_parse_parameters(body: &str, par: &regex::Regex) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for c in par.captures_iter(body) {
-        let name = c.get(1).map(|m| m.as_str()).unwrap_or("").trim().to_string();
-        let val = dsml_simple_entity_decode(c.get(2).map(|m| m.as_str()).unwrap_or("").trim());
-        if !name.is_empty() {
-            out.push((name, val));
-        }
-    }
-    out
-}
-
-fn dsml_params_to_tool_args(tool: &str, params: &[(String, String)]) -> Vec<String> {
-    let tl = tool.trim().to_ascii_lowercase();
-    match tl.as_str() {
-        "search_files" => {
-            let mut dir = ".".to_string();
-            let mut pat = "*".to_string();
-            let mut no_ignore = false;
-            for (k, v) in params {
-                let kl = k.to_ascii_lowercase();
-                match kl.as_str() {
-                    "dir" => {
-                        if !v.is_empty() {
-                            dir = v.clone();
-                        }
-                    }
-                    "pattern" | "glob" => {
-                        if !v.is_empty() {
-                            pat = v.clone();
-                        }
-                    }
-                    "--no-ignore" | "--no-gitignore" | "no_ignore" => {
-                        if dsml_truthy_param(v) {
-                            no_ignore = true;
-                        }
-                    }
-                    "limit" | "offset" | "max" | "max_results" | "top_k" | "string" => {}
-                    _ => {}
-                }
-            }
-            let mut out = vec![dir, pat];
-            if no_ignore {
-                out.push("--no-ignore".to_string());
-            }
-            out
-        }
-        "grep_content" => {
-            let mut dir = ".".to_string();
-            let mut pattern = String::new();
-            let mut file_glob: Option<String> = None;
-            let mut no_ignore = false;
-            let mut use_regex = false;
-            for (k, v) in params {
-                let kl = k.to_ascii_lowercase();
-                match kl.as_str() {
-                    "dir" => {
-                        if !v.is_empty() {
-                            dir = v.clone();
-                        }
-                    }
-                    "pattern" | "query" => pattern = v.clone(),
-                    "file_glob" | "glob" => {
-                        if !v.is_empty() {
-                            file_glob = Some(v.clone());
-                        }
-                    }
-                    "--no-ignore" | "--no-gitignore" | "no_ignore" => {
-                        if dsml_truthy_param(v) {
-                            no_ignore = true;
-                        }
-                    }
-                    "--regex" | "-r" | "regex" => {
-                        if dsml_truthy_param(v) {
-                            use_regex = true;
-                        }
-                    }
-                    "limit" | "string" | "offset" => {}
-                    _ => {}
-                }
-            }
-            let mut out = vec![dir, pattern];
-            if let Some(g) = file_glob {
-                if !g.is_empty() {
-                    out.push(g);
-                }
-            }
-            if use_regex {
-                out.push("--regex".to_string());
-            }
-            if no_ignore {
-                out.push("--no-ignore".to_string());
-            }
-            out
-        }
-        _ => dsml_generic_params_to_args(params),
-    }
-}
-
-fn dsml_generic_params_to_args(params: &[(String, String)]) -> Vec<String> {
-    let mut out = Vec::new();
-    for (k, v) in params {
-        let kt = k.trim();
-        if kt.eq_ignore_ascii_case("string") {
-            continue;
-        }
-        if kt.starts_with("--") {
-            if dsml_truthy_param(v) {
-                out.push(kt.to_string());
-            }
-        } else if !v.is_empty() {
-            out.push(v.clone());
-        }
-    }
-    out
-}
-
-fn dsml_fragment_invokes_to_tool_lines(
-    inner: &str,
-    inv: &regex::Regex,
-    par: &regex::Regex,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    for c in inv.captures_iter(inner) {
-        let name = c.get(1).map(|m| m.as_str()).unwrap_or("").trim();
-        if name.is_empty() {
-            continue;
-        }
-        let body = c.get(2).map(|m| m.as_str()).unwrap_or("");
-        let params = dsml_parse_parameters(body, par);
-        let args = dsml_params_to_tool_args(name, &params);
-        lines.push(format!("TOOL: {} {}", name, args.join(" ")));
-    }
-    lines
-}
-
-/// Certains modèles enveloppent les appels outils en XML (`<tool_call>read_file …</tool_call>`)
-/// ou enchaînent avec `<tool_call>…<tool_call>…` sans fermeture. Convertir en lignes `TOOL:` pour `parse_tool_calls`.
-fn normalize_xml_tool_call_wrappers(response: &str) -> String {
-    static CLOSE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    static OPEN_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-
-    let lower = response.to_ascii_lowercase();
-    if !lower.contains("<tool_call") {
-        return response.to_string();
-    }
-    let close_re = CLOSE_RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)</tool_call\s*>").expect("hard-coded close tool_call regex must compile")
-    });
-    let s = close_re.replace_all(response, "\n").to_string();
-    let open_re = OPEN_RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)<tool_call(?:\s[^>]*)?>\s*")
-            .expect("hard-coded open tool_call regex must compile")
-    });
-    open_re.replace_all(&s, "\nTOOL: ").to_string()
-}
-
-/// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
-///
-/// Lines that are inside the body of a multiline tool (`write_file`, `edit_file`,
-/// `apply_patch`, `ask_user`) are **not** normalized — only a real tool header
-/// (canonical `TOOL: …` or a sloppy markdown-style prefix recognized by
-/// `line_rest_after_leading_tool`, e.g. `- Tool: …` or `**TOOL:** …`) can
-/// terminate a body.  Lines that merely *mention* a tool mid-sentence
-/// (e.g. `### Step — TOOL: read_file`) remain body content because
-/// `line_rest_after_leading_tool` requires the keyword to appear at the effective
-/// start of the line after stripping markdown noise.
-fn normalize_response_tool_prefixes(response: &str) -> String {
-    let mut in_fence = false;
-    let mut in_multiline_body = false;
-    let mut out_lines = Vec::new();
-
-    for raw in response.lines() {
-        let trimmed = raw.trim();
-
-        // Track fenced code blocks (``` or ```lang) — never normalize inside them.
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
-            out_lines.push(raw.to_string());
-            continue;
-        }
-
-        if in_fence {
-            out_lines.push(raw.to_string());
-            continue;
-        }
-
-        // Inside a multiline body, exit body mode only when the line is a real
-        // tool header — either the canonical "TOOL: …" form or a sloppy
-        // markdown-style prefix that `line_rest_after_leading_tool` recognises
-        // (e.g. "- Tool: …", "**TOOL:** …").  Lines where TOOL: is embedded
-        // after non-noise text (e.g. "### Step — TOOL: read_file") are kept as
-        // body content because `line_rest_after_leading_tool` requires the
-        // keyword at the effective start of the line.
-        if in_multiline_body {
-            if raw.trim_start().starts_with("TOOL:") || line_rest_after_leading_tool(raw).is_some()
-            {
-                // Real tool header (canonical or sloppy) — exit body mode and fall through.
-                in_multiline_body = false;
-            } else {
-                out_lines.push(raw.to_string());
-                continue;
-            }
-        }
-
-        if let Some(rest) = line_rest_after_leading_tool(raw) {
-            let normalized = format!("TOOL: {}", rest);
-            // If this tool supports a multiline body, subsequent lines are body content.
-            if let Some(name) = rest.split_whitespace().next() {
-                if tool_supports_multiline_body(&name.to_lowercase()) {
-                    in_multiline_body = true;
-                }
-            }
-            out_lines.push(normalized);
-        } else {
-            // Already canonical TOOL: line — still need to track body-mode entry.
-            if let Some(rest) = trimmed.strip_prefix("TOOL:") {
-                if let Some(name) = rest.trim().split_whitespace().next() {
-                    if tool_supports_multiline_body(&name.to_lowercase()) {
-                        in_multiline_body = true;
-                    }
-                }
-            }
-            out_lines.push(raw.to_string());
-        }
-    }
-
-    out_lines.join("\n")
-}
-
-/// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
-fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
-    let dsml_norm = normalize_dsml_tool_calls(response);
-    let xml_norm = normalize_xml_tool_call_wrappers(&dsml_norm);
-    let normalized = normalize_response_tool_prefixes(&xml_norm);
-    parse_tool_calls_strict(&normalized)
-}
-
-/// Parse already-normalized tool lines (internal).
-fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String>)> {
-    let mut out = Vec::new();
-    let lines: Vec<&str> = response.lines().collect();
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i].trim();
-        if let Some(rest) = line.strip_prefix("TOOL:") {
-            let rest = rest.trim();
-            // Split by whitespace, respecting double-quoted args (so run_command -H "Bearer $VAR" works)
-            let parts: Vec<String> = split_whitespace_respecting_quotes(rest);
-            if let Some((name, fixed_args)) = parts.split_first() {
-                let tool_name_lc = name.to_lowercase();
-                if !tool_name_is_safe_identifier(&tool_name_lc) {
-                    i += 1;
-                    continue;
-                }
-                let mut args = fixed_args.to_vec();
-                // Only certain tools support a multi-line body argument.
-                let supports_body = tool_supports_multiline_body(&tool_name_lc);
-
-                if supports_body {
-                    // Collect subsequent non-TOOL: lines as a raw multi-line body (for
-                    // tools like apply_patch / edit_file that need preserved whitespace).
-                    i += 1;
-                    let body_start = i;
-                    while i < lines.len() && !lines[i].trim_start().starts_with("TOOL:") {
-                        i += 1;
-                    }
-                    // Trim trailing blank lines from the body
-                    let mut body_end = i;
-                    while body_end > body_start && lines[body_end - 1].trim().is_empty() {
-                        body_end -= 1;
-                    }
-                    if body_end > body_start {
-                        args.push(lines[body_start..body_end].join("\n"));
-                    }
-                    out.push((name.clone(), args));
-                    continue;
-                } else {
-                    // For other tools, only use the header line arguments and
-                    // do not consume following lines as a body.
-                    out.push((name.clone(), args));
-                    i += 1;
-                    continue;
-                }
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Parse run_command args: leading VAULT:vault_key=ENV_VAR entries are extracted;
-/// optional `--cwd <path>` (after VAULT lines) sets the working directory;
-/// the next token is the command, the rest are command arguments.
-/// Returns (vault_specs, cwd_flag, command, cmd_args).
-fn parse_run_command_args(
-    args: &[String],
-) -> (Vec<(String, String)>, Option<String>, String, Vec<String>) {
-    let mut vault_specs = Vec::new();
-    let mut rest: Vec<String> = Vec::new();
-    for arg in args {
-        if let Some(s) = arg.strip_prefix("VAULT:") {
-            if let Some((vault_key, env_var)) = s.split_once('=') {
-                vault_specs.push((vault_key.trim().to_string(), env_var.trim().to_string()));
-            }
-            continue;
-        }
-        rest.push(arg.clone());
-    }
-    let mut cwd_flag: Option<String> = None;
-    if rest.len() >= 2 && rest[0] == "--cwd" {
-        cwd_flag = Some(rest[1].clone());
-        rest.drain(..2);
-    }
-    let (command, cmd_args) = rest
-        .split_first()
-        .map(|(c, a)| (c.clone(), a.to_vec()))
-        .unwrap_or_else(|| (String::new(), Vec::new()));
-    (vault_specs, cwd_flag, command, cmd_args)
-}
-
-/// Resolve working directory for `run_command` / `run_terminal` / `run_command_background`.
-/// Returns `None` for legacy behavior (daemon process cwd). Returns `Some(path)` when `--cwd` was set
-/// or `run_command_default_cwd_workspace` applies.
-fn resolve_run_command_working_dir(
-    cwd_flag: Option<&str>,
-    workspace_root: Option<&std::path::Path>,
-    policy: &akasha_tools::ToolsPolicy,
-) -> Result<Option<std::path::PathBuf>, String> {
-    if let Some(raw) = cwd_flag {
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return Err("--cwd requires a non-empty path".to_string());
-        }
-        let p = resolve_tool_disk_path(raw, workspace_root);
-        let p = strip_verbatim_prefix(p);
-        let meta = std::fs::metadata(&p).map_err(|e| format!("cwd {}: {}", p.display(), e))?;
-        if !meta.is_dir() {
-            return Err(format!("--cwd is not a directory: {}", p.display()));
-        }
-        if !policy.can_read(&p) {
-            return Err(format!(
-                "cwd not allowed by policy (allowed_read_paths): {}",
-                p.display()
-            ));
-        }
-        return Ok(Some(p));
-    }
-    if policy.run_command_default_cwd_workspace {
-        if let Some(root) = workspace_root {
-            let root_pb = strip_verbatim_prefix(root.to_path_buf());
-            if root_pb.is_dir() && policy.can_read(&root_pb) {
-                return Ok(Some(root_pb));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Open a URL in the system default browser. Only http and https URLs are allowed.
-#[allow(dead_code)]
-fn open_url_in_browser(url: &str) -> Result<(), String> {
-    let url = url.trim();
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("Only http and https URLs are allowed".to_string());
-    }
-    let parsed = url
-        .parse::<url::Url>()
-        .map_err(|e| format!("Invalid URL: {}", e))?;
-    let scheme = parsed.scheme().to_ascii_lowercase();
-    if scheme != "http" && scheme != "https" {
-        return Err("Only http and https URLs are allowed".to_string());
-    }
-    let status = match std::env::consts::OS {
-        "windows" => std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
-            .status()
-            .map_err(|e| e.to_string())?,
-        "macos" => std::process::Command::new("open")
-            .arg(url)
-            .status()
-            .map_err(|e| e.to_string())?,
-        _ => std::process::Command::new("xdg-open")
-            .arg(url)
-            .status()
-            .map_err(|e| e.to_string())?,
-    };
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("Command exited with: {}", status))
-    }
-}
-
-/// Parse `device_invoke` params from the tail of the args list (args[3..]).
-/// - No extra args → `{}`
-/// - Single arg that is valid JSON → that JSON value
-/// - Single arg that is not valid JSON → `{}`
-/// - Multiple args → JSON array of strings
-fn parse_device_invoke_params(args: &[String]) -> serde_json::Value {
-    if args.len() <= 3 {
-        serde_json::json!({})
-    } else if args.len() == 4 {
-        serde_json::from_str::<serde_json::Value>(&args[3])
-            .unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!(args[3..].to_vec())
-    }
-}
-
-/// Root task id for the `workspace:/` virtual store (same bucket as `write_file`).
-/// Orchestrated children must read the lineage root map; otherwise they miss files written under the parent id.
-fn workspace_lineage_root_task_id(task_id: Uuid, store_path: Option<&std::path::Path>) -> Uuid {
-    store_path
-        .and_then(|sp| TaskStore::open(sp).ok())
-        .map(|s| {
-            let mut current = task_id;
-            for _ in 0..8 {
-                let parent = s.get(current).ok().flatten().and_then(|t| t.parent_task_id);
-                match parent {
-                    Some(p) => current = p,
-                    None => break,
-                }
-            }
-            current
-        })
-        .unwrap_or(task_id)
-}
-
-/// LLMs often paste a **stale** root id into `workspace:/.akasha/plan_<uuid>.md` (e.g. from an older run).
-/// Rewrite to this task's lineage root so reads/writes target the live orchestration plan.
-fn rewrite_workspace_plan_key_to_lineage_root(
-    key: &str,
-    lineage_root: Uuid,
-) -> (String, Option<Uuid>) {
-    const PREFIX: &str = ".akasha/plan_";
-    const SUFFIX: &str = ".md";
-    let k = key.replace('\\', "/");
-    if !k.starts_with(PREFIX) || !k.ends_with(SUFFIX) {
-        return (key.to_string(), None);
-    }
-    let mid = &k[PREFIX.len()..k.len() - SUFFIX.len()];
-    let Ok(parsed) = Uuid::parse_str(mid) else {
-        return (key.to_string(), None);
-    };
-    if parsed == lineage_root {
-        return (k, None);
-    }
-    let new_key = format!("{PREFIX}{lineage_root}{SUFFIX}");
-    (new_key, Some(parsed))
-}
-
-/// Rewrite a full `workspace:/...` path string so that any stale plan UUID is replaced by the
-/// lineage-root UUID.  Non-workspace paths and non-plan-trace paths are returned unchanged.
-/// Used before calling `resolve_tool_disk_path` for partial-edit tools (`search_replace`,
-/// `edit_file`, `apply_patch`) so they operate on the live plan file rather than a stale copy.
-fn rewrite_workspace_plan_path_str(
-    path_str: &str,
-    task_id: Uuid,
-    store_path: Option<&std::path::Path>,
-) -> String {
-    if !(path_str.starts_with("workspace:/") || path_str.starts_with("workspace:")) {
-        return path_str.to_string();
-    }
-    let key = path_str
-        .trim_start_matches("workspace:/")
-        .trim_start_matches("workspace:")
-        .trim_start_matches('/');
-    let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
-    let (new_key, _) = rewrite_workspace_plan_key_to_lineage_root(key, lineage_id);
-    format!("workspace:/{new_key}")
-}
-
-/// After a successful partial edit (`edit_file`, `search_replace`, `apply_patch`) on a `workspace:/` path,
-/// re-read the updated disk file and insert it into the in-memory workspace store so that subsequent
-/// `read_file workspace:/` calls return the latest content.
-async fn sync_workspace_store_from_disk(
-    workspace_store: Option<&TaskWorkspaceStore>,
-    task_id: Uuid,
-    store_path: Option<&std::path::Path>,
-    workspace_path_str: &str,
-    disk_path: &std::path::Path,
-) {
-    let Some(ws) = workspace_store else { return };
-    let key = workspace_path_str
-        .trim_start_matches("workspace:/")
-        .trim_start_matches("workspace:")
-        .trim_start_matches('/')
-        .to_string();
-    let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
-    let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
-    if let Ok(updated) = tokio::fs::read_to_string(disk_path).await {
-        let mut guard = ws.write().await;
-        guard
-            .entry(lineage_task_id)
-            .or_default()
-            .insert(key, updated);
-    }
-}
+pub(crate) use crate::api_tool_dispatch::fs_ops::{rewrite_workspace_plan_key_to_lineage_root, rewrite_workspace_plan_path_str, sync_workspace_store_from_disk, workspace_lineage_root_task_id};
 
 fn parse_plugin_tool_invocation(
     plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
@@ -4189,11 +3747,147 @@ async fn execute_tool_call(
     workspace_store: Option<&TaskWorkspaceStore>,
     browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
     workspace_root: Option<&std::path::Path>,
+    session_id: Option<&str>,
+) -> (bool, String, Option<String>) {
+    crate::api_tool_dispatch::execute_tool_call(
+        crate::api_tool_dispatch::ToolCallContext {
+            process_registry,
+            long_term_client,
+            task_id,
+            store_path,
+            conv_tx,
+            message_webhook_url,
+            plugin_registry,
+            device_bridge,
+            workspace_store,
+            browser_registry,
+            workspace_root,
+            session_id,
+        },
+        executor,
+        tool_name,
+        args,
+    )
+    .await
+}
+
+pub(crate) async fn execute_tool_call_impl(
+    executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
+    tool_name: &str,
+    args: &[String],
+    process_registry: Option<&ProcessRegistry>,
+    long_term_client: Option<&LongTermMemoryClient>,
+    task_id: Uuid,
+    store_path: Option<&std::path::Path>,
+    conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
+    message_webhook_url: Option<&str>,
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
+    device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
+    workspace_store: Option<&TaskWorkspaceStore>,
+    browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
+    workspace_root: Option<&std::path::Path>,
+    session_id: Option<&str>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
+    let is_studio_workspace =
+        crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
+    let assigned_agent_for_task = if is_studio_workspace {
+        store_path
+            .and_then(|sp| TaskStore::open(sp).ok())
+            .and_then(|store| store.get(task_id).ok().flatten())
+            .map(|t| t.assigned_agent.to_ascii_lowercase())
+    } else {
+        None
+    };
+    if assigned_agent_for_task.as_deref() == Some("studio_reviewer") {
+        let blocked = matches!(
+            tool_name,
+            "write_file"
+                | "write_code"
+                | "delete_file"
+                | "rename_path"
+                | "move_tree"
+                | "edit_file"
+                | "apply_patch"
+                | "search_replace"
+                | "delegate_to_agent"
+        );
+        if blocked {
+            return (
+                false,
+                format!(
+                    "[{}] forbidden for `studio_reviewer`: review agent is read-only and must only validate then update ticket feedback/status.",
+                    tool_name
+                ),
+                None,
+            );
+        }
+    }
+    if tool_name.starts_with("mcp_") {
+        if std::env::var("AKASHA_MCP_TOOLS_ENABLED").ok().as_deref() == Some("0") {
+            return (
+                false,
+                "[mcp] MCP tools disabled (AKASHA_MCP_TOOLS_ENABLED=0)".to_string(),
+                None,
+            );
+        }
+        let Some((server, mcp_tool)) = crate::mcp_runtime::parse_mcp_tool_name(tool_name) else {
+            return (
+                false,
+                format!("[{tool_name}] invalid MCP tool name (expected mcp_<server>_<tool>)"),
+                None,
+            );
+        };
+        if !executor.policy.can_use_mcp_tool(&server, &mcp_tool) {
+            return (
+                false,
+                format!(
+                    "[{tool_name}] MCP server/tool denied by tools_policy.yaml (mcp_servers)"
+                ),
+                None,
+            );
+        }
+        if let Some(max) = executor.policy.mcp_max_calls_per_task_for(&server) {
+            let used = crate::mcp_budget::count(task_id);
+            if used >= max {
+                return (
+                    false,
+                    format!(
+                        "[{tool_name}] MCP budget exceeded ({used}/{max} calls this task)"
+                    ),
+                    None,
+                );
+            }
+        }
+        crate::mcp_budget::record_call(task_id);
+        let args_json = if args.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "input": args.join(" ") })
+        };
+        return match crate::mcp_runtime::tools_call(&mcp_tool, args_json).await {
+            Ok(v) => {
+                let preview = v.to_string();
+                let (p, total, trunc) = crate::tool_output::truncate_utf8_by_bytes(&preview, 12_000);
+                let msg = crate::tool_output::with_truncation_footer(
+                    format!("[{tool_name}] {p}"),
+                    trunc,
+                    total,
+                    "MCP response truncated",
+                );
+                (true, msg, None)
+            }
+            Err(e) => (false, format!("[{tool_name}] MCP error: {e}"), None),
+        };
+    }
     let plugin_invocation = parse_plugin_tool_invocation(plugin_registry, tool_name, args);
     let is_plugin_candidate = plugin_invocation.is_some();
-    let can_use_named_tool = executor.policy.can_use_tool(tool_name);
+    let studio_ticket_tool_ok = matches!(
+        tool_name,
+        "studio_list_tickets" | "studio_create_ticket" | "studio_update_ticket"
+    ) && crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
+    let can_use_named_tool =
+        executor.policy.can_use_tool(tool_name) || studio_ticket_tool_ok;
     let can_use_plugin_call =
         executor.policy.can_use_tool("plugin.call") || executor.policy.can_use_tool("plugin_call");
     if is_plugin_candidate && !can_use_plugin_call {
@@ -4203,7 +3897,8 @@ async fn execute_tool_call(
             None,
         );
     }
-    if !can_use_named_tool && !is_plugin_candidate {
+    let is_mcp_tool = tool_name.starts_with("mcp_");
+    if !can_use_named_tool && !is_plugin_candidate && !is_mcp_tool {
         return (
             false,
             format!("[{}] tool not allowed by current profile", tool_name),
@@ -4281,6 +3976,308 @@ async fn execute_tool_call(
                         None,
                     ),
                 }
+            }
+        }
+        "user_rag_search" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (
+                    false,
+                    "[user_rag_search] no data dir".to_string(),
+                    None,
+                );
+            };
+            let data_dir = data_dir.to_path_buf();
+            let mut top_k = 5usize;
+            let mut rest: Vec<String> = Vec::new();
+            for a in args {
+                if let Ok(k) = a.parse::<usize>() {
+                    top_k = k.clamp(1, 20);
+                } else {
+                    rest.push(a.clone());
+                }
+            }
+            let query = rest.join(" ").trim().to_string();
+            if query.is_empty() {
+                return (
+                    false,
+                    "[user_rag_search] usage: user_rag_search <query> [top_k]".to_string(),
+                    None,
+                );
+            }
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::user_rag::UserRagStore::new(&data_dir);
+                store.retrieve(&query, top_k)
+            })
+            .await
+            {
+                Ok(Ok(chunks)) if chunks.is_empty() => (
+                    true,
+                    "[user_rag_search] no matching excerpts".to_string(),
+                    None,
+                ),
+                Ok(Ok(chunks)) => (
+                    true,
+                    format!(
+                        "[user_rag_search]\n{}",
+                        chunks
+                            .iter()
+                            .enumerate()
+                            .map(|(i, c)| format!("{}. {}", i + 1, c))
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    ),
+                    None,
+                ),
+                Ok(Err(e)) => (false, format!("[user_rag_search] {}", e), None),
+                Err(e) => (false, format!("[user_rag_search] join: {}", e), None),
+            }
+        }
+        "notes_list" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (false, "[notes_list] no data dir".to_string(), None);
+            };
+            let data_dir = data_dir.to_path_buf();
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::notes::NotesStore::new(&data_dir);
+                store.list()
+            })
+            .await
+            {
+                Ok(Ok(notes)) if notes.is_empty() => (true, "[notes_list] no notes".to_string(), None),
+                Ok(Ok(notes)) => {
+                    let lines: Vec<String> = notes
+                        .iter()
+                        .map(|n| format!("{} — {}", n.id, n.title))
+                        .collect();
+                    (true, format!("[notes_list]\n{}", lines.join("\n")), None)
+                }
+                Ok(Err(e)) => (false, format!("[notes_list] {}", e), None),
+                Err(e) => (false, format!("[notes_list] join: {}", e), None),
+            }
+        }
+        "notes_read" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (false, "[notes_read] no data dir".to_string(), None);
+            };
+            let id = args.first().map(String::as_str).unwrap_or("").trim();
+            if id.is_empty() {
+                return (
+                    false,
+                    "[notes_read] usage: notes_read <id>".to_string(),
+                    None,
+                );
+            }
+            let data_dir = data_dir.to_path_buf();
+            let id = id.to_string();
+            let id_for_err = id.clone();
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::notes::NotesStore::new(&data_dir);
+                store.read(&id)
+            })
+            .await
+            {
+                Ok(Ok(Some(doc))) => (
+                    true,
+                    format!(
+                        "[notes_read] {} — {}\n\n{}",
+                        doc.meta.id, doc.meta.title, doc.content
+                    ),
+                    None,
+                ),
+                Ok(Ok(None)) => (false, format!("[notes_read] note not found: {id_for_err}"), None),
+                Ok(Err(e)) => (false, format!("[notes_read] {}", e), None),
+                Err(e) => (false, format!("[notes_read] join: {}", e), None),
+            }
+        }
+        "notes_write" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (false, "[notes_write] no data dir".to_string(), None);
+            };
+            let id = args.first().map(String::as_str).unwrap_or("").trim();
+            if id.is_empty() {
+                return (
+                    false,
+                    "[notes_write] usage: notes_write <id> puis contenu markdown".to_string(),
+                    None,
+                );
+            }
+            let content = if args.len() > 1 {
+                args[1..].join("\n")
+            } else {
+                String::new()
+            };
+            let data_dir = data_dir.to_path_buf();
+            let id = id.to_string();
+            let id_for_err = id.clone();
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::notes::NotesStore::new(&data_dir);
+                store.update(&id, None, Some(&content))
+            })
+            .await
+            {
+                Ok(Ok(Some(doc))) => (
+                    true,
+                    format!(
+                        "[notes_write] updated {} — {} ({} chars)",
+                        doc.meta.id,
+                        doc.meta.title,
+                        doc.content.len()
+                    ),
+                    None,
+                ),
+                Ok(Ok(None)) => (false, format!("[notes_write] note not found: {id_for_err}"), None),
+                Ok(Err(e)) => (false, format!("[notes_write] {}", e), None),
+                Err(e) => (false, format!("[notes_write] join: {}", e), None),
+            }
+        }
+        "notes_search" => {
+            let Some(data_dir) = store_path.and_then(|p| p.parent()) else {
+                return (false, "[notes_search] no data dir".to_string(), None);
+            };
+            let mut limit = 10usize;
+            let mut rest: Vec<String> = Vec::new();
+            for a in args {
+                if let Ok(k) = a.parse::<usize>() {
+                    limit = k.clamp(1, 50);
+                } else {
+                    rest.push(a.clone());
+                }
+            }
+            let query = rest.join(" ").trim().to_string();
+            if query.is_empty() {
+                return (
+                    false,
+                    "[notes_search] usage: notes_search <query> [limit]".to_string(),
+                    None,
+                );
+            }
+            let data_dir = data_dir.to_path_buf();
+            match tokio::task::spawn_blocking(move || {
+                let store = crate::notes::NotesStore::new(&data_dir);
+                store.search(&query, limit)
+            })
+            .await
+            {
+                Ok(Ok(hits)) if hits.is_empty() => (
+                    true,
+                    "[notes_search] no matching notes".to_string(),
+                    None,
+                ),
+                Ok(Ok(hits)) => (
+                    true,
+                    format!(
+                        "[notes_search]\n{}",
+                        hits.iter()
+                            .enumerate()
+                            .map(|(i, h)| format!(
+                                "{}. {} — {}\n   {}",
+                                i + 1,
+                                h.id,
+                                h.title,
+                                h.snippet
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
+                    None,
+                ),
+                Ok(Err(e)) => (false, format!("[notes_search] {}", e), None),
+                Err(e) => (false, format!("[notes_search] join: {}", e), None),
+            }
+        }
+        "studio_list_tickets" => {
+            let Some(root) =
+                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+            else {
+                return (
+                    false,
+                    "[studio_list_tickets] Code Studio project workspace required".to_string(),
+                    None,
+                );
+            };
+            let tickets = crate::api_studio::studio_list_tickets(&root);
+            let slim: Vec<serde_json::Value> = tickets
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "id": t.id,
+                        "title": t.title,
+                        "status": t.status,
+                        "depends_on_ticket_ids": crate::api_studio::ticket_dependency_ids(t),
+                        "assigned_agent": t.assigned_agent,
+                        "review_agent": t.review_agent,
+                    })
+                })
+                .collect();
+            let pretty = serde_json::to_string_pretty(&slim).unwrap_or_else(|_| "[]".to_string());
+            (
+                true,
+                format!("[studio_list_tickets]\n{}", pretty),
+                None,
+            )
+        }
+        "studio_create_ticket" => {
+            let Some(root) =
+                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+            else {
+                return (
+                    false,
+                    "[studio_create_ticket] Code Studio project workspace required".to_string(),
+                    None,
+                );
+            };
+            let payload = args.join(" ");
+            let v: serde_json::Value = match serde_json::from_str(payload.trim()) {
+                Ok(x) => x,
+                Err(e) => {
+                    return (
+                        false,
+                        format!(
+                            "[studio_create_ticket] invalid JSON (single JSON object as args): {}",
+                            e
+                        ),
+                        None,
+                    );
+                }
+            };
+            match crate::api_studio::studio_tool_create_ticket_json(&root, &v) {
+                Ok(ticket) => {
+                    let enc = serde_json::to_string_pretty(&ticket).unwrap_or_default();
+                    (true, format!("[studio_create_ticket]\n{}", enc), None)
+                }
+                Err(e) => (false, format!("[studio_create_ticket] {}", e), None),
+            }
+        }
+        "studio_update_ticket" => {
+            let Some(root) =
+                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+            else {
+                return (
+                    false,
+                    "[studio_update_ticket] Code Studio project workspace required".to_string(),
+                    None,
+                );
+            };
+            let payload = args.join(" ");
+            let v: serde_json::Value = match serde_json::from_str(payload.trim()) {
+                Ok(x) => x,
+                Err(e) => {
+                    return (
+                        false,
+                        format!(
+                            "[studio_update_ticket] invalid JSON (single JSON object as args): {}",
+                            e
+                        ),
+                        None,
+                    );
+                }
+            };
+            match crate::api_studio::studio_tool_apply_ticket_patch_json(&root, &v) {
+                Ok(ticket) => {
+                    let enc = serde_json::to_string_pretty(&ticket).unwrap_or_default();
+                    (true, format!("[studio_update_ticket]\n{}", enc), None)
+                }
+                Err(e) => (false, format!("[studio_update_ticket] {}", e), None),
             }
         }
         "read_file" => {
@@ -4623,7 +4620,19 @@ async fn execute_tool_call(
                     let task = tokio::spawn(async move {
                         let cwd_ref = cwd_resolved.as_deref();
                         let result = exec.run_command(&cmd, &cmd_args, cwd_ref, None).await;
+                        let (success, exit_code) = match &result {
+                            Ok((out, res)) => (res.success, out.status.code()),
+                            Err(_) => (false, None),
+                        };
                         *cell_clone.write().await = Some(result);
+                        crate::process_watch::push_event(crate::process_watch::ProcessWatchEvent {
+                            ts_rfc3339: chrono::Utc::now().to_rfc3339(),
+                            session_id: session_id.to_string(),
+                            cmd_line: format!("{} {}", cmd, cmd_args.join(" ")),
+                            success,
+                            exit_code,
+                        })
+                        .await;
                         // Auto-cleanup after a TTL to prevent leaking sessions the client never polls.
                         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                         reg_clone.write().await.remove(&session_id);
@@ -4634,7 +4643,91 @@ async fn execute_tool_call(
                 None => (false, "[run_command_background] process registry not available".to_string(), None),
             }
         }
-        "terminal_session" => (true, "[terminal_session] Interactive PTY session planned (spec 43). Use run_command or run_terminal for a single command; run_command_background + process for background execution.".to_string(), None),
+        "terminal_session" => {
+            let sub = args.get(0).map(String::as_str).unwrap_or("");
+            match sub {
+                "list" => {
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().list_sessions()).await {
+                        Ok(Ok(v)) => (true, serde_json::to_string_pretty(&v).unwrap_or_else(|_| "[]".to_string()), None),
+                        Ok(Err(e)) => (false, format!("[terminal_session list] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session list] join: {}", e), None),
+                    }
+                }
+                "start" => {
+                    let create = crate::terminal_pty::PtyCreateBody {
+                        argv: None,
+                        cwd: None,
+                        transcript_name: Some(format!("session-{}", uuid::Uuid::new_v4())),
+                        idle_timeout_secs: Some(900),
+                        cols: 80,
+                        rows: 24,
+                    };
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().create(create)).await {
+                        Ok(Ok(v)) => (
+                            true,
+                            format!(
+                                "[terminal_session start] session_id={} idle_timeout_secs={} (use terminal_session read|write|resize|stop)",
+                                v.session_id, v.idle_timeout_secs
+                            ),
+                            None
+                        ),
+                        Ok(Err(e)) => (false, format!("[terminal_session start] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session start] join: {}", e), None),
+                    }
+                }
+                "read" => {
+                    let sid = args.get(1).cloned().unwrap_or_default();
+                    if sid.trim().is_empty() {
+                        return (false, "[terminal_session read] usage: terminal_session read <session_id> [max]".to_string(), None);
+                    }
+                    let max = args.get(2).and_then(|x| x.parse::<usize>().ok()).unwrap_or(4096);
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().read_output(&sid, max)).await {
+                        Ok(Ok(v)) => (true, serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string()), None),
+                        Ok(Err(e)) => (false, format!("[terminal_session read] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session read] join: {}", e), None),
+                    }
+                }
+                "write" => {
+                    let sid = args.get(1).cloned().unwrap_or_default();
+                    let payload = args.get(2..).unwrap_or(&[]).join(" ");
+                    if sid.trim().is_empty() || payload.is_empty() {
+                        return (false, "[terminal_session write] usage: terminal_session write <session_id> <text...>".to_string(), None);
+                    }
+                    let body = crate::terminal_pty::PtyInputBody { text: Some(payload), bytes_b64: None };
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().write_input(&sid, body)).await {
+                        Ok(Ok(_)) => (true, "[terminal_session write] ok".to_string(), None),
+                        Ok(Err(e)) => (false, format!("[terminal_session write] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session write] join: {}", e), None),
+                    }
+                }
+                "resize" => {
+                    let sid = args.get(1).cloned().unwrap_or_default();
+                    let cols = args.get(2).and_then(|x| x.parse::<u16>().ok()).unwrap_or(80);
+                    let rows = args.get(3).and_then(|x| x.parse::<u16>().ok()).unwrap_or(24);
+                    if sid.trim().is_empty() {
+                        return (false, "[terminal_session resize] usage: terminal_session resize <session_id> <cols> <rows>".to_string(), None);
+                    }
+                    let body = crate::terminal_pty::PtyResizeBody { cols, rows };
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().resize(&sid, body)).await {
+                        Ok(Ok(_)) => (true, "[terminal_session resize] ok".to_string(), None),
+                        Ok(Err(e)) => (false, format!("[terminal_session resize] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session resize] join: {}", e), None),
+                    }
+                }
+                "stop" => {
+                    let sid = args.get(1).cloned().unwrap_or_default();
+                    if sid.trim().is_empty() {
+                        return (false, "[terminal_session stop] usage: terminal_session stop <session_id>".to_string(), None);
+                    }
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().close(&sid)).await {
+                        Ok(Ok(_)) => (true, "[terminal_session stop] ok".to_string(), None),
+                        Ok(Err(e)) => (false, format!("[terminal_session stop] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session stop] join: {}", e), None),
+                    }
+                }
+                _ => (true, "[terminal_session] usage: terminal_session start|list|read|write|resize|stop. HTTP API: GET /api/terminal/capabilities.".to_string(), None),
+            }
+        },
         "process" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
             match (process_registry, sub) {
@@ -4757,7 +4850,8 @@ async fn execute_tool_call(
                         .ok()
                         .and_then(|r| r.ok());
                     match out {
-                        Some(()) => (true, "[memory_store] stored".to_string(), None),
+                        Some(Some(id)) => (true, format!("[memory_store] stored id={id}"), None),
+                        Some(None) => (true, "[memory_store] stored (duplicate skipped)".to_string(), None),
                         None => (false, "[memory_store] failed or memory not available".to_string(), None),
                     }
                 }
@@ -4783,6 +4877,44 @@ async fn execute_tool_call(
                     }
                 }
                 None => (false, "[memory_delete] long-term memory not available".to_string(), None),
+            }
+        }
+        "memory_update" => {
+            let id = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
+            let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+            if id.is_empty() || content.is_empty() {
+                return (false, "[memory_update] usage: memory_update <id> <new_content>".to_string(), None);
+            }
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let emit_client = client.clone();
+                    let id = id.to_string();
+                    let id_for_emit = id.clone();
+                    let content = content.trim().to_string();
+                    let out = tokio::task::spawn_blocking(move || client.update(id, content))
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok());
+                    match out {
+                        Some(()) => {
+                            let _ = emit_client.emit_event(
+                                "memory_updated".to_string(),
+                                format!("{{\"id\":\"{id_for_emit}\"}}"),
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(2),
+                                Some("global_user".to_string()),
+                                Some("memory_update".to_string()),
+                            );
+                            (true, "[memory_update] updated".to_string(), None)
+                        }
+                        None => (false, "[memory_update] failed or not found".to_string(), None),
+                    }
+                }
+                None => (false, "[memory_update] long-term memory not available".to_string(), None),
             }
         }
         "memory_forget" => {
@@ -4899,6 +5031,7 @@ async fn execute_tool_call(
                         created_at: now,
                         updated_at: now,
                         initial_message,
+                        studio_project_id: None,
                     };
                     match TaskStore::open(path) {
                         Ok(store) => {
@@ -4918,6 +5051,7 @@ async fn execute_tool_call(
                                     image_data_urls: None,
                                     execution_mode: None,
                                     preferred_task_type: None,
+                                    incognito: false,
                                 })
                                 .await
                                 .is_err()
@@ -4931,6 +5065,282 @@ async fn execute_tool_call(
                 }
                 (_, _) => (false, "[sessions_spawn] store or conversation channel not available".to_string(), None),
             }
+        }
+        "schedule_task" => {
+            let cron = args.get(0).map(String::as_str).unwrap_or("").trim().to_string();
+            let mut title = "Agent scheduled task".to_string();
+            let mut prompt_parts: Vec<&str> = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                if args[i] == "--title" {
+                    if let Some(value) = args.get(i + 1) {
+                        title = value.clone();
+                        i += 2;
+                        continue;
+                    }
+                }
+                prompt_parts.push(args[i].as_str());
+                i += 1;
+            }
+            let prompt = prompt_parts.join(" ");
+            let prompt = prompt.trim();
+            if cron.is_empty() || prompt.is_empty() {
+                return (
+                    false,
+                    "[schedule_task] usage: schedule_task <cron> <prompt...> [--title <title>]".to_string(),
+                    None,
+                );
+            }
+            match store_path {
+                Some(path) => match ScheduleStore::open(path) {
+                    Ok(store) => {
+                        let now = chrono::Utc::now();
+                        let s = Schedule {
+                            id: Uuid::new_v4(),
+                            name: title,
+                            description: prompt.to_string(),
+                            timezone: "UTC".to_string(),
+                            rrule: cron.to_string(),
+                            interval_seconds: None,
+                            start_at: now,
+                            end_at: None,
+                            channel_context: Some(
+                                serde_json::json!({
+                                    "message": prompt,
+                                    "session_id": format!("task:{}", task_id),
+                                    "source": "tool:schedule_task",
+                                    "created_by_task_id": task_id.to_string()
+                                })
+                                .to_string(),
+                            ),
+                            enabled: true,
+                            created_at: now,
+                            updated_at: now,
+                        };
+                        match store.insert_schedule(&s) {
+                            Ok(()) => (
+                                true,
+                                format!(
+                                    "[schedule_task] created schedule {} ({})",
+                                    s.id, cron
+                                ),
+                                None,
+                            ),
+                            Err(e) => (false, format!("[schedule_task] {}", e), None),
+                        }
+                    }
+                    Err(e) => (false, format!("[schedule_task] store error: {}", e), None),
+                },
+                None => (false, "[schedule_task] store not available".to_string(), None),
+            }
+        }
+        "list_scheduled_tasks" => {
+            let limit = args
+                .get(0)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(20)
+                .min(100);
+            match store_path {
+                Some(path) => match ScheduleStore::open(path) {
+                    Ok(store) => match store.list_schedules() {
+                        Ok(list) => {
+                            let lines: Vec<String> = list
+                                .into_iter()
+                                .rev()
+                                .take(limit)
+                                .map(|s| {
+                                    format!(
+                                        "{} {} {} {}",
+                                        s.id,
+                                        if s.enabled { "enabled" } else { "disabled" },
+                                        "cron",
+                                        s.rrule
+                                    )
+                                })
+                                .collect();
+                            (
+                                true,
+                                format!(
+                                    "[list_scheduled_tasks] {} schedule(s): {}",
+                                    lines.len(),
+                                    lines.join(" ; ")
+                                ),
+                                None,
+                            )
+                        }
+                        Err(e) => (false, format!("[list_scheduled_tasks] {}", e), None),
+                    },
+                    Err(e) => (false, format!("[list_scheduled_tasks] store error: {}", e), None),
+                },
+                None => (false, "[list_scheduled_tasks] store not available".to_string(), None),
+            }
+        }
+        "cancel_scheduled_task" => {
+            let id = args
+                .get(0)
+                .and_then(|s| Uuid::parse_str(s).ok());
+            match (store_path, id) {
+                (Some(path), Some(schedule_id)) => match ScheduleStore::open(path) {
+                    Ok(store) => match store.get_schedule(schedule_id) {
+                        Ok(Some(_)) => match store.delete_schedule(schedule_id) {
+                            Ok(()) => (
+                                true,
+                                format!("[cancel_scheduled_task] deleted {}", schedule_id),
+                                None,
+                            ),
+                            Err(e) => (false, format!("[cancel_scheduled_task] {}", e), None),
+                        },
+                        Ok(None) => (
+                            false,
+                            format!("[cancel_scheduled_task] {} not found", schedule_id),
+                            None,
+                        ),
+                        Err(e) => (false, format!("[cancel_scheduled_task] {}", e), None),
+                    },
+                    Err(e) => (false, format!("[cancel_scheduled_task] store error: {}", e), None),
+                },
+                (_, _) => (
+                    false,
+                    "[cancel_scheduled_task] usage: cancel_scheduled_task <schedule_id>".to_string(),
+                    None,
+                ),
+            }
+        }
+        "mcp_server_add" => {
+            let name = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let command = args.get(1).map(String::as_str).unwrap_or("").trim();
+            if name.is_empty() || command.is_empty() {
+                return (
+                    false,
+                    "[mcp_server_add] usage: mcp_server_add <name> <command> [args...]".to_string(),
+                    None,
+                );
+            }
+            let mcp_args: Vec<serde_json::Value> = args
+                .get(2..)
+                .unwrap_or(&[])
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect();
+            let entry = if mcp_args.is_empty() {
+                serde_json::json!({ "command": command })
+            } else {
+                serde_json::json!({ "command": command, "args": mcp_args })
+            };
+            match store_path.and_then(|sp| sp.parent()) {
+                Some(data_dir) => match crate::mcp::add_mcp_server(data_dir, name, &entry) {
+                    Ok(msg) => {
+                        crate::http_get_cache::invalidate_mcp_status();
+                        (true, format!("[mcp_server_add] {msg}"), None)
+                    }
+                    Err(e) => (false, format!("[mcp_server_add] {e}"), None),
+                },
+                None => (false, "[mcp_server_add] data directory not available".to_string(), None),
+            }
+        }
+        "mcp_server_remove" => {
+            let name = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if name.is_empty() {
+                return (
+                    false,
+                    "[mcp_server_remove] usage: mcp_server_remove <name>".to_string(),
+                    None,
+                );
+            }
+            match store_path.and_then(|sp| sp.parent()) {
+                Some(data_dir) => match crate::mcp::remove_mcp_server(data_dir, name) {
+                    Ok(msg) => {
+                        crate::http_get_cache::invalidate_mcp_status();
+                        (true, format!("[mcp_server_remove] {msg}"), None)
+                    }
+                    Err(e) => (false, format!("[mcp_server_remove] {e}"), None),
+                },
+                None => (
+                    false,
+                    "[mcp_server_remove] data directory not available".to_string(),
+                    None,
+                ),
+            }
+        }
+        "wake_in" => {
+            let minutes = args
+                .get(0)
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|&m| m > 0 && m <= 525_600);
+            let message = if args.len() > 1 {
+                args[1..].join(" ")
+            } else {
+                String::new()
+            };
+            let message = message.trim().to_string();
+            if minutes.is_none() || message.is_empty() {
+                return (
+                    false,
+                    "[wake_in] usage: wake_in <minutes> <message>".to_string(),
+                    None,
+                );
+            }
+            let minutes = minutes.unwrap();
+            match store_path {
+                Some(path) => {
+                    use akasha_store::platform_extras::{Wakeup, WakeupStore};
+                    let sid = session_id
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("task:{}", task_id));
+                    let fire_at =
+                        chrono::Utc::now() + chrono::Duration::minutes(minutes);
+                    let w = Wakeup {
+                        id: Uuid::new_v4(),
+                        session_id: sid,
+                        fire_at,
+                        message: message.clone(),
+                        status: "pending".into(),
+                        created_by_task_id: Some(task_id),
+                        rrule: None,
+                        created_at: chrono::Utc::now(),
+                    };
+                    match WakeupStore::open(path) {
+                        Ok(store) => match store.insert(&w) {
+                            Ok(()) => (
+                                true,
+                                format!(
+                                    "[wake_in] scheduled wakeup {} in {} min (at {})",
+                                    w.id,
+                                    minutes,
+                                    fire_at.to_rfc3339()
+                                ),
+                                None,
+                            ),
+                            Err(e) => (false, format!("[wake_in] {}", e), None),
+                        },
+                        Err(e) => (false, format!("[wake_in] store error: {}", e), None),
+                    }
+                }
+                None => (false, "[wake_in] store not available".to_string(), None),
+            }
+        }
+        "budget_status" => {
+            let session_id = args.get(0).cloned().unwrap_or_default();
+            let settings = match store_path {
+                Some(path) => path.parent().map(load_budget_settings).unwrap_or_default(),
+                None => BudgetSettings::default(),
+            };
+            let scope = if session_id.trim().is_empty() {
+                "global".to_string()
+            } else {
+                format!("session {}", session_id)
+            };
+            (
+                false,
+                format!(
+                    "[budget_status] limit={} warn_ratio={:.2} auto_concise={} scope={} usage_unavailable=true message=\"live usage is not available from this tool path; query the local /api/budget endpoint for accurate totals\"",
+                    settings.daily_token_limit,
+                    settings.warn_ratio,
+                    settings.auto_concise,
+                    scope
+                ),
+                None,
+            )
         }
         "message" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
@@ -5005,12 +5415,19 @@ async fn execute_tool_call(
                 }
                 let host = url.parse::<url::Url>().ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
                 if !executor.policy.can_use_browser_domain(&host) {
-                    return (false, format!("[browser] Domain not allowed: {}", host), None);
+                    let hint = crate::browser::format_domain_denied(
+                        &host,
+                        &executor.policy.browser_allowed_domains,
+                        &executor.policy.browser_blocked_domains,
+                    );
+                    return (false, format!("[browser] {}", hint), None);
                 }
                 let mut g = registry.write().await;
-                let session = if let Some(s) = g.get_mut(&task_id) {
-                    let res = s.send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } })).await;
+                let session = if let Some(mut s) = g.remove(&task_id) {
                     drop(g);
+                    let res = s.send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } })).await;
+                    // Always reinsert the session — a navigate failure doesn't mean the browser is dead.
+                    registry.write().await.insert(task_id, s);
                     res
                 } else {
                     drop(g);
@@ -5027,7 +5444,14 @@ async fn execute_tool_call(
                             }
                             res
                         }
-                        Err(e) => return (false, format!("[browser] error: {}", e), None),
+                        Err(e) => {
+                            let msg = crate::browser::format_runner_error(
+                                &e,
+                                action_timeout,
+                                session_timeout,
+                            );
+                            return (false, format!("[browser] error: {}", msg), None);
+                        }
                     }
                 };
                 match session {
@@ -5047,18 +5471,23 @@ async fn execute_tool_call(
                             (true, msg, None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("Navigate failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "snapshot" {
                 let mut g = registry.write().await;
-                let Some(session) = g.get_mut(&task_id) else {
+                let Some(mut session) = g.remove(&task_id) else {
                     return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
                 };
-                let resp = session.send_command(&serde_json::json!({ "cmd": "snapshot" })).await;
                 drop(g);
+                let resp = session.send_command(&serde_json::json!({ "cmd": "snapshot" })).await;
+                registry.write().await.insert(task_id, session);
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -5080,17 +5509,200 @@ async fn execute_tool_call(
                             (true, msg, None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("Snapshot failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
                             (false, format!("[browser] {}", err), None)
                         }
                     }
-                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
                 }
             } else if sub == "screenshot" {
-                (true, "[browser] Screenshot is planned for Phase 2. For now use device_invoke synthetic_input keyboard shortcut (e.g. Win+Shift+S).".to_string(), None)
-            } else if sub == "click" || sub == "fill" || sub == "wait" {
-                (true, "[browser] click, fill, wait are planned for Phase 2.".to_string(), None)
+                let mut g = registry.write().await;
+                let Some(mut session) = g.remove(&task_id) else {
+                    return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
+                };
+                drop(g);
+                let resp = session
+                    .send_command(&serde_json::json!({ "cmd": "screenshot", "params": { "full_page": false } }))
+                    .await;
+                registry.write().await.insert(task_id, session);
+                match resp {
+                    Ok(resp) => {
+                        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if ok {
+                            let b64 = resp
+                                .pointer("/result/data_base64")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let vision_attach_enabled = std::env::var("AKASHA_BROWSER_SCREENSHOT_VISION")
+                                .map(|v| {
+                                    let l = v.to_lowercase();
+                                    l != "0" && l != "false" && l != "no"
+                                })
+                                .unwrap_or(true);
+                            let mut captured_for_llm: Option<String> = None;
+                            if vision_attach_enabled && !b64.is_empty() {
+                                let url =
+                                    format!("data:image/png;base64,{}", b64);
+                                if vision_payload_within_cap(&url) {
+                                    captured_for_llm = Some(url);
+                                } else {
+                                    tracing::info!(
+                                        len = url.len(),
+                                        cap = vision_inject_max_chars(),
+                                        "browser screenshot: vision attachment skipped (exceeds AKASHA_VISION_INJECT_MAX_CHARS)"
+                                    );
+                                }
+                            }
+                            let (preview, total, trunc) = crate::tool_output::truncate_utf8_by_bytes(
+                                b64,
+                                crate::tool_output::BROWSER_SCREENSHOT_B64_MAX,
+                            );
+                            let base = format!(
+                                "[browser] Screenshot PNG (base64, {} bytes of payload):\n{}",
+                                total, preview
+                            );
+                            let msg = crate::tool_output::with_truncation_footer(
+                                base,
+                                trunc,
+                                total,
+                                "truncated base64 in text; full frame attached for vision on next model turn when enabled (AKASHA_BROWSER_SCREENSHOT_VISION)",
+                            );
+                            (true, msg, captured_for_llm)
+                        } else {
+                            let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("screenshot failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
+                            (false, format!("[browser] {}", err), None)
+                        }
+                    }
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
+                }
+            } else if sub == "click" {
+                let selector = args[1..].join(" ").trim().to_string();
+                if selector.is_empty() {
+                    return (false, "[browser] usage: browser click <css_selector>".to_string(), None);
+                }
+                let mut g = registry.write().await;
+                let Some(mut session) = g.remove(&task_id) else {
+                    return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
+                };
+                drop(g);
+                let resp = session
+                    .send_command(&serde_json::json!({
+                        "cmd": "click",
+                        "params": { "selector": selector, "timeout_secs": action_timeout }
+                    }))
+                    .await;
+                registry.write().await.insert(task_id, session);
+                match resp {
+                    Ok(resp) => {
+                        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if ok {
+                            (true, "[browser] Click OK.".to_string(), None)
+                        } else {
+                            let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("click failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
+                            (false, format!("[browser] {}", err), None)
+                        }
+                    }
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
+                }
+            } else if sub == "fill" {
+                let Some(sel) = args.get(1).map(|s| s.as_str()) else {
+                    return (
+                        false,
+                        "[browser] usage: browser fill <css_selector> <text>".to_string(),
+                        None,
+                    );
+                };
+                let sel = sel.trim();
+                if sel.is_empty() || args.len() < 3 {
+                    return (
+                        false,
+                        "[browser] usage: browser fill <css_selector> <text>".to_string(),
+                        None,
+                    );
+                }
+                let value: String = args[2..].join(" ");
+                let mut g = registry.write().await;
+                let Some(mut session) = g.remove(&task_id) else {
+                    return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
+                };
+                drop(g);
+                let resp = session
+                    .send_command(&serde_json::json!({
+                        "cmd": "fill",
+                        "params": { "selector": sel, "value": value, "timeout_secs": action_timeout }
+                    }))
+                    .await;
+                registry.write().await.insert(task_id, session);
+                match resp {
+                    Ok(resp) => {
+                        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if ok {
+                            (true, "[browser] Fill OK.".to_string(), None)
+                        } else {
+                            let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("fill failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
+                            (false, format!("[browser] {}", err), None)
+                        }
+                    }
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
+                }
+            } else if sub == "wait" {
+                let arg = args[1..].join(" ").trim().to_string();
+                if arg.is_empty() {
+                    return (
+                        false,
+                        "[browser] usage: browser wait <css_selector> | browser wait <milliseconds>".to_string(),
+                        None,
+                    );
+                }
+                let mut g = registry.write().await;
+                let Some(mut session) = g.remove(&task_id) else {
+                    return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
+                };
+                drop(g);
+                let cmd = if arg.chars().all(|c| c.is_ascii_digit()) {
+                    let ms: u64 = arg.parse().unwrap_or(0);
+                    serde_json::json!({ "cmd": "wait", "params": { "milliseconds": ms } })
+                } else {
+                    serde_json::json!({
+                        "cmd": "wait",
+                        "params": { "selector": arg, "timeout_secs": action_timeout }
+                    })
+                };
+                let resp = session.send_command(&cmd).await;
+                registry.write().await.insert(task_id, session);
+                match resp {
+                    Ok(resp) => {
+                        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if ok {
+                            (true, "[browser] Wait completed.".to_string(), None)
+                        } else {
+                            let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("wait failed");
+                            let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
+                            (false, format!("[browser] {}", err), None)
+                        }
+                    }
+                    Err(e) => {
+                        let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
+                        (false, format!("[browser] error: {}", msg), None)
+                    }
+                }
             } else {
-                (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot (Phase 2).".to_string(), None)
+                (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot | browser click <selector> | browser fill <selector> <text> | browser wait <selector|ms>".to_string(), None)
             }
         }
         "install_playwright" => {
@@ -5128,11 +5740,57 @@ async fn execute_tool_call(
             }
         }
         "image" => {
-            let path_or_url = args.get(0).map(String::as_str).unwrap_or("").trim();
-            if path_or_url.is_empty() {
-                (false, "[image] usage: image <path|url> [prompt]. For vision analysis attach the image in chat (vision-capable model in llm_router) or use a local path.".to_string(), None)
+            let path_str = path_arg_joined(args);
+            let path_str = path_str.trim();
+            if path_str.is_empty() {
+                (
+                    false,
+                    "[image] usage: image <path> [prompt] — read a local image (allowed_read_paths / workspace:/) and return metadata + data URL for vision.".to_string(),
+                    None,
+                )
+            } else if path_str.starts_with("http://") || path_str.starts_with("https://") {
+                (
+                    false,
+                    "[image] remote URLs are not supported — use a local path in allowed_read_paths or workspace:/".to_string(),
+                    None,
+                )
             } else {
-                (true, "[image] Vision analysis: use image as attachment in chat with a vision-capable model (llm_router). Local path metadata not yet implemented (spec 33).".to_string(), None)
+                let disk_path = resolve_tool_disk_path(path_str, workspace_root);
+                if !executor.policy.can_read(&disk_path) {
+                    (
+                        false,
+                        "[image] path not allowed by policy (allowed_read_paths)".to_string(),
+                        None,
+                    )
+                } else {
+                    match tokio::fs::read(&disk_path).await {
+                        Ok(bytes) => {
+                            let mime = guess_image_mime_from_path(&disk_path);
+                            let b64 = base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &bytes,
+                            );
+                            let data_url = format!("data:{mime};base64,{b64}");
+                            (
+                                true,
+                                format!(
+                                    "[image {}] {} bytes, mime={mime} — data URL ready for vision injection",
+                                    disk_path.display(),
+                                    bytes.len()
+                                ),
+                                Some(data_url),
+                            )
+                        }
+                        Err(e) => (
+                            false,
+                            format!(
+                                "[image] read failed: {e} (ensure file exists at {})",
+                                disk_path.display()
+                            ),
+                            None,
+                        ),
+                    }
+                }
             }
         }
         "pdf" => {
@@ -5283,11 +5941,27 @@ async fn execute_tool_call(
                 Err(e) => (false, format!("[grep_content] failed: {}", e), None),
             }
         }
-        "write_file" => {
+        "write_file" | "write_code" => {
+            let code_only = matches!(tool_name, "write_code");
+            let usage_tag = if code_only { "write_code" } else { "write_file" };
             let Some((path_str, content)) = parse_write_file_request(args) else {
-                return (false, "[write_file] usage: write_file <path> then file content on following lines".to_string(), None);
+                return (
+                    false,
+                    format!(
+                        "[{usage_tag}] usage: {usage_tag} <path> then file content on following lines"
+                    ),
+                    None,
+                );
             };
             let content = strip_markdown_fences_from_write_content(&content);
+            let ext_check_path = path_for_agent_write_extension_check(&path_str);
+            if code_only && !crate::api_studio::path_has_agent_code_extension(&ext_check_path) {
+                return (
+                    false,
+                    "[write_code] path must use a source-code extension (e.g. .ts, .tsx, .rs, .py); use write_file for markdown, JSON, or config files.".to_string(),
+                    None,
+                );
+            }
             if is_workspace_virtual_path(&path_str) {
                 match workspace_store {
                     Some(ws) => {
@@ -5331,43 +6005,70 @@ async fn execute_tool_call(
                                 if let Some(parent) = disk_path.parent() {
                                     let _ = tokio::fs::create_dir_all(parent).await;
                                 }
-                                if let Some(r) = workspace_root {
-                                    if crate::studio::is_strictly_under_studio_root(&disk_path, r) {
-                                        if let Some(msg) =
-                                            crate::api_studio::studio_reject_polluted_code_content(&disk_path, &effective_content)
-                                        {
-                                            return (false, format!("[write_file] {}", msg), None);
-                                        }
+                                let run_pollution_check = code_only
+                                    || workspace_root
+                                        .map(|r| {
+                                            crate::studio::is_strictly_under_studio_root(&disk_path, r)
+                                        })
+                                        .unwrap_or(false);
+                                if run_pollution_check {
+                                    if let Some(msg) =
+                                        crate::api_studio::studio_reject_polluted_code_content(
+                                            &disk_path,
+                                            &effective_content,
+                                        )
+                                    {
+                                        return (false, format!("[{usage_tag}] {}", msg), None);
                                     }
                                 }
                                 if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
-                                    return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
+                                    return (
+                                        true,
+                                        format!("[{usage_tag} workspace:{}] saved (disk).", key),
+                                        None,
+                                    );
                                 }
                             }
                         }
-                        return (true, format!("[write_file workspace:{}] saved.", key), None);
+                        return (
+                            true,
+                            format!("[{usage_tag} workspace:{}] saved.", key),
+                            None,
+                        );
                     }
-                    None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
+                    None => {
+                        return (
+                            false,
+                            format!(
+                                "[{usage_tag}] workspace paths require a workspace store."
+                            ),
+                            None,
+                        );
+                    }
                 }
             }
             let disk_path = resolve_tool_disk_path(path_str.trim(), workspace_root);
-            if let Some(root) = workspace_root {
-                if crate::studio::is_strictly_under_studio_root(&disk_path, root) {
-                    if let Some(msg) = crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content) {
-                        return (false, format!("[write_file] {}", msg), None);
-                    }
+            let run_pollution_check = code_only
+                || workspace_root
+                    .map(|root| crate::studio::is_strictly_under_studio_root(&disk_path, root))
+                    .unwrap_or(false);
+            if run_pollution_check {
+                if let Some(msg) =
+                    crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content)
+                {
+                    return (false, format!("[{usage_tag}] {}", msg), None);
                 }
             }
             match executor.write_file(&disk_path, &content).await {
                 Ok(res) => {
                     let msg = if res.success {
-                        format!("[write_file {}] {}", disk_path.display(), res.summary)
+                        format!("[{usage_tag} {}] {}", disk_path.display(), res.summary)
                     } else {
-                        format!("[write_file] {}", res.summary)
+                        format!("[{usage_tag}] {}", res.summary)
                     };
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[write_file] error: {}", e), None),
+                Err(e) => (false, format!("[{usage_tag}] error: {}", e), None),
             }
         }
         "delete_file" => {
@@ -6077,6 +6778,55 @@ async fn execute_tool_call(
                 Err(e) => (false, format!("[web_search] failed: {}", e), None),
             }
         }
+        "web_crawl" => {
+            let url = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if url.is_empty() {
+                return (false, "[web_crawl] usage: web_crawl <url> [limit]".to_string(), None);
+            }
+            let limit = args
+                .get(1)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(50);
+            match executor.web_crawl(url, limit).await {
+                Ok((body, res)) => {
+                    let msg = if res.success {
+                        format!("[web_crawl] {}\n{}", res.summary, body)
+                    } else {
+                        format!("[web_crawl] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[web_crawl] {}", e), None),
+            }
+        }
+        "web_crawl_status" => {
+            let job_id = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if job_id.is_empty() {
+                return (
+                    false,
+                    "[web_crawl_status] usage: web_crawl_status <job_id>".to_string(),
+                    None,
+                );
+            }
+            match executor.web_crawl_job_status(job_id).await {
+                Ok((body, res)) => {
+                    let (preview, total, trunc) =
+                        crate::tool_output::truncate_utf8_by_bytes(&body, 24_000);
+                    let msg = if res.success {
+                        crate::tool_output::with_truncation_footer(
+                            format!("[web_crawl_status] {} — {}", res.summary, preview),
+                            trunc,
+                            total,
+                            "response truncated; poll again if job still running",
+                        )
+                    } else {
+                        format!("[web_crawl_status] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[web_crawl_status] {}", e), None),
+            }
+        }
         "run_in_container" => {
             let work_dir = path_arg(0);
             let image = args.get(1).map(String::as_str).unwrap_or("");
@@ -6120,7 +6870,19 @@ async fn execute_tool_call(
                 }
                 vec![interface.to_string()]
             };
+            if !interface.is_empty()
+                && !matches!(interface, "local_media" | "system" | "synthetic_input")
+            {
+                return (
+                    false,
+                    format!(
+                        "[device_discover] interface '{interface}' is not supported (available: local_media, system, synthetic_input). Configure allowed_device_interfaces in tools_policy.yaml — see GET /api/docs."
+                    ),
+                    None,
+                );
+            }
             let mut devices: Vec<serde_json::Value> = Vec::new();
+            let mut unsupported: Vec<String> = Vec::new();
             for iface in &interfaces_to_list {
                 match iface.as_str() {
                     "local_media" => {
@@ -6135,12 +6897,14 @@ async fn execute_tool_call(
                         devices.push(serde_json::json!({ "interface": "synthetic_input", "id": "keyboard", "name": "Keyboard (shortcuts, type)" }));
                         devices.push(serde_json::json!({ "interface": "synthetic_input", "id": "mouse", "name": "Mouse (move, click, scroll, drag)" }));
                     }
-                    _ => {
-                        devices.push(serde_json::json!({ "interface": iface, "id": "default", "name": format!("{} (discovery stub)", iface) }));
-                    }
+                    _ => unsupported.push(iface.clone()),
                 }
             }
-            let body = serde_json::json!({ "devices": devices });
+            let body = if unsupported.is_empty() {
+                serde_json::json!({ "devices": devices })
+            } else {
+                serde_json::json!({ "devices": devices, "unsupported_interfaces": unsupported })
+            };
             (true, format!("[device_discover] {} device(s): {}", devices.len(), body.to_string()), None)
         }
         "device_invoke" => {
@@ -6246,7 +7010,11 @@ async fn execute_tool_call(
                     }
                 }
             } else if interface == "system" {
-                (false, "[device_invoke] system interface (e.g. print) not yet implemented".to_string(), None)
+                (
+                    false,
+                    "[device_invoke] system interface (printer/print) is not supported — OS-level printing is out of scope for Akasha. See GET /api/docs and tools_policy.yaml (allowed_device_interfaces).".to_string(),
+                    None,
+                )
             } else {
                 (false, format!("[device_invoke] interface '{}' handler not yet implemented", interface), None)
             }
@@ -6392,6 +7160,15 @@ async fn execute_tool_call(
 
 /// Compact short-term memory when it would exceed context: summarize oldest turns via LLM and replace in store.
 /// Optionally promote the summary to long-term memory (embed + store).
+/// KinBot-style continuous session: never force a new session when compaction ceiling is hit.
+fn session_continuous_mode() -> bool {
+    std::env::var("AKASHA_SESSION_CONTINUOUS")
+        .ok()
+        .as_deref()
+        .map(|s| matches!(s, "1" | "true" | "yes" | "on" | "TRUE" | "YES" | "ON"))
+        .unwrap_or(false)
+}
+
 /// Refuses compaction beyond MAX_COMPACTIONS_PER_SESSION per session to avoid costly loops.
 async fn compact_short_term_if_needed(
     short_term: &Arc<ShortTermStore>,
@@ -6399,12 +7176,23 @@ async fn compact_short_term_if_needed(
     llm_router: &akasha_llm::LLMRouter,
     new_message_tokens: usize,
     long_term_client: Option<&LongTermMemoryClient>,
+    tokenizer_provider: &str,
+    tokenizer_model: &str,
+    tasks_db_path: &std::path::Path,
 ) {
     if short_term.get_compaction_count(session_id).await
         >= crate::memory::MAX_COMPACTIONS_PER_SESSION
     {
-        tracing::info!(session_id, "Short-term compaction skipped: max compactions per session reached (start a new session if context is too long)");
-        return;
+        if session_continuous_mode() {
+            short_term.reset_compaction_count(session_id).await;
+            tracing::debug!(
+                session_id,
+                "Continuous session: compaction counter reset (AKASHA_SESSION_CONTINUOUS)"
+            );
+        } else {
+            tracing::info!(session_id, "Short-term compaction skipped: max compactions per session reached (start a new session if context is too long)");
+            return;
+        }
     }
     const MAX_CONTEXT_DEFAULT: usize = 8192;
     let max_context_tokens = std::env::var("AKASHA_MAX_CONTEXT_TOKENS")
@@ -6414,13 +7202,30 @@ async fn compact_short_term_if_needed(
     let trigger = (max_context_tokens as f64 * short_term.compaction_trigger_ratio) as usize;
 
     let turns = short_term.get_turns(session_id).await;
-    let history_tokens = ShortTermStore::turns_tokens(&turns);
+    let history_tokens =
+        ShortTermStore::turns_tokens_calibrated(tokenizer_provider, tokenizer_model, &turns);
     if history_tokens + new_message_tokens <= trigger || turns.len() <= 2 {
         return;
     }
 
     let to_summarize = turns.len() / 2;
     let old_turns: Vec<_> = turns.into_iter().take(to_summarize).collect();
+    let archive_batch: Vec<(usize, String, String)> = old_turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, t.role.clone(), t.content.clone()))
+        .collect();
+    if !archive_batch.is_empty() {
+        let sp = tasks_db_path.to_path_buf();
+        let sid = session_id.to_string();
+        let batch = archive_batch.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(store) = akasha_store::ConversationArchiveStore::open(&sp) {
+                let _ = store.archive_turns(&sid, &batch);
+            }
+        })
+        .await;
+    }
     let blob = ShortTermStore::turns_to_context(&old_turns);
     let summary_prompt = format!(
         "Summarize in a short paragraph in English, keeping important facts and decisions:\n\n{}",
@@ -6464,6 +7269,14 @@ async fn compact_short_term_if_needed(
                     .await;
                 short_term.increment_compaction_count(session_id).await;
                 tracing::debug!(session_id, to_summarize, "Short-term memory compacted");
+                crate::memory_hierarchical::maybe_run_hierarchical_compaction(
+                    short_term,
+                    llm_router,
+                    long_term_client,
+                    session_id,
+                    max_context_tokens,
+                )
+                .await;
                 // Promote summary to long-term memory (spec 06)
                 if let Some(client) = long_term_client {
                     let summary = summary.to_string();
@@ -6531,7 +7344,7 @@ Factual response in English.\n\n{}",
         prompt: summary_prompt,
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
-        preferred_task_type: Some("system".to_string()),
+        preferred_task_type: Some("utility".to_string()),
         system_prompt: None,
         image_data_urls: None,
         top_p: None,
@@ -6582,7 +7395,7 @@ Factual response in English.\n\n{}",
                 })
                 .await
                 {
-                    Ok(Ok(())) => {
+                    Ok(Ok(_)) => {
                         tracing::info!(session_id = %session_id, "Yesterday summarized and stored in long-term memory")
                     }
                     Ok(Err(e)) => {
@@ -6730,6 +7543,7 @@ struct MemoryProfile {
     user_rag_top_k: usize,
     workspace_graph_top_k: usize,
     expand_by_graph: bool,
+    graph_expand_hops: u8,
     compact_before_prompt: bool,
     allow_project_recall: bool,
     allow_identity_lookup: bool,
@@ -6748,8 +7562,29 @@ fn memory_profile_for_task(
     is_subagent: bool,
     orch_disk_deliverables: bool,
 ) -> MemoryProfile {
+    fn env_usize(name: &str) -> Option<usize> {
+        std::env::var(name).ok().and_then(|s| s.parse::<usize>().ok())
+    }
+    fn env_u8(name: &str) -> Option<u8> {
+        std::env::var(name).ok().and_then(|s| s.parse::<u8>().ok())
+    }
+    let apply_env_overrides = |mut profile: MemoryProfile| -> MemoryProfile {
+        if let Some(v) = env_usize("AKASHA_MEMORY_SEMANTIC_TOP_K") {
+            profile.semantic_top_k = v.min(50);
+        }
+        if let Some(v) = env_u8("AKASHA_MEMORY_GRAPH_EXPAND_HOPS") {
+            profile.graph_expand_hops = v.min(4);
+        }
+        if let Some(v) = env_usize("AKASHA_MEMORY_USER_RAG_TOP_K") {
+            profile.user_rag_top_k = v.min(50);
+        }
+        if let Some(v) = env_usize("AKASHA_MEMORY_WORKSPACE_GRAPH_TOP_K") {
+            profile.workspace_graph_top_k = v.min(50);
+        }
+        profile
+    };
     if is_subagent {
-        return MemoryProfile {
+        return apply_env_overrides(MemoryProfile {
             recent_turns_limit: 0,
             recent_context_max_chars: 0,
             semantic_top_k: 0,
@@ -6758,10 +7593,11 @@ fn memory_profile_for_task(
             user_rag_top_k: 0,
             workspace_graph_top_k: 0,
             expand_by_graph: false,
+            graph_expand_hops: 0,
             compact_before_prompt: false,
             allow_project_recall: false,
             allow_identity_lookup: false,
-        };
+        });
     }
 
     let enriched = !memory_fast_path_enabled()
@@ -6771,7 +7607,7 @@ fn memory_profile_for_task(
         || message.chars().count() > 280;
 
     if enriched {
-        MemoryProfile {
+        apply_env_overrides(MemoryProfile {
             recent_turns_limit: 15,
             recent_context_max_chars: 2_000,
             semantic_top_k: 5,
@@ -6780,12 +7616,17 @@ fn memory_profile_for_task(
             user_rag_top_k: 5,
             workspace_graph_top_k: 5,
             expand_by_graph: std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1"),
+            graph_expand_hops: if std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1") {
+                1
+            } else {
+                1
+            },
             compact_before_prompt: true,
             allow_project_recall: true,
             allow_identity_lookup: true,
-        }
+        })
     } else {
-        MemoryProfile {
+        apply_env_overrides(MemoryProfile {
             recent_turns_limit: 6,
             recent_context_max_chars: 800,
             semantic_top_k: 2,
@@ -6794,30 +7635,126 @@ fn memory_profile_for_task(
             user_rag_top_k: 0,
             workspace_graph_top_k: 0,
             expand_by_graph: false,
+            graph_expand_hops: 0,
             compact_before_prompt: false,
             allow_project_recall: false,
             allow_identity_lookup: true,
-        }
+        })
     }
+}
+
+fn task_stall_timeout_secs() -> u64 {
+    std::env::var("AKASHA_TASK_STALL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s >= 30)
+        .unwrap_or(180)
+}
+
+fn memory_recall_timeout_secs() -> u64 {
+    std::env::var("AKASHA_MEMORY_RECALL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s >= 5)
+        .unwrap_or(45)
+}
+
+/// Fails the task when no meaningful progress occurred within the stall timeout (worker hang, LLM never responds).
+fn spawn_task_stall_watchdog(
+    bus: EventBus,
+    store_path: std::path::PathBuf,
+    correlation_id: Uuid,
+    task_id: Uuid,
+    meaningful_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    task_completion_registry: Option<TaskCompletionRegistry>,
+    steering_queue: Option<SteeringQueueStore>,
+    mut cancel_rx: oneshot::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let timeout_secs = task_stall_timeout_secs();
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+                if meaningful_progress.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let still_running = TaskStore::open(&store_path)
+                    .ok()
+                    .and_then(|s| s.get(task_id).ok().flatten())
+                    .map(|t| t.status == TaskStatus::Running)
+                    .unwrap_or(false);
+                if !still_running {
+                    return;
+                }
+                let reason = format!(
+                    "La tâche n'a produit aucune progression utile après {} secondes. \
+                     Le worker a peut‑être bloqué ou le fournisseur LLM ne répond pas. \
+                     Réessayez ou redémarrez le daemon.",
+                    timeout_secs
+                );
+                if let Ok(store) = TaskStore::open(&store_path) {
+                    let _ = store.update_status(task_id, TaskStatus::Failed);
+                }
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 100,
+                            "message": reason
+                        })),
+                    )
+                    .with_correlation(correlation_id),
+                );
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::TaskFailed,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "status": "failed",
+                            "reason": reason
+                        })),
+                    )
+                    .with_correlation(correlation_id),
+                );
+                if let Some(ref sq) = steering_queue {
+                    sq.unregister_active(task_id).await;
+                }
+                notify_task_completion(&task_completion_registry, task_id).await;
+                tracing::warn!(
+                    task_id = %task_id,
+                    timeout_secs,
+                    "task stall watchdog: marked failed (no meaningful progress)"
+                );
+            }
+            _ = &mut cancel_rx => {}
+        }
+    });
 }
 
 fn spawn_progress_watchdog(
     bus: EventBus,
+    store_path: std::path::PathBuf,
     correlation_id: Uuid,
     task_id: Uuid,
     mut cancel_rx: oneshot::Receiver<()>,
 ) {
     tokio::spawn(async move {
         let checkpoints = [
-            (2_u64, 12_u8, "Still spinning up the worker…"),
-            (5_u64, 18_u8, "Still working — routing tools and context…"),
+            (2_u64, 12_u8, "pipeline_warmup", "Initialisation du worker…"),
+            (
+                5_u64,
+                18_u8,
+                "pipeline_context",
+                "Assemblage du contexte et routage des outils…",
+            ),
             (
                 10_u64,
                 24_u8,
-                "Still working — using a fallback path if needed…",
+                "pipeline_llm_pending",
+                "Appel au modèle LLM en cours (fallback possible)…",
             ),
         ];
-        for (secs, pct, message) in checkpoints {
+        for (secs, pct, stage, message) in checkpoints {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {
                     let _ = bus.send(
@@ -6831,6 +7768,16 @@ fn spawn_progress_watchdog(
                         )
                         .with_correlation(correlation_id),
                     );
+                    insert_task_tracking_event(
+                        store_path.as_path(),
+                        task_id,
+                        "pipeline_checkpoint",
+                        serde_json::json!({
+                            "stage": stage,
+                            "progress_pct": pct,
+                            "message": message,
+                        }),
+                    );
                 }
                 _ = &mut cancel_rx => return,
             }
@@ -6842,6 +7789,29 @@ fn cancel_progress_watchdog(cancel_tx: &mut Option<oneshot::Sender<()>>) {
     if let Some(tx) = cancel_tx.take() {
         let _ = tx.send(());
     }
+}
+
+fn cancel_task_watchdogs(
+    progress_cancel: &mut Option<oneshot::Sender<()>>,
+    stall_cancel: &mut Option<oneshot::Sender<()>>,
+) {
+    cancel_progress_watchdog(progress_cancel);
+    cancel_progress_watchdog(stall_cancel);
+}
+
+/// Reload `tools_policy.yaml` from disk into the in-memory executor (hot reload).
+async fn reload_tools_executor_policy(
+    executor: &std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
+    policy_path: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let mut reloaded = akasha_tools::ToolsPolicy::load_from_path(policy_path)?;
+    if let Ok(v) = akasha_vault::open_vault(data_dir) {
+        reloaded.apply_vault_api_keys(|k| v.get(k).ok());
+    }
+    reloaded.workspace_root = Some(data_dir.to_path_buf());
+    *executor.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
+    Ok(())
 }
 
 async fn wait_for_task_activity(
@@ -6935,61 +7905,6 @@ fn looks_like_manual_file_patch_reply(text: &str) -> bool {
     cues.iter().any(|c| lower.contains(c))
 }
 
-/// Returns true when a Code Studio implementation task received a prose-only audit/plan
-/// even though write tools are available. This catches replies like "ce qui manque...",
-/// "recommandations pour avancer", or "je ne peux pas modifier les fichiers" instead of
-/// applying changes with `TOOL:` lines.
-fn looks_like_code_studio_prose_only_implementation_reply(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    if lower.is_empty() {
-        return false;
-    }
-    let refusal_or_meta = [
-        "je ne peux pas modifier les fichiers",
-        "je ne peux pas modifier",
-        "i cannot modify files",
-        "i can't modify files",
-        "restriction « no tool lines »",
-        "restriction \"no tool lines\"",
-        "no tool lines",
-        "dans ce tour",
-        "in this turn",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-    let plan_without_action = [
-        "ce qui manque",
-        "recommandations pour avancer",
-        "il faudrait",
-        "il faut ",
-        "prochaine étape",
-        "next steps",
-        "recommendations",
-        "should implement",
-        "should add",
-        "à mettre en place",
-        "mettre en place",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-    let implementation_surface = [
-        "eslint",
-        "prettier",
-        "src/",
-        "package.json",
-        "composant",
-        "component",
-        "hook",
-        "tests",
-        "build",
-        "fichier",
-        "file",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-    refusal_or_meta || (plan_without_action && implementation_surface)
-}
-
 fn looks_like_meta_agent_response(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
     if lower.is_empty() {
@@ -7040,6 +7955,7 @@ const STUDIO_VERIFY_AUTOFIX_TOOLS: &[&str] = &[
     "search_replace",
     "edit_file",
     "write_file",
+    "write_code",
     "apply_patch",
     "file_diff",
     "delete_file",
@@ -7224,6 +8140,85 @@ fn studio_verify_summary_heading_markdown(lang: StudioVerifyUserLanguage) -> &'s
     }
 }
 
+/// Revue légère post-build : critères **manuel** vs résumé des changements (1 appel LLM, sans outils). `None` = rien à signaler.
+async fn studio_semantic_acceptance_review(
+    llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
+    manual_lines: &[String],
+    diff_summary: &str,
+    user_excerpt: &str,
+    assistant_excerpt: &str,
+) -> Option<Vec<String>> {
+    if manual_lines.is_empty() {
+        return None;
+    }
+    if std::env::var("AKASHA_STUDIO_SEMANTIC_VERIFY").ok().as_deref() == Some("0") {
+        return None;
+    }
+    let crit = manual_lines.join("\n- ");
+    let system = "You are a strict checklist reviewer for a software agent task. \
+You ONLY compare the manual acceptance criteria list to the evidence (file change summary + short user goal + short assistant reply). \
+Reply with a single JSON object and no markdown fences, no other text. Schema: {\"satisfied\":[\"...\"],\"missing\":[\"...\"]}. \
+Put in \"missing\" any manual criterion that is clearly not addressed or contradicted by the evidence. If uncertain, prefer putting a short note in \"missing\" rather than assuming success. \
+Use the same language as the criteria when writing strings.";
+    let user = format!(
+        "Manual criteria (each must be satisfied unless impossible and stated):\n- {crit}\n\n\
+Summarized file diffs / changes (truncated):\n{}\n\nUser goal (excerpt):\n{}\n\nAssistant reply (excerpt):\n{}\n\n\
+Output JSON only.",
+        diff_summary.chars().take(10_000).collect::<String>(),
+        user_excerpt.chars().take(1_800).collect::<String>(),
+        assistant_excerpt.chars().take(1_800).collect::<String>()
+    );
+    let req = CompletionRequest {
+        prompt: user,
+        max_tokens: Some(500),
+        temperature: Some(0.05),
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
+        thinking_level: None,
+        preferred_task_type: Some("conversation".to_string()),
+        system_prompt: Some(system.to_string()),
+        image_data_urls: None,
+    };
+    let raw = match tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        llm_router.complete(&req),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r.text,
+        _ => return None,
+    };
+    let trimmed = raw.trim();
+    let trimmed = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .trim()
+        .trim_end_matches('`')
+        .trim();
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let missing = v
+        .get("missing")
+        .and_then(|m| m.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if missing.is_empty() {
+        None
+    } else {
+        Some(missing)
+    }
+}
+
 /// Synthèse courte (LLM, sans outils) après échec de `studio_verify_after_agent_task`, pour l’utilisateur final.
 async fn studio_verify_explain_failure_to_user(
     llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
@@ -7352,6 +8347,53 @@ fn parse_read_file_tool_path(args: &[String]) -> Option<String> {
         return None;
     }
     Some(path_str)
+}
+
+/// Remove model reasoning wrappers that occasionally leak in plain text responses.
+fn strip_reasoning_wrappers(input: &str) -> String {
+    let mut out = input.to_string();
+    // Fast path: nothing to strip.
+    if !out.contains("<think>") && !out.contains("</think>") {
+        return out;
+    }
+    loop {
+        let Some(start) = out.find("<think>") else {
+            break;
+        };
+        if let Some(end_rel) = out[start..].find("</think>") {
+            let end = start + end_rel + "</think>".len();
+            out.replace_range(start..end, "");
+        } else {
+            // Unclosed tag: remove tail from opening marker.
+            out.truncate(start);
+            break;
+        }
+    }
+    out.replace("</think>", "").replace("<think>", "")
+}
+
+fn extract_ts2306_not_module_paths(verify_log: &str, cap: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in verify_log.lines() {
+        if !line.contains("error TS2306") || !line.contains("is not a module") {
+            continue;
+        }
+        let Some((_, after)) = line.split_once("File '") else {
+            continue;
+        };
+        let Some((path, _)) = after.split_once("' is not a module") else {
+            continue;
+        };
+        let p = path.trim().replace('\\', "/");
+        if p.is_empty() || out.iter().any(|x| x == &p) {
+            continue;
+        }
+        out.push(p);
+        if out.len() >= cap {
+            break;
+        }
+    }
+    out
 }
 
 /// Après un log d’échec de compilation, enchaîne quelques tours LLM + exécution d’outils pour corriger les sources.
@@ -7486,6 +8528,53 @@ KNOWN_TS_ERRORS:\n{}\n",
     };
     let mut prev_round_tool_fp: Option<String> = None;
     let mut pending_stall: Option<String> = None;
+    let mut read_only_round_streak: u32 = 0;
+
+    // Deterministic first-aid: TS2306 "is not a module" often comes from an empty .ts file.
+    // Patch those files immediately so subsequent LLM rounds can focus on remaining errors.
+    // Gated on tools_policy write permission; uses non-blocking I/O.
+    if policy_allows_primary_disk_write(&exec.policy) {
+        let not_module_paths = extract_ts2306_not_module_paths(verify_log, 12);
+        for p in &not_module_paths {
+            let as_path = std::path::Path::new(p);
+            if !as_path.starts_with(tool_disk_root) {
+                continue;
+            }
+            if !as_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("ts"))
+            {
+                continue;
+            }
+            let content = tokio::fs::read_to_string(as_path).await.unwrap_or_default();
+            if content.trim().is_empty() {
+                let new_content = "export {}\n";
+                // Pollution check — consistent with the write_file path
+                if crate::api_studio::studio_reject_polluted_code_content(as_path, new_content)
+                    .is_some()
+                {
+                    continue;
+                }
+                if tokio::fs::write(as_path, new_content.as_bytes()).await.is_ok() {
+                    any_write_success = true;
+                    writes_ok_count = writes_ok_count.saturating_add(1);
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "progress_pct": 57,
+                                "message": format!("Correctif auto TS2306: `{}` était vide, ajout de `export {{}}`.", p)
+                            })),
+                        )
+                        .with_correlation(timeline_correlation),
+                    );
+                }
+            }
+        }
+    }
+
     for round in 0..max_llm_rounds {
         let state_snapshot = format!(
             "STATE SNAPSHOT:\n\
@@ -7536,7 +8625,7 @@ LAST_FAILED_FILES: {}\n",
         )
         .await
         {
-            Ok(Ok(r)) => r.text,
+            Ok(Ok(r)) => strip_reasoning_wrappers(&r.text),
             Ok(Err(e)) => {
                 tracing::warn!(task_id = %task_id, error = %e, "studio verify autofix: LLM complete failed");
                 break;
@@ -7585,6 +8674,8 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
         }
         short_or_no_tool_retries = 0;
         let mut round_results: Vec<String> = Vec::new();
+        let mut round_read_success = false;
+        let mut round_write_like_success = false;
         let lanes = akasha_tools::schedule_tool_calls(&calls);
         for (_lane, lane_calls) in lanes {
             for (name, args) in &lane_calls {
@@ -7641,19 +8732,22 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                     workspace_store,
                     browser_registry,
                     Some(tool_disk_root),
+                    None,
                 )
                 .await;
                 let write_like = matches!(
                     actual_tool.as_str(),
-                    "write_file" | "search_replace" | "edit_file" | "apply_patch" | "delete_file"
-                        | "rename_path" | "move_tree"
+                    "write_file" | "write_code" | "search_replace" | "edit_file" | "apply_patch"
+                        | "delete_file" | "rename_path" | "move_tree"
                 );
                 if success && write_like {
                     any_write_success = true;
+                    round_write_like_success = true;
                     writes_ok_count = writes_ok_count.saturating_add(1);
                     last_read_file_path = None;
                     consecutive_same_file_reads = 0;
                 } else if success && actual_tool.as_str() == "read_file" {
+                    round_read_success = true;
                     if let Some(path_key) = parse_read_file_tool_path(args) {
                         if last_read_file_path.as_ref() == Some(&path_key) {
                             consecutive_same_file_reads =
@@ -7668,6 +8762,59 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
             }
         }
         follow_up = round_results.join("\n");
+        if round_read_success && !round_write_like_success {
+            read_only_round_streak = read_only_round_streak.saturating_add(1);
+        } else {
+            read_only_round_streak = 0;
+        }
+        if read_only_round_streak >= 2 {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 59,
+                        "message": format!(
+                            "[Étape: garde-fou autofix] {} round(s) lecture-only détecté(s) — correction d'écriture forcée (search_replace/edit_file/write_code/write_file).",
+                            read_only_round_streak
+                        )
+                    })),
+                )
+                .with_correlation(timeline_correlation),
+            );
+            let not_module_paths = extract_ts2306_not_module_paths(verify_log, 6);
+            let focus = if not_module_paths.is_empty() {
+                "No TS2306 path parsed from compiler output.".to_string()
+            } else {
+                format!("TS2306 focus files: {}", not_module_paths.join(", "))
+            };
+            follow_up.push_str(&format!(
+                "\n\n[HARD GUARD — READ-ONLY ROUNDS]\n\
+You just completed {read_only_round_streak} round(s) with successful reads but no successful write tool.\n\
+Stop broad exploration. Apply one concrete fix NOW with search_replace/edit_file/write_file.\n\
+If a file is empty and TS2306 says 'is not a module', add at least `export {{}}` first, then continue with proper exported types.\n\
+{focus}\n"
+            ));
+        }
+        if read_only_round_streak >= 4 {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 60,
+                        "message": "[Étape: arrêt anti-boucle] Trop de rounds lecture-only successifs en autofix — arrêt de la boucle pour éviter l'exploration infinie."
+                    })),
+                )
+                .with_correlation(timeline_correlation),
+            );
+            tracing::warn!(
+                task_id = %task_id,
+                round = round + 1,
+                "studio verify autofix: aborting due to repeated read-only rounds"
+            );
+            break;
+        }
         if consecutive_same_file_reads >= SAME_FILE_READ_THRESHOLD {
             let path_disp = last_read_file_path
                 .as_deref()
@@ -7732,6 +8879,7 @@ The compiler output already signals what is wrong: apply a minimal fix with `TOO
                     workspace_store,
                     browser_registry,
                     Some(tool_disk_root),
+                    None,
                 )
                 .await;
                 if ok {
@@ -7785,8 +8933,8 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 let actual_tool = canonicalize_tool_name(name);
                                 if !matches!(
                                     actual_tool.as_str(),
-                                    "search_replace" | "edit_file" | "write_file" | "apply_patch" | "file_diff" | "delete_file"
-                                        | "rename_path" | "move_tree"
+                                    "search_replace" | "edit_file" | "write_file" | "write_code" | "apply_patch"
+                                        | "file_diff" | "delete_file" | "rename_path" | "move_tree"
                                 ) {
                                     continue;
                                 }
@@ -7805,13 +8953,14 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                     workspace_store,
                                     browser_registry,
                                     Some(tool_disk_root),
+                                    None,
                                 )
                                 .await;
                                 if success
                                     && matches!(
                                         actual_tool.as_str(),
-                                        "search_replace" | "edit_file" | "write_file" | "apply_patch" | "delete_file"
-                                            | "rename_path" | "move_tree"
+                                        "search_replace" | "edit_file" | "write_file" | "write_code" | "apply_patch"
+                                            | "delete_file" | "rename_path" | "move_tree"
                                     )
                                 {
                                     any_write_success = true;
@@ -7824,6 +8973,44 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
         }
     }
     any_write_success
+}
+
+// #region agent log
+fn agent_debug_log(location: &str, message: &str, hypothesis_id: &str, data: serde_json::Value) {
+    let payload = serde_json::json!({
+        "sessionId": "0d82aa",
+        "timestamp": chrono::Utc::now().timestamp_millis(),
+        "location": location,
+        "message": message,
+        "hypothesisId": hypothesis_id,
+        "data": data,
+    });
+    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-0d82aa.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", payload);
+    }
+}
+// #endregion
+
+fn insert_task_tracking_event(
+    store_path: &std::path::Path,
+    task_id: Uuid,
+    event_type: &str,
+    payload: serde_json::Value,
+) {
+    if let Ok(store) = TaskStore::open(store_path) {
+        let _ = store.insert_event(
+            task_id,
+            event_type,
+            Some(&payload),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+    }
 }
 
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
@@ -7851,6 +9038,7 @@ pub(crate) async fn run_message_via_llm(
     process_registry: Option<ProcessRegistry>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     human_input_store: Option<HumanInputStore>,
+    steering_queue: Option<SteeringQueueStore>,
     delegation_tx: Option<mpsc::Sender<DelegationRequest>>,
     task_completion_registry: Option<TaskCompletionRegistry>,
     agent_profile_cache: Option<AgentProfileCache>,
@@ -7860,33 +9048,94 @@ pub(crate) async fn run_message_via_llm(
     browser_registry: Option<crate::browser::BrowserSessionRegistry>,
     autonomous_mission: Option<Arc<RwLock<AutonomousMissionConfig>>>,
     studio_disk_registry: crate::studio::StudioDiskRootRegistry,
+    studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
+    incognito: bool,
 ) {
-    let store = match TaskStore::open(&store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(task_id = %task_id, error_kind = "store_open", error = %e, "LLM task: store open failed");
-            if let Some(reg) = &browser_registry {
-                crate::browser::close_task(reg, task_id).await;
-            }
-            notify_task_completion(&task_completion_registry, task_id).await;
-            return;
-        }
-    };
-    let _ = store.update_status(task_id, TaskStatus::Running);
+    if let Ok(store) = TaskStore::open(&store_path) {
+        let _ = store.update_status(task_id, TaskStatus::Running);
+    }
+    let _ = bus.send(
+        EventEnvelope::new(
+            EventType::ProgressUpdate,
+            Some(serde_json::json!({
+                "task_id": task_id.to_string(),
+                "progress_pct": 5,
+                "message": "Analyzing your request…"
+            })),
+        )
+        .with_correlation(task_id),
+    );
+    // #region agent log
+    agent_debug_log(
+        "api.rs:run_message_via_llm",
+        "progress_5_sent",
+        "A",
+        serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+    );
+    // #endregion
+    // Start stall/progress watchdogs immediately after the first progress line so a hang in
+    // studio setup, session_state I/O, or context assembly still surfaces updates and can fail the task.
+    let meaningful_progress_flag =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timeline_correlation = task_id;
+    let (watchdog_tx, watchdog_rx) = oneshot::channel();
+    let mut watchdog_cancel = Some(watchdog_tx);
+    let (stall_tx, stall_rx) = oneshot::channel();
+    let mut stall_cancel = Some(stall_tx);
+    spawn_progress_watchdog(
+        bus.clone(),
+        store_path.clone(),
+        timeline_correlation,
+        task_id,
+        watchdog_rx,
+    );
+    spawn_task_stall_watchdog(
+        bus.clone(),
+        store_path.clone(),
+        timeline_correlation,
+        task_id,
+        meaningful_progress_flag.clone(),
+        task_completion_registry.clone(),
+        steering_queue.clone(),
+        stall_rx,
+    );
+    let (message, embedded_studio_acceptance) =
+        crate::api_studio::strip_embedded_acceptance_json(&message);
     let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
+    let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
     let tool_disk_workspace_root: std::path::PathBuf = {
+        if let Some(wt) = crate::studio_worktree::get_worktree_for_task(&studio_worktree_registry, task_id).await
+        {
+            wt.worktree_path
+        } else {
         let reg = studio_disk_registry.read().await;
         if let Some(p) = reg.get(&lineage_for_studio) {
             p.clone()
         } else {
             drop(reg);
-            store_path
-                .parent()
-                .map(|x| x.to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
+            let mut resolved: Option<std::path::PathBuf> = None;
+            if let Some(pid) = TaskStore::open(&store_path)
+                .ok()
+                .and_then(|s| s.get(lineage_for_studio).ok().flatten())
+                .and_then(|t| t.studio_project_id.clone())
+            {
+                if let Ok(dir) = crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags, &pid) {
+                    resolved = Some(dir);
+                }
+            }
+            if let Some(dir) = resolved {
+                let mut w = studio_disk_registry.write().await;
+                w.insert(lineage_for_studio, dir.clone());
+                dir
+            } else {
+                store_path
+                    .parent()
+                    .map(|x| x.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+            }
+        }
         }
     };
-    let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
     let code_studio_disk_task = tool_disk_workspace_root
         .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags));
     let studio_disk_system_append = {
@@ -7898,7 +9147,21 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     // NOTE: interpret_message is called below, after guardrail extraction, so it uses clean_message.
-    let task_snapshot = store.get(task_id).ok().flatten();
+    let task_snapshot = TaskStore::open(&store_path)
+        .ok()
+        .and_then(|s| s.get(task_id).ok().flatten());
+    // #region agent log
+    agent_debug_log(
+        "api.rs:run_message_via_llm",
+        "tool_disk_setup_done",
+        "A",
+        serde_json::json!({
+            "task_id": task_id.to_string(),
+            "session_id": session_id,
+            "code_studio_disk_task": code_studio_disk_task,
+        }),
+    );
+    // #endregion
     let assigned_agent = task_snapshot
         .as_ref()
         .map(|t| t.assigned_agent.clone())
@@ -7913,24 +9176,73 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .and_then(|t| t.parent_task_id)
         .is_some();
+    let router_task_type_early = if preferred_task_type_override.as_deref()
+        == Some("image_generation")
+        || assigned_agent == "image_generation"
+    {
+        llm_router.resolve_task_type_for_agent("conversation")
+    } else {
+        preferred_task_type_override
+            .clone()
+            .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
+    };
+    if let Some((provider, model)) =
+        llm_router.primary_route_for_task_type(&router_task_type_early)
+    {
+        insert_task_tracking_event(
+            store_path.as_path(),
+            task_id,
+            "llm_route_planned",
+            serde_json::json!({
+                "task_type": router_task_type_early,
+                "provider": provider,
+                "model": model,
+                "phase": "pre_context",
+            }),
+        );
+    }
+    if let Some(ref sq) = steering_queue {
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "steering_register_start",
+            "B",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
+        sq.register_active(task_id, session_id.clone(), !is_subagent)
+            .await;
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "steering_register_done",
+            "B",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
+    }
     if code_studio_disk_task && !is_subagent {
         let dd = data_dir_for_studio_flags.to_path_buf();
         let root = tool_disk_workspace_root.clone();
         let tid = task_id;
-        match tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             let snap_path = dd.join("studio-task-snapshots").join(format!("{tid}.json"));
             if snap_path.exists() {
                 return Ok(false);
             }
             crate::studio_task_snapshot::capture_task_snapshot(&dd, tid, &root)?;
             Ok(true)
-        })
+        }),
+        )
         .await
         {
-            Ok(Ok(true)) => {}
-            Ok(Ok(false)) => tracing::debug!(task_id = %tid, "studio task snapshot already captured; skipping"),
-            Ok(Err(e)) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot capture failed"),
-            Err(e) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot join failed"),
+            Ok(Ok(Ok(true))) => {}
+            Ok(Ok(Ok(false))) => tracing::debug!(task_id = %tid, "studio task snapshot already captured; skipping"),
+            Ok(Ok(Err(e))) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot capture failed"),
+            Ok(Err(e)) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot join failed"),
+            Err(_) => tracing::warn!(task_id = %tid, "studio task snapshot timed out"),
         }
     }
     // When main_agent prepends a guardrail block on selector timeout, extract the real user message.
@@ -7957,13 +9269,41 @@ pub(crate) async fn run_message_via_llm(
     // Anchor the CLEAN user goal (without guardrail prefix) in session state at task start.
     // Skip for orchestrated task messages — their [Task]\nObjective text is not a user goal.
     if !is_subagent && !is_orchestrated_task_msg && !clean_message.trim().is_empty() {
-        let data_dir_goal = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+        let data_dir_goal = store_path.parent().unwrap_or_else(|| store_path.as_ref()).to_path_buf();
         let goal_text = clean_message.chars().take(240).collect::<String>();
-        let _ = crate::session_state::merge(data_dir_goal, &session_id, |s| {
-            if s.goals.iter().all(|g| g != &goal_text) {
-                s.goals.push(goal_text);
-            }
-        });
+        let session_id_goal = session_id.clone();
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "session_state_merge_start",
+            "A",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
+        let merge_outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            tokio::task::spawn_blocking(move || {
+                crate::session_state::merge(&data_dir_goal, &session_id_goal, |s| {
+                    if s.goals.iter().all(|g| g != &goal_text) {
+                        s.goals.push(goal_text);
+                    }
+                })
+            }),
+        )
+        .await;
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "session_state_merge_done",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "ok": matches!(merge_outcome, Ok(Ok(Ok(_)))),
+                "timed_out": matches!(merge_outcome, Err(_)),
+            }),
+        );
+        // #endregion
     }
     let timeline_correlation = resolve_root_task_id(&store_path, task_id)
         .or_else(|| task_snapshot.as_ref().and_then(|t| t.parent_task_id))
@@ -7980,7 +9320,13 @@ pub(crate) async fn run_message_via_llm(
     } else {
         classify_small_talk_message(clean_message)
     };
-    let session_recall_intent = detect_session_recall_intent(clean_message);
+    // Never treat Code Studio disk tasks as « session recap » — injected prefixes can contain
+    // words like « rappellent » (substring « rappel » used to trigger the recap fast path).
+    let session_recall_intent = if code_studio_disk_task {
+        None
+    } else {
+        detect_session_recall_intent(clean_message)
+    };
     tracing::debug!(
         ?session_recall_intent,
         "[RECALL_DEBUG] session_recall_intent"
@@ -8001,6 +9347,7 @@ pub(crate) async fn run_message_via_llm(
             user_rag_top_k: 0,
             workspace_graph_top_k: 0,
             expand_by_graph: false,
+            graph_expand_hops: 0,
             compact_before_prompt: false,
             allow_project_recall: false,
             allow_identity_lookup: false,
@@ -8013,6 +9360,19 @@ pub(crate) async fn run_message_via_llm(
             orch_disk_deliverables,
         )
     };
+    if incognito {
+        memory_profile.recent_turns_limit = 0;
+        memory_profile.recent_context_max_chars = 0;
+        memory_profile.semantic_top_k = 0;
+        memory_profile.episodic_limit = 0;
+        memory_profile.facts_limit = 0;
+        memory_profile.user_rag_top_k = 0;
+        memory_profile.workspace_graph_top_k = 0;
+        memory_profile.graph_expand_hops = 0;
+        memory_profile.expand_by_graph = false;
+        memory_profile.allow_project_recall = false;
+        memory_profile.allow_identity_lookup = false;
+    }
     // For external/transport/general-knowledge queries, always isolate from recent context.
     // Loading previous dev/Akasha-specific turns from short-term history actively misleads
     // small local models: they latch onto the most recent topic (e.g. Akasha CLI discussion)
@@ -8065,22 +9425,6 @@ pub(crate) async fn run_message_via_llm(
         .with_correlation(task_id),
     );
 
-    // Progress to show we have started (model may be loading on first call).
-    let _ = bus.send(
-        EventEnvelope::new(
-            EventType::ProgressUpdate,
-            Some(serde_json::json!({
-                "task_id": task_id.to_string(),
-                "progress_pct": 10,
-                "message": "Analyzing your request…"
-            })),
-        )
-        .with_correlation(task_id),
-    );
-    let (watchdog_tx, watchdog_rx) = oneshot::channel();
-    let mut watchdog_cancel = Some(watchdog_tx);
-    spawn_progress_watchdog(bus.clone(), timeline_correlation, task_id, watchdog_rx);
-
     let max_tokens = std::env::var("AKASHA_MAX_RESPONSE_TOKENS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
@@ -8116,11 +9460,11 @@ pub(crate) async fn run_message_via_llm(
         }
         if orch_disk_deliverables {
             if let Some(ref list) = allowed_tools {
-                if !list.iter().any(|t| t == "write_file") {
+                if !list.iter().any(|t| t == "write_file" || t == "write_code") {
                     tracing::warn!(
                         task_id = %task_id,
-                        "Orchestrated deliverables: tools_policy default_profile omits write_file; \
-                         workspace file tools will NOT be advertised to the model — add write_file \
+                        "Orchestrated deliverables: tools_policy default_profile omits write_file/write_code; \
+                         workspace file tools will NOT be advertised to the model — add write_file or write_code \
                          (and other file tools) to the profile to enable disk deliverables."
                     );
                 }
@@ -8273,6 +9617,11 @@ pub(crate) async fn run_message_via_llm(
         Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
         None => AgentProfile::load(data_dir),
     };
+    let completion_temperature = agent_profile
+        .temperature
+        .filter(|t| *t >= 0.0 && *t <= 2.0)
+        .map(|t| t as f32)
+        .unwrap_or(0.7);
     let profile_block = if code_studio_disk_task {
         String::new()
     } else {
@@ -8363,6 +9712,9 @@ pub(crate) async fn run_message_via_llm(
     } else {
         "Reply in the same language as the user message below (French, English, etc.).\n\n"
     });
+    if !is_small_talk_fast_lane && !code_studio_disk_task {
+        user_prefix.push_str(&crate::agents::current_date_context_block(chrono::Local::now()));
+    }
     if let Some(ref am) = autonomous_mission {
         let g = am.read().await;
         if g.enabled && g.status == MissionStatusYaml::Active && session_id == g.session_id {
@@ -8386,9 +9738,34 @@ pub(crate) async fn run_message_via_llm(
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
     };
+    // #region agent log
+    {
+        let turn_count = if let Some(st) = &short_term {
+            st.get_turns(&session_id).await.len()
+        } else {
+            0usize
+        };
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "session_turns_snapshot",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "turns_empty": turns_empty,
+                "turn_count": turn_count,
+                "semantic_top_k": memory_profile.semantic_top_k,
+            }),
+        );
+    }
+    // #endregion
+    let process_id_for_recall = resolve_root_task_id(store_path.as_path(), task_id)
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| task_id.to_string());
     let user_profile = UserProfile::load(data_dir);
     let user_identity_prefix = user_profile.format_for_prompt();
-    let recall_params = crate::memory_orchestrator::RecallParams {
+    let constitution = crate::constitution::Constitution::load(data_dir);
+    let mut recall_params = crate::memory_orchestrator::RecallParams {
         message: message.clone(),
         session_id: session_id.clone(),
         semantic_top_k: memory_profile.semantic_top_k,
@@ -8402,6 +9779,9 @@ pub(crate) async fn run_message_via_llm(
             && memory_profile.allow_identity_lookup
             && !code_studio_disk_task,
         expand_by_graph: memory_profile.expand_by_graph,
+        graph_expand_hops: memory_profile.graph_expand_hops,
+        process_id: Some(process_id_for_recall),
+        task_id: Some(task_id.to_string()),
         user_identity_prefix: if user_identity_prefix.is_empty()
             || !memory_profile.allow_identity_lookup
         {
@@ -8409,31 +9789,186 @@ pub(crate) async fn run_message_via_llm(
         } else {
             Some(user_identity_prefix)
         },
-        task_outcomes_limit: if code_studio_disk_task { 6 } else { 8 },
-        task_outcomes_scope_session: code_studio_disk_task,
+        task_outcomes_limit: if incognito {
+            0
+        } else if code_studio_disk_task {
+            6
+        } else {
+            8
+        },
+        task_outcomes_scope_session: code_studio_disk_task || !turns_empty,
         include_preference_and_personality_episodic: !code_studio_disk_task,
+        constitution: if constitution.is_configured() {
+            Some(constitution)
+        } else {
+            None
+        },
         ..Default::default()
     };
+    if memory_profile.semantic_top_k > 0
+        && !is_small_talk_fast_lane
+        && !code_studio_disk_task
+    {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 6,
+                    "message": "Préparation du contexte…"
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        let mut search_queries =
+            crate::memory_retrieval_enhance::expand_queries(&llm_router, &message).await;
+        if let Some(hyde) =
+            crate::memory_retrieval_enhance::hyde_document(&llm_router, &message).await
+        {
+            search_queries.push(hyde);
+        }
+        recall_params.search_queries = search_queries;
+    }
+    let mut workspace_registry_lines: Vec<String> = Vec::new();
+    if memory_profile.workspace_graph_top_k > 0 {
+        let graph_query = message.clone();
+        let graph_k = memory_profile.workspace_graph_top_k;
+        let sp = store_path.clone();
+        if let Some((workspace_lines, graph_lines)) = tokio::task::spawn_blocking(move || {
+            let store = WorkspaceGraphStore::open(&sp)?;
+            let workspaces = store.list_workspaces()?;
+            let workspace_lines: Vec<String> = workspaces
+                .iter()
+                .map(|w| format!("- \"{}\" — id {} — {}", w.name, w.id, w.root_path))
+                .collect();
+            let graph_lines = store.search_graph_context(&graph_query, graph_k, None)?;
+            Ok::<_, anyhow::Error>((workspace_lines, graph_lines))
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        {
+            workspace_registry_lines = workspace_lines;
+            recall_params.workspace_graph_lines = graph_lines;
+        }
+    }
     if memory_profile.semantic_top_k > 0
         || memory_profile.episodic_limit > 0
         || memory_profile.facts_limit > 0
         || recall_params.user_identity_prefix.is_some()
         || recall_params.task_outcomes_limit > 0
+        || !recall_params.workspace_graph_lines.is_empty()
     {
-        let fused =
-            crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params)
-                .await;
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 8,
+                    "message": "Chargement du contexte et de la mémoire…"
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        let recall_timeout = std::time::Duration::from_secs(memory_recall_timeout_secs());
+        insert_task_tracking_event(
+            store_path.as_path(),
+            task_id,
+            "memory_recall_started",
+            serde_json::json!({
+                "timeout_secs": recall_timeout.as_secs(),
+                "semantic_top_k": memory_profile.semantic_top_k,
+            }),
+        );
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "memory_recall_start",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "timeout_secs": recall_timeout.as_secs(),
+            }),
+        );
+        // #endregion
+        let (fused, recall_timed_out) = match tokio::time::timeout(
+            recall_timeout,
+            crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params),
+        )
+        .await
+        {
+            Ok(ctx) => (ctx, false),
+            Err(_) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    timeout_secs = recall_timeout.as_secs(),
+                    "memory recall timed out; continuing without long-term context"
+                );
+                // #region agent log
+                agent_debug_log(
+                    "api.rs:run_message_via_llm",
+                    "memory_recall_timeout",
+                    "A",
+                    serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+                );
+                // #endregion
+                (
+                    crate::memory_orchestrator::FusedMemoryContext::default(),
+                    true,
+                )
+            }
+        };
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "memory_recall_done",
+            "A",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "session_id": session_id,
+                "had_results": !fused.to_context_string().is_empty(),
+            }),
+        );
+        // #endregion
+        insert_task_tracking_event(
+            store_path.as_path(),
+            task_id,
+            "memory_recall_finished",
+            serde_json::json!({
+                "had_results": !fused.to_context_string().is_empty(),
+                "timed_out": recall_timed_out,
+            }),
+        );
         let fused_str = fused.to_context_string();
         if !fused_str.is_empty() {
             user_prefix.push_str(&fused_str);
         }
+        let recall_had_results = !fused_str.is_empty();
+        crate::memory_maintenance::schedule_post_retrieval(
+            long_term_client.clone(),
+            message.clone(),
+            Some(session_id.clone()),
+            recall_had_results,
+        );
     }
     if memory_profile.user_rag_top_k > 0 {
         let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
         let rag_query = message.clone();
         let rag_top_k = memory_profile.user_rag_top_k;
+        let data_dir_rag = data_dir.to_path_buf();
         let chunks =
-            tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, rag_top_k))
+            tokio::task::spawn_blocking(move || {
+                #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+                let query_embedding = {
+                    use akasha_embeddings::Embedder;
+                    let cache_dir = data_dir_rag.join("embedding_model");
+                    Embedder::new(&cache_dir).embed_one(&rag_query).ok()
+                };
+                #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+                let query_embedding: Option<Vec<f32>> = None;
+                user_rag_store.retrieve_hybrid(&rag_query, query_embedding.as_deref(), rag_top_k)
+            })
                 .await
                 .ok()
                 .and_then(|res| res.ok())
@@ -8448,69 +9983,54 @@ pub(crate) async fn run_message_via_llm(
             user_prefix.push_str("\n");
         }
     }
-    if memory_profile.workspace_graph_top_k > 0 {
-        let graph_query = message.clone();
-        let graph_k = memory_profile.workspace_graph_top_k;
-        let sp = store_path.clone();
-        let (workspace_lines, graph_lines) = tokio::task::spawn_blocking(move || {
-            let store = WorkspaceGraphStore::open(&sp)?;
-            let workspaces = store.list_workspaces()?;
-            let workspace_lines: Vec<String> = workspaces
-                .iter()
-                .map(|w| {
-                    format!(
-                        "- \"{}\" — id {} — {}",
-                        w.name, w.id, w.root_path
-                    )
-                })
-                .collect();
-            let graph_lines = store.search_graph_context(&graph_query, graph_k, None)?;
-            Ok::<_, anyhow::Error>((workspace_lines, graph_lines))
-        })
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
-        if workspace_lines.len() > 1 {
-            const MAX_WORKSPACE_LINES: usize = 8;
-            user_prefix.push_str(
-                "[Project knowledge graphs — registered workspaces (use id with workspace_graph_search --workspace)]\n",
-            );
-            for line in workspace_lines.iter().take(MAX_WORKSPACE_LINES) {
-                user_prefix.push_str(line);
-                user_prefix.push_str("\n");
-            }
-            if workspace_lines.len() > MAX_WORKSPACE_LINES {
-                user_prefix.push_str(&format!(
-                    "- … ({} more workspaces not shown)\n",
-                    workspace_lines.len() - MAX_WORKSPACE_LINES
-                ));
-            }
-            user_prefix.push_str(
-                "To fetch more symbols or files from the index, call: workspace_graph_search <keywords> [--workspace <id>]\n\n",
-            );
-        }
-        if !graph_lines.is_empty() {
-            user_prefix.push_str(
-                "[Project knowledge graphs — excerpts matching this message (indexed folders)]\n",
-            );
-            for line in &graph_lines {
-                user_prefix.push_str("- ");
-                user_prefix.push_str(line);
-                user_prefix.push_str("\n");
-            }
+    if workspace_registry_lines.len() > 1 {
+        const MAX_WORKSPACE_LINES: usize = 8;
+        user_prefix.push_str(
+            "[Project knowledge graphs — registered workspaces (use id with workspace_graph_search --workspace)]\n",
+        );
+        for line in workspace_registry_lines.iter().take(MAX_WORKSPACE_LINES) {
+            user_prefix.push_str(line);
             user_prefix.push_str("\n");
         }
+        if workspace_registry_lines.len() > MAX_WORKSPACE_LINES {
+            user_prefix.push_str(&format!(
+                "- … ({} more workspaces not shown)\n",
+                workspace_registry_lines.len() - MAX_WORKSPACE_LINES
+            ));
+        }
+        user_prefix.push_str(
+            "To fetch more symbols or files from the index, call: workspace_graph_search <keywords> [--workspace <id>]\n\n",
+        );
     }
+    let router_task_type_for_compact = if preferred_task_type_override.as_deref()
+        == Some("image_generation")
+        || assigned_agent == "image_generation"
+    {
+        llm_router.resolve_task_type_for_agent("conversation")
+    } else {
+        preferred_task_type_override
+            .clone()
+            .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
+    };
+    let (tok_prov, tok_model) = llm_router
+        .primary_route_for_task_type(&router_task_type_for_compact)
+        .unwrap_or_else(|| ("default".to_string(), "default".to_string()));
     if let Some(ref st) = short_term {
-        if memory_profile.compact_before_prompt {
-            let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
+        if memory_profile.compact_before_prompt && !incognito {
+            let new_msg_tokens = ShortTermStore::estimate_tokens_calibrated(
+                tok_prov.as_str(),
+                tok_model.as_str(),
+                &message,
+            );
             compact_short_term_if_needed(
                 st,
                 &session_id,
                 &llm_router,
                 new_msg_tokens,
                 long_term_client.as_ref(),
+                tok_prov.as_str(),
+                tok_model.as_str(),
+                &store_path,
             )
             .await;
         }
@@ -8542,6 +10062,17 @@ pub(crate) async fn run_message_via_llm(
             }
         }
     }
+    let store = match TaskStore::open(&store_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(task_id = %task_id, error_kind = "store_open", error = %e, "LLM task: store open failed before prompt assembly");
+            if let Some(ref sq) = steering_queue {
+                sq.unregister_active(task_id).await;
+            }
+            notify_task_completion(&task_completion_registry, task_id).await;
+            return;
+        }
+    };
     if !is_small_talk_fast_lane {
         if let Ok(todos) = store.get_todos(task_id) {
             if let Some(block) = format_todos_plan_block(&todos) {
@@ -8559,35 +10090,59 @@ pub(crate) async fn run_message_via_llm(
     // IMPORTANT: intent classification must use the clean user message (without guardrail/prefix
     // injections). Using the raw `message` can falsely trigger intents (e.g. transport/maps)
     // from injected context blocks and activate unrelated plugin routing.
-    let mut intent_flags = compute_message_intent_flags(clean_message);
-    if code_studio_disk_task {
-        code_studio_disable_plugin_intents(&mut intent_flags);
-    }
-    let runtime_tool_routing_enforcer = if code_studio_disk_task {
-        // Hard guard: Code Studio tasks must stay project/code oriented and must not be
-        // hijacked by dynamic plugin routing (maps/graph/external intents).
-        None
+    let intent_flags = compute_message_intent_flags(clean_message);
+    let plugin_catalog_reminder = if code_studio_disk_task
+        || is_small_talk_fast_lane
+        || plugin_registry.is_none()
+    {
+        String::new()
     } else {
-        build_runtime_tool_routing_enforcer(
-            plugin_registry.as_ref(),
-            clean_message,
-            &intent_flags,
-            tools_executor_snapshot.as_ref(),
-        )
+        match plugin_registry.as_ref() {
+            None => String::new(),
+            Some(reg) => {
+                let all_tool: Vec<PluginManifest> = reg
+                    .manifests()
+                    .into_iter()
+                    .filter(|m| m.kind == PluginKind::Tool)
+                    .collect();
+                if all_tool.is_empty() {
+                    String::new()
+                } else {
+                    let selected_ids = crate::plugins::selection::select_relevant_plugins_via_llm(
+                        llm_router.as_ref(),
+                        clean_message,
+                        &all_tool,
+                    )
+                    .await;
+                    let id_lower: std::collections::HashSet<String> = selected_ids
+                        .iter()
+                        .map(|s| s.to_lowercase())
+                        .collect();
+                    let mut picked: Vec<PluginManifest> = all_tool
+                        .iter()
+                        .filter(|m| id_lower.contains(&m.id.to_lowercase()))
+                        .cloned()
+                        .collect();
+                    if picked.is_empty() {
+                        picked.clone_from(&all_tool);
+                    }
+                    crate::plugins::selection::build_plugin_catalog_block(&picked)
+                }
+            }
+        }
     };
     let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
     } else {
         ""
     };
-    // web_search is effectively available only when the tool is allowed by the active profile,
-    // web_search_enabled is true in the policy, and a Brave API key is present (vault or env).
+    // web_search is available when allowed by profile, enabled in policy, and a provider chain exists
+    // (Brave/Tavily/Serper/Google PSE with keys, or keyless SearXNG + DuckDuckGo).
     let web_search_effectively_available = tools_executor_snapshot
         .as_ref()
         .map(|e| {
             e.policy.can_use_tool("web_search")
-                && e.policy.web_search_enabled
-                && (e.policy.brave_api_key.is_some() || std::env::var("BRAVE_API_KEY").is_ok())
+                && akasha_tools::any_provider_available(&e.policy)
         })
         .unwrap_or(false);
     let web_search_reminder: &str = if intent_flags.external_info {
@@ -8626,19 +10181,7 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let (plugin_routing_reminder, plugin_handles_geo_distance) = if code_studio_disk_task {
-        (String::new(), false)
-    } else {
-        build_plugin_routing_reminders(
-            plugin_registry.as_ref(),
-            clean_message,
-            &intent_flags,
-            tools_executor_snapshot.as_ref(),
-        )
-    };
-    let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance
-        && !plugin_handles_geo_distance
-    {
+    let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance {
         let has_any_tool = tools_executor_snapshot
             .as_ref()
             .map(|e| e.policy.can_use_tool("web_search") || e.policy.can_use_tool("plugin.call"))
@@ -8697,7 +10240,7 @@ pub(crate) async fn run_message_via_llm(
         ""
     };
     // When user clearly wants a photo from camera, prefix the message with an imperative so the model responds with device_invoke directly (no ask_user).
-    let user_message = if !device_camera_reminder.is_empty() {
+    let mut user_message = if !device_camera_reminder.is_empty() {
         format!(
             "[Répondre par: TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne pas utiliser ask_user.]\n\n{}",
             clean_message
@@ -8714,7 +10257,7 @@ pub(crate) async fn run_message_via_llm(
             web_search_followup_reminder,
             transport_reminder,
             geolocation_distance_reminder,
-            plugin_routing_reminder,
+            plugin_catalog_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
@@ -8732,7 +10275,7 @@ pub(crate) async fn run_message_via_llm(
             web_search_followup_reminder,
             transport_reminder,
             geolocation_distance_reminder,
-            plugin_routing_reminder,
+            plugin_catalog_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
@@ -8741,7 +10284,7 @@ pub(crate) async fn run_message_via_llm(
             user_message
         )
     };
-    let reply_text;
+    let mut reply_text = String::new();
     let mut last_llm_model_used: Option<String> = None;
     let mut first_meaningful_progress_sent = false;
 
@@ -8791,7 +10334,8 @@ pub(crate) async fn run_message_via_llm(
             }
         });
         first_meaningful_progress_sent = true;
-        cancel_progress_watchdog(&mut watchdog_cancel);
+        meaningful_progress_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
         if emit_timeline_once_for_task(
             &bus,
             Some(store_path.as_path()),
@@ -8802,6 +10346,25 @@ pub(crate) async fn run_message_via_llm(
             log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
         }
     } else {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 12,
+                    "message": "Génération de la réponse…"
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "progress_12_llm_loop_start",
+            "A",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
         let mut max_tool_rounds = std::env::var("AKASHA_MAX_TOOL_ROUNDS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -8817,6 +10380,8 @@ pub(crate) async fn run_message_via_llm(
             }
         }
         let mut round = 0u32;
+        // Tours d'affilée avec uniquement des outils d'exploration (Code Studio).
+        let mut studio_read_only_streak_rounds: u32 = 0;
         let mut social_snapshot_seen = false;
         // Loop detection history is tracked per "agent key".
         // For now, agent key = current task_id (sub-agent tasks each have their own task_id).
@@ -8835,41 +10400,18 @@ pub(crate) async fn run_message_via_llm(
             String,
             std::collections::HashSet<String>,
         > = std::collections::HashMap::new();
-        let strict_tools_first = runtime_tool_routing_enforcer
-            .as_ref()
-            .map(|e| !e.preferred_tools.is_empty())
-            .unwrap_or(false);
-        let strict_tools_instruction = if strict_tools_first {
-            let preferred = runtime_tool_routing_enforcer
-                .as_ref()
-                .map(|e| {
-                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                    v.sort();
-                    v.join(", ")
-                })
-                .unwrap_or_default();
-            format!(
-                "\n\n[TOOLS-FIRST STRICT MODE]\n- PRIMARY USER REQUEST (must be satisfied): {}\n- You MUST output TOOL lines only until at least one allowed tool succeeds.\n- Preferred tools: {}\n- If inputs are missing, output ONLY: TOOL: ask_user {{\"question\":\"...\",\"context\":\"...\",\"choices\":[...]}}\n- Do NOT output prose, role acknowledgements, policy acknowledgements, or generic greetings.\n",
-                user_message, preferred
-            )
-        } else {
-            String::new()
-        };
-        let mut strict_no_tool_rounds = 0u32;
-        let mut strict_successful_tool_calls = 0u32;
-        let mut strict_preferred_tool_replay_input: Option<String> = None;
-        // In strict tools-first mode, deterministic preferred-tool attempts must run only once before
-        // the first LLM call. `round` stays 0 until the model emits parseable TOOL lines, so without
-        // this flag we would re-run deterministic maps (etc.) on every strict re-prompt and burn a
-        // full LLM timeout budget on a duplicate hung stream.
-        let mut deterministic_preferred_attempted = false;
         // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
         let mut orch_disk_write_nags = 0u32;
         // Code Studio implementation agents: prevent "copy/paste this file" fallback
         // when write tools are available but unused.
         let mut studio_manual_patch_nags = 0u32;
         let mut studio_prose_only_write_nags = 0u32;
+        let mut studio_zero_tool_promise_nags = 0u32;
+        let mut studio_unparsed_tool_marker_nags = 0u32;
+        let mut studio_pm_mandatory_delegate_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
+        // Images from tools (browser screenshot, camera, generate_image) queued for the next CompletionRequest for multimodal models.
+        let mut pending_completion_image_urls: Option<Vec<String>> = None;
 
         let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
             .ok()
@@ -8886,145 +10428,47 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_else(|| llm_timeout_secs.min(300));
 
         'tool_rounds: loop {
-            let strict_mode_active = strict_tools_first && strict_successful_tool_calls == 0;
-            if strict_mode_active {
-                let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::ProgressUpdate,
-                        Some(serde_json::json!({
-                            "task_id": task_id.to_string(),
-                            "progress_pct": 30,
-                            "message": "Applying dynamic plugin routing rules (tools-first)…"
-                        })),
-                    )
-                    .with_correlation(task_id),
-                );
-            }
-
-            // Deterministic first attempt in strict tools-first mode:
-            // try preferred tools with the full user request as input before asking the LLM again.
-            let run_deterministic_preferred = strict_mode_active
-                && (strict_preferred_tool_replay_input.is_some()
-                    || (!deterministic_preferred_attempted && round == 0));
-            if run_deterministic_preferred {
-                if let (Some(enforcer), Some(exec)) = (
-                    &runtime_tool_routing_enforcer,
-                    tools_executor_snapshot.as_ref(),
-                ) {
-                    let preferred_tool_request = strict_preferred_tool_replay_input
-                        .take()
-                        .unwrap_or_else(|| user_message.clone());
-                    let mut deterministic_results: Vec<String> = Vec::new();
-                    const MAPS_RESULT_FULL_MAX: usize = 400_000;
-                    for preferred_tool in enforcer.preferred_tools.iter().take(3) {
-                        let args_preview = if preferred_tool_request.chars().count() > 240 {
-                            format!(
-                                "{}…",
-                                preferred_tool_request.chars().take(240).collect::<String>()
-                            )
-                        } else {
-                            preferred_tool_request.clone()
-                        };
-                        let _ = bus.send(
-                            EventEnvelope::new(
-                                EventType::TimelineMilestone,
-                                Some(serde_json::json!({
-                                    "name": "deterministic_preferred_tool_attempt",
-                                    "task_id": task_id.to_string(),
-                                    "round": round,
-                                    "tool": preferred_tool,
-                                    "args_preview": args_preview,
-                                })),
-                            )
-                            .with_correlation(timeline_correlation),
-                        );
-                        let auto_args = vec![preferred_tool_request.clone()];
-                        let (success, res, captured_image) = execute_tool_call(
-                            exec,
-                            preferred_tool,
-                            &auto_args,
-                            process_registry.as_ref(),
-                            long_term_client.as_ref(),
-                            task_id,
-                            Some(store_path.as_path()),
-                            conv_tx.clone(),
-                            message_webhook_url.as_deref(),
-                            plugin_registry.as_ref(),
-                            device_bridge.as_ref(),
-                            workspace_store.as_ref(),
-                            browser_registry.as_ref(),
-                            Some(tool_disk_workspace_root.as_path()),
-                        )
-                        .await;
-                        let result_preview = if res.chars().count() > 320 {
-                            format!("{}…", res.chars().take(320).collect::<String>())
-                        } else {
-                            res.clone()
-                        };
-                        // UI (chat) needs full plugin JSON for rich views (e.g. maps); preview is truncated.
-                        let mut milestone = serde_json::json!({
-                            "name": "deterministic_preferred_tool_result",
-                            "task_id": task_id.to_string(),
-                            "round": round,
-                            "tool": preferred_tool,
-                            "success": success,
-                            "result_preview": result_preview,
-                        });
-                        if success
-                            && preferred_tool.starts_with("maps_")
-                            && res.len() <= MAPS_RESULT_FULL_MAX
-                        {
-                            milestone["result_full"] = serde_json::Value::String(res.clone());
-                        }
-                        let _ = bus.send(
-                            EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
-                                .with_correlation(timeline_correlation),
-                        );
-                        tool_loop_history_by_agent
-                            .entry(loop_agent_key.clone())
-                            .or_default()
-                            .push((
-                                preferred_tool.clone(),
-                                if success { "success" } else { "failure" }.to_string(),
-                            ));
-                        if let Some(img) = captured_image {
-                            last_captured_image_base64 = Some(img);
-                        }
-                        deterministic_results.push(res.clone());
-                        if success {
-                            strict_successful_tool_calls =
-                                strict_successful_tool_calls.saturating_add(1);
-                            log_tool_journal_if_write(preferred_tool, &auto_args, &res).await;
-                            break;
-                        }
-                    }
-                    if strict_successful_tool_calls > 0 {
-                        let results_blob = deterministic_results.join("\n");
-                        last_tool_results_blob = Some(results_blob.clone());
-                        current_prompt = format!(
-                        "User request: {}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise. No TOOL: lines.",
-                        user_message,
-                        results_blob
-                    );
-                        // Continue to next round so the model synthesizes from concrete tool results.
-                        continue;
-                    }
-                    let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::TimelineMilestone,
-                        Some(serde_json::json!({
-                            "name": "deterministic_preferred_tool_no_success",
-                            "task_id": task_id.to_string(),
-                            "round": round,
-                            "attempted_tools": enforcer.preferred_tools.iter().cloned().collect::<Vec<_>>(),
-                        })),
-                    )
-                    .with_correlation(timeline_correlation),
-                );
+            match store.get(task_id).ok().flatten().map(|t| t.status) {
+                Some(TaskStatus::Paused)
+                | Some(TaskStatus::Cancelled)
+                | Some(TaskStatus::Failed) => {
+                    break 'tool_rounds;
                 }
-                deterministic_preferred_attempted = true;
+                _ => {}
             }
-
+            if let Some(ref sq) = steering_queue {
+                let steering_items = sq.drain_steering(task_id).await;
+                for item in steering_items {
+                    let steer_text = format!(
+                        "[Steering — instruction utilisateur à appliquer maintenant]\n{}",
+                        item.text
+                    );
+                    if let Some(st) = short_term.as_ref() {
+                        st.append(&session_id, "user", steer_text.clone()).await;
+                    }
+                    user_message = format!("{user_message}\n\n{steer_text}");
+                    let _ = store.insert_event(
+                        task_id,
+                        "user_steering_applied",
+                        Some(&serde_json::json!({
+                            "queue_id": item.id,
+                            "preview": item.text.chars().take(200).collect::<String>(),
+                            "schema_version": 1
+                        })),
+                        &chrono::Utc::now().to_rfc3339(),
+                    );
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "message": format!("[Steering] {}", item.text.chars().take(120).collect::<String>()),
+                                "task_id": task_id.to_string()
+                            })),
+                        )
+                        .with_correlation(task_id),
+                    );
+                }
+            }
             // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
             if let Some(ref store) = task_usage_store {
                 let (session_tokens, session_cost) =
@@ -9064,25 +10508,47 @@ pub(crate) async fn run_message_via_llm(
                     .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
             };
             let preferred_task_type = Some(router_task_type_for_llm);
+            let mut merged_image_urls: Vec<String> = Vec::new();
+            if tool_loop_history_by_agent
+                .get(&loop_agent_key)
+                .map(|v| v.is_empty())
+                .unwrap_or(true)
+            {
+                if let Some(ref u) = image_data_urls {
+                    merged_image_urls.extend(u.iter().cloned());
+                }
+            }
+            if let Some(mut pending) = pending_completion_image_urls.take() {
+                merged_image_urls.append(&mut pending);
+            }
+            let merged_image_data_urls = if merged_image_urls.is_empty() {
+                None
+            } else {
+                Some(merged_image_urls)
+            };
+            if let Some((provider, model)) = preferred_task_type
+                .as_deref()
+                .and_then(|tt| llm_router.primary_route_for_task_type(tt))
+            {
+                insert_task_tracking_event(
+                    store_path.as_path(),
+                    task_id,
+                    "llm_call_started",
+                    serde_json::json!({
+                        "round": round + 1,
+                        "task_type": preferred_task_type,
+                        "provider": provider,
+                        "model": model,
+                    }),
+                );
+            }
             let request = CompletionRequest {
-                prompt: if strict_mode_active {
-                    format!("{}{}", current_prompt, strict_tools_instruction)
-                } else {
-                    format!("{}{}", current_prompt, tool_instruction)
-                },
+                prompt: format!("{}{}", current_prompt, tool_instruction),
                 max_tokens: Some(completion_max_tokens),
-                temperature: Some(0.7),
+                temperature: Some(completion_temperature),
                 preferred_task_type,
                 system_prompt: system_prompt.clone(),
-                image_data_urls: if tool_loop_history_by_agent
-                    .get(&loop_agent_key)
-                    .map(|v| v.is_empty())
-                    .unwrap_or(true)
-                {
-                    image_data_urls.clone()
-                } else {
-                    None
-                },
+                image_data_urls: merged_image_data_urls,
                 top_p: None,
                 top_k: None,
                 frequency_penalty: None,
@@ -9138,7 +10604,9 @@ pub(crate) async fn run_message_via_llm(
                     Ok(Some(chunk)) => {
                         if !first_meaningful_progress_sent && !chunk.trim().is_empty() {
                             first_meaningful_progress_sent = true;
-                            cancel_progress_watchdog(&mut watchdog_cancel);
+                            meaningful_progress_flag
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
                             if emit_timeline_once_for_task(
                                 &bus,
                                 Some(store_path.as_path()),
@@ -9183,6 +10651,44 @@ pub(crate) async fn run_message_via_llm(
                             )
                             .with_correlation(task_id),
                         );
+                        if !chunk_ref.is_empty() {
+                            let _ = store.insert_event(
+                                task_id,
+                                "assistant_text_delta",
+                                Some(&serde_json::json!({
+                                    "delta": chunk_ref,
+                                    "schema_version": 1
+                                })),
+                                &chrono::Utc::now().to_rfc3339(),
+                            );
+                            if chunk_ref.contains("TOOL:") || chunk_ref.contains("<tool_call") {
+                                let tool_name = parse_tool_name_from_toolcall_delta(chunk_ref);
+                                let _ = bus.send(
+                                    EventEnvelope::new(
+                                        EventType::ProgressUpdate,
+                                        Some(serde_json::json!({
+                                            "task_id": task_id.to_string(),
+                                            "event_type": "toolcall_delta",
+                                            "delta": chunk_ref,
+                                            "delta_raw": chunk_ref,
+                                            "tool_name": tool_name
+                                        })),
+                                    )
+                                    .with_correlation(task_id),
+                                );
+                                let _ = store.insert_event(
+                                    task_id,
+                                    "toolcall_delta",
+                                    Some(&serde_json::json!({
+                                        "delta": chunk_ref,
+                                        "delta_raw": chunk_ref,
+                                        "tool_name": tool_name,
+                                        "schema_version": 1
+                                    })),
+                                    &chrono::Utc::now().to_rfc3339(),
+                                );
+                            }
+                        }
                     }
                     Ok(None) => break,
                     Err(_) => {
@@ -9211,19 +10717,65 @@ pub(crate) async fn run_message_via_llm(
                 match tokio::time::timeout(remaining, stream_join).await {
                     Ok(Ok(Ok(resp))) => {
                         last_llm_model_used = Some(resp.model_used.clone());
+                        insert_task_tracking_event(
+                            store_path.as_path(),
+                            task_id,
+                            "llm_call_finished",
+                            serde_json::json!({
+                                "round": round + 1,
+                                "success": true,
+                                "model_used": resp.model_used,
+                                "latency_ms": resp
+                                    .total_duration_ns
+                                    .map(|ns| ns / 1_000_000)
+                                    .unwrap_or(0),
+                                "prompt_tokens": resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                                "completion_tokens": resp
+                                    .usage
+                                    .as_ref()
+                                    .map(|u| u.completion_tokens)
+                                    .unwrap_or(0),
+                            }),
+                        );
                         if let Some(ref store) = task_usage_store {
-                            let tokens = resp
+                            let prompt_tokens =
+                                resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0);
+                            let completion_tokens = resp
                                 .usage
                                 .as_ref()
-                                .map(|u| u.prompt_tokens + u.completion_tokens)
+                                .map(|u| u.completion_tokens)
                                 .unwrap_or(0);
                             let cost = resp.cost_usd.unwrap_or(0.0);
-                            store.add(task_id, &session_id, tokens, cost).await;
+                            let latency_ms = resp
+                                .total_duration_ns
+                                .map(|ns| ns / 1_000_000)
+                                .unwrap_or(0);
+                            store
+                                .add(
+                                    task_id,
+                                    &session_id,
+                                    prompt_tokens,
+                                    completion_tokens,
+                                    cost,
+                                    latency_ms,
+                                    Some(resp.model_used.as_str()),
+                                )
+                                .await;
                         }
                         resp.text.trim().to_string()
                     }
                     Ok(Ok(Err(e))) => {
                         tracing::warn!(error = %e, "LLM completion failed");
+                        insert_task_tracking_event(
+                            store_path.as_path(),
+                            task_id,
+                            "llm_call_finished",
+                            serde_json::json!({
+                                "round": round + 1,
+                                "success": false,
+                                "error": e.to_string(),
+                            }),
+                        );
                         reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
                         break;
                     }
@@ -9254,20 +10806,8 @@ pub(crate) async fn run_message_via_llm(
             // from the final body. Parsing tools only from `resp.text` then skips execution entirely (user sees text, no disk writes).
             // Use `parse_tool_calls` (which normalizes sloppy prefixes like `- Tool:` / `**TOOL:**`) instead of a raw
             // `contains("TOOL:")` check so that any provider-specific formatting is handled consistently.
-            let r = response.trim();
-            let a = accumulated.trim();
-            let a_has_tools = !a.is_empty() && !parse_tool_calls(a).is_empty();
-            let r_has_tools = !r.is_empty() && !parse_tool_calls(r).is_empty();
-            let merged_for_tools = if r.is_empty() && !a.is_empty() {
-                a.to_string()
-            } else if a_has_tools && !r_has_tools {
-                a.to_string()
-            } else if !r.is_empty() {
-                r.to_string()
-            } else {
-                a.to_string()
-            };
-            let response = merged_for_tools;
+            let response =
+                crate::api_llm_stream::choose_merged_response_for_tools(&response, &accumulated);
 
             if let Some(intent) = small_talk_intent {
                 if response_looks_off_topic_for_small_talk(&response) {
@@ -9300,6 +10840,39 @@ pub(crate) async fn run_message_via_llm(
                     Some(calls)
                 }
             });
+            if code_studio_disk_task && assigned_agent.eq_ignore_ascii_case("studio_project_manager")
+            {
+                if let Some(calls) = parsed_tool_calls.as_ref() {
+                    let delegate_calls = calls
+                        .iter()
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("delegate_to_agent"))
+                        .count();
+                    if delegate_calls > 1 {
+                        let _ = bus.send(
+                        EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 47,
+                                    "message": format!(
+                                        "Conflit d'orchestration détecté: {} délégations dans le même tour (anti-collision activé).",
+                                        delegate_calls
+                                    ),
+                                    "studio_notice_type": "studio_conflict_notice",
+                                    "reason": "Plusieurs délégations sous-agents dans le même tour (risque d'écrasement croisé).",
+                                    "delegate_calls": delegate_calls
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        current_prompt = format!(
+                            "User request: {}\n\nYour previous reply tried {} delegate_to_agent calls in a single turn.\n\n[Code Studio — anti-conflict delegation]\nUse exactly ONE `TOOL: delegate_to_agent <agent> <message>` per turn. Wait for its completion, then read impacted files and continue with the next delegation in a later turn.\nDo not run parallel delegation batches in the same answer.",
+                            user_message, delegate_calls
+                        );
+                        continue;
+                    }
+                }
+            }
             let no_parseable_tools_this_round = parsed_tool_calls.is_none();
             let response_plain = response
                 .lines()
@@ -9309,35 +10882,43 @@ pub(crate) async fn run_message_via_llm(
                 .trim()
                 .to_string();
 
-            if strict_tools_first
+            // Code Studio PM mode with explicit mandatory delegation prefix:
+            // do not allow the root PM to finish in prose after only read-only checks.
+            let studio_delegate_mandatory =
+                code_studio_disk_task && message.contains("[Délégation obligatoire (Code Studio");
+            let pm_delegate_required = studio_delegate_mandatory
+                && assigned_agent.eq_ignore_ascii_case("studio_project_manager");
+            let pm_has_delegated = tool_loop_history_by_agent
+                .get(&loop_agent_key)
+                .map(|v| {
+                    v.iter()
+                        .any(|(tool, _)| tool.eq_ignore_ascii_case("delegate_to_agent"))
+                })
+                .unwrap_or(false);
+            const MAX_STUDIO_PM_MANDATORY_DELEGATE_NAGS: u32 = 4;
+            if pm_delegate_required
+                && !pm_has_delegated
                 && no_parseable_tools_this_round
-                && strict_successful_tool_calls == 0
+                && studio_pm_mandatory_delegate_nags < MAX_STUDIO_PM_MANDATORY_DELEGATE_NAGS
             {
-                strict_no_tool_rounds = strict_no_tool_rounds.saturating_add(1);
-                let preferred_tools_hint = runtime_tool_routing_enforcer
-                    .as_ref()
-                    .map(|e| {
-                        let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                        v.sort();
-                        v.join(", ")
-                    })
-                    .unwrap_or_default();
-
-                if strict_no_tool_rounds <= 1 {
-                    current_prompt = format!(
-                    "User request: {}\n\nYour previous reply:\n{}\n\nDynamic plugin routing rules are active for this request. You MUST emit TOOL lines only. Preferred tools: {}. If inputs are missing, call TOOL: ask_user with one precise question. Do NOT output prose-only answers now.",
-                    user_message,
-                    response_plain,
-                    preferred_tools_hint
+                studio_pm_mandatory_delegate_nags += 1;
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 47,
+                            "message": "Relance PM Code Studio : délégation obligatoire non exécutée (`delegate_to_agent` requis)."
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
                 );
-                    continue;
-                }
-
-                reply_text = format!(
-                "Impossible de répondre de façon fiable sans exécuter un outil autorisé. Outils attendus: {}. Vérifiez les règles de routage des plugins installés ou fournissez les paramètres manquants.",
-                preferred_tools_hint
-            );
-                break 'tool_rounds;
+                current_prompt = format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\n[Code Studio — mandatory PM delegation gate]\nYou are `studio_project_manager` and the task is configured with mandatory delegation. You must execute at least one `TOOL: delegate_to_agent <agent_type> <message>` now before any final synthesis. Do not end with prose only.\n\nValid first step examples:\n- TOOL: delegate_to_agent studio_scaffold <task>\n- TOOL: delegate_to_agent studio_frontend <task>\n- TOOL: delegate_to_agent studio_backend <task>\n- TOOL: delegate_to_agent studio_fullstack <task>\n- TOOL: delegate_to_agent code <task>\n- TOOL: delegate_to_agent qa <task>\n",
+                    user_message,
+                    response_plain
+                );
+                continue;
             }
 
             if no_parseable_tools_this_round
@@ -9355,30 +10936,137 @@ pub(crate) async fn run_message_via_llm(
             }
 
             const MAX_STUDIO_PROSE_ONLY_WRITE_NAGS: u32 = 4;
-            if code_studio_disk_task
+            const MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS: u32 = 3;
+            const MAX_STUDIO_UNPARSED_TOOL_MARKER_NAGS: u32 = 4;
+
+            let policy_allows_write = tools_executor_snapshot
+                .as_ref()
+                .map(|e| policy_allows_primary_disk_write(&e.policy))
+                .unwrap_or(false);
+
+            let prose_path_base = code_studio_disk_task
                 && no_parseable_tools_this_round
-                && strict_successful_tool_calls == 0
-                && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS
-                && looks_like_code_studio_prose_only_implementation_reply(&response_plain)
+                && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS;
+            let prose_heuristic = prose_path_base
+                && policy_allows_write
+                && crate::api_studio::looks_like_code_studio_prose_only_implementation_reply(
+                    &response_plain,
+                );
+
+            // Code Studio: first model turn often returns only "Je vais examiner / diagnostic…" with zero TOOL lines, then the task ends.
+            let tool_history_empty = tool_loop_history_by_agent
+                .get(&loop_agent_key)
+                .map(|v| v.is_empty())
+                .unwrap_or(true);
+            let enforce_pm_zero_tool_guard = code_studio_disk_task
+                || assigned_agent.eq_ignore_ascii_case("studio_project_manager");
+            let promise_path_base = enforce_pm_zero_tool_guard
+                && tools_executor_snapshot.is_some()
+                && no_parseable_tools_this_round
+                && tool_history_empty
+                && !crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+                    assigned_agent.as_str(),
+                )
+                && studio_zero_tool_promise_nags < MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS;
+            let promise_heuristic = promise_path_base
+                && crate::api_studio::looks_like_code_studio_promise_before_any_tools(&response_plain);
+
+            let mut prose_fire = prose_heuristic;
+            let promise_fire = promise_heuristic;
+            if crate::api_studio::studio_llm_response_auditor_enabled()
+                && (prose_heuristic || promise_heuristic)
             {
-                let policy_allows_write = tools_executor_snapshot
-                    .as_ref()
-                    .map(|e| {
-                        e.policy.can_use_tool("write_file")
-                            || e.policy.can_use_tool("edit_file")
-                            || e.policy.can_use_tool("search_replace")
-                            || e.policy.can_use_tool("apply_patch")
-                    })
-                    .unwrap_or(false);
-                if policy_allows_write {
-                    studio_prose_only_write_nags += 1;
-                    current_prompt = format!(
-                        "User request: {}\n\nYour previous reply:\n{}\n\n[Code Studio — mandatory execution guard]\nThe user asked you to implement changes in the repository. Your previous reply was an audit/plan/refusal instead of executing available write tools. You DO have write tools in this task. Emit only executable TOOL lines now.\n\nRequired format examples:\nTOOL: write_file workspace:/path/to/file.ts\n<complete file content on following lines>\n\nTOOL: search_replace workspace:/path/to/file.ts old snippet | new snippet\n\nDo not say \"I cannot modify files\", \"No TOOL lines\", or ask where to start. Apply the requested changes on disk with `write_file`, `edit_file`, `search_replace`, or `apply_patch`.",
-                        user_message,
-                        response_plain
-                    );
-                    continue;
+                if let Some(audit) = crate::api_studio::studio_llm_audit_code_studio_turn(
+                    &llm_router,
+                    crate::api_studio::StudioLlmAuditParams {
+                        user_excerpt: user_message.as_str(),
+                        assistant_plain: &response_plain,
+                        assigned_agent: assigned_agent.as_str(),
+                        policy_allows_write,
+                        tool_history_empty,
+                        consider_prose: prose_heuristic,
+                        consider_promise: promise_heuristic,
+                    },
+                )
+                .await
+                {
+                    if prose_heuristic {
+                        prose_fire = audit.prose_only_implementation;
+                    }
+                    // Promise-without-tools: keep heuristic result. The optional auditor often answers
+                    // false on French intros (« état des lieux », « mise en place »), which would skip
+                    // mandatory TOOL retries and leave Code Studio tasks « completed » with zero tools.
                 }
+            }
+
+            if prose_fire {
+                studio_prose_only_write_nags += 1;
+                current_prompt = format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\n[Code Studio — mandatory execution guard]\nThe user asked you to implement changes in the repository. Your previous reply was an audit/plan/refusal instead of executing available write tools. You DO have write tools in this task. Emit only executable TOOL lines now.\n\nRequired format examples:\nTOOL: write_file workspace:/path/to/file.ts\n<complete file content on following lines>\n\nTOOL: search_replace workspace:/path/to/file.ts old snippet | new snippet\n\nDo not say \"I cannot modify files\", \"No TOOL lines\", or ask where to start. Apply the requested changes on disk with `write_file`, `edit_file`, `search_replace`, or `apply_patch`.",
+                    user_message,
+                    response_plain
+                );
+                continue;
+            }
+
+            if promise_fire {
+                studio_zero_tool_promise_nags += 1;
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 48,
+                            "message": "Relance Code Studio : la réponse ne contenait aucune ligne TOOL: — exécution d’outils requise (lecture, délégation ou écriture)."
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                let pm_delegate = if assigned_agent.eq_ignore_ascii_case("studio_project_manager")
+                {
+                    " If you are the project manager, you may start with `TOOL: delegate_to_agent <agent> <message>` to a worker, or `TOOL: read_file` / `TOOL: run_command` yourself — but you must output at least one `TOOL:` line this turn, not only a plan in prose."
+                } else {
+                    ""
+                };
+                current_prompt = format!(
+                    "User request: {}\n\nYour previous reply (rejected — no tools ran):\n{}\n\n[Code Studio — TOOL required this turn]\nYou started with a conversational plan but emitted no `TOOL:` line, so nothing ran on the repository. The task must not end here.\nReply THIS turn with one or more lines starting with `TOOL:` only (then optional brief prose after tool lines if needed). Examples:\n- `TOOL: read_file workspace:/package.json`\n- `TOOL: run_command --cwd workspace:/ npm run build`\n- `TOOL: grep_content workspace:/src pattern`\nDo not reply with only promises like \"I will examine…\" — execute at least one tool call now.{}",
+                    user_message,
+                    response_plain,
+                    pm_delegate
+                );
+                continue;
+            }
+
+            // Kimi-scale dumps: prose + inlined `TOOL:` tokens that do not survive normalization → zero parseable tools.
+            let unparsed_marker_base = code_studio_disk_task
+                && tools_executor_snapshot.is_some()
+                && no_parseable_tools_this_round
+                && policy_allows_write
+                && studio_unparsed_tool_marker_nags < MAX_STUDIO_UNPARSED_TOOL_MARKER_NAGS
+                && crate::api_studio::looks_like_code_studio_tool_marker_but_unparsed(&response);
+            if unparsed_marker_base {
+                studio_unparsed_tool_marker_nags += 1;
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 49,
+                            "message": "Relance Code Studio : « TOOL: » détecté mais aucun appel exécutable — format strict requis."
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                current_prompt = format!(
+                    "{}\n\n[Code Studio — unparsed TOOL lines]\nYour last message mentioned TOOL: but nothing parsed as executable tool calls (often: multiline search_replace / write_file shape, or TOOL: embedded in prose). Emit **valid** calls only:\n\
+                    - One tool per line starting with `TOOL:` at the beginning of the line (after optional list/markdown noise normalized by the runtime).\n\
+                    - `TOOL: search_replace workspace:/path/to/file.ext` then on the **next lines** the full OLD block, a line with only ` | ` (space-pipe-space), then the NEW block — OR keep old|new on one line after the path.\n\
+                    - `TOOL: write_file workspace:/path` then the **entire file body** on following lines until the next `TOOL:`.\n\
+                    - Prefer `TOOL: run_command --cwd workspace:/ …` for npm/create-vite instead of pasting fake command transcripts.\n\
+                    Reply now with working TOOL lines only (brief summary after is OK).",
+                    current_prompt
+                );
+                continue;
             }
 
             if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
@@ -9413,58 +11101,7 @@ pub(crate) async fn run_message_via_llm(
                             None => name.clone(),
                         };
                         let actual_tool = canonicalize_tool_name(&actual_tool);
-                        let should_forward_user_request = strict_tools_first
-                            && args.is_empty()
-                            && !actual_tool.eq_ignore_ascii_case("ask_user")
-                            && runtime_tool_routing_enforcer
-                                .as_ref()
-                                .map(|e| e.preferred_tools.contains(&actual_tool))
-                                .unwrap_or(false);
-                        let forwarded_args: Vec<String> = if should_forward_user_request {
-                            vec![user_message.clone()]
-                        } else {
-                            args.clone()
-                        };
-                        let tool_args: &[String] = &forwarded_args;
-                        let effective_tool_for_routing = if actual_tool.is_empty() {
-                            name.as_str()
-                        } else {
-                            actual_tool.as_str()
-                        };
-                        let device_routing_bypass = intent_flags.camera_or_mic
-                            && (effective_tool_for_routing.eq_ignore_ascii_case("device_discover")
-                                || effective_tool_for_routing
-                                    .eq_ignore_ascii_case("device_invoke"));
-                        if let Some(enforcer) = &runtime_tool_routing_enforcer {
-                            if !device_routing_bypass
-                                && !enforcer.is_tool_allowed(effective_tool_for_routing, tool_args)
-                            {
-                                let blocked = format!(
-                            "[tool_blocked_by_routing_rules] tool={} blocked by dynamic plugin routing rules",
-                            effective_tool_for_routing
-                        );
-                                let payload = serde_json::json!({
-                                    "tool": effective_tool_for_routing,
-                                    "args": tool_args,
-                                    "result_preview": blocked,
-                                    "success": false,
-                                    "reason": "blocked_by_dynamic_plugin_routing_rules"
-                                });
-                                let _ = bus.send(
-                                    EventEnvelope::new(EventType::ToolInvoked, Some(payload))
-                                        .with_correlation(timeline_correlation),
-                                );
-                                tracing::warn!(
-                                    task_id = %task_id,
-                                    tool = %effective_tool_for_routing,
-                                    preferred = ?enforcer.preferred_tools,
-                                    forbidden = ?enforcer.forbidden_tools,
-                                    "Tool blocked by runtime routing enforcer"
-                                );
-                                tool_results.push(blocked);
-                                continue;
-                            }
-                        }
+                        let tool_args: &[String] = args.as_slice();
                         // Hard guardrail: if read_file on this path was already truncated for this
                         // agent key, block repeated full-file reads and require chunked/windowed read.
                         if actual_tool.eq_ignore_ascii_case("read_file") {
@@ -9532,7 +11169,9 @@ pub(crate) async fn run_message_via_llm(
                         let progress_msg = progress_message_for_tool(display_tool, tool_args);
                         if !first_meaningful_progress_sent {
                             first_meaningful_progress_sent = true;
-                            cancel_progress_watchdog(&mut watchdog_cancel);
+                            meaningful_progress_flag
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
                             if emit_timeline_once_for_task(
                                 &bus,
                                 Some(store_path.as_path()),
@@ -9559,6 +11198,54 @@ pub(crate) async fn run_message_via_llm(
                         );
                         // Phase 3.1: tools in require_approval need user confirmation before execution.
                         if exec.policy.requires_approval(&actual_tool) {
+                            let permission_mode = load_permission_mode(data_dir);
+                            if permission_mode.mode == "allow_all" {
+                                // Global session mode bypasses interactive approval prompts.
+                            } else {
+                            let scope_key = tool_scope_key(&actual_tool, &tool_args);
+                            let state = crate::permissions_center::load(data_dir);
+                            let mut already_granted = false;
+                            if let Some(decision) =
+                                crate::permissions_center::lookup(&actual_tool, &scope_key, &state)
+                            {
+                                match decision.mode {
+                                    crate::permissions_center::DecisionMode::AllowPersistent => {
+                                        already_granted = true;
+                                        let payload = serde_json::json!({
+                                            "tool": actual_tool,
+                                            "scope": scope_key,
+                                            "approved": true,
+                                            "mode": "allow_persistent",
+                                            "decision_id": decision.id
+                                        });
+                                        let _ = bus.send(
+                                            EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                                .with_correlation(timeline_correlation),
+                                        );
+                                    }
+                                    crate::permissions_center::DecisionMode::DenyPersistent => {
+                                        tool_results.push(
+                                            "Action refusée par la politique d'approbation persistante."
+                                                .to_string(),
+                                        );
+                                        let payload = serde_json::json!({
+                                            "tool": actual_tool,
+                                            "scope": scope_key,
+                                            "approved": false,
+                                            "mode": "deny_persistent",
+                                            "decision_id": decision.id
+                                        });
+                                        let _ = bus.send(
+                                            EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                                .with_correlation(timeline_correlation),
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                            if already_granted {
+                                // Persistent approval matched: skip interactive prompt.
+                            } else {
                             match &human_input_store {
                                 Some(store) => {
                                     const APPROVAL_TIMEOUT_SECS: u64 = 300;
@@ -9566,7 +11253,7 @@ pub(crate) async fn run_message_via_llm(
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(
                                         actual_tool.as_str(),
-                                        "apply_patch" | "edit_file" | "write_file" | "delete_file"
+                                        "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
                                     ) {
                                         "[redacted]".to_string()
                                     } else {
@@ -9597,8 +11284,41 @@ pub(crate) async fn run_message_via_llm(
                                         "Approuver l'action : {} — {} ?",
                                         actual_tool, args_preview
                                     );
-                                    let choices =
-                                        vec!["Approuver".to_string(), "Refuser".to_string()];
+                                    let choices = vec![
+                                        "Approuver".to_string(),
+                                        "Toujours autoriser".to_string(),
+                                        "Refuser".to_string(),
+                                    ];
+                                    let approval_request_id = Uuid::new_v4().to_string();
+                                    let now = chrono::Utc::now();
+                                    let queue_req = crate::permissions_queue::PermissionQueueRequest {
+                                        id: approval_request_id.clone(),
+                                        task_id: task_id.to_string(),
+                                        tool: actual_tool.clone(),
+                                        scope: scope_key.clone(),
+                                        action: actual_tool.clone(),
+                                        description: format!("{} {}", actual_tool, args_preview),
+                                        rationale: format!(
+                                            "Outil sensible (confirmation requise) pour la tâche {}",
+                                            task_id
+                                        ),
+                                        urgency: "normal".to_string(),
+                                        status: crate::permissions_queue::QueueStatus::Pending,
+                                        created_at: now.to_rfc3339(),
+                                        updated_at: now.to_rfc3339(),
+                                        expires_at: Some(
+                                            (now + chrono::Duration::seconds(APPROVAL_TIMEOUT_SECS as i64))
+                                                .to_rfc3339(),
+                                        ),
+                                        decision_note: None,
+                                        decision_source: None,
+                                    };
+                                    if let Err(err) = crate::permissions_queue::upsert_request(data_dir, queue_req) {
+                                        eprintln!(
+                                            "failed to persist permission queue request {} for task {} (tool {}): {}",
+                                            approval_request_id, task_id, actual_tool, err
+                                        );
+                                    }
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
                                         question: question.clone(),
@@ -9615,6 +11335,7 @@ pub(crate) async fn run_message_via_llm(
                                     }
                                     let payload = serde_json::json!({
                                         "task_id": task_id.to_string(),
+                                        "request_id": approval_request_id.clone(),
                                         "question": question,
                                         "context": format!("Outil : {}", actual_tool),
                                         "choices": choices,
@@ -9630,7 +11351,8 @@ pub(crate) async fn run_message_via_llm(
                                     let approval_payload = serde_json::json!({
                                         "tool": actual_tool,
                                         "args_redacted": args_preview,
-                                        "task_id": task_id.to_string()
+                                        "task_id": task_id.to_string(),
+                                        "request_id": approval_request_id.clone()
                                     });
                                     let _ = bus.send(
                                         EventEnvelope::new(
@@ -9639,15 +11361,13 @@ pub(crate) async fn run_message_via_llm(
                                         )
                                         .with_correlation(task_id),
                                     );
-                                    let granted = match tokio::time::timeout(
+                                    let answer = match tokio::time::timeout(
                                         std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS),
                                         rx,
                                     )
                                     .await
                                     {
-                                        Ok(Ok(reply)) => {
-                                            reply.trim().eq_ignore_ascii_case("Approuver")
-                                        }
+                                        Ok(Ok(reply)) => reply.trim().to_string(),
                                         _ => {
                                             // Timeout or channel error: remove stale pending entry to avoid it staying forever.
                                             {
@@ -9657,7 +11377,15 @@ pub(crate) async fn run_message_via_llm(
                                             let expired_payload = serde_json::json!({
                                                 "task_id": task_id.to_string(),
                                                 "tool": actual_tool,
+                                                "request_id": approval_request_id.clone(),
                                             });
+                                            let _ = crate::permissions_queue::update_status(
+                                                data_dir,
+                                                &approval_request_id,
+                                                crate::permissions_queue::QueueStatus::Expired,
+                                                Some("timeout".to_string()),
+                                                Some("timeout".to_string()),
+                                            );
                                             let _ = bus.send(
                                                 EventEnvelope::new(
                                                     EventType::ToolApprovalExpired,
@@ -9665,9 +11393,43 @@ pub(crate) async fn run_message_via_llm(
                                                 )
                                                 .with_correlation(task_id),
                                             );
-                                            false
+                                            "Refuser".to_string()
                                         }
                                     };
+                                    let granted = answer.eq_ignore_ascii_case("Approuver")
+                                        || answer.eq_ignore_ascii_case("Toujours autoriser");
+                                    let queue_status = if granted {
+                                        crate::permissions_queue::QueueStatus::Approved
+                                    } else {
+                                        crate::permissions_queue::QueueStatus::Denied
+                                    };
+                                    if let Err(err) = crate::permissions_queue::update_status(
+                                        data_dir,
+                                        &approval_request_id,
+                                        queue_status,
+                                        Some(answer.clone()),
+                                        Some("chat_inline".to_string()),
+                                    ) {
+                                        eprintln!(
+                                            "failed to update permission queue status for {} (task {}): {}",
+                                            approval_request_id, task_id, err
+                                        );
+                                    }
+                                    if answer.eq_ignore_ascii_case("Toujours autoriser") {
+                                        let mut state = crate::permissions_center::load(data_dir);
+                                        state.decisions.retain(|d| {
+                                            !(d.tool == actual_tool && d.scope == scope_key)
+                                        });
+                                        state.decisions.push(crate::permissions_center::PermissionDecision {
+                                            id: Uuid::new_v4().to_string(),
+                                            tool: actual_tool.clone(),
+                                            scope: scope_key.clone(),
+                                            mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                                            created_at: chrono::Utc::now().to_rfc3339(),
+                                            expires_at: None,
+                                        });
+                                        let _ = crate::permissions_center::save(data_dir, &state);
+                                    }
                                     if !granted {
                                         tool_results.push("Action refusée par l'utilisateur (approbation requise).".to_string());
                                         let payload = serde_json::json!({
@@ -9688,6 +11450,8 @@ pub(crate) async fn run_message_via_llm(
                                     tool_results.push("Action nécessitant approbation impossible (human_input_store indisponible).".to_string());
                                     continue;
                                 }
+                            }
+                            }
                             }
                         }
                         let tool_t0 = std::time::Instant::now();
@@ -10175,6 +11939,7 @@ pub(crate) async fn run_message_via_llm(
                                         workspace_store.as_ref(),
                                         browser_registry.as_ref(),
                                         Some(tool_disk_workspace_root.as_path()),
+                                        Some(session_id.as_str()),
                                     )
                                     .await;
                                     (s, r, None)
@@ -10225,23 +11990,24 @@ pub(crate) async fn run_message_via_llm(
                                     workspace_store.as_ref(),
                                     browser_registry.as_ref(),
                                     Some(tool_disk_workspace_root.as_path()),
+                                    Some(session_id.as_str()),
                                 )
                                 .await
                             };
                         if let Some(img) = captured_image {
-                            last_captured_image_base64 = Some(img);
-                        }
-                        if success
-                            && strict_tools_first
-                            && actual_tool.eq_ignore_ascii_case("ask_user")
-                        {
-                            if let Some(reply) = res.strip_prefix("[ask_user] User replied: ") {
-                                let reply = reply.trim();
-                                if !reply.is_empty() {
-                                    strict_preferred_tool_replay_input = Some(format!(
-                                        "Original user request: {}\n\nUser clarification: {}",
-                                        user_message, reply
-                                    ));
+                            last_captured_image_base64 = Some(img.clone());
+                            if captured_media_suitable_for_vision_injection(&img) {
+                                let norm = normalize_captured_media_for_vision_turn(&img);
+                                if vision_payload_within_cap(&norm) {
+                                    pending_completion_image_urls
+                                        .get_or_insert_with(Vec::new)
+                                        .push(norm);
+                                } else {
+                                    tracing::debug!(
+                                        len = norm.len(),
+                                        cap = vision_inject_max_chars(),
+                                        "vision inject skipped (payload cap)"
+                                    );
                                 }
                             }
                         }
@@ -10249,7 +12015,7 @@ pub(crate) async fn run_message_via_llm(
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                         let redacted_args: Vec<String> = if matches!(
                             actual_tool.as_str(),
-                            "apply_patch" | "edit_file" | "write_file" | "delete_file"
+                            "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
                         ) {
                             vec!["[redacted for write-like tool]".to_string()]
                         } else {
@@ -10300,7 +12066,7 @@ pub(crate) async fn run_message_via_llm(
                             )
                             .with_correlation(timeline_correlation),
                         );
-                        // Chat UI loads map / rich views from timeline_milestone + result_full (same as strict tools-first path).
+                        // Chat UI loads map / rich views from timeline_milestone + result_full.
                         if success && tool_display.starts_with("maps_") && res.len() <= 400_000usize
                         {
                             let result_preview = if res.chars().count() > 320 {
@@ -10323,17 +12089,11 @@ pub(crate) async fn run_message_via_llm(
                             );
                         }
                         if success {
-                            // In tools-first strict mode, ask_user is a clarification step, not
-                            // a terminal success for the primary objective. Keep strict mode active
-                            // until a non-ask_user tool actually succeeds.
-                            if !actual_tool.eq_ignore_ascii_case("ask_user") {
-                                strict_successful_tool_calls =
-                                    strict_successful_tool_calls.saturating_add(1);
-                            }
                             if code_studio_disk_task
                                 && matches!(
                                     actual_tool.as_str(),
                                     "write_file"
+                                        | "write_code"
                                         | "delete_file"
                                         | "rename_path"
                                         | "move_tree"
@@ -10371,6 +12131,43 @@ pub(crate) async fn run_message_via_llm(
                     }
                 }
                 let results_blob = tool_results.join("\n");
+                let mut studio_readonly_nudge: Option<String> = None;
+                if code_studio_disk_task && !calls.is_empty() {
+                    let only_survey = calls.iter().all(|(name, _)| {
+                        let c = canonicalize_tool_name(&name.trim().to_string());
+                        crate::api_studio::studio_survey_tool(&c)
+                    });
+                    if only_survey {
+                        studio_read_only_streak_rounds =
+                            studio_read_only_streak_rounds.saturating_add(1);
+                    } else {
+                        studio_read_only_streak_rounds = 0;
+                    }
+                    let max_streak = std::env::var("AKASHA_STUDIO_READ_ONLY_STREAK_MAX")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(4)
+                        .max(2)
+                        .min(20);
+                    if studio_read_only_streak_rounds >= max_streak {
+                        studio_read_only_streak_rounds = 0;
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 52,
+                                    "message": "[Étape: garde-fou lecture] Plusieurs tours d’affilée n’ont utilisé que des outils d’exploration — appliquez une modification concrète (write_code / write_file / search_replace / edit_file) ou indiquez le blocage exact."
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        studio_readonly_nudge = Some(format!(
+                            "[STUDIO_READ_ONLY_STREAK]\nThe last {} model rounds only invoked read-only survey tools (read_file, list_dir, grep_content, search_files, file_diff, git status/log/diff). The user request requires repository changes. Emit at least one write-like TOOL line in this turn (write_code, write_file, search_replace, edit_file, apply_patch) OR answer in plain text with the precise blocking reason (e.g. tool policy forbids writes). Do not repeat another exploratory-only round.",
+                            max_streak
+                        ));
+                    }
+                }
                 last_tool_results_blob = Some(results_blob.clone());
                 if results_blob.contains("[browser] Snapshot") {
                     social_snapshot_seen = true;
@@ -10457,6 +12254,9 @@ pub(crate) async fn run_message_via_llm(
                     user_message, response, results_blob
                 )
                 };
+                if let Some(nudge) = studio_readonly_nudge {
+                    current_prompt = format!("{nudge}\n\n{current_prompt}");
+                }
                 if round >= max_tool_rounds {
                     let response_for_user = response
                         .lines()
@@ -10600,7 +12400,7 @@ pub(crate) async fn run_message_via_llm(
             {
                 let policy_allows_write = tools_executor_snapshot
                     .as_ref()
-                    .map(|e| e.policy.can_use_tool("write_file"))
+                    .map(|e| policy_allows_primary_disk_write(&e.policy))
                     .unwrap_or(false);
                 if policy_allows_write {
                     let tool_loop_history = tool_loop_history_by_agent
@@ -10610,13 +12410,13 @@ pub(crate) async fn run_message_via_llm(
                     let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
                         matches!(
                             t.as_str(),
-                            "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                            "write_file" | "write_code" | "edit_file" | "search_replace" | "apply_patch"
                         )
                     });
                     if !disk_write_attempted && orch_disk_write_nags < MAX_ORCH_DISK_WRITE_NAGS {
                         orch_disk_write_nags += 1;
                         current_prompt = format!(
-                        "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
+                        "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_code / write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
                         current_prompt
                     );
                         continue;
@@ -10643,14 +12443,11 @@ pub(crate) async fn run_message_via_llm(
                             .get(&loop_agent_key)
                             .map(|v| v.as_slice())
                             .unwrap_or(&[]);
-                        let allows = e.policy.can_use_tool("write_file")
-                            || e.policy.can_use_tool("edit_file")
-                            || e.policy.can_use_tool("search_replace")
-                            || e.policy.can_use_tool("apply_patch");
+                        let allows = policy_allows_primary_disk_write(&e.policy);
                         let seen = tool_loop_history.iter().any(|(t, _)| {
                             matches!(
                                 t.as_str(),
-                                "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                                "write_file" | "write_code" | "edit_file" | "search_replace" | "apply_patch"
                             )
                         });
                         (allows, seen)
@@ -10667,21 +12464,6 @@ pub(crate) async fn run_message_via_llm(
                     );
                     continue;
                 }
-            }
-            if strict_tools_first && strict_successful_tool_calls == 0 {
-                let preferred_tools_hint = runtime_tool_routing_enforcer
-                    .as_ref()
-                    .map(|e| {
-                        let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                        v.sort();
-                        v.join(", ")
-                    })
-                    .unwrap_or_default();
-                reply_text = format!(
-                "Réponse bloquée: aucune exécution d'outil autorisé n'a réussi pour cette demande. Outils attendus: {}. Merci de vérifier la configuration des plugins/routing rules ou de préciser les paramètres requis.",
-                preferred_tools_hint
-            );
-                break;
             }
             // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
             let tool_loop_history = tool_loop_history_by_agent
@@ -10703,10 +12485,9 @@ pub(crate) async fn run_message_via_llm(
             );
                 continue;
             }
-            // Guardrail: when a plugin/tool already succeeded, reject generic
-            // greeting responses and force one synthesis round from tool outputs.
-            if strict_tools_first
-                && strict_successful_tool_calls > 0
+            // Guardrail: when tools already produced results, reject generic greeting responses
+            // and force one synthesis round from tool outputs.
+            if !tool_loop_history.is_empty()
                 && last_tool_results_blob
                     .as_ref()
                     .map_or(false, |b| !b.is_empty())
@@ -10741,10 +12522,78 @@ pub(crate) async fn run_message_via_llm(
                 })
                 .unwrap_or_default();
             let response_clean = ensure_no_open_code_block(&response_for_user);
+            let enforce_pm_zero_tool_warning = code_studio_disk_task
+                || assigned_agent.eq_ignore_ascii_case("studio_project_manager");
+            let warn_zero_tools_heuristic = enforce_pm_zero_tool_warning
+                && tool_loop_history.is_empty()
+                && !crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+                    assigned_agent.as_str(),
+                )
+                && crate::api_studio::looks_like_code_studio_promise_before_any_tools(
+                    &response_for_user,
+                );
+            let mut warn_zero_tools_fire = warn_zero_tools_heuristic;
+            if warn_zero_tools_heuristic && crate::api_studio::studio_llm_response_auditor_enabled()
+            {
+                let user_ex: String = user_message.chars().take(2200).collect();
+                let assist_ex: String = response_for_user.chars().take(3200).collect();
+                if let Some(audit) = crate::api_studio::studio_llm_audit_code_studio_turn(
+                    &llm_router,
+                    crate::api_studio::StudioLlmAuditParams {
+                        user_excerpt: user_ex.as_str(),
+                        assistant_plain: assist_ex.as_str(),
+                        assigned_agent: assigned_agent.as_str(),
+                        policy_allows_write: false,
+                        tool_history_empty: true,
+                        consider_prose: false,
+                        consider_promise: true,
+                    },
+                )
+                .await
+                {
+                    warn_zero_tools_fire = audit.promise_without_tools;
+                }
+            }
+            let studio_no_tool_warning = if warn_zero_tools_fire {
+                "\n\n— *Akasha (Code Studio)* : aucune ligne `TOOL:` n’a été exécutée ; le dépôt n’a probablement pas été modifié. Relancez la tâche ou vérifiez le fournisseur LLM."
+            } else {
+                ""
+            };
+            if let Some(ref sq) = steering_queue {
+                let follow_items = sq.drain_follow_up(task_id).await;
+                if !follow_items.is_empty() && !is_subagent {
+                    for item in follow_items {
+                        let fu = format!(
+                            "[Follow-up — poursuivre après le travail en cours]\n{}",
+                            item.text
+                        );
+                        if let Some(st) = short_term.as_ref() {
+                            st.append(&session_id, "user", fu.clone()).await;
+                        }
+                        user_message.push_str("\n\n");
+                        user_message.push_str(&fu);
+                        let _ = store.insert_event(
+                            task_id,
+                            "user_follow_up_applied",
+                            Some(&serde_json::json!({
+                                "queue_id": item.id,
+                                "preview": item.text.chars().take(200).collect::<String>(),
+                                "schema_version": 1
+                            })),
+                            &chrono::Utc::now().to_rfc3339(),
+                        );
+                    }
+                    current_prompt = format!(
+                        "{guardrail_reminder_block}{write_reminder}{web_search_reminder}{web_search_followup_reminder}{transport_reminder}{geolocation_distance_reminder}{plugin_catalog_reminder}{social_feed_reminder}{device_camera_reminder}{image_generation_reminder}{github_vault_reminder}{code_dev_sandbox_reminder}{user_prefix}User:\n{user_message}"
+                    );
+                    round = 0;
+                    continue;
+                }
+            }
             reply_text = if response_for_user.is_empty() {
                 format!("{}{}", response, image_md)
             } else {
-                format!("{}{}", response_clean, image_md)
+                format!("{}{}{}", response_clean, studio_no_tool_warning, image_md)
             };
             break;
         }
@@ -10761,16 +12610,20 @@ pub(crate) async fn run_message_via_llm(
         }
         reply_text
     };
-    let is_paused = matches!(
-        store.get(task_id),
-        Ok(Some(Task {
-            status: TaskStatus::Paused,
-            ..
-        }))
+    let task_status_snapshot = store.get(task_id).ok().flatten().map(|t| t.status);
+    let is_paused = matches!(task_status_snapshot, Some(TaskStatus::Paused));
+    let halted_user = matches!(
+        task_status_snapshot,
+        Some(
+            TaskStatus::Paused
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
+                | TaskStatus::Failed
+        )
     );
     let mut studio_verify_error: Option<String> = None;
     let mut studio_autofix_applied = false;
-    if !is_paused && code_studio_disk_task {
+    if !halted_user && code_studio_disk_task {
         let max_passes: u32 = if is_session_recall {
             1
         } else {
@@ -10850,9 +12703,124 @@ pub(crate) async fn run_message_via_llm(
         if studio_verify_error.is_none() && studio_autofix_applied {
             reply_text.push_str("\n\n_(Compilation du projet Code Studio corrigée automatiquement après échec du build.)_");
         }
+        if studio_verify_error.is_none() {
+            if let Some(ref pay) = embedded_studio_acceptance {
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 57,
+                            "message": "[Étape: critères d'acceptation] Vérification fichiers / commandes configurées…"
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                let tmo = crate::api_studio::studio_project_verify_timeout_sec(
+                    tool_disk_workspace_root.as_path(),
+                );
+                let mech = crate::api_studio::run_mechanical_acceptance_checks(
+                    tool_disk_workspace_root.as_path(),
+                    pay,
+                    tmo,
+                )
+                .await;
+                if !mech.is_empty() {
+                    studio_verify_error = Some(format!(
+                        "Échec critères d'acceptation (vérification automatique) :\n{}",
+                        mech.join("\n")
+                    ));
+                } else {
+                    let manual_lines: Vec<String> = pay
+                        .criteria
+                        .iter()
+                        .filter(|c| matches!(c.kind, crate::api_studio::StudioCriterionKind::Manual))
+                        .map(|c| {
+                            let id = if c.id.is_empty() { "-" } else { c.id.as_str() };
+                            format!("{id}: {}", c.text)
+                        })
+                        .collect();
+                    if !manual_lines.is_empty() {
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 59,
+                                    "message": "[Étape: contrôle critères] Analyse des critères manuels (après build)…"
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_path());
+                        let diff_summary: String = {
+                            let snap_path = data_dir
+                                .join("studio-task-snapshots")
+                                .join(format!("{task_id}.json"));
+                            let snap_json = std::fs::read_to_string(&snap_path).unwrap_or_default();
+                            if snap_json.is_empty() {
+                                String::new()
+                            } else if let Ok(snap) = serde_json::from_str::<
+                                crate::studio_task_snapshot::StudioTaskSnapshot,
+                            >(&snap_json)
+                            {
+                                match tokio::task::spawn_blocking(move || {
+                                    crate::studio_task_snapshot::compute_studio_task_diff_from_snapshot(
+                                        snap,
+                                    )
+                                })
+                                .await
+                                {
+                                    Ok(Ok(entries)) => {
+                                        let mut parts = Vec::new();
+                                        for e in entries.iter().take(24) {
+                                            parts.push(format!(
+                                                "{} [{}]: {}",
+                                                e.path,
+                                                e.status,
+                                                e.diff.chars().take(900).collect::<String>()
+                                            ));
+                                        }
+                                        parts.join("\n")
+                                    }
+                                    _ => String::new(),
+                                }
+                            } else {
+                                String::new()
+                            }
+                        };
+                        if let Some(missing) = studio_semantic_acceptance_review(
+                            &llm_router,
+                            &manual_lines,
+                            &diff_summary,
+                            clean_message,
+                            &reply_text,
+                        )
+                        .await
+                        {
+                            if !missing.is_empty() {
+                                reply_text.push_str(
+                                    "\n\n---\n**Revue critères (non bloquant)** — à vérifier manuellement :\n- ",
+                                );
+                                reply_text.push_str(&missing.join("\n- "));
+                                if let Ok(store_ev) = TaskStore::open(&store_path) {
+                                    let _ = store_ev.insert_event(
+                                        task_id,
+                                        "studio_acceptance_review",
+                                        Some(&serde_json::json!({ "missing": missing })),
+                                        &chrono::Utc::now().to_rfc3339(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     if !first_meaningful_progress_sent && !reply_text.trim().is_empty() {
-        cancel_progress_watchdog(&mut watchdog_cancel);
+        meaningful_progress_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
         if emit_timeline_once_for_task(
             &bus,
             Some(store_path.as_path()),
@@ -10863,13 +12831,13 @@ pub(crate) async fn run_message_via_llm(
             log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
         }
     } else {
-        cancel_progress_watchdog(&mut watchdog_cancel);
+        cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
     }
 
     // Persist this exchange in short-term memory (spec 06)
     // Skip orchestrated task messages ([Task]\n prefix): they are internal planner artefacts,
     // not real user/assistant turns. Storing them pollutes future context with unrelated content.
-    if !is_small_talk_fast_lane && !is_orchestrated_task_msg {
+    if !incognito && !is_small_talk_fast_lane && !is_orchestrated_task_msg {
         if let Some(ref st) = short_term {
             // Store the clean user message (without any guardrail prefix) so history is human-readable.
             st.append(&session_id, "user", clean_message.to_string())
@@ -10880,7 +12848,7 @@ pub(crate) async fn run_message_via_llm(
     }
 
     // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
-    if !is_small_talk_fast_lane {
+    if !incognito && !is_small_talk_fast_lane {
         if let Some(ref long_term) = long_term_client {
             // Heuristic: capture obvious name/intro from user message. Promote these *immediately* so they appear in Memory tab right away.
             // Case-insensitive matching on lowercased text, but extract from original message to preserve casing.
@@ -10948,7 +12916,7 @@ pub(crate) async fn run_message_via_llm(
                 })
                 .await
                 {
-                    Ok(Ok(())) => {
+                    Ok(Ok(_)) => {
                         tracing::info!("Personal fact stored in long-term memory (heuristic)")
                     }
                     Ok(Err(e)) => {
@@ -11102,7 +13070,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     })
                     .await
                     {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(_)) => {}
                         Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed"),
                         Err(e) => tracing::debug!(error = %e, "Promote task join error"),
                     }
@@ -11225,15 +13193,27 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         );
     }
 
-    let final_event_type = if is_paused {
+    let final_event_type = if matches!(task_status_snapshot, Some(TaskStatus::Cancelled)) {
+        EventType::TaskCancelled
+    } else if is_paused {
         EventType::TaskPaused
+    } else if matches!(task_status_snapshot, Some(TaskStatus::Interrupted)) {
+        EventType::TaskPaused
+    } else if matches!(task_status_snapshot, Some(TaskStatus::Failed)) {
+        EventType::TaskFailed
     } else if studio_verify_error.is_some() {
         EventType::TaskFailed
     } else {
         EventType::TaskCompleted
     };
-    let final_status_str = if is_paused {
+    let final_status_str = if matches!(task_status_snapshot, Some(TaskStatus::Cancelled)) {
+        "cancelled"
+    } else if is_paused {
         "paused"
+    } else if matches!(task_status_snapshot, Some(TaskStatus::Interrupted)) {
+        "interrupted"
+    } else if matches!(task_status_snapshot, Some(TaskStatus::Failed)) {
+        "failed"
     } else if studio_verify_error.is_some() {
         "failed"
     } else {
@@ -11245,6 +13225,19 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         "status": final_status_str,
         "model_used": last_llm_model_used
     });
+    if let Some(ref store) = task_usage_store {
+        if let Some(u) = store.get_last_turn(task_id).await {
+            if let Some(obj) = final_payload.as_object_mut() {
+                obj.insert("prompt_tokens".to_string(), serde_json::json!(u.prompt_tokens));
+                obj.insert(
+                    "completion_tokens".to_string(),
+                    serde_json::json!(u.completion_tokens),
+                );
+                obj.insert("cost_usd".to_string(), serde_json::json!(u.cost_usd));
+                obj.insert("latency_ms".to_string(), serde_json::json!(u.latency_ms));
+            }
+        }
+    }
     if studio_verify_error.is_some() {
         if let Some(obj) = final_payload.as_object_mut() {
             let reason_text: String = studio_verify_display_message
@@ -11261,6 +13254,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             obj.insert("reason".to_string(), serde_json::Value::String(reason_text));
         }
     }
+    let failure_reason = final_payload.get("reason").cloned();
     let _ = bus.send(
         EventEnvelope::new(final_event_type, Some(final_payload)).with_correlation(task_id),
     );
@@ -11271,16 +13265,83 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         "task_completed",
         Some(serde_json::json!({ "status": final_status_str })),
     );
+    if final_status_str == "completed" || final_status_str == "failed" {
+        let hook_event = if final_status_str == "completed" {
+            "task_completed"
+        } else {
+            "task_failed"
+        };
+        let mut hook_payload = serde_json::json!({
+            "task_id": task_id.to_string(),
+            "session_id": session_id,
+            "status": final_status_str,
+            "model_used": last_llm_model_used,
+            "reply_preview": reply_text.chars().take(800).collect::<String>(),
+        });
+        if final_status_str == "failed" {
+            if let (Some(obj), Some(reason)) = (hook_payload.as_object_mut(), failure_reason.as_ref()) {
+                obj.insert("reason".to_string(), reason.clone());
+            }
+        }
+        let hook_data_dir = store_path.parent().unwrap_or_else(|| store_path.as_path());
+        crate::plugin_hook_bus::dispatch_hook_event(
+            hook_data_dir,
+            hook_event,
+            &hook_payload.to_string(),
+        );
+    }
     clear_task_milestones(task_id, Some(store_path.as_path()));
 
-    // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
-    if !is_paused {
+    if let Some(data_dir) = store_path.parent().map(|p| p.to_path_buf()) {
+        let sp = store_path.to_path_buf();
+        let tid = task_id;
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::session_transcript::write_task_transcript(&data_dir, &sp, tid);
+        })
+        .await;
+    }
+
+    // Phase 2 AI OS: do not overwrite Paused / Cancelled / Interrupted with Completed.
+    if !halted_user {
         if studio_verify_error.is_some() {
             let _ = store.update_status(task_id, TaskStatus::Failed);
         } else {
+            // #region agent log
+            agent_debug_log(
+                "api.rs:run_message_via_llm",
+                "task_completed",
+                "A",
+                serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "session_id": session_id,
+                    "final_status": final_status_str,
+                }),
+            );
+            // #endregion
             let _ = store.update_status(task_id, TaskStatus::Completed);
+            if let Ok(events) = store.get_events(task_id) {
+                if let Some(ticket_id) = events
+                    .iter()
+                    .rev()
+                    .find(|e| e.event_type == "studio_ticket_link")
+                    .and_then(|e| e.payload.as_ref())
+                    .and_then(|p| p.get("ticket_id").and_then(|x| x.as_str()))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                {
+                    let _ = crate::api_studio::studio_mark_ticket_ready_for_review(
+                        &tool_disk_workspace_root,
+                        &ticket_id,
+                        &task_id.to_string(),
+                        "system",
+                    );
+                }
+            }
         }
         notify_task_completion(&task_completion_registry, task_id).await;
+        if let Some(ref sq) = steering_queue {
+            sq.unregister_active(task_id).await;
+        }
         let data_dir_sess = store_path.parent().unwrap_or_else(|| store_path.as_ref());
         let is_root_task = store
             .get(task_id)
@@ -11450,8 +13511,72 @@ pub(crate) async fn learn_from_task_outcome_async(
 /// Optional channel to trigger daemon shutdown (for POST /api/restart).
 pub type RestartTx = Option<tokio::sync::mpsc::Sender<()>>;
 
+/// Optional filters for GET /api/events (`?task_id=` and/or `?types=` comma-separated).
+#[derive(Debug, Clone, Default)]
+pub struct SseEventFilter {
+    pub task_id: Option<uuid::Uuid>,
+    pub event_types: Option<std::collections::HashSet<String>>,
+}
+
+/// Parse `task_id` and `types` / `event_types` from a query string (without leading `?`).
+pub fn parse_sse_event_filter(query: &str) -> SseEventFilter {
+    let mut filter = SseEventFilter::default();
+    for pair in query.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = k.trim().to_lowercase();
+        let val = urlencoding::decode(v.trim()).unwrap_or_else(|_| v.trim().into());
+        match key.as_str() {
+            "task_id" | "correlation_id" => {
+                if let Ok(id) = uuid::Uuid::parse_str(val.trim()) {
+                    filter.task_id = Some(id);
+                }
+            }
+            "types" | "event_types" => {
+                let set: std::collections::HashSet<String> = val
+                    .split(',')
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !set.is_empty() {
+                    filter.event_types = Some(set);
+                }
+            }
+            _ => {}
+        }
+    }
+    filter
+}
+
+fn sse_event_matches_filter(envelope: &EventEnvelope, filter: &SseEventFilter) -> bool {
+    if let Some(tid) = filter.task_id {
+        let corr = envelope.correlation_id == Some(tid);
+        let payload_tid = envelope
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("task_id"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            == Some(tid);
+        if !corr && !payload_tid {
+            return false;
+        }
+    }
+    if let Some(ref types) = filter.event_types {
+        if !types.contains(&envelope.event_type.as_str().to_lowercase()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Stream event-bus events as Server-Sent Events (GET /api/events). Keeps connection open until client disconnects.
-pub async fn stream_sse_events<W>(bus: &EventBus, stream: &mut W) -> std::io::Result<()>
+pub async fn stream_sse_events<W>(
+    bus: &EventBus,
+    stream: &mut W,
+    filter: SseEventFilter,
+) -> std::io::Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -11462,6 +13587,9 @@ where
     loop {
         match rx.recv().await {
             Ok(envelope) => {
+                if !sse_event_matches_filter(&envelope, &filter) {
+                    continue;
+                }
                 let payload = serde_json::json!({
                     "id": envelope.id.to_string(),
                     "event_type": envelope.event_type.as_str(),
@@ -11484,169 +13612,22 @@ where
     Ok(())
 }
 
-fn split_path_query(path: &str) -> (&str, &str) {
-    path.split_once('?').map(|(p, q)| (p, q)).unwrap_or((path, ""))
-}
-
-fn parse_query_param(query: &str, key: &str) -> Option<String> {
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return Some(
-                    urlencoding::decode(v)
-                        .map(|c| c.into_owned())
-                        .unwrap_or_else(|_| v.to_string()),
-                );
-            }
-        }
-    }
-    None
-}
-
-async fn get_autonomous_mission_state(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-) -> String {
-    let cfg = am.read().await;
-    let am_store = match AutonomousMissionStore::open(store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
+fn permission_queue_decision_body(body: Option<&[u8]>) -> (Option<String>, Option<String>) {
+    let Some(b) = body else {
+        return (None, None);
     };
-    let (last_hb, last_tid) = am_store.get_meta().unwrap_or((None, None));
-    let report_abs = data_dir.join(&cfg.report_dir);
-    let horizon_s = match cfg.horizon {
-        Horizon::Short => "short",
-        Horizon::Medium => "medium",
-        Horizon::Long => "long",
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(b) else {
+        return (None, None);
     };
-    let status_s = match cfg.status {
-        MissionStatusYaml::Active => "active",
-        MissionStatusYaml::Paused => "paused",
-        MissionStatusYaml::Completed => "completed",
-    };
-    let next_hb = last_hb.map(|t| t + chrono::Duration::minutes(cfg.heartbeat_interval_minutes as i64));
-    let role_definitions: Vec<serde_json::Value> = cfg
-        .role_definitions
-        .iter()
-        .map(|r| {
-            serde_json::json!({
-                "name": r.name,
-                "responsibility": r.responsibility,
-                "preferred_agent_type": r.preferred_agent_type,
-            })
-        })
-        .collect();
-    let body = serde_json::json!({
-        "enabled": cfg.enabled,
-        "global_context": cfg.global_context.as_str(),
-        "horizon": horizon_s,
-        "objective": cfg.objective.as_str(),
-        "heartbeat_interval_minutes": cfg.heartbeat_interval_minutes,
-        "report_dir": cfg.report_dir.as_str(),
-        "report_path_absolute": report_abs.display().to_string(),
-        "session_id": cfg.session_id.as_str(),
-        "status": status_s,
-        "operating_rules": cfg.operating_rules.as_str(),
-        "role_definitions": role_definitions,
-        "heartbeat_preferred_task_type": cfg.heartbeat_preferred_task_type.as_str(),
-        "last_heartbeat_at": last_hb.map(|t| t.to_rfc3339()),
-        "last_task_id": last_tid.map(|u| u.to_string()),
-        "next_heartbeat_approx_at": next_hb.map(|t| t.to_rfc3339()),
-    });
-    json_response("200 OK", &body.to_string())
-}
-
-async fn put_autonomous_mission_state(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-    body: &[u8],
-) -> String {
-    let v: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(x) => x,
-        Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-    };
-    {
-        let mut w = am.write().await;
-        let _ = merge_from_json_partial(&mut *w, &v);
-        if let Err(e) = persist_config_and_snapshot(data_dir, store_path, &*w) {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    }
-    get_autonomous_mission_state(data_dir, store_path, am).await
-}
-
-async fn get_autonomous_mission_events_list(store_path: &Path, query: &str) -> String {
-    let limit = parse_query_param(query, "limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(100)
-        .min(1000);
-    let since = parse_query_param(query, "since").and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s.trim())
-            .ok()
-            .map(|d| d.with_timezone(&chrono::Utc))
-    });
-    let am_store = match AutonomousMissionStore::open(store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let events = match am_store.list_events_since(since, limit) {
-        Ok(e) => e,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let arr: Vec<_> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "at": e.at.to_rfc3339(),
-                "event_type": e.event_type,
-                "payload": e.payload,
-            })
-        })
-        .collect();
-    json_response("200 OK", &serde_json::json!({ "events": arr }).to_string())
-}
-
-async fn post_autonomous_mission_status(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-    status: MissionStatusYaml,
-) -> String {
-    {
-        let mut w = am.write().await;
-        w.status = status;
-        if let Err(e) = persist_config_and_snapshot(data_dir, store_path, &*w) {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    }
-    get_autonomous_mission_state(data_dir, store_path, am).await
+    let note = v
+        .get("note")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+    let decision_source = v
+        .get("decision_source")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+    (note, decision_source)
 }
 
 pub async fn handle_api(
@@ -11665,14 +13646,16 @@ pub async fn handle_api(
     ollama_base_url: Option<&str>,
     spec_dir: &Path,
     restart_tx: RestartTx,
-    _tools_executor: Option<
+    tools_executor: Option<
         &std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
     >,
     skill_registry: &std::sync::Arc<crate::skills::SkillRegistry>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
     human_input_store: Option<HumanInputStore>,
+    steering_queue: Option<SteeringQueueStore>,
     user_rag_store: &crate::user_rag::SharedUserRagStore,
+    notes_store: &crate::notes::SharedNotesStore,
     agent_profile_cache: &AgentProfileCache,
     update_cache: &UpdateCheckCache,
     task_usage_store: &TaskUsageStore,
@@ -11681,29 +13664,17 @@ pub async fn handle_api(
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
-    // CSRF protection: reject state-changing requests that originate from a non-local web page.
-    // Browsers include an Origin header on cross-origin requests; same-origin or non-browser clients
-    // (curl, CLI) typically do not. Allowing only localhost/tauri origins for mutating methods blocks
-    // attacks from malicious web pages opened in the same browser as the Tauri app.
-    if matches!(method, "POST" | "PUT" | "DELETE" | "PATCH") {
-        if let Some(origin) = headers.get("origin") {
-            let origin = origin.trim();
-            let is_local = origin == "null"
-                || origin.starts_with("http://localhost")
-                || origin.starts_with("http://127.0.0.1")
-                || origin.starts_with("https://localhost")
-                || origin.starts_with("https://127.0.0.1")
-                || origin.starts_with("http://tauri.localhost")
-                || origin.starts_with("https://tauri.localhost")
-                || origin.starts_with("tauri://");
-            if !is_local {
-                tracing::warn!(origin = %origin, method = %method, path = %path, "CSRF: rejected request from non-local origin");
-                return json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#);
-            }
-        }
+    if let Some(resp) = crate::api_security::csrf_reject_response(method, path, headers) {
+        return resp;
     }
 
-    let (path_only, query_str) = split_path_query(path);
+    let (path_only, query_str) = crate::api_security::split_path_query(path);
+    let _http_post_lifecycle = crate::lifecycle_hooks::HttpPostLifecycleHooks {
+        data_dir: data_dir.to_path_buf(),
+        method: method.to_string(),
+        path: path_only.to_string(),
+    };
+    crate::lifecycle_hooks::run_http_request_pre_hooks(data_dir, method, path_only).await;
 
     if let Some(resp) = crate::api_studio::handle_studio_route(
         method,
@@ -11729,50 +13700,142 @@ pub async fn handle_api(
         return resp;
     }
 
-    if path_only == "/api/autonomous-mission" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        if method == "GET" {
-            return get_autonomous_mission_state(data_dir, store_path, am).await;
-        }
-        if method == "PUT" {
-            let Some(ref b) = body else {
-                return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-            };
-            return put_autonomous_mission_state(data_dir, store_path, am, b).await;
-        }
-        return json_response("405 Method Not Allowed", r#"{"error":"method_not_allowed"}"#);
+    if let Some(resp) = crate::api_routes_automation::handle_automation_routes(
+        method,
+        path_only,
+        body.as_deref(),
+        headers,
+        data_dir,
+    )
+    .await
+    {
+        return resp;
     }
-    if path_only == "/api/autonomous-mission/events" && method == "GET" {
-        if autonomous_mission.is_none() {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
+
+    if let Some(resp) = crate::api_routes_event_triggers::handle_event_trigger_routes(
+        method,
+        path_only,
+        body.as_deref(),
+        store_path,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    if let Some(resp) = crate::api_routes_notes::try_handle(
+        method,
+        path_only,
+        Some(query_str),
+        body.as_deref(),
+        notes_store,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    if let Some(resp) = crate::api_routes_kinbot::try_handle(
+        method,
+        path_only,
+        Some(query_str),
+        body.as_deref(),
+        &crate::api_routes_kinbot::KinbotRouteCtx {
+            store_path,
+            data_dir,
+            user_rag_store,
+            plugin_registry: Some(plugin_registry),
+        },
+    )
+    .await
+    {
+        return resp;
+    }
+
+    if method == "GET" && path_only == "/api/process/watch/recent" {
+        let limit_opt = crate::api_security::parse_query_param(query_str, "limit")
+            .and_then(|s| s.parse::<usize>().ok());
+        let can_cache = limit_opt.unwrap_or(50) == 50;
+        if can_cache {
+            if let Some(cached) = crate::http_get_cache::cache_get_process_watch_recent() {
+                return json_response("200 OK", &cached);
+            }
         }
-        return get_autonomous_mission_events_list(store_path, query_str).await;
+        let limit = limit_opt.unwrap_or(50);
+        let ev = crate::process_watch::recent(limit).await;
+        let body = serde_json::to_string(&ev).unwrap_or_else(|_| "[]".to_string());
+        if can_cache {
+            crate::http_get_cache::cache_put_process_watch_recent(&body);
+        }
+        return json_response(
+            "200 OK",
+            &body,
+        );
     }
-    if path_only == "/api/autonomous-mission/pause" && method == "POST" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        return post_autonomous_mission_status(data_dir, store_path, am, MissionStatusYaml::Paused).await;
+
+    if let Some(resp) = crate::api_routes_terminal::handle_terminal_routes(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+    )
+    .await
+    {
+        return resp;
     }
-    if path_only == "/api/autonomous-mission/resume" && method == "POST" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        return post_autonomous_mission_status(data_dir, store_path, am, MissionStatusYaml::Active).await;
+
+    if let Some(resp) = crate::api_routes_mcp::handle_mcp_lifecycle_routes(
+        method,
+        path_only,
+        body.as_deref(),
+        data_dir,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    if let Some(tools_exec) = tools_executor {
+        let research_ctx = crate::deep_research::build_research_context(
+            llm_router.clone(),
+            tools_exec.clone(),
+            data_dir,
+        );
+        if let Some(resp) = crate::deep_research::handle_deep_research_routes(
+            method,
+            path_only,
+            body.as_deref(),
+            &research_ctx,
+        )
+        .await
+        {
+            return resp;
+        }
+    }
+
+    if let Some(resp) = crate::api_routes_workspace::handle_workspace_routes(
+        method,
+        path_only,
+        body.as_deref(),
+        &llm_router,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    if let Some(resp) = crate::api_routes_mission::handle_mission_routes(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+        data_dir,
+        store_path,
+        autonomous_mission.clone(),
+    )
+    .await
+    {
+        return resp;
     }
 
     if method == "GET" && (path == "/" || path.is_empty()) {
@@ -11810,6 +13873,69 @@ pub async fn handle_api(
             &serde_json::to_string(&serde_json::json!({
                 "session_id": session_id,
                 "state": st,
+            }))
+            .unwrap_or_else(|_| "{}".into()),
+        );
+    }
+
+    // GET /api/session/resume-brief?session_id=… — structured session state + short-term size for resume UX.
+    if method == "GET" && path.starts_with("/api/session/resume-brief") {
+        let session_id = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&').find_map(|p| {
+                    if let Some(v) = p.strip_prefix("session_id=") {
+                        Some(
+                            urlencoding::decode(v)
+                                .map(|c| c.into_owned())
+                                .unwrap_or_else(|_| v.to_string()),
+                        )
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_default();
+        if session_id.is_empty() {
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"session_id query_parameter_required"}"#,
+            );
+        }
+        let st = crate::session_state::load(data_dir, &session_id);
+        let (short_term_turns, compaction_count) = match &short_term {
+            Some(st_mem) => {
+                let n = st_mem.get_turns(&session_id).await.len();
+                let c = st_mem.get_compaction_count(&session_id).await;
+                (n, c)
+            }
+            None => (0usize, 0u32),
+        };
+        let tools_policy_brief = if let Some(exec_lock) = tools_executor {
+            let g = exec_lock.read().await;
+            let p = &g.policy;
+            serde_json::json!({
+                "default_profile": p.default_profile,
+                "web_search_enabled": p.web_search_enabled,
+                "browser_enabled": p.browser_enabled,
+                "web_crawl_enabled": p.web_crawl_enabled,
+                "cloudflare_account_configured": p.resolved_cloudflare_account_id().is_some(),
+                "cloudflare_token_configured": p.resolved_cloudflare_api_token().is_some(),
+            })
+        } else {
+            serde_json::Value::Null
+        };
+        return json_response(
+            "200 OK",
+            &serde_json::to_string(&serde_json::json!({
+                "session_id": session_id,
+                "session_state": st,
+                "short_term_turn_count": short_term_turns,
+                "compaction_count": compaction_count,
+                "memory_recall_metrics": crate::memory_orchestrator::memory_recall_metrics_snapshot(),
+                "tools_policy_brief": tools_policy_brief,
+                "hint": "Use this payload to restore UI tabs (goals, constraints) and to explain context to the user after reconnect."
             }))
             .unwrap_or_else(|_| "{}".into()),
         );
@@ -11968,314 +14094,415 @@ pub async fn handle_api(
         }
     }
 
-    // GET /api/agent-profile — read agent profile (name, personality, role, gender, formality, avatar, rules, can_do, cannot_do, traits_override, preferred_mode)
-    if method == "GET" && path == "/api/agent-profile" {
-        let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
-        let body_json = serde_json::json!({
-            "name": profile.name,
-            "personality": profile.personality,
-            "role": profile.role,
-            "gender": profile.gender,
-            "formality": profile.formality,
-            "avatar": profile.avatar,
-            "rules": profile.rules,
-            "can_do": profile.can_do,
-            "cannot_do": profile.cannot_do,
-            "traits_override": profile.traits_override,
-            "preferred_mode": profile.preferred_mode
-        });
-        return json_response("200 OK", &body_json.to_string());
+    if let Some(resp) = crate::api_routes_profiles::handle_profiles_routes(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+        data_dir,
+        agent_profile_cache,
+        short_term.clone(),
+        long_term_client.clone(),
+    )
+    .await
+    {
+        return resp;
     }
 
-    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, formality?, avatar?, rules?, can_do?, cannot_do?, traits_override?, preferred_mode? }
-    if method == "POST" && path == "/api/agent-profile" {
-        let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
-        if let Some(body) = body.as_deref() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-                if let Some(s) = v.get("name").and_then(|x| x.as_str()) {
-                    profile.name = Some(s.to_string());
-                }
-                if let Some(s) = v.get("personality").and_then(|x| x.as_str()) {
-                    profile.personality = Some(s.to_string());
-                }
-                if v.get("role").is_some() {
-                    profile.role = v.get("role").and_then(|x| x.as_str()).map(String::from);
-                }
-                if v.get("gender").is_some() {
-                    profile.gender = v.get("gender").and_then(|x| x.as_str()).map(String::from);
-                }
-                if let Some(fv) = v.get("formality") {
-                    if fv.is_null() {
-                        profile.formality = None;
-                    } else if let Some(s) = fv.as_str() {
-                        let t = s.trim().to_lowercase();
-                        profile.formality = match t.as_str() {
-                            "formal" => Some("formal".to_string()),
-                            "informal" => Some("informal".to_string()),
-                            _ => None,
-                        };
+    // Second brain controls: settings, overview and clear.
+    if method == "GET" && path == "/api/agent-identity" {
+        let identity = crate::memory_agent_identity::AgentIdentityManifest::load(data_dir);
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "identity": identity }).to_string(),
+        );
+    }
+    if method == "POST" && path == "/api/agent-identity" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mut identity = body_json
+            .as_ref()
+            .and_then(|v| v.get("identity"))
+            .and_then(|v| serde_json::from_value::<crate::memory_agent_identity::AgentIdentityManifest>(v.clone()).ok())
+            .unwrap_or_else(|| crate::memory_agent_identity::AgentIdentityManifest::load(data_dir));
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("name")).and_then(|x| x.as_str()) {
+            identity.name = Some(v.to_string());
+        }
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("role")).and_then(|x| x.as_str()) {
+            identity.role = Some(v.to_string());
+        }
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("tone")).and_then(|x| x.as_str()) {
+            identity.tone = Some(v.to_string());
+        }
+        if let Some(v) = body_json.as_ref().and_then(|j| j.get("values")).and_then(|x| x.as_array()) {
+            identity.values = Some(
+                v.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+            );
+        }
+        if let Some(v) = body_json
+            .as_ref()
+            .and_then(|j| j.get("constraints"))
+            .and_then(|x| x.as_array())
+        {
+            identity.constraints = Some(
+                v.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+            );
+        }
+        match crate::memory_agent_identity::save(data_dir, &identity) {
+            Ok(()) => {
+                crate::memory_agent_identity::bootstrap_agent_identity(data_dir, long_term_client.as_ref());
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "identity": identity }).to_string(),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+    if method == "GET" && path == "/api/memory/advanced-settings" {
+        let settings = crate::memory_retrieval_enhance::advanced_settings_snapshot();
+        return json_response("200 OK", &serde_json::json!({ "settings": settings }).to_string());
+    }
+    if method == "POST" && path == "/api/memory/advanced-settings" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        if let Some(ref j) = body_json {
+            crate::memory_retrieval_enhance::apply_advanced_settings(j);
+        }
+        let settings = crate::memory_retrieval_enhance::advanced_settings_snapshot();
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "settings": settings }).to_string(),
+        );
+    }
+    if method == "GET" && path == "/api/memory/second-brain/settings" {
+        let settings = load_second_brain_settings(data_dir);
+        let body = serde_json::json!({ "settings": settings });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/memory/second-brain/settings" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mut settings = load_second_brain_settings(data_dir);
+        if let Some(enabled) = body_json
+            .as_ref()
+            .and_then(|v| v.get("enabled").and_then(|b| b.as_bool()))
+        {
+            settings.enabled = enabled;
+        }
+        if let Some(paused) = body_json
+            .as_ref()
+            .and_then(|v| v.get("paused").and_then(|b| b.as_bool()))
+        {
+            settings.paused = paused;
+        }
+        match save_second_brain_settings(data_dir, &settings) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "settings": settings }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "GET" && path.starts_with("/api/memory/second-brain/overview") {
+        let settings = load_second_brain_settings(data_dir);
+        let (entries, total) = if let Some(ref client) = long_term_client {
+            let client = client.clone();
+            tokio::task::spawn_blocking(move || client.list(500, 0))
+                .await
+                .unwrap_or((vec![], 0))
+        } else {
+            (vec![], 0)
+        };
+        let mut by_type: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for (_, _, source, _) in entries {
+            let t = if source.contains("preference") {
+                "preference"
+            } else if source.contains("goal") {
+                "goal"
+            } else if source.contains("project") {
+                "project"
+            } else if source.contains("decision") {
+                "decision"
+            } else if source.contains("constraint") {
+                "constraint"
+            } else if source.contains("identity") || source.contains("user_fact") {
+                "identity"
+            } else {
+                "other"
+            };
+            *by_type.entry(t.to_string()).or_insert(0) += 1;
+        }
+        let body = serde_json::json!({
+            "settings": settings,
+            "total_entries": total,
+            "typed_counts": by_type
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/memory/second-brain/clear" {
+        let mut deleted = 0u64;
+        if let Some(ref client) = long_term_client {
+            let client = client.clone();
+            deleted = tokio::task::spawn_blocking(move || {
+                let mut removed = 0u64;
+                loop {
+                    let (rows, _total) = client.list(200, 0);
+                    if rows.is_empty() {
+                        break;
                     }
-                }
-                if v.get("avatar").is_some() {
-                    profile.avatar = v.get("avatar").and_then(|x| x.as_str()).map(String::from);
-                }
-                if let Some(arr) = v.get("rules").and_then(|x| x.as_array()) {
-                    profile.rules = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                }
-                if let Some(arr) = v.get("can_do").and_then(|x| x.as_array()) {
-                    profile.can_do = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                }
-                if let Some(arr) = v.get("cannot_do").and_then(|x| x.as_array()) {
-                    profile.cannot_do = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                }
-                if let Some(obj) = v.get("traits_override").and_then(|x| x.as_object()) {
-                    let mut map = std::collections::HashMap::new();
-                    for (k, val) in obj {
-                        if let Some(n) = val.as_f64() {
-                            map.insert(k.clone(), n);
+                    for (id, _content, _source, _created) in rows {
+                        if client.delete(id).is_ok() {
+                            removed += 1;
                         }
                     }
-                    profile.traits_override = if map.is_empty() { None } else { Some(map) };
                 }
-                if v.get("preferred_mode").is_some() {
-                    profile.preferred_mode = v
-                        .get("preferred_mode")
-                        .and_then(|x| x.as_str())
-                        .map(String::from);
-                }
-            }
-        }
-        // Persist default name if none or empty so the agent always has an identity on disk
-        if profile
-            .name
-            .as_deref()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true)
-        {
-            profile.name = Some(AgentProfile::DEFAULT_NAME.to_string());
-        }
-        match profile.save(data_dir) {
-            Ok(()) => {
-                set_agent_profile_cache(agent_profile_cache, profile).await;
-                return json_response(
-                    "200 OK",
-                    r#"{"ok":true,"message":"Profil agent mis à jour"}"#,
-                );
-            }
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e.to_string() }).to_string(),
-                )
-            }
-        }
-    }
-
-    // GET /api/user-profile — read user profile (first_name, last_name, how_to_call, onboarding_completed)
-    if method == "GET" && path == "/api/user-profile" {
-        let profile = UserProfile::load(data_dir);
-        let body_json = serde_json::json!({
-            "first_name": profile.first_name,
-            "last_name": profile.last_name,
-            "how_to_call": profile.how_to_call,
-            "onboarding_completed": profile.onboarding_completed,
-            "proactive_check_in_enabled": profile.proactive_check_in_enabled,
-            "proactive_check_in_interval_days": profile.proactive_check_in_interval_days,
-        });
-        return json_response("200 OK", &body_json.to_string());
-    }
-
-    // POST /api/user-profile — update user profile. Body: { first_name?, last_name?, how_to_call?, onboarding_completed?, proactive_check_in_enabled?, proactive_check_in_interval_days? }
-    if method == "POST" && path == "/api/user-profile" {
-        let mut profile = UserProfile::load(data_dir);
-        if let Some(body) = body.as_deref() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-                if v.get("first_name").is_some() {
-                    profile.first_name = v
-                        .get("first_name")
-                        .and_then(|x| x.as_str())
-                        .map(String::from);
-                }
-                if v.get("last_name").is_some() {
-                    profile.last_name = v
-                        .get("last_name")
-                        .and_then(|x| x.as_str())
-                        .map(String::from);
-                }
-                if v.get("how_to_call").is_some() {
-                    profile.how_to_call = v
-                        .get("how_to_call")
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.trim().to_string());
-                }
-                if let Some(b) = v.get("onboarding_completed").and_then(|x| x.as_bool()) {
-                    profile.onboarding_completed = b;
-                }
-                if v.get("proactive_check_in_enabled").is_some() {
-                    profile.proactive_check_in_enabled = v
-                        .get("proactive_check_in_enabled")
-                        .and_then(|x| x.as_bool())
-                        .unwrap_or(false);
-                }
-                if v.get("proactive_check_in_interval_days").is_some() {
-                    profile.proactive_check_in_interval_days =
-                        v.get("proactive_check_in_interval_days")
-                            .and_then(|x| x.as_u64())
-                            .unwrap_or(0) as u32;
-                }
-            }
-        }
-        match profile.save(data_dir) {
-            Ok(()) => {
-                return json_response(
-                    "200 OK",
-                    r#"{"ok":true,"message":"Profil utilisateur mis à jour"}"#,
-                )
-            }
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e.to_string() }).to_string(),
-                )
-            }
-        }
-    }
-
-    // GET /api/first-message?context=onboarding|first_today|proactive — agent-initiated first message (onboarding, daily greeting, proactive check-in)
-    if method == "GET" && path.starts_with("/api/first-message") {
-        let context = path
-            .split('?')
-            .nth(1)
-            .and_then(|q| {
-                q.split('&').find(|p| p.starts_with("context=")).map(|p| {
-                    urlencoding::decode(p.trim_start_matches("context="))
-                        .unwrap_or_default()
-                        .into_owned()
-                })
+                removed
             })
-            .unwrap_or_default();
-        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
-        let user_profile = UserProfile::load(data_dir);
-
-        if context == "onboarding" && !user_profile.has_how_to_call() {
-            let message = "Bonjour ! Pour personnaliser nos échanges, comment dois-je vous appeler ? (prénom ou surnom)";
-            if let Some(ref st) = short_term {
-                st.append(&session_id, "assistant", message.to_string())
-                    .await;
-            }
-            let body_json = serde_json::json!({ "message": message, "session_id": session_id });
-            return json_response("200 OK", &body_json.to_string());
+            .await
+            .unwrap_or(0);
         }
-
-        if context == "proactive"
-            && user_profile.has_how_to_call()
-            && user_profile.proactive_check_in_enabled
-            && user_profile.proactive_check_in_interval_days > 0
-        {
-            let now = chrono::Utc::now();
-            let last = UserProfile::load_last_activity(data_dir);
-            let interval_days = user_profile.proactive_check_in_interval_days as i64;
-            let show = match last {
-                None => true,
-                Some(t) => (now - t).num_days() >= interval_days,
-            };
-            if show {
-                let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
-                let message = format!(
-                    "Ça fait un moment, {} ! Tu veux qu'on travaille sur quelque chose ?",
-                    how
-                );
-                if let Some(ref st) = short_term {
-                    st.append(&session_id, "assistant", message.clone()).await;
-                }
-                let body_json = serde_json::json!({ "message": message, "session_id": session_id });
-                return json_response("200 OK", &body_json.to_string());
-            }
-        }
-
-        if context == "first_today" && user_profile.has_how_to_call() {
-            let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
-            let message = format!("Bonjour {}, quoi de neuf aujourd'hui ?", how);
-            if let Some(ref st) = short_term {
-                st.append(&session_id, "assistant", message.clone()).await;
-            }
-            let body_json = serde_json::json!({ "message": message, "session_id": session_id });
-            return json_response("200 OK", &body_json.to_string());
-        }
-
-        // Other contexts: return empty so UI does not show a duplicate message
-        let body_json = serde_json::json!({ "message": "", "session_id": session_id });
-        return json_response("200 OK", &body_json.to_string());
+        let body = serde_json::json!({ "ok": true, "deleted_entries": deleted });
+        return json_response("200 OK", &body.to_string());
     }
 
-    // POST /api/personality-memory — store a structured personality preference (Phase 3). Body: { "key": "preferred_tone"|"technical_depth_preference"|..., "value": "..." }
-    if method == "POST" && path == "/api/personality-memory" {
-        let Some(client) = long_term_client.clone() else {
+    if method == "GET" && path == "/api/memory/hygiene-status" {
+        return json_response(
+            "200 OK",
+            &crate::memory_hygiene::metrics_snapshot().to_string(),
+        );
+    }
+
+    // GET /api/memory/branch/:session_id — branch overview (E3)
+    if method == "GET" && path.starts_with("/api/memory/branch/") {
+        let session_id = path
+            .trim_start_matches("/api/memory/branch/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if session_id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"session_id_required"}"#);
+        }
+        let db = data_dir.join("memory.db");
+        match crate::memory_branch::branch_overview(&db, session_id) {
+            Ok(v) => return json_response("200 OK", &v.to_string()),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+
+    // POST /api/memory/branch/:session_id — clone session memory to target branch (E3)
+    if method == "POST" && path.starts_with("/api/memory/branch/") {
+        let source_session = path
+            .trim_start_matches("/api/memory/branch/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if source_session.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"session_id_required"}"#);
+        }
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let target_session = body_json
+            .as_ref()
+            .and_then(|j| j.get("target_session_id").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if target_session.is_empty() {
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"target_session_id_required"}"#,
+            );
+        }
+        let Some(ref client) = long_term_client else {
             return json_response(
                 "503 Service Unavailable",
                 r#"{"error":"long_term_memory_unavailable"}"#,
             );
         };
-        let Some(body) = body.as_deref() else {
-            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-        };
-        let v: serde_json::Value = match serde_json::from_slice(body) {
-            Ok(x) => x,
-            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-        };
-        let key = match v.get("key").and_then(|x| x.as_str()) {
-            Some(k) if !k.trim().is_empty() => k.trim().to_string(),
-            _ => return json_response("400 Bad Request", r#"{"error":"key_required"}"#),
-        };
-        let value = v
-            .get("value")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        let payload = serde_json::json!({ "key": key, "value": value }).to_string();
+        let db = data_dir.join("memory.db");
+        let client = client.clone();
+        let source = source_session.to_string();
+        let target_for_clone = target_session.clone();
         let result = tokio::task::spawn_blocking(move || {
-            client.emit_event(
-                "personality_memory".to_string(),
-                payload,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            crate::memory_branch::clone_branch(&client, &db, &source, &target_for_clone)
         })
         .await;
         match result {
-            Ok(Ok(id)) => {
+            Ok(Ok((lt, ep))) => {
                 return json_response(
                     "200 OK",
-                    &serde_json::json!({ "ok": true, "id": id.to_string() }).to_string(),
-                )
+                    &serde_json::json!({
+                        "ok": true,
+                        "source_session_id": source_session,
+                        "target_session_id": target_session,
+                        "long_term_cloned": lt,
+                        "episodic_cloned": ep,
+                    })
+                    .to_string(),
+                );
             }
             Ok(Err(e)) => {
                 return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e }).to_string(),
-                )
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
             }
             Err(e) => {
                 return json_response(
                     "500 Internal Server Error",
                     &serde_json::json!({ "error": e.to_string() }).to_string(),
-                )
+                );
             }
         }
+    }
+
+    if method == "GET" && path == "/api/memory/export" {
+        let db = data_dir.join("memory.db");
+        match crate::memory_export::export_memory(&db) {
+            Ok(bundle) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::to_string(&bundle).unwrap_or_else(|_| "{}".into()),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+
+    if method == "POST" && path == "/api/memory/import" {
+        let parsed = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<crate::memory_export::MemoryExportBundle>(b).ok());
+        let Some(bundle) = parsed else {
+            return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
+        };
+        let db = data_dir.join("memory.db");
+        match crate::memory_export::import_memory(&db, &bundle) {
+            Ok((entries, facts)) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "entries_imported": entries, "facts_imported": facts })
+                        .to_string(),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+
+    if method == "POST" && path == "/api/migrate/openclaw/preview" {
+        let source_dir = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+            .and_then(|v| v.get("source_dir").and_then(|x| x.as_str()).map(|s| s.to_string()))
+            .unwrap_or_default();
+        if source_dir.trim().is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_source_dir"}"#);
+        }
+        match crate::openclaw_migration::preview(&source_dir) {
+            Ok(p) => {
+                return json_response("200 OK", &serde_json::to_string(&p).unwrap_or_else(|_| "{}".into()));
+            }
+            Err(e) => {
+                return json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                );
+            }
+        }
+    }
+
+    if method == "POST" && path == "/api/migrate/openclaw/apply" {
+        let parsed = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let source_dir = parsed
+            .as_ref()
+            .and_then(|v| v.get("source_dir").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let dry_run = parsed
+            .as_ref()
+            .and_then(|v| v.get("dry_run").and_then(|x| x.as_bool()))
+            .unwrap_or(false);
+        let import_memory = parsed
+            .as_ref()
+            .and_then(|v| v.get("import_memory").and_then(|x| x.as_bool()))
+            .unwrap_or(false);
+        if source_dir.trim().is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_source_dir"}"#);
+        }
+        match crate::openclaw_migration::apply(&source_dir, data_dir, dry_run, import_memory) {
+            Ok(r) => {
+                return json_response("200 OK", &serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()));
+            }
+            Err(e) => {
+                return json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                );
+            }
+        }
+    }
+
+    // GET /api/memory/recall-metrics — counters from memory orchestrator (semantic recall hits/empty).
+    if method == "GET" && path == "/api/memory/recall-metrics" {
+        if let Some(cached) = crate::http_get_cache::cache_get_recall_metrics() {
+            return json_response("200 OK", &cached);
+        }
+        let mut body = crate::memory_orchestrator::memory_recall_metrics_snapshot();
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(m) = crate::memory_maintenance::metrics_snapshot().as_object() {
+                for (k, v) in m {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            if let Some(m) = crate::memory_hygiene::metrics_snapshot().as_object() {
+                for (k, v) in m {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        let body_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+        crate::http_get_cache::cache_put_recall_metrics(&body_str);
+        return json_response("200 OK", &body_str);
     }
 
     // GET /api/memory/short-term?session_id=... — turns for session (default: day-YYYY-MM-DD)
@@ -12377,7 +14604,7 @@ pub async fn handle_api(
             prompt,
             max_tokens: Some(80),
             temperature: Some(0.3),
-            preferred_task_type: None,
+            preferred_task_type: Some("utility".to_string()),
             system_prompt: Some(
                 "Output only the title text. No quotes. No leading 'Title:'.".to_string(),
             ),
@@ -12771,6 +14998,13 @@ pub async fn handle_api(
 
     // GET /api/doctor — health checks from daemon (for slash /doctor)
     if method == "GET" && path == "/api/doctor" {
+        if let Some(cached) = crate::http_get_cache::cache_get_doctor() {
+            return format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                cached.len(),
+                cached
+            );
+        }
         let mut checks: Vec<serde_json::Value> = Vec::new();
         checks.push(
             serde_json::json!({ "id": "daemon", "ok": true, "description": "Daemon running" }),
@@ -12942,12 +15176,54 @@ pub async fn handle_api(
             "npm_on_path": npm_on_path,
         });
 
+        let rbitnet_models_url = std::env::var("RBITNET_CHAT_BASE_URL")
+            .ok()
+            .map(|u| {
+                let base = u.trim_end_matches('/');
+                if base.ends_with("/v1") {
+                    format!("{base}/models")
+                } else {
+                    format!("{base}/v1/models")
+                }
+            })
+            .or_else(|| {
+                std::env::var("RBITNET_BIND").ok().map(|b| {
+                    let host = b.trim();
+                    if host.starts_with("http://") || host.starts_with("https://") {
+                        format!("{host}/v1/models")
+                    } else {
+                        format!("http://{host}/v1/models")
+                    }
+                })
+            })
+            .unwrap_or_else(|| "http://127.0.0.1:8080/v1/models".to_string());
+        let rbitnet_ok = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+            .get(&rbitnet_models_url)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        checks.push(serde_json::json!({
+            "id": "rbitnet",
+            "ok": rbitnet_ok,
+            "description": if rbitnet_ok {
+                "Rbitnet reachable (local inference). Compare perf vs llama.cpp: see Rbitnet/docs/BENCHMARKS.md"
+            } else {
+                "Rbitnet unreachable (optional: rbitnet-server on RBITNET_BIND, default 127.0.0.1:8080)"
+            },
+            "models_url": rbitnet_models_url
+        }));
+
         let all_ok = checks
             .iter()
             .all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
         let body_json =
             serde_json::json!({ "ok": all_ok, "checks": checks, "playwright": playwright_json })
                 .to_string();
+        crate::http_get_cache::cache_put_doctor(&body_json);
         return format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body_json.len(),
@@ -13045,6 +15321,50 @@ pub async fn handle_api(
         );
     }
 
+    // POST /api/vault — set one secret (body: {"key": "KEY_NAME", "value": "secret"})
+    if method == "POST" && path == "/api/vault" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let key = body_json
+            .as_ref()
+            .and_then(|j| j.get("key"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let value = body_json
+            .as_ref()
+            .and_then(|j| j.get("value"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        match (key, value) {
+            (Some(k), Some(v)) if !k.is_empty() && !v.is_empty() => {
+                match akasha_vault::open_vault(data_dir) {
+                    Ok(vault) => match vault.set(&k, &v) {
+                        Ok(()) => {
+                            return json_response(
+                                "200 OK",
+                                &serde_json::json!({ "ok": true, "key": k }).to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            return json_response(
+                                "500 Internal Server Error",
+                                &serde_json::json!({ "error": e.to_string() }).to_string(),
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        return json_response(
+                            "503 Service Unavailable",
+                            &serde_json::json!({ "error": e.to_string() }).to_string(),
+                        );
+                    }
+                }
+            }
+            _ => return json_response("400 Bad Request", r#"{"error":"missing key or value"}"#),
+        }
+    }
+
     // DELETE /api/vault — remove one key (body: {"key": "KEY_NAME"})
     if method == "DELETE" && path == "/api/vault" {
         let body_json = body
@@ -13126,9 +15446,11 @@ pub async fn handle_api(
     if method == "POST" && path == "/channels/slack/command" {
         if let Some(ref secret) = channel_config.slack_signing_secret {
             let sig = headers.get("x-slack-signature").map(String::as_str);
+            let ts = headers.get("x-slack-request-timestamp").map(String::as_str);
             return crate::channels::slack::handle_slack_command(
                 body,
                 sig,
+                ts,
                 secret,
                 channel_config.port,
                 main_agent,
@@ -13153,9 +15475,135 @@ pub async fn handle_api(
                 channel_config.port,
                 main_agent,
                 store_path,
-            );
+            ).await;
         }
         return json_response("404 Not Found", r#"{"error":"teams_not_configured"}"#);
+    }
+
+    if method == "POST" && path == "/api/session/handoff" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let Some(body_json) = body_json else {
+            return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
+        };
+        let session_id = body_json
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let Some(session_id) = session_id else {
+            return json_response("400 Bad Request", r#"{"error":"missing_session_id"}"#);
+        };
+        let target_model = body_json
+            .get("target_model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let target_provider = body_json
+            .get("target_provider")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let task_id_filter = body_json
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let task_uuid = match task_id_filter {
+            Some(ref s) => match Uuid::parse_str(s) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    return json_response("400 Bad Request", r#"{"error":"invalid_task_id"}"#);
+                }
+            },
+            None => None,
+        };
+        let transcript_ctx = if let Some(tid) = task_uuid {
+            let transcript_path = data_dir.join("transcripts").join(format!("{tid}.json"));
+            if let Ok(raw) = std::fs::read_to_string(&transcript_path) {
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .map(|v| {
+                        let status = v
+                            .get("status")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("unknown");
+                        let summary = v
+                            .get("summary")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .chars()
+                            .take(1800)
+                            .collect::<String>();
+                        let actions = v
+                            .get("actions")
+                            .and_then(|x| x.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .take(8)
+                                    .filter_map(|a| a.get("summary").and_then(|s| s.as_str()))
+                                    .map(|s| format!("- {}", s.trim()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            "[Handoff transcript]\n- source_task_id: {tid}\n- status: {status}\n- summary: {summary}\n{}",
+                            if actions.is_empty() {
+                                String::new()
+                            } else {
+                                format!("\n[Recent actions]\n{actions}\n")
+                            }
+                        )
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        let model_route = match (&target_provider, &target_model) {
+            (Some(p), Some(m)) => format!("{p}/{m}"),
+            (Some(p), None) => p.clone(),
+            (None, Some(m)) => m.clone(),
+            (None, None) => "auto".to_string(),
+        };
+        let route_hint = if target_provider.is_some() || target_model.is_some() {
+            format!(
+                "[Handoff route request]\n- target_provider: {}\n- target_model: {}\nUse this route preference if configured; otherwise fall back to the nearest available route and mention the fallback.\n\n",
+                target_provider.as_deref().unwrap_or(""),
+                target_model.as_deref().unwrap_or("")
+            )
+        } else {
+            String::new()
+        };
+        let handoff_prompt = format!(
+            "{}{}\n[Instruction]\nContinue the conversation from this handoff context and produce the next actionable response.",
+            route_hint, transcript_ctx
+        );
+        let envelope = crate::gateway::MessageEnvelope::api(
+            session_id.clone(),
+            handoff_prompt,
+            None,
+            TaskPriority::UserNormal,
+            false,
+        );
+        match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
+            Ok(task_id) => {
+                let body = serde_json::json!({
+                    "schema_version": 2,
+                    "task_id": task_id.to_string(),
+                    "session_id": session_id,
+                    "model": model_route
+                });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(_) => {
+                return json_response("500 Internal Server Error", r#"{"error":"handle_failed"}"#)
+            }
+        }
     }
 
     if method == "POST" && path == "/api/message" {
@@ -13242,7 +15690,7 @@ pub async fn handle_api(
             }
         };
         // Session: "new_session" => new UUID; else provided non-empty session_id; else day-YYYY-MM-DD (short-term = current day, survives UI restart).
-        let session_id = {
+        let mut session_id = {
             let new_session = body_json
                 .as_ref()
                 .and_then(|v| v.get("new_session"))
@@ -13313,11 +15761,37 @@ pub async fn handle_api(
                 }
             })
             .unwrap_or(TaskPriority::UserNormal);
+        let incognito = body_json
+            .as_ref()
+            .map(|v| {
+                v.get("incognito")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false)
+                    || v.get("no_memory")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false);
         let studio_code_mode = body_json
             .as_ref()
             .and_then(|v| v.get("studio_code_mode").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty());
+        let message_delivery_mode = body_json
+            .as_ref()
+            .and_then(|v| {
+                v.get("queue_mode")
+                    .or_else(|| v.get("message_delivery_mode"))
+                    .and_then(|x| x.as_str())
+            })
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+        let target_task_id: Option<Uuid> = body_json
+            .as_ref()
+            .and_then(|v| v.get("target_task_id").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| Uuid::parse_str(&s).ok());
         let studio_policy_hint = body_json
             .as_ref()
             .and_then(|v| v.get("studio_policy_hint").and_then(|x| x.as_str()))
@@ -13333,6 +15807,23 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_design_doc").and_then(|x| x.as_str()))
             .map(|s| s.to_string())
             .filter(|s| !s.trim().is_empty());
+        let studio_acceptance_parsed: Option<crate::api_studio::StudioAcceptancePayload> =
+            match body_json
+                .as_ref()
+                .and_then(|v| v.get("studio_acceptance_criteria"))
+            {
+                Some(v) => match crate::api_studio::parse_api_acceptance_field(v) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let body = serde_json::json!({
+                            "error": "invalid_studio_acceptance_criteria",
+                            "detail": e
+                        });
+                        return json_response("400 Bad Request", &body.to_string());
+                    }
+                },
+                None => None,
+            };
         let studio_delegate_single_level = body_json
             .as_ref()
             .and_then(|v| v.get("studio_delegate_single_level").and_then(|x| x.as_bool()))
@@ -13342,6 +15833,67 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let mut studio_ticket_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_ticket_id").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let fork_from_task_id: Option<Uuid> = {
+            let raw = body_json
+                .as_ref()
+                .and_then(|v| v.get("fork_from_task_id").and_then(|x| x.as_str()))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            match raw {
+                None => None,
+                Some(s) => match Uuid::parse_str(&s) {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        let body = serde_json::json!({ "error": "invalid_fork_from_task_id", "detail": "fork_from_task_id must be a valid UUID" });
+                        return json_response("400 Bad Request", &body.to_string());
+                    }
+                },
+            }
+        };
+        let fork_after_message_index = body_json
+            .as_ref()
+            .and_then(|v| v.get("fork_after_message_index").and_then(|x| x.as_i64()))
+            .filter(|n| *n >= 0)
+            .map(|n| n as u64);
+        let mut fork_meta_for_task: Option<serde_json::Value> = None;
+        if let Some(parent_task_id) = fork_from_task_id.as_ref() {
+            let parent_session_id = session_id.clone();
+            let fork_session_id = format!("fork-{}", Uuid::new_v4().simple());
+            if let Some(st) = short_term.as_ref() {
+                let parent_turns = st.get_turns(&parent_session_id).await;
+                let keep = fork_after_message_index
+                    .map(|n| (n as usize).saturating_add(1))
+                    .unwrap_or(parent_turns.len())
+                    .min(parent_turns.len());
+                for turn in parent_turns.into_iter().take(keep) {
+                    st.append(&fork_session_id, &turn.role, turn.content).await;
+                }
+                fork_meta_for_task = Some(serde_json::json!({
+                    "fork_parent_task_id": parent_task_id.to_string(),
+                    "fork_parent_session_id": parent_session_id,
+                    "fork_session_id": fork_session_id,
+                    "fork_cut_index": fork_after_message_index,
+                    "fork_cut_turns": keep,
+                    "schema_version": 1
+                }));
+            } else {
+                fork_meta_for_task = Some(serde_json::json!({
+                    "fork_parent_task_id": parent_task_id.to_string(),
+                    "fork_parent_session_id": parent_session_id,
+                    "fork_session_id": fork_session_id,
+                    "fork_cut_index": fork_after_message_index,
+                    "fork_cut_turns": 0usize,
+                    "schema_version": 1,
+                    "note": "short_term_store_unavailable"
+                }));
+            }
+            session_id = fork_session_id;
+        }
         let studio_disk_root = if let Some(pid) = studio_project_id.as_deref()
         {
             match crate::studio::resolve_studio_project_dir(data_dir, pid.trim()) {
@@ -13357,6 +15909,64 @@ pub async fn handle_api(
         } else {
             None
         };
+        if let (Some(ref root), Some(_pid)) = (studio_disk_root.as_ref(), studio_project_id.as_ref())
+        {
+            if studio_ticket_id.is_none() {
+                let mode = crate::api_studio::studio_ticket_enforcement_mode(root);
+                if mode != "off"
+                    && crate::api_studio::studio_user_message_suggests_evolution(&message)
+                {
+                    match crate::api_studio::studio_create_evolution_ticket_from_chat(root, &message)
+                    {
+                        Ok(id) => {
+                            tracing::info!(
+                                ticket_id = %id,
+                                "auto-created Code Studio evolution ticket from chat"
+                            );
+                            studio_ticket_id = Some(id);
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "studio evolution auto-ticket skipped");
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(ref root) = studio_disk_root {
+            let studio_ticket_enforcement_mode = crate::api_studio::studio_ticket_enforcement_mode(root);
+            if studio_ticket_enforcement_mode == "strict" && studio_ticket_id.is_none() {
+                let body = serde_json::json!({
+                    "error": "ticket_required",
+                    "detail": "studio_ticket_id is required in strict mode"
+                });
+                return json_response("409 Conflict", &body.to_string());
+            }
+            if let Some(ref tid) = studio_ticket_id {
+                let Some(ticket) = crate::api_studio::studio_get_ticket(root, tid) else {
+                    let body = serde_json::json!({
+                        "error": "ticket_not_found",
+                        "detail": "studio_ticket_id does not match an existing project ticket"
+                    });
+                    return json_response("404 Not Found", &body.to_string());
+                };
+                if ticket.status == "done" {
+                    let body = serde_json::json!({
+                        "error": "ticket_already_done",
+                        "detail": "cannot start execution on a done ticket"
+                    });
+                    return json_response("409 Conflict", &body.to_string());
+                }
+                if !crate::api_studio::studio_ticket_prerequisite_done(root, &ticket) {
+                    let body = serde_json::json!({
+                        "error": "ticket_prerequisite_pending",
+                        "detail": "depends_on_ticket_id must reference a ticket in status \"done\" before this run is allowed"
+                    });
+                    return json_response("409 Conflict", &body.to_string());
+                }
+            } else if studio_ticket_enforcement_mode == "soft" {
+                tracing::warn!("Code Studio soft ticket enforcement: run started without studio_ticket_id");
+            }
+        }
         let studio_ui_agent_preference = body_json
             .as_ref()
             .and_then(|v| v.get("studio_assigned_agent").and_then(|x| x.as_str()))
@@ -13384,14 +15994,86 @@ pub async fn handle_api(
                     crate::api_studio::evolution_branch_for_id(data_dir, pid.trim(), eid.trim());
             }
         }
+        // Steering / follow-up: queue on a running task instead of spawning a new root task.
+        if let (Some(ref mode_s), Some(ref sq)) = (message_delivery_mode.as_deref(), steering_queue.as_ref())
+        {
+            if let Some(qmode) = crate::steering_queue::QueueMode::parse(mode_s) {
+                if let Some(tid) = sq
+                    .resolve_running_task(&session_id, target_task_id)
+                    .await
+                {
+                    let queued = sq.enqueue(tid, qmode, message.clone()).await;
+                    let event_type = match qmode {
+                        crate::steering_queue::QueueMode::Steering => "user_steering_queued",
+                        crate::steering_queue::QueueMode::FollowUp => "user_follow_up_queued",
+                    };
+                    if let Ok(ts) = TaskStore::open(store_path) {
+                        let _ = ts.insert_event(
+                            tid,
+                            event_type,
+                            Some(&serde_json::json!({
+                                "queue_id": queued.id,
+                                "mode": queued.mode,
+                                "preview": queued.text.chars().take(200).collect::<String>(),
+                                "schema_version": 1
+                            })),
+                            &chrono::Utc::now().to_rfc3339(),
+                        );
+                    }
+                    let body = serde_json::json!({
+                        "ack": true,
+                        "queued": true,
+                        "queue_mode": queued.mode,
+                        "queue_id": queued.id,
+                        "task_id": tid.to_string(),
+                        "session_id": session_id,
+                        "message": "Message mis en file pour la tâche en cours."
+                    });
+                    // #region agent log
+                    agent_debug_log(
+                        "api.rs:post_message",
+                        "message_queued_to_running_task",
+                        "B",
+                        serde_json::json!({
+                            "task_id": tid.to_string(),
+                            "session_id": session_id,
+                            "queue_mode": queued.mode,
+                        }),
+                    );
+                    // #endregion
+                    return json_response("200 OK", &body.to_string());
+                }
+            }
+        }
+
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
         // Capture the raw user message for code-RAG retrieval before any prefixes are injected.
         let raw_user_message = message.clone();
         let mut message_for_llm = message;
+        if let Some(mode) = message_delivery_mode.as_deref() {
+            if mode == "steering" || mode == "follow_up" {
+                message_for_llm = format!(
+                    "[Delivery mode hint: `{mode}`. Prefer coherent continuation with the current session state.]\n\n{}",
+                    message_for_llm
+                );
+            }
+        }
+        if let Some(parent_task_id) = fork_from_task_id.as_ref() {
+            let cut = fork_after_message_index
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            message_for_llm = format!(
+                "[Session fork context] Parent task: {parent_task_id}; cut index: {cut}. Continue from this branch only.\n\n{}",
+                message_for_llm
+            );
+        }
         if let Some(ref root) = studio_disk_root {
             if let Some(plan) = crate::api_studio::studio_code_plan_message_prefix(root) {
                 message_for_llm = format!("{plan}{message_for_llm}");
+            }
+            if let Some(s) = crate::api_studio::studio_project_summary_prefix(root) {
+                message_for_llm = format!("{s}{message_for_llm}");
             }
             let (evol_prefix, policy_prefix, tech_prefix) =
                 crate::api_studio::studio_meta_prefixes(root);
@@ -13418,6 +16100,19 @@ pub async fn handle_api(
             if let Some(ref h) = studio_policy_hint {
                 if let Some(p) = crate::api_studio::studio_one_shot_policy_hint_prefix(h) {
                     message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if let Some(ref ticket_id) = studio_ticket_id {
+                if let Some(ticket) = crate::api_studio::studio_get_ticket(root, ticket_id) {
+                    message_for_llm = format!(
+                        "[Ticket Kanban obligatoire]\n- ticket_id: {}\n- titre: {}\n- assigned_agent: {}\n- review_agent: {}\n- status: {}\n- contraintes: ne pas clôturer en done; produire un résultat exécutable et laisser le ticket en review pour validation.\n\n{}",
+                        ticket.id,
+                        ticket.title,
+                        ticket.assigned_agent,
+                        ticket.review_agent,
+                        ticket.status,
+                        message_for_llm
+                    );
                 }
             }
             if let Some(ref h) = studio_design_hint {
@@ -13472,6 +16167,11 @@ pub async fn handle_api(
                     "[Délégation : privilégier une seule passe agent — éviter les sous-agents ou tâches parallèles implicites sans accord utilisateur.]\n\n{}",
                     message_for_llm
                 );
+            } else {
+                message_for_llm = format!(
+                    "[Délégation obligatoire (Code Studio ; option « délégation simple » désactivée) : tu dois router la demande via `delegate_to_agent <agent_type> <message>` vers l’agent le plus adapté (`conversation`, `code`, `qa`, `studio_planner`, `studio_scaffold`, `studio_frontend`, `studio_backend`, `studio_fullstack`, ou autre spécialiste reconnu). Le sous-agent exécute le travail sur le dépôt ; en tant que chef de projet, n’implémente pas toi-même le code applicatif dans ce tour (`write_file`, `search_replace`, `run_command` sur les sources) — délègue. Exception : seuls les fichiers de planification imposés par les règles Code Studio (`workspace:/specs/…`, sections de `CODE_STUDIO_PLAN.md`) peuvent être mis à jour par toi si une évolution l’exige avant délégation. Les sous-agents ne rappellent pas `delegate_to_agent`.\n\n{}",
+                    message_for_llm
+                );
             }
             if let Some(pref) = studio_ui_agent_preference.as_ref() {
                 if !pref.is_empty() && pref != "studio_project_manager" {
@@ -13481,18 +16181,58 @@ pub async fn handle_api(
                     );
                 }
             }
+            if let Some(ref pay) = studio_acceptance_parsed {
+                let prefix = crate::api_studio::format_acceptance_prefix_for_llm(pay);
+                if !prefix.is_empty() {
+                    message_for_llm = format!("{prefix}{message_for_llm}");
+                }
+                if let Ok(embed) = serde_json::to_string(pay) {
+                    message_for_llm.push_str(crate::api_studio::STUDIO_ACCEPTANCE_JSON_BEGIN);
+                    message_for_llm.push_str(&embed);
+                    message_for_llm.push_str(crate::api_studio::STUDIO_ACCEPTANCE_JSON_END);
+                }
+            }
         }
         let mut envelope = crate::gateway::MessageEnvelope::api(
             session_id.clone(),
             message_for_llm,
             image_data_urls,
             priority,
+            incognito,
         );
-        envelope.studio_disk_root = studio_disk_root;
+        envelope.studio_disk_root = studio_disk_root.clone();
         envelope.studio_forced_agent = studio_forced_agent;
         envelope.studio_evolution_branch = studio_evolution_branch;
         match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
+                if let (Some(root), Some(ticket_id)) = (studio_disk_root.as_ref(), studio_ticket_id.as_ref()) {
+                    let _ = crate::api_studio::studio_attach_task_to_ticket(
+                        root,
+                        ticket_id,
+                        &task_id.to_string(),
+                        "system",
+                    );
+                    if let Ok(task_store) = TaskStore::open(store_path) {
+                        let _ = task_store.insert_event(
+                            task_id,
+                            "studio_ticket_link",
+                            Some(&serde_json::json!({
+                                "ticket_id": ticket_id,
+                            })),
+                            &chrono::Utc::now().to_rfc3339(),
+                        );
+                    }
+                }
+                if let Some(meta) = fork_meta_for_task {
+                    if let Ok(task_store) = TaskStore::open(store_path) {
+                        let _ = task_store.insert_event(
+                            task_id,
+                            "session_fork_created",
+                            Some(&meta),
+                            &chrono::Utc::now().to_rfc3339(),
+                        );
+                    }
+                }
                 let body = serde_json::json!({
                     "ack": true,
                     "task_id": task_id.to_string(),
@@ -13556,8 +16296,38 @@ pub async fn handle_api(
                 if method == "POST" && parts.get(1) == Some(&"resume") {
                     return resume_task(store_path, id, main_agent).await;
                 }
+                if method == "GET" && parts.get(1) == Some(&"queue") {
+                    if let Some(ref sq) = steering_queue {
+                        let body = sq.snapshot(id).await;
+                        return json_response("200 OK", &body.to_string());
+                    }
+                    return json_response("200 OK", r#"{"steering":[],"follow_up":[]}"#);
+                }
+                if method == "DELETE" && parts.get(1) == Some(&"queue") {
+                    if let Some(ref sq) = steering_queue {
+                        let (s, f) = sq.flush(id).await;
+                        if let Ok(ts) = TaskStore::open(store_path) {
+                            let _ = ts.insert_event(
+                                id,
+                                "user_queue_flushed",
+                                Some(&serde_json::json!({
+                                    "steering_removed": s,
+                                    "follow_up_removed": f,
+                                    "schema_version": 1
+                                })),
+                                &chrono::Utc::now().to_rfc3339(),
+                            );
+                        }
+                        let body = serde_json::json!({ "ok": true, "steering_removed": s, "follow_up_removed": f });
+                        return json_response("200 OK", &body.to_string());
+                    }
+                    return json_response("200 OK", r#"{"ok":true,"steering_removed":0,"follow_up_removed":0}"#);
+                }
                 if method == "GET" && parts.get(1) == Some(&"events") {
                     return get_task_events(store_path, events, id).await;
+                }
+                if method == "GET" && parts.get(1) == Some(&"report") {
+                    return get_task_report(store_path, events, id).await;
                 }
                 if method == "GET" && parts.get(1) == Some(&"studio-diff") {
                     return get_task_studio_diff(store_path, id).await;
@@ -13617,6 +16387,24 @@ pub async fn handle_api(
                     return get_schedule_exceptions(store_path, id).await;
                 }
                 return get_schedule_by_id(store_path, id).await;
+            }
+        }
+    }
+    // POST /api/schedules/{id}/pause|resume|run_now — scheduled job ops (enabled flag + manual fire).
+    if method == "POST" && path.starts_with("/api/schedules/") {
+        let rest = path.trim_start_matches("/api/schedules/");
+        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.len() == 2 {
+            if let Ok(id) = Uuid::parse_str(parts[0]) {
+                let resp = match parts[1] {
+                    "pause" => Some(schedule_set_enabled(store_path, id, false).await),
+                    "resume" => Some(schedule_set_enabled(store_path, id, true).await),
+                    "run_now" | "run-now" => Some(schedule_run_now(store_path, main_agent, id).await),
+                    _ => None,
+                };
+                if let Some(r) = resp {
+                    return r;
+                }
             }
         }
     }
@@ -13685,9 +16473,41 @@ pub async fn handle_api(
 
     // Phase 5: Plugins
     if method == "GET" && path == "/api/plugins" {
+        if let Some(cached) = crate::http_get_cache::cache_get_plugins() {
+            return json_response("200 OK", &cached);
+        }
         let list = plugin_registry.list();
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+        crate::http_get_cache::cache_put_plugins(&body);
         return json_response("200 OK", &body);
+    }
+    if method == "GET" && (path == "/api/plugins/catalog" || path.starts_with("/api/plugins/catalog?")) {
+        match crate::plugin_install::fetch_remote_catalog(None).await {
+            Ok(catalog) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::to_string(&catalog).unwrap_or_else(|_| "{}".to_string()),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "502 Bad Gateway",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+    if method == "GET" && path == "/api/plugins/metrics" {
+        if let Some(cached) = crate::http_get_cache::cache_get_plugins_metrics() {
+            return json_response("200 OK", &cached);
+        }
+        let m = crate::plugins::metrics::snapshot();
+        let body = serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string());
+        crate::http_get_cache::cache_put_plugins_metrics(&body);
+        return json_response(
+            "200 OK",
+            &body,
+        );
     }
     // GET /api/plugins/routing_rules[?message=...] — debug dynamic plugin routing rules
     // - Without message: returns all declared routing rules from loaded plugin manifests.
@@ -13723,7 +16543,7 @@ pub async fn handle_api(
         let (active_intents, matched_rules) = if let Some(ref msg) = message {
             let flags = compute_message_intent_flags(msg);
             let intents = active_intents_from_flags(&flags);
-            let tools_executor_snapshot = if let Some(exec_lock) = _tools_executor {
+            let tools_executor_snapshot = if let Some(exec_lock) = tools_executor {
                 Some(exec_lock.read().await.clone())
             } else {
                 None
@@ -13746,6 +16566,8 @@ pub async fn handle_api(
             "active_intents": active_intents,
             "matched_rules_count": matched_rules.len(),
             "matched_rules": matched_rules,
+            "routing_rules_deprecated": true,
+            "routing_rules_note": "Manifest routing_rules are no longer enforced at runtime. Plugin hints are chosen via a short system LLM call from plugin descriptions; this endpoint remains for debugging legacy manifests.",
         });
         return json_response("200 OK", &body.to_string());
     }
@@ -13801,7 +16623,7 @@ pub async fn handle_api(
 
         let flags = compute_message_intent_flags(message);
         let intents = active_intents_from_flags(&flags);
-        let tools_executor_snapshot = if let Some(exec_lock) = _tools_executor {
+        let tools_executor_snapshot = if let Some(exec_lock) = tools_executor {
             Some(exec_lock.read().await.clone())
         } else {
             None
@@ -13826,12 +16648,133 @@ pub async fn handle_api(
             "allowed_tools": allowed_tools,
             "matched_rules_count": matched_rules.len(),
             "matched_rules": matched_rules,
+            "routing_rules_deprecated": true,
+            "routing_rules_note": "Manifest routing_rules are no longer enforced at runtime. Plugin hints are chosen via a short system LLM call from plugin descriptions; this endpoint remains for debugging legacy manifests.",
         });
         return json_response("200 OK", &body.to_string());
     }
     if method == "POST" && path == "/api/plugins/reload" {
         plugin_registry.reload();
         return json_response("200 OK", r#"{"reloaded":true}"#);
+    }
+    if method == "GET" && path == "/api/tools/policy" {
+        let policy_path = data_dir.join("tools_policy.yaml");
+        let policy = akasha_tools::ToolsPolicy::load_from_path(&policy_path).unwrap_or_default();
+        let body = serde_json::json!({
+            "policy": policy,
+            "path": policy_path.display().to_string(),
+            "exists": policy_path.is_file(),
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/tools/policy" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let policy_value = body_json
+            .as_ref()
+            .and_then(|j| j.get("policy").cloned())
+            .or_else(|| body_json.clone());
+        let Some(policy_value) = policy_value else {
+            return json_response("400 Bad Request", r#"{"error":"missing policy"}"#);
+        };
+        let policy: akasha_tools::ToolsPolicy = match serde_json::from_value(policy_value) {
+            Ok(p) => p,
+            Err(e) => {
+                let body = serde_json::json!({
+                    "error": "invalid_policy",
+                    "detail": e.to_string()
+                });
+                return json_response("400 Bad Request", &body.to_string());
+            }
+        };
+        let policy_path = data_dir.join("tools_policy.yaml");
+        if let Err(e) = policy.save_to_path(&policy_path) {
+            let body = serde_json::json!({
+                "error": "save_failed",
+                "detail": e.to_string()
+            });
+            return json_response("500 Internal Server Error", &body.to_string());
+        }
+        let reloaded = match tools_executor {
+            Some(exec) => reload_tools_executor_policy(exec, policy_path.as_path(), data_dir)
+                .await
+                .is_ok(),
+            None => false,
+        };
+        tracing::info!(path = %policy_path.display(), reloaded, "Tools policy saved from settings");
+        let body = serde_json::json!({ "ok": true, "reloaded": reloaded });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/tools/reload" {
+        let policy_path = data_dir.join("tools_policy.yaml");
+        match tools_executor {
+            Some(exec) => match reload_tools_executor_policy(exec, policy_path.as_path(), data_dir).await
+            {
+                Ok(()) => {
+                    tracing::info!(path = %policy_path.display(), "Tools policy hot-reloaded");
+                    return json_response("200 OK", r#"{"reloaded":true}"#);
+                }
+                Err(e) => {
+                    let body = serde_json::json!({
+                        "error": "reload_failed",
+                        "detail": e.to_string()
+                    })
+                    .to_string();
+                    return json_response("500 Internal Server Error", &body);
+                }
+            },
+            None => {
+                let body = serde_json::json!({ "error": "tools_executor_unavailable" }).to_string();
+                return json_response("503 Service Unavailable", &body);
+            }
+        }
+    }
+    if method == "GET" && path == "/api/connectors" {
+        let connectors = crate::connectors_config::connectors_status(data_dir);
+        let config = crate::connectors_config::connectors_config_view(data_dir);
+        let restart_required = connectors
+            .iter()
+            .any(|c| c.enabled_in_file != c.active_in_process);
+        let body = serde_json::json!({
+            "connectors": connectors,
+            "config": config,
+            "restart_required": restart_required,
+            "matrix_note": "Matrix uses plugin matrix-channel sidecar and MATRIX_* env vars (manual setup)."
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/connectors" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let Some(ref j) = body_json else {
+            return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
+        };
+        let update: crate::connectors_config::ConnectorsUpdate =
+            match serde_json::from_value(j.clone()) {
+                Ok(u) => u,
+                Err(e) => {
+                    let body = serde_json::json!({
+                        "error": "invalid_body",
+                        "detail": e.to_string()
+                    });
+                    return json_response("400 Bad Request", &body.to_string());
+                }
+            };
+        match crate::connectors_config::apply_connectors_update(data_dir, &update) {
+            Ok(()) => {
+                let body = serde_json::json!({ "ok": true, "restart_required": true });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                let body = serde_json::json!({
+                    "error": "save_failed",
+                    "detail": e.to_string()
+                });
+                return json_response("500 Internal Server Error", &body.to_string());
+            }
+        }
     }
     // POST /api/plugins/reputation/reset
     // Body optional:
@@ -13880,6 +16823,60 @@ pub async fn handle_api(
         }
     }
 
+    // POST /api/plugins/{id}/disable | /enable | /uninstall — user plugin management
+    if method == "POST" && path.starts_with("/api/plugins/") {
+        if let Some(rest) = path.strip_prefix("/api/plugins/") {
+            let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            if segs.len() == 2 {
+                let plugin_id = segs[0];
+                let action = segs[1];
+                if !akasha_plugin_api::is_safe_plugin_id(plugin_id) {
+                    let body = serde_json::json!({ "error": "invalid_plugin_id" });
+                    return json_response("400 Bad Request", &body.to_string());
+                }
+                let maybe_result = match action {
+                    "disable" => Some(plugin_registry.set_enabled(plugin_id, false)),
+                    "enable" => Some(plugin_registry.set_enabled(plugin_id, true)),
+                    "uninstall" => Some(plugin_registry.uninstall(plugin_id)),
+                    _ => None,
+                };
+                if let Some(result) = maybe_result {
+                    match result {
+                        Ok(()) => {
+                            let body = serde_json::json!({
+                                "ok": true,
+                                "id": plugin_id,
+                                "action": action,
+                            });
+                            return json_response("200 OK", &body.to_string());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            let body = serde_json::json!({
+                                "error": "not_found",
+                                "detail": e.to_string(),
+                            });
+                            return json_response("404 Not Found", &body.to_string());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                            let body = serde_json::json!({
+                                "error": "invalid_plugin_id",
+                                "detail": e.to_string(),
+                            });
+                            return json_response("400 Bad Request", &body.to_string());
+                        }
+                        Err(e) => {
+                            let body = serde_json::json!({
+                                "error": "plugin_action_failed",
+                                "detail": e.to_string(),
+                            });
+                            return json_response("500 Internal Server Error", &body.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Phase D: Skills (loadable skills for agents; Agent Skills spec + flat YAML)
     if method == "GET" && path == "/api/skills" {
         let list = skill_registry.list().await;
@@ -13913,7 +16910,7 @@ pub async fn handle_api(
         match name {
             Some(skill_name) => {
                 let policy_path = data_dir.join("tools_policy.yaml");
-                let tools_reload = _tools_executor.map(|r| (r, policy_path.as_path()));
+                let tools_reload = tools_executor.map(|r| (r, policy_path.as_path()));
                 let (ok, msg) = do_uninstall_skill(
                     &skill_name,
                     data_dir,
@@ -13952,7 +16949,7 @@ pub async fn handle_api(
             .map(String::from);
         match url {
             Some(skill_url) => {
-                let allowed_hosts = if let Some(exec_lock) = _tools_executor {
+                let allowed_hosts = if let Some(exec_lock) = tools_executor {
                     exec_lock.read().await.policy.skill_install_allowed_hosts()
                 } else {
                     vec![
@@ -13964,7 +16961,7 @@ pub async fn handle_api(
                 let policy_path = data_dir.join("tools_policy.yaml");
                 // tools_reload: passed to do_install_skill so it can hot-reload tools_policy
                 // after the new skill command entry is registered.
-                let tools_reload = _tools_executor.map(|r| (r, policy_path.as_path()));
+                let tools_reload = tools_executor.map(|r| (r, policy_path.as_path()));
                 let (ok, msg) = do_install_skill(
                     &skill_url,
                     data_dir,
@@ -13990,7 +16987,7 @@ pub async fn handle_api(
     }
 
     // Liste des outils machine disponibles (Phase A)
-    if method == "GET" && path == "/api/tools" {
+    if method == "GET" && (path == "/api/tools" || path_only == "/api/tools") {
         let list: Vec<serde_json::Value> = AVAILABLE_TOOLS
             .iter()
             .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
@@ -13998,6 +16995,599 @@ pub async fn handle_api(
         let body = serde_json::to_string(&serde_json::json!({ "tools": list }))
             .unwrap_or_else(|_| "{}".to_string());
         return json_response("200 OK", &body);
+    }
+
+    // Effective tool policy (toolset visibility): allowed / approval / rule sources.
+    if method == "GET" && path_only == "/api/tools/effective" {
+        match tools_executor {
+            Some(ex_arc) => {
+                let ex_inner = ex_arc.read().await;
+                let executor = ex_inner.as_ref();
+                let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
+                let rows = executor.policy.effective_tool_rows(&names);
+                let body = serde_json::to_string(&serde_json::json!({
+                    "tools": rows,
+                    "default_profile": executor.policy.default_profile,
+                }))
+                .unwrap_or_else(|_| "{}".to_string());
+                return json_response("200 OK", &body);
+            }
+            None => {
+                return json_response(
+                    "503 Service Unavailable",
+                    r#"{"error":"tools_executor_unavailable"}"#,
+                );
+            }
+        }
+    }
+
+    // Telegram channel access (pairing + RBAC lifecycle)
+    if method == "GET" && path_only == "/api/channel-access/telegram/users" {
+        let state = crate::channel_access::load(data_dir);
+        let body = serde_json::json!({
+            "approved": state.approved,
+            "pending": state.pending
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/request" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let username = body_json
+            .as_ref()
+            .and_then(|v| v.get("username").and_then(|s| s.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let mut state = crate::channel_access::load(data_dir);
+        if crate::channel_access::is_approved_user(&state, user_id) {
+            return json_response("200 OK", r#"{"ok":true,"already_approved":true}"#);
+        }
+        state.pending.retain(|p| p.user_id != user_id);
+        let code = format!("TG-{}", Uuid::new_v4().to_string()[..8].to_uppercase());
+        state.pending.push(crate::channel_access::TelegramPending {
+            user_id,
+            username,
+            pairing_code: code.clone(),
+            requested_at: chrono::Utc::now().to_rfc3339(),
+        });
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist pairing request");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
+        let body = serde_json::json!({ "ok": true, "pairing_code": code });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/approve" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let code = body_json
+            .as_ref()
+            .and_then(|v| v.get("pairing_code").and_then(|s| s.as_str()))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        let mut state = crate::channel_access::load(data_dir);
+        let pending = if !code.is_empty() {
+            let idx = state.pending.iter().position(|p| p.pairing_code == code);
+            idx.map(|i| state.pending.remove(i))
+        } else if user_id != 0 {
+            let idx = state.pending.iter().position(|p| p.user_id == user_id);
+            idx.map(|i| state.pending.remove(i))
+        } else {
+            None
+        };
+        let Some(pending) = pending else {
+            return json_response("404 Not Found", r#"{"error":"pending_not_found"}"#);
+        };
+        let is_first = state.approved.is_empty();
+        state.approved.retain(|u| u.user_id != pending.user_id);
+        state.approved.push(crate::channel_access::TelegramUser {
+            user_id: pending.user_id,
+            username: pending.username,
+            role: if is_first {
+                crate::channel_access::TelegramRole::Admin
+            } else {
+                crate::channel_access::TelegramRole::Member
+            },
+            approved_at: chrono::Utc::now().to_rfc3339(),
+        });
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist approve");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
+        return json_response("200 OK", r#"{"ok":true}"#);
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/reject" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        let before = state.pending.len();
+        state.pending.retain(|p| p.user_id != user_id);
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist reject");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
+        let removed = before != state.pending.len();
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "removed": removed }).to_string(),
+        );
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/remove" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        let before = state.approved.len();
+        state.approved.retain(|u| u.user_id != user_id);
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist remove");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
+        let removed = before != state.approved.len();
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "removed": removed }).to_string(),
+        );
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/promote" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        if let Some(u) = state.approved.iter_mut().find(|u| u.user_id == user_id) {
+            u.role = crate::channel_access::TelegramRole::Admin;
+            if let Err(e) = crate::channel_access::save(data_dir, &state) {
+                tracing::error!(error = %e, "channel-access: failed to persist promote");
+                return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+            }
+            return json_response("200 OK", r#"{"ok":true}"#);
+        }
+        return json_response("404 Not Found", r#"{"error":"user_not_found"}"#);
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/demote" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        if let Some(u) = state.approved.iter_mut().find(|u| u.user_id == user_id) {
+            u.role = crate::channel_access::TelegramRole::Member;
+            if let Err(e) = crate::channel_access::save(data_dir, &state) {
+                tracing::error!(error = %e, "channel-access: failed to persist demote");
+                return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+            }
+            return json_response("200 OK", r#"{"ok":true}"#);
+        }
+        return json_response("404 Not Found", r#"{"error":"user_not_found"}"#);
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/reset" {
+        let state = crate::channel_access::TelegramAccessState::default();
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist reset");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
+        return json_response("200 OK", r#"{"ok":true}"#);
+    }
+
+    if method == "GET" && path_only == "/api/permissions/mode" {
+        let state = load_permission_mode(data_dir);
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "mode": state.mode, "updated_at": state.updated_at }).to_string(),
+        );
+    }
+    if method == "POST" && path_only == "/api/permissions/mode" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mode = body_json
+            .as_ref()
+            .and_then(|v| v.get("mode").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .to_lowercase();
+        if mode != "ask_me" && mode != "allow_all" {
+            return json_response("400 Bad Request", r#"{"error":"invalid_mode"}"#);
+        }
+        let state = PermissionModeState {
+            mode,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        match save_permission_mode(data_dir, &state) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "mode": state.mode }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+
+    // Permission center: persisted approval decisions.
+    if method == "GET" && path_only == "/api/permissions/decisions" {
+        let state = crate::permissions_center::load(data_dir);
+        let body = serde_json::json!({ "decisions": state.decisions });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "GET" && path_only == "/api/permissions/queue" {
+        let status_filter = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("status=")))
+            .and_then(|p| p.split_once('=').map(|(_, v)| decode_url_component(v)))
+            .and_then(|v| crate::permissions_queue::QueueStatus::parse(&v));
+        let limit = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("limit=")))
+            .and_then(|p| p.split_once('=').map(|(_, v)| v.to_string()))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100)
+            .clamp(1, 500);
+        let mut items = crate::permissions_queue::load(data_dir).requests;
+        if let Some(status) = status_filter {
+            items.retain(|i| i.status == status);
+        }
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.truncate(limit);
+        let body = serde_json::json!({ "items": items });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "GET" && path_only.starts_with("/api/permissions/queue/") {
+        let id = path_only.trim_start_matches("/api/permissions/queue/").trim();
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        if let Some(item) = crate::permissions_queue::get_request(data_dir, id) {
+            return json_response(
+                "200 OK",
+                &serde_json::json!({ "item": item }).to_string(),
+            );
+        }
+        return json_response("404 Not Found", r#"{"error":"request_not_found"}"#);
+    }
+    if method == "POST"
+        && (path_only.starts_with("/api/permissions/queue/") && path_only.ends_with("/approve"))
+    {
+        let id = path_only
+            .trim_start_matches("/api/permissions/queue/")
+            .trim_end_matches("/approve")
+            .trim_matches('/');
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        let (note, decision_source) = permission_queue_decision_body(body.as_deref());
+        match crate::permissions_queue::update_status(
+            data_dir,
+            id,
+            crate::permissions_queue::QueueStatus::Approved,
+            note,
+            decision_source.or(Some("api".to_string())),
+        ) {
+            Ok(Some(item)) => {
+                if let (Some(store), Ok(task_id)) =
+                    (human_input_store.as_ref(), Uuid::parse_str(&item.task_id))
+                {
+                    let pending = {
+                        let mut g = store.write().await;
+                        g.remove(&task_id)
+                    };
+                    if let Some(pending) = pending {
+                        let _ = pending.response_tx.send("Approuver".to_string());
+                    }
+                }
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "item": item }).to_string(),
+                );
+            }
+            Ok(None) => return json_response("404 Not Found", r#"{"error":"request_not_found"}"#),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "POST"
+        && (path_only.starts_with("/api/permissions/queue/") && path_only.ends_with("/deny"))
+    {
+        let id = path_only
+            .trim_start_matches("/api/permissions/queue/")
+            .trim_end_matches("/deny")
+            .trim_matches('/');
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        let (note, decision_source) = permission_queue_decision_body(body.as_deref());
+        match crate::permissions_queue::update_status(
+            data_dir,
+            id,
+            crate::permissions_queue::QueueStatus::Denied,
+            note,
+            decision_source.or(Some("api".to_string())),
+        ) {
+            Ok(Some(item)) => {
+                if let (Some(store), Ok(task_id)) =
+                    (human_input_store.as_ref(), Uuid::parse_str(&item.task_id))
+                {
+                    let pending = {
+                        let mut g = store.write().await;
+                        g.remove(&task_id)
+                    };
+                    if let Some(pending) = pending {
+                        let _ = pending.response_tx.send("Refuser".to_string());
+                    }
+                }
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "item": item }).to_string(),
+                );
+            }
+            Ok(None) => return json_response("404 Not Found", r#"{"error":"request_not_found"}"#),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "POST"
+        && (path_only.starts_with("/api/permissions/queue/") && path_only.ends_with("/expire"))
+    {
+        let id = path_only
+            .trim_start_matches("/api/permissions/queue/")
+            .trim_end_matches("/expire")
+            .trim_matches('/');
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        match crate::permissions_queue::update_status(
+            data_dir,
+            id,
+            crate::permissions_queue::QueueStatus::Expired,
+            Some("expired by operator".to_string()),
+            Some("api".to_string()),
+        ) {
+            Ok(Some(item)) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "item": item }).to_string(),
+                );
+            }
+            Ok(None) => return json_response("404 Not Found", r#"{"error":"request_not_found"}"#),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "POST" && path_only == "/api/permissions/decisions" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let tool = body_json
+            .as_ref()
+            .and_then(|v| v.get("tool").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let scope = body_json
+            .as_ref()
+            .and_then(|v| v.get("scope").and_then(|s| s.as_str()))
+            .unwrap_or("global")
+            .trim()
+            .to_string();
+        let mode_str = body_json
+            .as_ref()
+            .and_then(|v| v.get("mode").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let mode = match mode_str.as_str() {
+            "allow_persistent" => crate::permissions_center::DecisionMode::AllowPersistent,
+            "deny_persistent" => crate::permissions_center::DecisionMode::DenyPersistent,
+            _ => {
+                return json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid_mode","expected":"allow_persistent|deny_persistent"}"#,
+                )
+            }
+        };
+        if tool.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_tool"}"#);
+        }
+        let mut state = crate::permissions_center::load(data_dir);
+        state
+            .decisions
+            .retain(|d| !(d.tool == tool && d.scope == scope));
+        let decision = crate::permissions_center::PermissionDecision {
+            id: Uuid::new_v4().to_string(),
+            tool,
+            scope,
+            mode,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: None,
+        };
+        state.decisions.push(decision.clone());
+        match crate::permissions_center::save(data_dir, &state) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "decision": decision }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "DELETE" && path_only.starts_with("/api/permissions/decisions/") {
+        let id = path_only
+            .trim_start_matches("/api/permissions/decisions/")
+            .trim();
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        let mut state = crate::permissions_center::load(data_dir);
+        let before = state.decisions.len();
+        state.decisions.retain(|d| d.id != id);
+        let removed = before != state.decisions.len();
+        if removed {
+            if let Err(e) = crate::permissions_center::save(data_dir, &state) {
+                tracing::error!(error = %e, id = %id, "permissions/decisions: failed to persist delete");
+                return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+            }
+        }
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "removed": removed, "id": id }).to_string(),
+        );
+    }
+
+    // Budget controls (daily limit + warning ratio + auto-concise mode).
+    if method == "GET" && path_only == "/api/budget" {
+        let settings = load_budget_settings(data_dir);
+        let session_id = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("session_id=")))
+            .map(|p| p.trim_start_matches("session_id=").to_string())
+            .unwrap_or_default();
+        let session_usage = if session_id.is_empty() {
+            None
+        } else {
+            task_usage_store.get_session(&session_id).await
+        };
+        let totals = task_usage_store.totals().await;
+        let used_tokens = session_usage.map(|u| u.0).unwrap_or(totals.0);
+        let used_cost_usd = session_usage.map(|u| u.1).unwrap_or(totals.1);
+        let usage_ratio = if settings.daily_token_limit == 0 {
+            0.0
+        } else {
+            used_tokens as f64 / settings.daily_token_limit as f64
+        };
+        let body = serde_json::json!({
+            "settings": settings,
+            "session_id": if session_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(session_id) },
+            "usage": {
+                "tokens": used_tokens,
+                "cost_usd": used_cost_usd,
+                "ratio": usage_ratio,
+                "warn_reached": usage_ratio >= settings.warn_ratio
+            }
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/budget" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mut settings = load_budget_settings(data_dir);
+        if let Some(limit) = body_json
+            .as_ref()
+            .and_then(|v| v.get("daily_token_limit").and_then(|n| n.as_u64()))
+        {
+            settings.daily_token_limit = limit;
+        }
+        if let Some(warn_ratio) = body_json
+            .as_ref()
+            .and_then(|v| v.get("warn_ratio").and_then(|n| n.as_f64()))
+        {
+            settings.warn_ratio = warn_ratio.clamp(0.0, 1.0);
+        }
+        if let Some(auto_concise) = body_json
+            .as_ref()
+            .and_then(|v| v.get("auto_concise").and_then(|b| b.as_bool()))
+        {
+            settings.auto_concise = auto_concise;
+        }
+        match save_budget_settings(data_dir, &settings) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "settings": settings }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "POST" && path_only == "/api/budget/reset-session" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let session_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("session_id").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if session_id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_session_id"}"#);
+        }
+        task_usage_store.reset_session(&session_id).await;
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "session_id": session_id }).to_string(),
+        );
     }
 
     // User RAG: list documents
@@ -14050,8 +17640,10 @@ pub async fn handle_api(
         let store = user_rag_store.lock().await;
         match store.add_document(&content_base64, &name, &mime_type) {
             Ok(id) => {
+                let data_dir = store_path.parent().unwrap_or(store_path).to_path_buf();
+                crate::api_routes_kinbot::spawn_user_rag_index(data_dir, id.clone());
                 let body =
-                    serde_json::json!({ "id": id, "name": name, "message": "Document ajouté." });
+                    serde_json::json!({ "id": id, "name": name, "message": "Document ajouté.", "index_status": "pending" });
                 return json_response("200 OK", &body.to_string());
             }
             Err(e) => {
@@ -14126,10 +17718,16 @@ pub async fn handle_api(
         };
         match llm_router.complete(&req).await {
             Ok(resp) => {
+                let latency_ms = resp
+                    .total_duration_ns
+                    .map(|ns| ns / 1_000_000)
+                    .unwrap_or(0);
                 let body = serde_json::json!({
                     "text": resp.text,
                     "model_used": resp.model_used,
-                    "usage": resp.usage
+                    "usage": resp.usage,
+                    "cost_usd": resp.cost_usd,
+                    "latency_ms": latency_ms,
                 });
                 return json_response("200 OK", &body.to_string());
             }
@@ -14237,6 +17835,33 @@ pub async fn handle_api(
         return json_response("200 OK", &body.to_string());
     }
 
+    // POST /api/router/reload — hot-reload llm_router.yaml (routes/models per task type)
+    if method == "POST" && path == "/api/router/reload" {
+        let router_path = data_dir.join("llm_router.yaml");
+        match akasha_llm::config::RoutingConfig::load_from_path(&router_path) {
+            Ok(config) => {
+                llm_router.reload_routing_config(config);
+                crate::http_get_cache::invalidate_router_models();
+                crate::http_get_cache::invalidate_router_routes();
+                tracing::info!(path = %router_path.display(), "LLM router config hot-reloaded");
+                let body = serde_json::json!({
+                    "reloaded": true,
+                    "path": router_path.display().to_string(),
+                    "message": "Routes and models reloaded from llm_router.yaml."
+                });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                let body = serde_json::json!({
+                    "error": "reload_failed",
+                    "detail": e.to_string()
+                })
+                .to_string();
+                return json_response("500 Internal Server Error", &body);
+            }
+        }
+    }
+
     // POST /api/router/embedded/reload — unload embedded model; next request will load it again
     if method == "POST" && path == "/api/router/embedded/reload" {
         llm_router.embedded_unload();
@@ -14267,6 +17892,11 @@ pub async fn handle_api(
             .and_then(|j| j.get("model"))
             .and_then(|v| v.as_str())
             .map(String::from);
+        let role = body_json
+            .as_ref()
+            .and_then(|j| j.get("role"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("primary");
         match (category, provider, model) {
             (Some(cat), Some(prov), Some(modl))
                 if !cat.is_empty() && !prov.is_empty() && !modl.is_empty() =>
@@ -14280,11 +17910,16 @@ pub async fn handle_api(
                     model: modl.clone(),
                     config: None,
                 };
-                llm_router.set_primary_route(&cat, entry.clone());
                 let router_path = data_dir.join("llm_router.yaml");
                 let mut config = akasha_llm::config::RoutingConfig::load_from_path(&router_path)
                     .unwrap_or_else(|_| akasha_llm::config::RoutingConfig::default_config());
-                config.set_primary_route(&cat, entry);
+                if role == "fallback" {
+                    llm_router.add_fallback_route(&cat, entry.clone());
+                    config.add_fallback_route(&cat, entry);
+                } else {
+                    llm_router.set_primary_route(&cat, entry.clone());
+                    config.set_primary_route(&cat, entry);
+                }
                 if let Err(e) = config.save_to_path(&router_path) {
                     let body_err =
                         serde_json::json!({ "ok": false, "error": format!("save failed: {}", e) });
@@ -14295,8 +17930,15 @@ pub async fn handle_api(
                     "category": cat,
                     "provider": prov,
                     "model": modl,
-                    "message": "Route updated (in memory and saved to llm_router.yaml)."
+                    "role": role,
+                    "message": if role == "fallback" {
+                        "Fallback route added (in memory and saved to llm_router.yaml)."
+                    } else {
+                        "Route updated (in memory and saved to llm_router.yaml)."
+                    }
                 });
+                crate::http_get_cache::invalidate_router_models();
+                crate::http_get_cache::invalidate_router_routes();
                 return json_response("200 OK", &body_ok.to_string());
             }
             _ => {
@@ -14309,13 +17951,20 @@ pub async fn handle_api(
 
     // GET /api/router/routes — list primary + fallback per category (for CLI and TUI "models by category")
     if method == "GET" && path == "/api/router/routes" {
+        if let Some(cached) = crate::http_get_cache::cache_get_router_routes() {
+            return json_response("200 OK", &cached);
+        }
         let routes = llm_router.routes_by_category();
         let body = serde_json::to_string(&routes).unwrap_or_else(|_| "{}".to_string());
+        crate::http_get_cache::cache_put_router_routes(&body);
         return json_response("200 OK", &body);
     }
 
     // GET /api/router/models — list models from all providers (config + Ollama live when available)
     if method == "GET" && path == "/api/router/models" {
+        if let Some(cached) = crate::http_get_cache::cache_get_router_models() {
+            return json_response("200 OK", &cached);
+        }
         let mut providers: std::collections::HashMap<String, Vec<String>> =
             llm_router.list_models_from_config();
         if let Some(base_url) = ollama_base_url
@@ -14357,7 +18006,9 @@ pub async fn handle_api(
             }
         }
         let body = serde_json::json!({ "providers": providers });
-        return json_response("200 OK", &body.to_string());
+        let body_str = body.to_string();
+        crate::http_get_cache::cache_put_router_models(&body_str);
+        return json_response("200 OK", &body_str);
     }
 
     // GET /api/router/ollama/models — list models from configured Ollama (kept for backward compat)
@@ -14612,10 +18263,15 @@ async fn cancel_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::Ma
 }
 
 /// Returns true when a task in `status` can be paused.
-/// Only `Pending` and `Queued` tasks can be paused safely; `Running` tasks cannot be cooperatively
-/// interrupted and must be allowed to complete or be cancelled instead.
+/// `Running` : la pause est appliquée en base ; la boucle outils sort au prochain tour et ne marque pas la tâche comme terminée.
 pub(crate) fn is_pausable(status: &TaskStatus) -> bool {
-    matches!(status, TaskStatus::Pending | TaskStatus::Queued)
+    matches!(
+        status,
+        TaskStatus::Pending
+            | TaskStatus::Queued
+            | TaskStatus::Running
+            | TaskStatus::WaitingUserInput
+    )
 }
 
 /// Returns true when a task in `status` can be resumed.
@@ -14639,7 +18295,7 @@ async fn pause_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::Mai
     if !is_pausable(&task.status) {
         let body = serde_json::json!({
             "error": "task_not_pausable",
-            "detail": "La tâche ne peut pas être mise en pause dans son état actuel (déjà terminée, annulée, en pause ou en cours d'exécution).",
+            "detail": "La tâche ne peut pas être mise en pause dans son état actuel (terminée, annulée, en pause ou interrompue).",
             "status": task.status.as_str()
         });
         return json_response("400 Bad Request", &body.to_string());
@@ -14754,11 +18410,34 @@ fn code_studio_suggested_actions(
     status: &TaskStatus,
     failure_detail: Option<&str>,
     last_progress: Option<&ProgressEntry>,
+    acceptance_review: Option<&serde_json::Value>,
 ) -> Vec<serde_json::Value> {
     use TaskStatus::*;
     let mut v = Vec::new();
     match status {
         Completed => {
+            if let Some(payload) = acceptance_review {
+                if let Some(arr) = payload.get("missing").and_then(|m| m.as_array()) {
+                    if !arr.is_empty() {
+                        let joined = arr
+                            .iter()
+                            .filter_map(|x| x.as_str())
+                            .take(12)
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        if !joined.is_empty() {
+                            v.push(serde_json::json!({
+                                "id": "acceptance_review_followup",
+                                "label": "Compléter les critères signalés",
+                                "kind": "message",
+                                "message": format!(
+                                    "La tâche est terminée mais la revue des critères a signalé des points à clarifier ou compléter : {joined}\n\nPropose des changements concrets (fichiers + étapes) pour les traiter."
+                                )
+                            }));
+                        }
+                    }
+                }
+            }
             v.push(serde_json::json!({
                 "id": "refresh_files",
                 "label": "Rafraîchir la liste des fichiers",
@@ -14851,14 +18530,19 @@ async fn get_task_status(
                 .collect()
         })
         .unwrap_or_default();
-    // Prefer persisted progress when available; fall back to in-memory progress if none is stored.
+    // Merge in-memory progress (live bus updates) with DB rows so polling shows watchdog/LLM
+    // progress even when the persistence writer is contending on SQLite.
+    let mem_entries: Vec<ProgressEntry> = {
+        let g = progress.read().await;
+        g.get(&id)
+            .map(|q| q.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let db_last_pct = progress_list.last().map(|e| e.progress_pct).unwrap_or(0);
+    let mem_last_pct = mem_entries.last().map(|e| e.progress_pct).unwrap_or(0);
     if progress_list.is_empty() {
-        let mem_entries: Vec<ProgressEntry> = {
-            let g = progress.read().await;
-            g.get(&id)
-                .map(|q| q.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
-        };
+        progress_list = mem_entries;
+    } else if mem_last_pct > db_last_pct || mem_entries.len() > progress_list.len() {
         progress_list = mem_entries;
     }
     // For a root task with children, aggregate child progress so the UI shows intermediate percentages.
@@ -14919,6 +18603,8 @@ async fn get_task_status(
         }
     }
     let (tokens_used, cost_usd) = task_usage_store.get_task(id).await.unwrap_or((0, 0.0));
+    let last_turn = task_usage_store.get_last_turn(id).await.unwrap_or_default();
+    let last_turn_model = task_usage_store.get_last_model(id).await;
     let (todos, todos_updated_at) = store
         .get_todos_with_updated_at(id)
         .unwrap_or_else(|_| (Vec::new(), None));
@@ -14945,7 +18631,18 @@ async fn get_task_status(
         None
     };
     let last_for_suggest = progress_list.last().cloned();
-    let suggested = code_studio_suggested_actions(&task.status, failure_detail.as_deref(), last_for_suggest.as_ref());
+    let acceptance_review = store.get_events(id).ok().and_then(|evs| {
+        evs.iter()
+            .rev()
+            .find(|e| e.event_type == "studio_acceptance_review")
+            .and_then(|e| e.payload.clone())
+    });
+    let suggested = code_studio_suggested_actions(
+        &task.status,
+        failure_detail.as_deref(),
+        last_for_suggest.as_ref(),
+        acceptance_review.as_ref(),
+    );
     // Dernière ligne de progression par sous-tâche pour le détail Studio (dédoublonnage côté client par task_id).
     if let Ok(children) = store.get_children(id) {
         if !children.is_empty() {
@@ -14980,6 +18677,11 @@ async fn get_task_status(
         "progress": progress_list,
         "tokens_used": tokens_used,
         "cost_usd": cost_usd,
+        "last_turn_tokens_in": last_turn.prompt_tokens,
+        "last_turn_tokens_out": last_turn.completion_tokens,
+        "last_turn_cost_usd": last_turn.cost_usd,
+        "last_turn_latency_ms": last_turn.latency_ms,
+        "last_turn_model_used": last_turn_model,
         "todos": todos_json,
         "suggested_actions": suggested
     });
@@ -14988,6 +18690,9 @@ async fn get_task_status(
     }
     if let Some(fd) = failure_detail {
         body["failure_detail"] = serde_json::Value::String(fd);
+    }
+    if let Some(ref ar) = acceptance_review {
+        body["acceptance_review"] = ar.clone();
     }
     json_response("200 OK", &body.to_string())
 }
@@ -15291,6 +18996,94 @@ async fn delete_schedule(store_path: &Path, id: Uuid) -> String {
     )
 }
 
+async fn schedule_set_enabled(store_path: &Path, id: Uuid, enabled: bool) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let mut s = match store.get_schedule(id) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return json_response("404 Not Found", r#"{"error":"schedule_not_found"}"#);
+        }
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    s.enabled = enabled;
+    s.updated_at = chrono::Utc::now();
+    if store.update_schedule(&s).is_err() {
+        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    }
+    json_response(
+        "200 OK",
+        &serde_json::json!({ "id": id.to_string(), "enabled": enabled }).to_string(),
+    )
+}
+
+async fn schedule_run_now(
+    store_path: &Path,
+    main_agent: &crate::agents::MainAgent,
+    schedule_id: Uuid,
+) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let s = match store.get_schedule(schedule_id) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return json_response("404 Not Found", r#"{"error":"schedule_not_found"}"#);
+        }
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    if !s.enabled {
+        return json_response(
+            "400 Bad Request",
+            &serde_json::json!({
+                "error": "schedule_paused",
+                "detail": "Resume the schedule before run-now.",
+            })
+            .to_string(),
+        );
+    }
+    let msg = s
+        .channel_context
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(s.name.as_str());
+    let session_id = format!("schedule:{}", schedule_id);
+    let correlation = Uuid::new_v4();
+    match main_agent
+        .handle_message(
+            store_path,
+            msg,
+            correlation,
+            true,
+            &session_id,
+            None,
+            TaskPriority::Scheduled,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+    {
+        Ok(task_id) => json_response(
+            "200 OK",
+            &serde_json::json!({
+                "task_id": task_id.to_string(),
+                "schedule_id": schedule_id.to_string(),
+            })
+            .to_string(),
+        ),
+        Err(e) => json_response(
+            "500 Internal Server Error",
+            &serde_json::json!({ "error": "run_now_failed", "detail": e.to_string() }).to_string(),
+        ),
+    }
+}
+
 fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> String {
     const LABEL_MAX: usize = 100;
     match initial_message {
@@ -15524,16 +19317,29 @@ mod tests {
         ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, packaged_spec_check_ok, parse_content_length,
-        parse_device_invoke_params, parse_generate_image_tool_args,
+        parse_device_invoke_params, parse_generate_image_tool_args, parse_sse_event_filter,
         parse_memory_store_explicit_links, parse_plugin_reputation_reset_body, parse_run_command_args,
         parse_skill_install_url, parse_tool_calls, parse_write_file_request,
         resolve_run_command_working_dir, strip_markdown_fences_from_write_content,
+        code_studio_tools_for_prompt,
         response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
         rewrite_workspace_plan_path_str, small_talk_fast_lane, PluginReputationResetBody,
         SessionRecallIntent, SessionRecallRange, SmallTalkLanguage,
     };
     use akasha_store::TaskStatus;
     use uuid::Uuid;
+
+    #[test]
+    fn parse_sse_event_filter_task_id_and_types() {
+        let tid = Uuid::new_v4();
+        let q = format!(
+            "task_id={}&types=progress_update,task_completed",
+            tid
+        );
+        let f = parse_sse_event_filter(&q);
+        assert_eq!(f.task_id, Some(tid));
+        assert!(f.event_types.as_ref().unwrap().contains("progress_update"));
+    }
 
     #[test]
     fn parse_content_length_returns_header_end_and_content_length() {
@@ -15770,6 +19576,17 @@ mod tests {
     }
 
     #[test]
+    fn detect_session_recall_no_false_positive_rappellent() {
+        assert!(
+            detect_session_recall_intent(
+                "[Délégation obligatoire] Les sous-agents ne rappellent pas delegate_to_agent.\n\nmet à jour CODE_STUDIO_PLAN.md"
+            )
+            .is_none(),
+            "« rappellent » must not false-positive via substring « rappel »"
+        );
+    }
+
+    #[test]
     fn build_session_recap_reply_filters_noise() {
         let turns = vec![
             crate::memory::ConversationTurn {
@@ -15827,6 +19644,82 @@ mod tests {
         assert_eq!(c.len(), 2, "{:?}", c);
         assert_eq!(c[0].0, "read_file");
         assert_eq!(c[1].0, "read_file");
+    }
+
+    /// OpenRouter / modèles qui émettent `<longcat_tool_call>…</longcat_tool_call>` au lieu de `TOOL:`.
+    #[test]
+    fn parse_tool_calls_longcat_read_file_inline() {
+        let s = "Intro prose.<longcat_tool_call>read_file <longcat_arg_key>path <longcat_arg_value>workspace:/CODE_STUDIO_PLAN.md </longcat_tool_call>";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1, "{:?}", c);
+        assert_eq!(c[0].0, "read_file");
+        assert_eq!(c[0].1[0], "workspace:/CODE_STUDIO_PLAN.md");
+    }
+
+    #[test]
+    fn parse_tool_calls_longcat_read_file_multiline() {
+        let s = r#"Salut !
+<longcat_tool_call>read_file
+<longcat_arg_key>path
+<longcat_arg_value>workspace:/package.json
+</longcat_tool_call>"#;
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1, "{:?}", c);
+        assert_eq!(c[0].0, "read_file");
+        assert_eq!(c[0].1[0], "workspace:/package.json");
+    }
+
+    #[test]
+    fn parse_tool_calls_longcat_three_parallel_reads() {
+        let s = r#"Plan.<longcat_tool_call>read_file <longcat_arg_key>path <longcat_arg_value>workspace:/CODE_STUDIO_PLAN.md </longcat_tool_call> <longcat_tool_call>read_file <longcat_arg_key>path <longcat_arg_value>workspace:/DESIGN.md </longcat_tool_call> <longcat_tool_call>read_file <longcat_arg_key>path <longcat_arg_value>workspace:/package.json </longcat_tool_call>"#;
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 3, "{:?}", c);
+        assert_eq!(c[0].1[0], "workspace:/CODE_STUDIO_PLAN.md");
+        assert_eq!(c[1].1[0], "workspace:/DESIGN.md");
+        assert_eq!(c[2].1[0], "workspace:/package.json");
+    }
+
+    /// Kimi / modèles qui mettent toute la phrase + plusieurs `TOOL:` sur **une** ligne.
+    #[test]
+    fn parse_tool_calls_prose_inline_multiple_tool_on_one_line() {
+        let s = "Je vérifie. TOOL: search_files workspace:/ * --no-ignore TOOL: read_file workspace:/package.json TOOL: read_file workspace:/vite.config.ts";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 3, "{:?}", c);
+        assert_eq!(c[0].0, "search_files");
+        assert_eq!(
+            c[0].1,
+            vec![
+                "workspace:/".to_string(),
+                "*".to_string(),
+                "--no-ignore".to_string()
+            ]
+        );
+        assert_eq!(c[1].0, "read_file");
+        assert_eq!(c[1].1, vec!["workspace:/package.json"]);
+        assert_eq!(c[2].0, "read_file");
+        assert_eq!(c[2].1, vec!["workspace:/vite.config.ts"]);
+    }
+
+    #[test]
+    fn parse_tool_calls_search_replace_multiline_body_after_path_only() {
+        let s = r#"TOOL: search_replace workspace:/CODE_STUDIO_PLAN.md
+## Old section
+line two | ## New section
+line two new"#;
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1, "{:?}", c);
+        assert_eq!(c[0].0, "search_replace");
+        assert_eq!(c[0].1.len(), 2);
+        assert_eq!(c[0].1[0], "workspace:/CODE_STUDIO_PLAN.md");
+        assert!(c[0].1[1].contains(" | "), "{:?}", c[0].1[1]);
+    }
+
+    #[test]
+    fn parse_tool_calls_strips_redacted_thinking_then_finds_tools() {
+        let s = "<think>plan</think>OK. TOOL: read_file workspace:/a.ts";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1, "{:?}", c);
+        assert_eq!(c[0].0, "read_file");
     }
 
     /// DeepSeek-style `<｜DSML｜…>` (U+FF5C fullwidth vertical line).
@@ -16021,6 +19914,34 @@ mod tests {
         ));
         assert!(!looks_like_meta_agent_response(
             "Voici le rapport demandé et le fichier a été écrit dans workspace:/analyze/comparatif.md."
+        ));
+    }
+
+    #[test]
+    fn promise_before_tools_detects_diagnostic_preamble_fr() {
+        let s = "Salut Loïc ! Je vais d'abord examiner l'état actuel du projet pour comprendre ce qui est déjà en place et ce qui fait échouer le build, puis je planifierai et implémenterai les fonctionnalités manquantes. Commençons par un diagnostic.";
+        assert!(crate::api_studio::looks_like_code_studio_promise_before_any_tools(s));
+    }
+
+    #[test]
+    fn promise_before_tools_detects_inspect_and_delegate_wording() {
+        let s = "Je vais d'abord inspecter l'état actuel du projet pour identifier précisément ce qui manque, puis planifier et déléguer l'implémentation.";
+        assert!(crate::api_studio::looks_like_code_studio_promise_before_any_tools(s));
+    }
+
+    #[test]
+    fn promise_before_tools_false_when_long_prose() {
+        let s = "Je vais ".to_string() + &"x".repeat(1700);
+        assert!(!crate::api_studio::looks_like_code_studio_promise_before_any_tools(&s));
+    }
+
+    #[test]
+    fn skip_zero_tool_retry_for_planner_only() {
+        assert!(crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+            "studio_planner"
+        ));
+        assert!(!crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+            "studio_project_manager"
         ));
     }
 
@@ -16280,6 +20201,7 @@ mod tests {
             "qa",
             "system",
             "image_generation",
+            "studio_reviewer",
         ];
         for t in &with_role {
             let s = agent_role_system_prompt(t);
@@ -16298,6 +20220,30 @@ mod tests {
         assert!(agent_role_system_prompt("").is_none());
         // schedule is handled specially (recurring task), no role prompt
         assert!(agent_role_system_prompt("schedule").is_none());
+    }
+
+    #[test]
+    fn code_studio_tools_for_reviewer_are_read_only_plus_ticket_updates() {
+        let tools = code_studio_tools_for_prompt(None, "studio_reviewer");
+        assert!(tools.iter().any(|t| t == "read_file"));
+        assert!(tools.iter().any(|t| t == "studio_list_tickets"));
+        assert!(tools.iter().any(|t| t == "studio_update_ticket"));
+        for forbidden in [
+            "write_file",
+            "write_code",
+            "delete_file",
+            "rename_path",
+            "move_tree",
+            "edit_file",
+            "apply_patch",
+            "search_replace",
+            "delegate_to_agent",
+        ] {
+            assert!(
+                !tools.iter().any(|t| t == forbidden),
+                "tool `{forbidden}` must not be available for studio_reviewer"
+            );
+        }
     }
 
     // --- ensure_no_open_code_block ---
@@ -16338,17 +20284,16 @@ mod tests {
     // --- is_pausable / is_resumable state transitions ---
 
     #[test]
-    fn pausable_only_pending_and_queued() {
+    fn pausable_includes_pending_queued_running_and_waiting_input() {
         assert!(is_pausable(&TaskStatus::Pending));
         assert!(is_pausable(&TaskStatus::Queued));
-        // Running tasks cannot be cooperatively paused
-        assert!(!is_pausable(&TaskStatus::Running));
+        assert!(is_pausable(&TaskStatus::Running));
+        assert!(is_pausable(&TaskStatus::WaitingUserInput));
         assert!(!is_pausable(&TaskStatus::Paused));
         assert!(!is_pausable(&TaskStatus::Completed));
         assert!(!is_pausable(&TaskStatus::Failed));
         assert!(!is_pausable(&TaskStatus::Cancelled));
         assert!(!is_pausable(&TaskStatus::Interrupted));
-        assert!(!is_pausable(&TaskStatus::WaitingUserInput));
     }
 
     #[test]
@@ -16492,5 +20437,147 @@ mod tests {
         let exp = std::fs::canonicalize(tmp.path()).unwrap();
         let got_c = std::fs::canonicalize(&got).unwrap();
         assert_eq!(got_c, exp);
+    }
+
+    // --- tool_scope_key ---
+
+    #[test]
+    fn tool_scope_key_run_command_joins_first_two_args() {
+        let args = vec![s("git"), s("status"), s("--short")];
+        let key = super::tool_scope_key("run_command", &args);
+        assert_eq!(key, "git status");
+    }
+
+    #[test]
+    fn tool_scope_key_delete_file_joins_all_args_for_spaced_paths() {
+        let args = vec![s("Cas"), s("d'usage.pdf")];
+        let key = super::tool_scope_key("delete_file", &args);
+        assert_eq!(key, "Cas d'usage.pdf");
+    }
+
+    #[test]
+    fn tool_scope_key_delete_file_single_arg() {
+        let args = vec![s("/tmp/test.txt")];
+        let key = super::tool_scope_key("delete_file", &args);
+        assert_eq!(key, "/tmp/test.txt");
+    }
+
+    #[test]
+    fn tool_scope_key_write_file_uses_plain_path_from_first_arg() {
+        let args = vec![s("/tmp/hello.txt"), s("content here")];
+        let key = super::tool_scope_key("write_file", &args);
+        assert_eq!(key, "/tmp/hello.txt");
+    }
+
+    #[test]
+    fn tool_scope_key_write_file_parses_json_path() {
+        let args = vec![s(r#"{"path":"/tmp/from_json.txt","content":"hello"}"#)];
+        let key = super::tool_scope_key("write_file", &args);
+        assert_eq!(key, "/tmp/from_json.txt");
+    }
+
+    #[test]
+    fn tool_scope_key_edit_file_uses_first_arg() {
+        let args = vec![s("/some/file.rs"), s("1"), s("5"), s("new content")];
+        let key = super::tool_scope_key("edit_file", &args);
+        assert_eq!(key, "/some/file.rs");
+    }
+
+    #[test]
+    fn tool_scope_key_unknown_tool_returns_global() {
+        let args = vec![s("whatever")];
+        let key = super::tool_scope_key("unknown_tool", &args);
+        assert_eq!(key, "global");
+    }
+
+    #[test]
+    fn tool_scope_key_empty_args_returns_global_for_write_file() {
+        let args: Vec<String> = vec![];
+        let key = super::tool_scope_key("write_file", &args);
+        assert_eq!(key, "global");
+    }
+
+    // --- permissions_center (load/save/lookup) ---
+
+    #[test]
+    fn permissions_center_save_load_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![crate::permissions_center::PermissionDecision {
+                id: "abc".to_string(),
+                tool: "delete_file".to_string(),
+                scope: "/tmp/foo.txt".to_string(),
+                mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+            }],
+        };
+        crate::permissions_center::save(tmp.path(), &state).unwrap();
+        let loaded = crate::permissions_center::load(tmp.path());
+        assert_eq!(loaded.decisions.len(), 1);
+        assert_eq!(loaded.decisions[0].tool, "delete_file");
+        assert_eq!(loaded.decisions[0].scope, "/tmp/foo.txt");
+        assert_eq!(loaded.decisions[0].mode, crate::permissions_center::DecisionMode::AllowPersistent);
+    }
+
+    #[test]
+    fn permissions_center_lookup_returns_matching_decision() {
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![
+                crate::permissions_center::PermissionDecision {
+                    id: "d1".to_string(),
+                    tool: "write_file".to_string(),
+                    scope: "/tmp/a.txt".to_string(),
+                    mode: crate::permissions_center::DecisionMode::DenyPersistent,
+                    created_at: "2024-01-01T00:00:00Z".to_string(),
+                    expires_at: None,
+                },
+            ],
+        };
+        let found = crate::permissions_center::lookup("write_file", "/tmp/a.txt", &state);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().mode, crate::permissions_center::DecisionMode::DenyPersistent);
+    }
+
+    #[test]
+    fn permissions_center_lookup_returns_none_for_different_scope() {
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![crate::permissions_center::PermissionDecision {
+                id: "d1".to_string(),
+                tool: "write_file".to_string(),
+                scope: "/tmp/a.txt".to_string(),
+                mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+            }],
+        };
+        let not_found = crate::permissions_center::lookup("write_file", "/tmp/b.txt", &state);
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn permissions_center_lookup_returns_none_for_different_tool() {
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![crate::permissions_center::PermissionDecision {
+                id: "d1".to_string(),
+                tool: "write_file".to_string(),
+                scope: "global".to_string(),
+                mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+            }],
+        };
+        let not_found = crate::permissions_center::lookup("delete_file", "global", &state);
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn permissions_center_save_is_atomic_via_tmp_rename() {
+        // Verify no .tmp file is left behind after a successful save.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::permissions_center::PermissionCenterState::default();
+        crate::permissions_center::save(tmp.path(), &state).unwrap();
+        let tmp_file = tmp.path().join("permissions_center.json.tmp");
+        assert!(!tmp_file.exists(), ".tmp file should not remain after save");
     }
 }

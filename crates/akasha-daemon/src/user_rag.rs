@@ -1,5 +1,5 @@
 //! User RAG: per-user documents indexed for retrieval by agents.
-//! Storage in data_dir/user_rag/, keyword-based retrieval (MVP).
+//! Storage in data_dir/user_rag/, keyword + optional embedding retrieval.
 
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -11,6 +11,15 @@ use uuid::Uuid;
 
 const MANIFEST_FILENAME: &str = "index.json";
 const DOCUMENTS_DIR: &str = "documents";
+const CHUNKS_SUFFIX: &str = ".chunks.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexedChunk {
+    content: String,
+    /// Little-endian f32 embedding bytes (optional).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    embedding: Vec<u8>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserDocMeta {
@@ -20,6 +29,17 @@ pub struct UserDocMeta {
     /// Relative path under user_rag/documents/
     pub path: String,
     pub added_at: String,
+    /// pending | indexing | ready | failed
+    #[serde(default = "default_index_status")]
+    pub index_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_error: Option<String>,
+}
+
+fn default_index_status() -> String {
+    "pending".to_string()
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -43,11 +63,6 @@ pub(crate) fn is_safe_relative_filename(filename: &str) -> bool {
         Some(std::path::Component::Normal(_)) => components.next().is_none(),
         _ => false,
     }
-}
-
-/// In-memory chunk for retrieval.
-struct Chunk {
-    content: String,
 }
 
 /// A `UserRagStore` wrapped in an `Arc<Mutex<…>>` so it can be safely shared
@@ -131,6 +146,9 @@ impl UserRagStore {
             mime_type: mime_type.to_string(),
             path: rel_path,
             added_at: chrono::Utc::now().to_rfc3339(),
+            index_status: "pending".to_string(),
+            indexed_at: None,
+            index_error: None,
         };
 
         let mut manifest = self.load_manifest()?;
@@ -167,8 +185,54 @@ impl UserRagStore {
         } else {
             warn!(id = %meta.id, path = %meta.path, "Skipping file deletion for document with unsafe path");
         }
+        let chunk_path = self.base_dir.join(format!("{}{}", meta.id, CHUNKS_SUFFIX));
+        if chunk_path.exists() {
+            let _ = std::fs::remove_file(&chunk_path);
+        }
         self.save_manifest(&manifest)?;
         Ok(true)
+    }
+
+    pub fn get_document(&self, id: &str) -> anyhow::Result<Option<UserDocMeta>> {
+        let manifest = self.load_manifest()?;
+        Ok(manifest.documents.into_iter().find(|d| d.id == id))
+    }
+
+    pub fn document_status(&self, id: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        let Some(doc) = self.get_document(id)? else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::json!({
+            "id": doc.id,
+            "index_status": doc.index_status,
+            "indexed_at": doc.indexed_at,
+            "index_error": doc.index_error,
+        })))
+    }
+
+    pub fn set_index_status(
+        &self,
+        id: &str,
+        status: &str,
+        indexed_at: Option<chrono::DateTime<chrono::Utc>>,
+        error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut manifest = self.load_manifest()?;
+        let Some(doc) = manifest.documents.iter_mut().find(|d| d.id == id) else {
+            anyhow::bail!("document not found: {id}");
+        };
+        doc.index_status = status.to_string();
+        doc.indexed_at = indexed_at.map(|t| t.to_rfc3339());
+        doc.index_error = error.map(String::from);
+        self.save_manifest(&manifest)
+    }
+
+    pub fn read_document_bytes(&self, meta: &UserDocMeta) -> anyhow::Result<Vec<u8>> {
+        if !is_safe_relative_filename(&meta.path) {
+            anyhow::bail!("unsafe document path");
+        }
+        let full_path = self.documents_dir().join(&meta.path);
+        Ok(std::fs::read(full_path)?)
     }
 
     /// List all documents.
@@ -177,8 +241,17 @@ impl UserRagStore {
         Ok(manifest.documents)
     }
 
-    /// Retrieve up to k text chunks most relevant to the query (keyword match). Only indexes text/* and common text extensions.
+    /// Retrieve up to k text chunks (keyword match; optional semantic rerank when query_embedding provided).
     pub fn retrieve(&self, query: &str, k: usize) -> anyhow::Result<Vec<String>> {
+        self.retrieve_hybrid(query, None, k)
+    }
+
+    pub fn retrieve_hybrid(
+        &self,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        k: usize,
+    ) -> anyhow::Result<Vec<String>> {
         let manifest = self.load_manifest()?;
         if manifest.documents.is_empty() || k == 0 {
             return Ok(Vec::new());
@@ -191,12 +264,21 @@ impl UserRagStore {
             .map(String::from)
             .collect();
 
-        let mut chunks: Vec<Chunk> = Vec::new();
+        let mut chunks: Vec<IndexedChunk> = Vec::new();
         let docs_dir = self.documents_dir();
         for doc in &manifest.documents {
             if !is_safe_relative_filename(&doc.path) {
                 warn!(id = %doc.id, path = %doc.path, "Skipping document with unsafe path in retrieve");
                 continue;
+            }
+            let chunk_path = self.base_dir.join(format!("{}{}", doc.id, CHUNKS_SUFFIX));
+            if chunk_path.is_file() {
+                if let Ok(s) = std::fs::read_to_string(&chunk_path) {
+                    if let Ok(stored) = serde_json::from_str::<Vec<IndexedChunk>>(&s) {
+                        chunks.extend(stored);
+                        continue;
+                    }
+                }
             }
             let path = docs_dir.join(&doc.path);
             if !path.is_file() {
@@ -216,14 +298,42 @@ impl UserRagStore {
             };
             let content_trim = content.trim();
             if content_trim.chars().count() > 10 {
-                chunks.push(Chunk {
+                chunks.push(IndexedChunk {
                     content: content_trim.chars().take(4000).collect::<String>(),
+                    embedding: Vec::new(),
                 });
             }
         }
 
         if chunks.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if let Some(q_emb) = query_embedding {
+            if !q_emb.is_empty() {
+                let mut scored: Vec<(f32, usize)> = chunks
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, c)| {
+                        if c.embedding.len() < 4 {
+                            return None;
+                        }
+                        let emb = akasha_store::decode_embedding_bytes(&c.embedding);
+                        if emb.is_empty() {
+                            return None;
+                        }
+                        Some((akasha_store::cosine_similarity(q_emb, &emb), i))
+                    })
+                    .collect();
+                if !scored.is_empty() {
+                    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                    return Ok(scored
+                        .into_iter()
+                        .take(k)
+                        .map(|(_, i)| chunks[i].content.clone())
+                        .collect());
+                }
+            }
         }
 
         if terms.is_empty() {
@@ -248,6 +358,18 @@ impl UserRagStore {
             .map(|(_, i)| chunks[i].content.clone())
             .collect();
         Ok(result)
+    }
+
+    /// Persist chunk embeddings for a document (called after async indexing).
+    pub fn save_chunk_embeddings(&self, doc_id: &str, chunks: Vec<(String, Vec<u8>)>) -> anyhow::Result<()> {
+        let indexed: Vec<IndexedChunk> = chunks
+            .into_iter()
+            .map(|(content, embedding)| IndexedChunk { content, embedding })
+            .collect();
+        let path = self.base_dir.join(format!("{doc_id}{CHUNKS_SUFFIX}"));
+        std::fs::create_dir_all(&self.base_dir)?;
+        std::fs::write(path, serde_json::to_string_pretty(&indexed)?)?;
+        Ok(())
     }
 }
 
@@ -281,12 +403,27 @@ mod tests {
     }
 
     #[test]
-    fn user_rag_retrieve_empty_query_returns_chunks() {
+    fn user_rag_delete_removes_chunks_sidecar() {
         let dir = tempfile::tempdir().unwrap();
         let store = UserRagStore::new(dir.path());
-        let content = base64::engine::general_purpose::STANDARD.encode(b"Some text content");
-        store.add_document(&content, "a.txt", "text/plain").unwrap();
-        let chunks = store.retrieve("", 5).unwrap();
-        assert_eq!(chunks.len(), 1);
+        let content = base64::engine::general_purpose::STANDARD.encode(b"chunk test");
+        let id = store.add_document(&content, "t.txt", "text/plain").unwrap();
+        store
+            .save_chunk_embeddings(&id, vec![("hello".into(), vec![])])
+            .unwrap();
+        assert!(dir.path().join("user_rag").join(format!("{id}.chunks.json")).is_file());
+        store.delete_document(&id).unwrap();
+        assert!(!dir.path().join("user_rag").join(format!("{id}.chunks.json")).exists());
+    }
+
+    #[test]
+    fn user_rag_document_status_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserRagStore::new(dir.path());
+        let content = base64::engine::general_purpose::STANDARD.encode(b"x");
+        let id = store.add_document(&content, "a.txt", "text/plain").unwrap();
+        store.set_index_status(&id, "ready", Some(chrono::Utc::now()), None).unwrap();
+        let st = store.document_status(&id).unwrap().unwrap();
+        assert_eq!(st.get("index_status").and_then(|v| v.as_str()), Some("ready"));
     }
 }

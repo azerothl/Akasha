@@ -150,6 +150,7 @@ const SPECIALIST_AGENTS: &[&str] = &[
     "studio_backend",
     "studio_fullstack",
     "studio_planner",
+    "studio_reviewer",
     "studio_project_manager",
 ];
 
@@ -178,6 +179,8 @@ pub struct OrchestratorTask {
     pub execution_mode: Option<ExecutionMode>,
     /// Optional system-selected task type for routing (falls back to current classifier/router when absent).
     pub preferred_task_type: Option<String>,
+    /// When true, skip long-term memory promotion for this turn.
+    pub incognito: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -457,6 +460,7 @@ User message:\n{}",
         studio_disk_root: Option<std::path::PathBuf>,
         studio_forced_agent: Option<String>,
         studio_evolution_branch: Option<String>,
+        incognito: bool,
     ) -> anyhow::Result<Uuid> {
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
@@ -500,6 +504,10 @@ User message:\n{}",
         // connection) must be dropped before the .await below (system_selector_decision).
         {
             let store = TaskStore::open(store_path)?;
+            let data_dir_for_pid = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+            let studio_project_id = studio_disk_root
+                .as_ref()
+                .and_then(|root| crate::studio::studio_project_id_from_disk_root(data_dir_for_pid, root));
             let task = Task {
                 id: task_id,
                 parent_task_id: None,
@@ -508,8 +516,15 @@ User message:\n{}",
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 initial_message,
+                studio_project_id,
             };
             store.insert(&task)?;
+            let _ = store.insert_event(
+                task_id,
+                "session_bound",
+                Some(&serde_json::json!({ "session_id": session_id })),
+                &Utc::now().to_rfc3339(),
+            );
         }
 
         if let Some(p) = studio_disk_root.clone() {
@@ -548,6 +563,7 @@ User message:\n{}",
         let message_owned = message_for_llm;
         let original_user_message_owned = original_user_message;
         let session_id_owned = session_id.to_string();
+        let incognito_flag = incognito;
         let store_path_buf = store_path.to_path_buf();
         let preliminary_agent_str = preliminary_agent.to_string();
         tokio::spawn(async move {
@@ -710,16 +726,45 @@ User message:\n{}",
                         image_data_urls,
                         execution_mode: None,
                         preferred_task_type: preferred_task_type.clone(),
+                        incognito: incognito_flag,
                     };
                     if let Err(e) = tx.try_send(task_msg) {
                         match e {
                             mpsc::error::TrySendError::Full(t) => {
+                                let store_path_recover = store_path_buf.clone();
+                                let dropped_task_id = t.task_id;
                                 tokio::spawn(async move {
-                                    let _ = tx.send(t).await;
+                                    let send_outcome = tokio::time::timeout(
+                                        std::time::Duration::from_secs(30),
+                                        tx.send(t),
+                                    )
+                                    .await;
+                                    if send_outcome.is_ok() && send_outcome.unwrap().is_ok() {
+                                        return;
+                                    }
+                                    tracing::error!(
+                                        task_id = %dropped_task_id,
+                                        "conversation queue saturated; task failed after enqueue timeout"
+                                    );
+                                    if let Ok(store) = TaskStore::open(store_path_recover.as_path()) {
+                                        let _ = store.update_status(dropped_task_id, TaskStatus::Failed);
+                                        let _ = store.insert_event(
+                                            dropped_task_id,
+                                            "task_failed",
+                                            Some(&serde_json::json!({
+                                                "reason": "conversation_queue_full",
+                                                "message": "La file conversation est saturée. Réessayez dans quelques secondes."
+                                            })),
+                                            &Utc::now().to_rfc3339(),
+                                        );
+                                    }
                                 });
                             }
                             mpsc::error::TrySendError::Closed(_) => {
                                 tracing::error!(task_id = %task_id, "direct conversation channel closed; task dropped");
+                                if let Ok(store) = TaskStore::open(store_path) {
+                                    let _ = store.update_status(task_id, TaskStatus::Failed);
+                                }
                             }
                         }
                     }
@@ -732,6 +777,7 @@ User message:\n{}",
                             image_data_urls,
                             execution_mode,
                             preferred_task_type,
+                            incognito: incognito_flag,
                         },
                         priority,
                     );
@@ -787,6 +833,7 @@ User message:\n{}",
             image_data_urls: None,
             execution_mode,
             preferred_task_type: None,
+            incognito: false,
         };
         // Update status to Queued BEFORE enqueuing so the conversation worker won't
         // see a Paused/Interrupted status and silently drop the task.

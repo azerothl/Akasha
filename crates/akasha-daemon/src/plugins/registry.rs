@@ -1,15 +1,16 @@
 //! Phase 5 — Plugin registry: load WASM from dir, list, call tool, reputation.
 
 use akasha_core::TrustStore;
-use akasha_plugin_api::{PluginManifest, PluginKind, PluginRoutingRule};
+use akasha_plugin_api::{is_safe_plugin_id, PluginKind, PluginManifest, PluginRoutingRule};
 use akasha_plugin_host::WasmPlugin;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
 use super::reputation::ReputationStore;
+use super::state::PluginStateStore;
 
 #[derive(Clone, serde::Serialize)]
 pub struct PluginEntry {
@@ -17,6 +18,8 @@ pub struct PluginEntry {
     pub name: String,
     pub version: String,
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub enabled: bool,
     pub score: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,6 +30,7 @@ pub struct PluginRegistry {
     plugins_dir: PathBuf,
     plugins: std::sync::RwLock<HashMap<String, LoadedPlugin>>,
     reputation: Arc<ReputationStore>,
+    state: Arc<PluginStateStore>,
     trust_store: Option<Arc<TrustStore>>,
 }
 
@@ -75,27 +79,44 @@ fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_jso
     );
 }
 
+fn manifest_description(m: &PluginManifest) -> Option<String> {
+    let d = m.description.trim();
+    if d.is_empty() {
+        None
+    } else {
+        Some(d.to_string())
+    }
+}
+
 impl PluginRegistry {
     pub fn new(
         plugins_dir: PathBuf,
         reputation: Arc<ReputationStore>,
+        state: Arc<PluginStateStore>,
         trust_store: Option<Arc<TrustStore>>,
     ) -> Self {
         Self {
             plugins_dir,
             plugins: std::sync::RwLock::new(HashMap::new()),
             reputation,
+            state,
             trust_store,
         }
     }
 
     /// Load all plugins from plugins_dir (scan for manifest.toml / manifest.json per subdir or root).
     pub fn load_all(&self) {
+        let t0 = Instant::now();
         let mut plugins = self.plugins.write().unwrap();
         plugins.clear();
+        let mut loaded_ok: u64 = 0;
+        let mut load_errors: u64 = 0;
         if !self.plugins_dir.exists() {
             if let Err(e) = std::fs::create_dir_all(&self.plugins_dir) {
                 warn!(error = %e, "Could not create plugins dir");
+                super::metrics::record_plugin_load(t0.elapsed().as_millis() as u64, 0, 1);
+            } else {
+                super::metrics::record_plugin_load(t0.elapsed().as_millis() as u64, 0, 0);
             }
             return;
         }
@@ -103,6 +124,7 @@ impl PluginRegistry {
             Ok(d) => d,
             Err(e) => {
                 warn!(error = %e, "Could not read plugins dir");
+                super::metrics::record_plugin_load(t0.elapsed().as_millis() as u64, 0, 1);
                 return;
             }
         };
@@ -111,57 +133,71 @@ impl PluginRegistry {
             if path.is_dir() {
                 for name in &["manifest.toml", "manifest.json"] {
                     let manifest_path = path.join(name);
-                    if manifest_path.exists() {
-                        if let Ok(manifest) = PluginManifest::load_from_path(&manifest_path) {
-                            if self.reputation.is_disabled(&manifest.id) {
-                                info!(id = %manifest.id, "Plugin disabled (reputation), skipping");
-                                continue;
-                            }
-                            let wasm_path = manifest.wasm_path.as_ref().map(|p| path.join(p)).unwrap_or_else(|| path.join("plugin.wasm"));
-                            if let Some(ref store) = self.trust_store {
-                                if store.requires_signing() {
-                                    let wasm_bytes = match std::fs::read(&wasm_path) {
-                                        Ok(b) => b,
-                                        Err(_) => {
-                                            warn!(id = %manifest.id, path = ?wasm_path, "Failed to read WASM for signature check");
-                                            continue;
-                                        }
-                                    };
-                                    let sig_path = wasm_path.with_extension("wasm.sig");
-                                    let sig_path = if sig_path.exists() { sig_path } else { wasm_path.with_extension("sig") };
-                                    let sig = match std::fs::read(&sig_path) {
-                                        Ok(s) if s.len() == 64 => s,
-                                        Ok(_) => {
-                                            warn!(id = %manifest.id, "Plugin signature file invalid length (expected 64 bytes), skipping");
-                                            continue;
-                                        }
-                                        Err(_) => {
-                                            warn!(id = %manifest.id, "Plugin unsigned (no .sig file) and trust store requires signing, skipping");
-                                            continue;
-                                        }
-                                    };
-                                    if store.verify_plugin(&wasm_bytes, &sig).is_err() {
-                                        warn!(id = %manifest.id, "Plugin signature verification failed, skipping");
+                        if manifest_path.exists() {
+                            match PluginManifest::load_from_path(&manifest_path) {
+                                Ok(manifest) => {
+                                    if self.state.is_disabled(&manifest.id) {
+                                        info!(id = %manifest.id, "Plugin disabled (user), skipping");
                                         continue;
                                     }
+                                    if self.reputation.is_disabled(&manifest.id) {
+                                        info!(id = %manifest.id, "Plugin disabled (reputation), skipping");
+                                        continue;
+                                    }
+                                    let wasm_path = manifest.wasm_path.as_ref().map(|p| path.join(p)).unwrap_or_else(|| path.join("plugin.wasm"));
+                                    if let Some(ref store) = self.trust_store {
+                                        if store.requires_signing() {
+                                            let wasm_bytes = match std::fs::read(&wasm_path) {
+                                                Ok(b) => b,
+                                                Err(_) => {
+                                                    warn!(id = %manifest.id, path = ?wasm_path, "Failed to read WASM for signature check");
+                                                    continue;
+                                                }
+                                            };
+                                            let sig_path = wasm_path.with_extension("wasm.sig");
+                                            let sig_path = if sig_path.exists() { sig_path } else { wasm_path.with_extension("sig") };
+                                            let sig = match std::fs::read(&sig_path) {
+                                                Ok(s) if s.len() == 64 => s,
+                                                Ok(_) => {
+                                                    warn!(id = %manifest.id, "Plugin signature file invalid length (expected 64 bytes), skipping");
+                                                    continue;
+                                                }
+                                                Err(_) => {
+                                                    warn!(id = %manifest.id, "Plugin unsigned (no .sig file) and trust store requires signing, skipping");
+                                                    continue;
+                                                }
+                                            };
+                                            if store.verify_plugin(&wasm_bytes, &sig).is_err() {
+                                                warn!(id = %manifest.id, "Plugin signature verification failed, skipping");
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    if let Ok(wasm) = WasmPlugin::load(&wasm_path) {
+                                        let loaded = LoadedPlugin {
+                                            manifest: manifest.clone(),
+                                            wasm: wasm.with_manifest(manifest.clone()),
+                                        };
+                                        plugins.insert(manifest.id.clone(), loaded);
+                                        loaded_ok += 1;
+                                        info!(id = %manifest.id, kind = ?manifest.kind, "Plugin loaded");
+                                    } else {
+                                        load_errors += 1;
+                                        warn!(id = %manifest.id, path = ?wasm_path, "Failed to load WASM");
+                                    }
+                                    break;
+                                }
+                                Err(e) => {
+                                    warn!(path = ?manifest_path, error = %e, "Failed to parse plugin manifest");
+                                    load_errors += 1;
+                                    break;
                                 }
                             }
-                            if let Ok(wasm) = WasmPlugin::load(&wasm_path) {
-                                let loaded = LoadedPlugin {
-                                    manifest: manifest.clone(),
-                                    wasm: wasm.with_manifest(manifest.clone()),
-                                };
-                                plugins.insert(manifest.id.clone(), loaded);
-                                info!(id = %manifest.id, kind = ?manifest.kind, "Plugin loaded");
-                            } else {
-                                warn!(id = %manifest.id, path = ?wasm_path, "Failed to load WASM");
-                            }
                         }
-                        break;
-                    }
                 }
             }
         }
+        super::metrics::record_plugin_load(t0.elapsed().as_millis() as u64, loaded_ok, load_errors);
     }
 
     pub fn list(&self) -> Vec<PluginEntry> {
@@ -169,24 +205,20 @@ impl PluginRegistry {
         let mut out: Vec<PluginEntry> = guard
             .values()
             .map(|p| {
-                let disabled = self.reputation.is_disabled(&p.manifest.id);
                 PluginEntry {
                     id: p.manifest.id.clone(),
                     name: p.manifest.name.clone(),
                     version: p.manifest.version.clone(),
                     kind: p.manifest.kind.to_string(),
-                    enabled: !disabled,
+                    description: manifest_description(&p.manifest),
+                    enabled: true,
                     score: self.reputation.score(&p.manifest.id),
-                    disabled_reason: if disabled {
-                        Some("reputation".to_string())
-                    } else {
-                        None
-                    },
+                    disabled_reason: None,
                 }
             })
             .collect();
 
-        // Add plugins that are currently disabled by reputation and therefore not loaded in memory.
+        // Add plugins on disk that are not loaded (user-disabled or reputation-disabled).
         let mut known_ids: std::collections::HashSet<String> =
             out.iter().map(|p| p.id.clone()).collect();
         if let Ok(read_dir) = std::fs::read_dir(&self.plugins_dir) {
@@ -204,17 +236,24 @@ impl PluginRegistry {
                         if known_ids.contains(&manifest.id) {
                             break;
                         }
-                        let disabled = self.reputation.is_disabled(&manifest.id);
-                        if disabled {
+                        let manual = self.state.is_disabled(&manifest.id);
+                        let rep = self.reputation.is_disabled(&manifest.id);
+                        if manual || rep {
                             known_ids.insert(manifest.id.clone());
+                            let disabled_reason = if manual {
+                                Some("manual".to_string())
+                            } else {
+                                Some("reputation".to_string())
+                            };
                             out.push(PluginEntry {
                                 id: manifest.id.clone(),
                                 name: manifest.name.clone(),
                                 version: manifest.version.clone(),
                                 kind: manifest.kind.to_string(),
+                                description: manifest_description(&manifest),
                                 enabled: false,
                                 score: self.reputation.score(&manifest.id),
-                                disabled_reason: Some("reputation".to_string()),
+                                disabled_reason,
                             });
                         }
                     }
@@ -299,6 +338,33 @@ impl PluginRegistry {
         out
     }
 
+    /// Call a memory plugin: fulfill [`MemoryDelegateRequest`] via loopback `/api/memory/*`, else WASM `run`.
+    pub fn call_memory(&self, plugin_id: &str, input: &str) -> Result<String, akasha_plugin_api::PluginError> {
+        if self.state.is_disabled(plugin_id) {
+            return Err(akasha_plugin_api::PluginError::Disabled);
+        }
+        if self.reputation.is_disabled(plugin_id) {
+            return Err(akasha_plugin_api::PluginError::Disabled);
+        }
+        let guard = self.plugins.read().unwrap();
+        let loaded = guard
+            .get(plugin_id)
+            .ok_or_else(|| akasha_plugin_api::PluginError::Message("plugin not found".into()))?;
+        if loaded.manifest.kind != PluginKind::Memory {
+            return Err(akasha_plugin_api::PluginError::Message("not a memory plugin".into()));
+        }
+        let result = loaded
+            .wasm
+            .run_with_memory_delegate(input, super::memory_delegate::fulfill_memory_delegate);
+        drop(guard);
+        match &result {
+            Ok(_) => self.reputation.record_success(plugin_id),
+            Err(akasha_plugin_api::PluginError::Crashed) => self.reputation.record_crash(plugin_id),
+            Err(_) => self.reputation.record_failure(plugin_id),
+        }
+        result
+    }
+
     /// Call a tool plugin by id. Updates reputation on success/failure/crash.
     pub fn call_tool(&self, plugin_id: &str, input: &str) -> Result<String, akasha_plugin_api::PluginError> {
         // #region agent log
@@ -312,6 +378,9 @@ impl PluginRegistry {
             }),
         );
         // #endregion
+        if self.state.is_disabled(plugin_id) {
+            return Err(akasha_plugin_api::PluginError::Disabled);
+        }
         if self.reputation.is_disabled(plugin_id) {
             return Err(akasha_plugin_api::PluginError::Disabled);
         }
@@ -360,6 +429,41 @@ impl PluginRegistry {
 
     pub fn reset_all_reputation(&self) -> std::io::Result<()> {
         self.reputation.reset_all()
+    }
+
+    /// Persist user enable/disable (separate from reputation). Reloads plugins from disk.
+    pub fn set_enabled(&self, plugin_id: &str, enabled: bool) -> std::io::Result<()> {
+        if !is_safe_plugin_id(plugin_id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid plugin id",
+            ));
+        }
+        self.state.set_disabled(plugin_id, !enabled)?;
+        self.reload();
+        Ok(())
+    }
+
+    /// Remove plugin directory from `plugins_dir` and clear manual state + reputation entry.
+    pub fn uninstall(&self, plugin_id: &str) -> std::io::Result<()> {
+        if !is_safe_plugin_id(plugin_id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid plugin id",
+            ));
+        }
+        let dest = self.plugins_dir.join(plugin_id);
+        if !dest.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "plugin not found",
+            ));
+        }
+        std::fs::remove_dir_all(&dest)?;
+        self.state.remove(plugin_id)?;
+        let _ = self.reputation.reset(plugin_id);
+        self.reload();
+        Ok(())
     }
 }
 

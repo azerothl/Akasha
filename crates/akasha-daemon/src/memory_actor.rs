@@ -1,6 +1,7 @@
 //! Long-term memory actor: runs on a dedicated thread (SQLite and embedder are !Send), services search/insert via channel.
 //! When neither "embeddings" nor "embeddings-tract" is enabled, no-op client and start_memory_actor returns Err.
 
+#[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
 use crate::memory_relation_semantic::auto_relation_kind;
 use std::path::Path;
 use std::thread;
@@ -60,11 +61,25 @@ pub enum MemoryRequest {
     GetRelationsForEntries { ids: Vec<String> },
     /// Recompute embedding-tier relations (`similar` / `relates_to`) for all entries (graph display).
     RebuildSimilarRelations { max_per_entry: usize },
+    /// Post-retrieval maintenance: boost confidence on recalled ids.
+    RecordRecallBoost { ids: Vec<String> },
+    /// Post-retrieval maintenance: decay stale recalled entries.
+    RecordRecallDecay { ids: Vec<String> },
+    /// Update entry content (re-embed in actor).
+    Update { id: String, content: String },
+    /// Janitor: purge expired and low-confidence entries.
+    HygienePurge,
+    /// Rollup stub for entries older than N days.
+    LtRollup { days: u32, limit: usize },
+    /// GraphRAG light: list entries by source prefix (e.g. `project:`).
+    ListBySourcePrefix { prefix: String, limit: usize },
+    /// E3 branch clone: list entries for a session.
+    ListBySession { session_id: String, limit: usize },
 }
 
 pub enum MemoryResponse {
     Search(Vec<(String, String)>), // (id, content)
-    Promote(Result<(), String>),
+    Promote(Result<Option<String>, String>), // Some(id) on success
     List((Vec<(String, String, String, String)>, u64)), // (entries, total_count)
     Delete(Result<(), String>),
     ForgetByQuery(Result<u64, String>),
@@ -78,13 +93,37 @@ pub enum MemoryResponse {
     GetContentsByIds(Vec<(String, String)>),
     GetRelationsForEntries(std::collections::HashMap<String, Vec<(String, String)>>),
     RebuildSimilarRelations(Result<u64, String>),
+    RecordRecallBoost(Result<u64, String>),
+    RecordRecallDecay(Result<u64, String>),
+    Update(Result<(), String>),
+    HygienePurge(Result<(u64, u64), String>),
+    LtRollup(Result<u64, String>),
+    ListBySourcePrefix(Vec<(String, String, String)>),
+    ListBySession(Vec<(String, String, String)>),
+}
+
+/// Receive a memory-actor response from the dedicated memory thread.
+///
+/// Uses `std::sync::mpsc` (not `tokio::sync::oneshot::blocking_recv`) so callers on
+/// `spawn_blocking` threads can block safely. When a Tokio handle is present (worker or
+/// blocking pool), wrap the wait in `block_in_place` so worker threads yield their core.
+#[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+fn recv_memory_response(
+    resp_rx: std::sync::mpsc::Receiver<MemoryResponse>,
+) -> Result<MemoryResponse, ()> {
+    let recv = || resp_rx.recv().map_err(|_| ());
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(recv)
+    } else {
+        recv()
+    }
 }
 
 /// Client handle: Send + Sync, can be used from async code.
 #[derive(Clone)]
 pub struct LongTermMemoryClient {
     #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
-    tx: std::sync::mpsc::Sender<(MemoryRequest, tokio::sync::oneshot::Sender<MemoryResponse>)>,
+    tx: std::sync::mpsc::Sender<(MemoryRequest, std::sync::mpsc::Sender<MemoryResponse>)>,
 }
 
 impl LongTermMemoryClient {
@@ -98,18 +137,18 @@ impl LongTermMemoryClient {
     ) -> Vec<(String, String)> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Search { query_text, top_k, filter }, resp_tx)).is_err() {
                 return Vec::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Search(entries)) => entries,
                 _ => Vec::new(),
             }
         }
         #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
-            let _ = (query_text, filter);
+            let _ = (query_text, top_k, filter);
             Vec::new()
         }
     }
@@ -125,14 +164,14 @@ impl LongTermMemoryClient {
         scope: Option<String>,
         expires_at: Option<String>,
         explicit_links: Option<Vec<(String, String)>>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at, explicit_links }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Promote(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -140,7 +179,7 @@ impl LongTermMemoryClient {
         #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
             let _ = (content, source, entity_id, process_id, session_id, importance, scope, expires_at, explicit_links);
-            Ok(())
+            Ok(None)
         }
     }
 
@@ -149,11 +188,11 @@ impl LongTermMemoryClient {
     pub fn list(&self, limit: usize, offset: usize) -> (Vec<(String, String, String, String)>, u64) {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::List { limit, offset }, resp_tx)).is_err() {
                 return (Vec::new(), 0);
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::List(pair)) => pair,
                 _ => (Vec::new(), 0),
             }
@@ -169,11 +208,11 @@ impl LongTermMemoryClient {
     pub fn delete(&self, id: String) -> Result<(), String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Delete { id }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Delete(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -189,11 +228,11 @@ impl LongTermMemoryClient {
     pub fn has_daily_summary_for_date(&self, date: String) -> bool {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::HasDailySummary { date }, resp_tx)).is_err() {
                 return false;
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::HasDailySummary(exists)) => exists,
                 _ => false,
             }
@@ -209,11 +248,11 @@ impl LongTermMemoryClient {
     pub fn forget_by_query(&self, query: String) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::ForgetByQuery { query }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::ForgetByQuery(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -229,11 +268,11 @@ impl LongTermMemoryClient {
     pub fn stats(&self) -> Result<(u64, u64), String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Stats, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Stats(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -257,11 +296,11 @@ impl LongTermMemoryClient {
     ) -> Result<uuid::Uuid, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::EmitEvent { event_type, payload, entity_id, process_id, session_id, task_id, importance, scope, tags }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::EmitEvent(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -277,11 +316,11 @@ impl LongTermMemoryClient {
     pub fn search_episodic(&self, filter: akasha_store::EpisodicFilter, limit: usize) -> Vec<akasha_store::EpisodicEvent> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::SearchEpisodic { filter, limit }, resp_tx)).is_err() {
                 return Vec::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::SearchEpisodic(events)) => events,
                 _ => Vec::new(),
             }
@@ -297,11 +336,11 @@ impl LongTermMemoryClient {
     pub fn get_facts_by_entity(&self, entity_id: String, limit: usize) -> Vec<akasha_store::Fact> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::GetFactsByEntity { entity_id, limit }, resp_tx)).is_err() {
                 return Vec::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::GetFactsByEntity(facts)) => facts,
                 _ => Vec::new(),
             }
@@ -317,11 +356,11 @@ impl LongTermMemoryClient {
     pub fn get_related_ids(&self, entry_id: String, kind: Option<String>, limit: usize) -> Vec<String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::GetRelatedIds { entry_id, kind, limit }, resp_tx)).is_err() {
                 return Vec::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::GetRelatedIds(ids)) => ids,
                 _ => Vec::new(),
             }
@@ -340,11 +379,11 @@ impl LongTermMemoryClient {
             if ids.is_empty() {
                 return Vec::new();
             }
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::GetContentsByIds { ids }, resp_tx)).is_err() {
                 return Vec::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::GetContentsByIds(contents)) => contents,
                 _ => Vec::new(),
             }
@@ -363,11 +402,11 @@ impl LongTermMemoryClient {
             if ids.is_empty() {
                 return std::collections::HashMap::new();
             }
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::GetRelationsForEntries { ids }, resp_tx)).is_err() {
                 return std::collections::HashMap::new();
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::GetRelationsForEntries(map)) => map,
                 _ => std::collections::HashMap::new(),
             }
@@ -383,11 +422,11 @@ impl LongTermMemoryClient {
     pub fn rebuild_similar_relations(&self, max_per_entry: usize) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::RebuildSimilarRelations { max_per_entry }, resp_tx)).is_err() {
                 return Err("memory actor unavailable".to_string());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::RebuildSimilarRelations(r)) => r,
                 _ => Err("memory actor response error".to_string()),
             }
@@ -403,11 +442,11 @@ impl LongTermMemoryClient {
     pub fn gc(&self, retention_days: u32, protect_sources: Option<Vec<String>>) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
             if self.tx.send((MemoryRequest::Gc { retention_days, protect_sources }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
-            match resp_rx.blocking_recv() {
+            match recv_memory_response(resp_rx) {
                 Ok(MemoryResponse::Gc(r)) => r,
                 _ => Err("no response".into()),
             }
@@ -416,6 +455,150 @@ impl LongTermMemoryClient {
         {
             let _ = (retention_days, protect_sources);
             Err("long-term memory disabled".into())
+        }
+    }
+
+    pub fn record_recall_boost(&self, ids: Vec<String>) -> Result<u64, String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+            if self.tx.send((MemoryRequest::RecordRecallBoost { ids }, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match recv_memory_response(resp_rx) {
+                Ok(MemoryResponse::RecordRecallBoost(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = ids;
+            Ok(0)
+        }
+    }
+
+    pub fn record_recall_decay(&self, ids: Vec<String>) -> Result<u64, String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+            if self.tx.send((MemoryRequest::RecordRecallDecay { ids }, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match recv_memory_response(resp_rx) {
+                Ok(MemoryResponse::RecordRecallDecay(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = ids;
+            Ok(0)
+        }
+    }
+
+    pub fn update(&self, id: String, content: String) -> Result<(), String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+            if self.tx.send((MemoryRequest::Update { id, content }, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match recv_memory_response(resp_rx) {
+                Ok(MemoryResponse::Update(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (id, content);
+            Err("long-term memory disabled".into())
+        }
+    }
+
+    pub fn run_hygiene_purge(&self) -> Result<(u64, u64), String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+            if self.tx.send((MemoryRequest::HygienePurge, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match recv_memory_response(resp_rx) {
+                Ok(MemoryResponse::HygienePurge(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            Ok((0, 0))
+        }
+    }
+
+    pub fn list_by_source_prefix(&self, prefix: String, limit: usize) -> Vec<(String, String, String)> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+            if self
+                .tx
+                .send((MemoryRequest::ListBySourcePrefix { prefix, limit }, resp_tx))
+                .is_err()
+            {
+                return Vec::new();
+            }
+            match recv_memory_response(resp_rx) {
+                Ok(MemoryResponse::ListBySourcePrefix(rows)) => rows,
+                _ => Vec::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (prefix, limit);
+            Vec::new()
+        }
+    }
+
+    pub fn list_by_session(&self, session_id: String, limit: usize) -> Vec<(String, String, String)> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+            if self
+                .tx
+                .send((MemoryRequest::ListBySession { session_id, limit }, resp_tx))
+                .is_err()
+            {
+                return Vec::new();
+            }
+            match recv_memory_response(resp_rx) {
+                Ok(MemoryResponse::ListBySession(rows)) => rows,
+                _ => Vec::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (session_id, limit);
+            Vec::new()
+        }
+    }
+
+    pub fn run_lt_rollup(&self, days: u32) -> Result<u64, String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+            if self
+                .tx
+                .send((MemoryRequest::LtRollup { days, limit: 20 }, resp_tx))
+                .is_err()
+            {
+                return Err("memory actor disconnected".into());
+            }
+            match recv_memory_response(resp_rx) {
+                Ok(MemoryResponse::LtRollup(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = days;
+            Ok(0)
         }
     }
 }
@@ -429,13 +612,16 @@ pub fn start_memory_actor(
     #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
     {
         use std::sync::mpsc;
-        use tokio::sync::oneshot;
         use uuid::Uuid;
         use akasha_embeddings::{embedding_to_bytes, Embedder};
-        use akasha_store::{cosine_similarity, decode_embedding_bytes, extract_facts_simple, EpisodicStore, FactsStore, LongTermStore};
+        use akasha_store::{
+            extract_facts_simple, hybrid_memory_search, HybridSearchOptions, EpisodicStore,
+            FactsStore, LongTermStore,
+        };
+        use crate::memory_fact_extract;
         use crate::memory_relation_inference;
 
-        let (tx, rx) = mpsc::channel::<(MemoryRequest, oneshot::Sender<MemoryResponse>)>();
+        let (tx, rx) = mpsc::channel::<(MemoryRequest, mpsc::Sender<MemoryResponse>)>();
         let memory_db_path = _memory_db_path.to_path_buf();
         let embedding_cache_dir = _embedding_cache_dir.to_path_buf();
         let handle = thread::spawn(move || {
@@ -467,30 +653,18 @@ pub fn start_memory_actor(
                     }
                     MemoryRequest::Search { query_text, top_k, filter } => {
                         let filter_ref = filter.as_ref();
-                        const HYBRID_CANDIDATES: usize = 50;
                         let contents = match embedder.embed_one(&query_text) {
                             Ok(query_vec) => {
-                                // Hybrid (plan moyen terme 2): keyword candidates then rerank by embedding.
-                                let keyword_candidates = store
-                                    .search_by_keywords(&query_text, HYBRID_CANDIDATES, filter_ref)
-                                    .unwrap_or_default();
-                                if keyword_candidates.is_empty() {
-                                    let entries = store.search_by_embedding(&query_vec, top_k, filter_ref).unwrap_or_default();
-                                    entries.into_iter().map(|e| (e.id.to_string(), e.content)).collect()
-                                } else {
-                                    let ids: Vec<String> = keyword_candidates.iter().map(|(id, _)| id.clone()).collect();
-                                    let with_emb = store.get_entries_with_embeddings_by_ids(&ids).unwrap_or_default();
-                                    let mut scored: Vec<(f32, (String, String))> = with_emb
-                                        .into_iter()
-                                        .map(|(id, content, emb_bytes)| {
-                                            let emb = decode_embedding_bytes(&emb_bytes);
-                                            let sim = cosine_similarity(&query_vec, &emb);
-                                            (sim, (id, content))
-                                        })
-                                        .collect();
-                                    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                                    scored.into_iter().take(top_k).map(|(_, pair)| pair).collect()
-                                }
+                                let options = HybridSearchOptions::default();
+                                hybrid_memory_search(
+                                    &store,
+                                    &query_text,
+                                    &query_vec,
+                                    top_k,
+                                    filter_ref,
+                                    &options,
+                                )
+                                .unwrap_or_default()
                             }
                             Err(_) => {
                                 store.search_by_keywords(&query_text, top_k, filter_ref).unwrap_or_default()
@@ -502,7 +676,7 @@ pub fn start_memory_actor(
                         let already_exists = store.content_exists(&content).unwrap_or(false);
                         if already_exists {
                             tracing::debug!(content = %content.chars().take(60).collect::<String>(), "Skipping duplicate long-term memory entry");
-                            MemoryResponse::Promote(Ok(()))
+                            MemoryResponse::Promote(Ok(None))
                         } else {
                             use chrono::DateTime;
                             let expires_at_dt = expires_at
@@ -558,14 +732,24 @@ pub fn start_memory_actor(
                                             if entry.id == id {
                                                 continue;
                                             }
-                                            if let Some(kind) = auto_relation_kind(sim, &content) {
+                                            if let Some(kind) =
+                                                auto_relation_kind(sim, &content, &entry.content)
+                                            {
                                                 let _ = store.insert_relation(id, entry.id, kind);
                                                 n += 1;
                                             }
                                         }
                                     }
-                                    Ok(())
-                                });
+                                    Ok(id)
+                                })
+                                .map(|id| Some(id.to_string()));
+                            if let Ok(Some(ref entry_id)) = &result {
+                                memory_fact_extract::enqueue_after_promote(
+                                    entry_id.clone(),
+                                    content.clone(),
+                                    source.clone(),
+                                );
+                            }
                             MemoryResponse::Promote(result)
                         }
                     }
@@ -646,6 +830,156 @@ pub fn start_memory_actor(
                             .rebuild_similar_relations(max_per_entry)
                             .map_err(|e| e.to_string());
                         MemoryResponse::RebuildSimilarRelations(result)
+                    }
+                    MemoryRequest::RecordRecallBoost { ids } => {
+                        let threshold = std::env::var("AKASHA_MEMORY_DECAY_RECALL_THRESHOLD")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(5);
+                        let _ = store.record_recall_decay(&ids, threshold);
+                        let result = store.record_recall_boost(&ids).map_err(|e| e.to_string());
+                        MemoryResponse::RecordRecallBoost(result)
+                    }
+                    MemoryRequest::RecordRecallDecay { ids } => {
+                        let threshold = std::env::var("AKASHA_MEMORY_DECAY_RECALL_THRESHOLD")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(5);
+                        let result = store.record_recall_decay(&ids, threshold).map_err(|e| e.to_string());
+                        MemoryResponse::RecordRecallDecay(result)
+                    }
+                    MemoryRequest::Update { id, content } => {
+                        let result = Uuid::parse_str(&id)
+                            .map_err(|_| "invalid uuid".to_string())
+                            .and_then(|uuid| {
+                                embedder
+                                    .embed_one(&content)
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|vec| {
+                                        let bytes = embedding_to_bytes(&vec);
+                                        store
+                                            .update_entry_content(uuid, &content, &bytes)
+                                            .map_err(|e| e.to_string())
+                                            .and_then(|ok| {
+                                                if ok {
+                                                    Ok(())
+                                                } else {
+                                                    Err("not found".to_string())
+                                                }
+                                            })
+                                    })
+                            });
+                        MemoryResponse::Update(result)
+                    }
+                    MemoryRequest::HygienePurge => {
+                        let expired = store.purge_expired_entries().unwrap_or(0);
+                        let low = store.purge_low_confidence(0.2).unwrap_or(0);
+                        MemoryResponse::HygienePurge(Ok((expired, low)))
+                    }
+                    MemoryRequest::ListBySourcePrefix { prefix, limit } => {
+                        let rows = store
+                            .list_by_source_prefix(&prefix, limit)
+                            .unwrap_or_default();
+                        MemoryResponse::ListBySourcePrefix(rows)
+                    }
+                    MemoryRequest::ListBySession { session_id, limit } => {
+                        let rows = store
+                            .list_entries_by_session(&session_id, limit)
+                            .unwrap_or_default();
+                        MemoryResponse::ListBySession(rows)
+                    }
+                    MemoryRequest::LtRollup { days, limit } => {
+                        let result = (|| -> Result<u64, String> {
+                            let old = store
+                                .list_entries_older_than(days, limit)
+                                .map_err(|e| e.to_string())?;
+                            if old.is_empty() {
+                                return Ok(0);
+                            }
+                            let source = format!(
+                                "memory_rollup_{}",
+                                chrono::Utc::now().format("%Y-%m-%d")
+                            );
+                            let summary_lines = old
+                                .iter()
+                                .map(|(id, content, src)| {
+                                    format!(
+                                        "- [{id}] (source={src}) {}",
+                                        content.chars().take(800).collect::<String>()
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let summary = format!(
+                                "[Rollup mémoire long-terme: {} entrée(s) > {} jours]\n{}",
+                                old.len(),
+                                days,
+                                summary_lines
+                            );
+                            if store.content_exists(&summary).unwrap_or(false) {
+                                tracing::debug!(days, "LT memory rollup skipped: duplicate summary");
+                                return Ok(0);
+                            }
+                            let ids_to_delete: Vec<String> =
+                                old.iter().map(|(id, _, _)| id.clone()).collect();
+                            embedder
+                                .embed_one(&summary)
+                                .map_err(|e| e.to_string())
+                                .and_then(|vec| {
+                                    let bytes = embedding_to_bytes(&vec);
+                                    store
+                                        .insert_with_attribution(
+                                            &summary,
+                                            &bytes,
+                                            &source,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            Some(1),
+                                            Some("global_user"),
+                                            None,
+                                        )
+                                        .map_err(|e| e.to_string())
+                                })?;
+                            let mut deleted = 0u64;
+                            for id_str in ids_to_delete {
+                                if let Ok(uuid) = Uuid::parse_str(&id_str) {
+                                    if store.delete_by_id(uuid).map_err(|e| e.to_string())? {
+                                        deleted += 1;
+                                    }
+                                }
+                            }
+                            if let Some(ref ep) = episodic_store {
+                                let payload = serde_json::json!({
+                                    "rollup_days": days,
+                                    "entry_count": old.len(),
+                                    "deleted_count": deleted,
+                                    "source": source,
+                                });
+                                let _ = ep.insert_event(
+                                    "memory_rollup",
+                                    &payload.to_string(),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    Some(1),
+                                    Some("global_user"),
+                                    Some("rollup"),
+                                );
+                            }
+                            tracing::info!(
+                                count = deleted,
+                                memory_rollup_entries = deleted,
+                                days,
+                                source = %source,
+                                "LT memory rollup completed"
+                            );
+                            Ok(deleted)
+                        })();
+                        MemoryResponse::LtRollup(result)
                     }
                 };
                 let _ = resp_tx.send(response);

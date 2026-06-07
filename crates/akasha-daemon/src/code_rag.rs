@@ -120,6 +120,15 @@ impl CodeRagStore {
         self.base_dir.join(project_id)
     }
 
+    /// Supprime l’index code-RAG local pour un `project_id` (dossier sous le répertoire d’index).
+    pub fn remove_project_index(&self, project_id: &str) -> anyhow::Result<()> {
+        let dir = self.project_index_dir(project_id);
+        if dir.is_dir() {
+            fs::remove_dir_all(&dir)?;
+        }
+        Ok(())
+    }
+
     fn manifest_path(&self, project_id: &str) -> PathBuf {
         self.project_index_dir(project_id).join(INDEX_FILENAME)
     }

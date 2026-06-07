@@ -3,11 +3,13 @@
 mod policy;
 mod tools;
 mod tool_contract;
+#[cfg(feature = "web")]
+mod web_search;
 
 #[cfg(feature = "container")]
 mod container;
 
-pub use policy::ToolsPolicy;
+pub use policy::{ToolEffectiveRow, ToolsPolicy};
 pub use tool_contract::{
     built_in_tool_capabilities, schedule_tool_calls, ToolCall, ToolCapabilities, ToolExecutionLane,
     ToolInterruptBehavior,
@@ -18,7 +20,9 @@ pub use tools::{
     write_file, ToolResult,
 };
 #[cfg(feature = "web")]
-pub use tools::{web_fetch, web_search};
+pub use tools::{web_crawl_start, web_crawl_status, web_fetch, web_search};
+#[cfg(feature = "web")]
+pub use web_search::any_provider_available;
 
 #[cfg(feature = "container")]
 pub use container::{run_container, run_code_in_container, ContainerRunOptions, ContainerRunResult};
@@ -176,6 +180,16 @@ impl ToolExecutor {
     #[cfg(feature = "web")]
     pub async fn web_search(&self, query: &str, max_results: u32) -> anyhow::Result<(String, ToolResult)> {
         web_search(query, max_results, &self.policy).await
+    }
+
+    #[cfg(feature = "web")]
+    pub async fn web_crawl(&self, url: &str, limit: u32) -> anyhow::Result<(String, ToolResult)> {
+        web_crawl_start(url, limit, &self.policy).await
+    }
+
+    #[cfg(feature = "web")]
+    pub async fn web_crawl_job_status(&self, job_id: &str) -> anyhow::Result<(String, ToolResult)> {
+        web_crawl_status(job_id, &self.policy).await
     }
 
     /// Run a command in a container (work_dir must be allowed for read). Feature "container".

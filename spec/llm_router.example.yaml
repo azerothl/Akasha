@@ -120,6 +120,28 @@ task_types:
       - provider: akasha_core
         model: core
 
+  # Modèle utilitaire (inspiré Odysseus) — compaction, titres de session, synthèse compare, tâches de fond.
+  # Utiliser un petit modèle local ou API économique ; retombe sur akasha_embedded si absent.
+  utility:
+    primary:
+      provider: akasha_embedded
+      model: default
+      config:
+        temperature: 0.3
+        max_tokens: 512
+    fallback:
+      - provider: akasha_core
+        model: core
+
+  # Deep research / compare (routes /api/research/deep, /api/compare)
+  research:
+    primary:
+      provider: akasha_embedded
+      model: default
+    fallback:
+      - provider: akasha_core
+        model: core
+
 # Example: Using Ollama with custom model config
 # Uncomment and configure to switch to Ollama:
 #

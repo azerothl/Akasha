@@ -156,6 +156,7 @@ async fn tick(
             "Autonomous mission heartbeat {}",
             now.format("%Y-%m-%d %H:%M UTC")
         )),
+        studio_project_id: None,
     };
 
     {
@@ -170,6 +171,7 @@ async fn tick(
         image_data_urls: None,
         execution_mode: Some(ExecutionMode::Orchestrated),
         preferred_task_type: Some(heartbeat_task_type.to_string()),
+        incognito: false,
     };
 
     // Drop am_store before .await so the future remains Send

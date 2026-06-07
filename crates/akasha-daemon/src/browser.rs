@@ -70,6 +70,45 @@ pub fn playwright_runner_dir(runner_path: &Path) -> Option<PathBuf> {
     runner_path.parent().map(Path::to_path_buf)
 }
 
+/// Actionable message when `browser_allowed_domains` denies a host.
+pub fn format_domain_denied(host: &str, allowed: &[String], blocked: &[String]) -> String {
+    let allow_hint = if allowed.iter().any(|d| d.trim() == "*") {
+        "browser_allowed_domains contains '*' but host may be in browser_blocked_domains".to_string()
+    } else if allowed.is_empty() {
+        "browser_allowed_domains is empty (deny by default)".to_string()
+    } else {
+        format!("browser_allowed_domains: {}", allowed.join(", "))
+    };
+    let block_hint = if blocked.is_empty() {
+        String::new()
+    } else {
+        format!("; browser_blocked_domains: {}", blocked.join(", "))
+    };
+    format!(
+        "Domain not allowed: {host}. Add '{host}' (or a parent domain) to browser_allowed_domains in tools_policy.yaml ({allow_hint}{block_hint}). Use TOOL: web_fetch when the page is static and allowed_web_domains covers the host."
+    )
+}
+
+/// Enrich Playwright runner errors with timeout and install guidance.
+pub fn format_runner_error(
+    raw: &str,
+    action_timeout_secs: u64,
+    session_timeout_secs: u64,
+) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("timeout") {
+        return format!(
+            "{raw} (action timeout browser_action_timeout_secs={action_timeout_secs}s in tools_policy.yaml; session cap browser_session_timeout_secs={session_timeout_secs}s — use browser wait <ms> or increase timeouts, then retry navigate/snapshot)"
+        );
+    }
+    if init_failure_suggests_missing_browser(raw) {
+        return format!(
+            "{raw} — Run TOOL: install_playwright after user consent, or ensure AKASHA_PLAYWRIGHT_AUTO_INSTALL is not 0 and Node.js/npm are on PATH."
+        );
+    }
+    raw.to_string()
+}
+
 fn init_failure_suggests_missing_browser(msg: &str) -> bool {
     let m = msg.to_lowercase();
     m.contains("executable doesn't exist")

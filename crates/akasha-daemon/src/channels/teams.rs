@@ -3,7 +3,11 @@
 
 use crate::agents::MainAgent;
 use crate::gateway;
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 const TEAMS_POLL_INTERVAL_MS: u64 = 1500;
@@ -25,63 +29,132 @@ const ALLOWED_SERVICE_URL_DOMAINS: &[&str] = &[
     ".teams.microsoft.com",
 ];
 
-/// Validate the Bot Framework Authorization header: require a Bearer JWT, validate
-/// structure, issuer, and audience (app_id). Returns an error string on failure.
-/// Note: signature verification requires fetching JWKS from Microsoft endpoints;
-/// here we validate the token structure, issuer prefix, and audience to prevent
-/// unauthenticated access while keeping the implementation self-contained.
-fn validate_teams_jwt(authorization: Option<&str>, app_id: &str) -> Result<(), &'static str> {
-    let auth = match authorization {
-        Some(a) if a.to_ascii_lowercase().starts_with("bearer ") => &a[7..],
-        _ => return Err("missing_authorization"),
+/// Maximum number of per-`kid` entries retained in the JWKS cache.
+/// When this limit is reached during an insert, stale entries are evicted first;
+/// if all entries are still fresh, the oldest half are dropped to bound memory.
+const JWKS_CACHE_MAX_ENTRIES: usize = 50;
+
+const BOTFRAMEWORK_JWKS_URL: &str = "https://login.botframework.com/v1/.well-known/keys";
+/// TTL for the JWKS/cert cache (1 hour).
+const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
+
+/// Per-`kid` PEM certificate cache with timestamps for TTL-based expiry.
+static JWKS_CERT_CACHE: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+
+fn jwks_cert_cache() -> &'static Mutex<HashMap<String, (String, Instant)>> {
+    JWKS_CERT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn extract_bearer_token<'a>(authorization: Option<&'a str>) -> Option<&'a str> {
+    let auth = authorization?;
+    let lower = auth.to_ascii_lowercase();
+    let rest = if lower.starts_with("bearer ") {
+        auth.get(7..)?
+    } else {
+        return None;
     };
-    // Decode JWT payload (middle segment, base64url encoded JSON).
-    // JWT uses base64url without padding; try URL_SAFE_NO_PAD first, then with padding added.
-    let parts: Vec<&str> = auth.splitn(3, '.').collect();
-    if parts.len() != 3 {
-        return Err("invalid_jwt_format");
+    let t = rest.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
     }
-    let payload_b64 = parts[1];
-    let decoded = base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        payload_b64,
-    )
-    .or_else(|_| {
-        let padded = match payload_b64.len() % 4 {
-            2 => format!("{}==", payload_b64),
-            3 => format!("{}=", payload_b64),
-            _ => payload_b64.to_string(),
-        };
-        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &padded)
-    })
-    .map_err(|_| "jwt_payload_decode_error")?;
-    let payload: serde_json::Value =
-        serde_json::from_slice(&decoded).map_err(|_| "jwt_payload_parse_error")?;
-    // Validate issuer.
-    let iss = payload.get("iss").and_then(|v| v.as_str()).unwrap_or("");
+}
+
+/// Inner blocking JWKS fetch: makes a network call and extracts the PEM for `kid`.
+fn fetch_pem_from_jwks(kid: &str) -> Result<String, &'static str> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|_| "jwks_client_build_failed")?;
+    let resp = client
+        .get(BOTFRAMEWORK_JWKS_URL)
+        .send()
+        .map_err(|_| "jwks_fetch_failed")?;
+    if !resp.status().is_success() {
+        return Err("jwks_http_error");
+    }
+    let v: serde_json::Value = resp.json().map_err(|_| "jwks_json_failed")?;
+    let keys = v["keys"].as_array().ok_or("jwks_missing_keys")?;
+    for k in keys {
+        if k["kid"].as_str() != Some(kid) {
+            continue;
+        }
+        let x5c0 = k["x5c"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|x| x.as_str())
+            .ok_or("jwks_missing_x5c")?;
+        return Ok(format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            x5c0
+        ));
+    }
+    Err("jwks_kid_not_found")
+}
+
+/// Fetch JWKS from Bot Framework and return PEM (first `x5c` cert) for `kid`.
+///
+/// Results are cached per `kid` with a [`JWKS_CACHE_TTL`] TTL.  At most
+/// [`JWKS_CACHE_MAX_ENTRIES`] entries are kept; stale entries are evicted on
+/// every insert and, if still full, the oldest half are removed.
+///
+/// The blocking HTTP call is off-loaded to the Tokio blocking thread pool via
+/// `spawn_blocking` so the async runtime thread is never stalled.
+async fn botframework_signing_pem_for_kid(kid: &str) -> Result<String, &'static str> {
+    // Fast path: check the in-memory cache.
+    {
+        let cache = jwks_cert_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((pem, inserted)) = cache.get(kid) {
+            if inserted.elapsed() < JWKS_CACHE_TTL {
+                return Ok(pem.clone());
+            }
+        }
+    }
+    // Cache miss or TTL expired: fetch from network on the blocking thread pool.
+    let kid_owned = kid.to_string();
+    let pem = tokio::task::spawn_blocking(move || fetch_pem_from_jwks(&kid_owned))
+        .await
+        .map_err(|_| "jwks_spawn_failed")??;
+    // Populate the cache, evicting stale / excess entries.
+    {
+        let mut cache = jwks_cert_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= JWKS_CACHE_MAX_ENTRIES {
+            // First evict all expired entries.
+            cache.retain(|_, (_, t)| t.elapsed() < JWKS_CACHE_TTL);
+            // If still full, drop the oldest half.
+            if cache.len() >= JWKS_CACHE_MAX_ENTRIES {
+                let mut entries: Vec<_> = cache.drain().collect();
+                entries.sort_by_key(|(_, (_, t))| *t);
+                let keep = entries.split_off(entries.len() / 2);
+                cache.extend(keep);
+            }
+        }
+        cache.insert(kid.to_string(), (pem.clone(), Instant::now()));
+    }
+    Ok(pem)
+}
+
+/// Validate the Bot Framework Authorization header: Bearer JWT with **RS256 signature**
+/// against Microsoft JWKS (`x5c`), plus audience (`app_id`) and issuer prefix checks.
+async fn validate_teams_jwt(authorization: Option<&str>, app_id: &str) -> Result<(), &'static str> {
+    let token = extract_bearer_token(authorization).ok_or("missing_authorization")?;
+    let header = decode_header(token).map_err(|_| "invalid_jwt_header")?;
+    if header.alg != Algorithm::RS256 {
+        return Err("unsupported_jwt_alg");
+    }
+    let kid = header.kid.as_deref().ok_or("missing_kid")?;
+    let pem = botframework_signing_pem_for_kid(kid).await?;
+    let key = DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|_| "invalid_signing_pem")?;
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.validate_exp = true;
+    validation.leeway = 60;
+    validation.set_audience(&[app_id]);
+    let data = decode::<serde_json::Value>(token, &key, &validation).map_err(|_| "jwt_verify_failed")?;
+    let iss = data.claims.get("iss").and_then(|v| v.as_str()).unwrap_or("");
     if !BOT_FRAMEWORK_ISSUERS.iter().any(|prefix| iss.starts_with(prefix)) {
         warn!(iss = %iss, "Teams: JWT issuer not from Bot Framework");
         return Err("invalid_jwt_issuer");
-    }
-    // Validate audience matches our app_id.
-    let aud_matches = match payload.get("aud") {
-        Some(serde_json::Value::String(s)) => s == app_id,
-        Some(serde_json::Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some(app_id)),
-        _ => false,
-    };
-    if !aud_matches {
-        warn!("Teams: JWT audience does not match app_id");
-        return Err("invalid_jwt_audience");
-    }
-    // Validate token is not expired.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if let Some(exp) = payload.get("exp").and_then(|v| v.as_u64()) {
-        if exp < now {
-            return Err("jwt_expired");
-        }
     }
     Ok(())
 }
@@ -136,7 +209,7 @@ struct TeamsConversation {
 }
 
 /// Handle Teams Bot Framework message: validate JWT auth, parse activity, create task, poll, reply.
-pub fn handle_teams_message(
+pub async fn handle_teams_message(
     body: Option<Vec<u8>>,
     authorization: Option<&str>,
     app_id: &str,
@@ -146,55 +219,55 @@ pub fn handle_teams_message(
     store_path: &Path,
 ) -> String {
     // Validate Bot Framework JWT before processing the request.
-    if let Err(e) = validate_teams_jwt(authorization, app_id) {
+    if let Err(e) = validate_teams_jwt(authorization, app_id).await {
         warn!(reason = e, "Teams: authentication failed");
         let body = serde_json::json!({ "error": "unauthorized", "detail": e });
-        return crate::api::json_response("401 Unauthorized", &body.to_string());
+        return crate::api_http::json_response("401 Unauthorized", &body.to_string());
     }
 
     let body = match body {
         Some(b) if !b.is_empty() => b,
         _ => {
-            return crate::api::json_response("400 Bad Request", r#"{"error":"missing_body"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"missing_body"}"#);
         }
     };
     let activity: TeamsActivity = match serde_json::from_slice(&body) {
         Ok(a) => a,
         Err(e) => {
             warn!(error = %e, "Teams: invalid JSON");
-            return crate::api::json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
         }
     };
     if activity.type_.as_deref() != Some("message") {
-        return crate::api::json_response("200 OK", "{}");
+        return crate::api_http::json_response("200 OK", "{}");
     }
     let text = activity.text.as_deref().unwrap_or("").trim().to_string();
     if text.is_empty() {
-        return crate::api::json_response("200 OK", "{}");
+        return crate::api_http::json_response("200 OK", "{}");
     }
     let service_url = match activity.service_url.as_deref() {
         Some(u) if !u.is_empty() => u.to_string(),
         _ => {
             warn!("Teams: missing serviceUrl");
-            return crate::api::json_response("400 Bad Request", r#"{"error":"missing_service_url"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"missing_service_url"}"#);
         }
     };
     // Validate serviceUrl to prevent SSRF.
     if let Err(e) = validate_service_url(&service_url) {
         warn!(reason = e, service_url = %service_url, "Teams: serviceUrl validation failed");
         let body = serde_json::json!({ "error": "invalid_service_url", "detail": e });
-        return crate::api::json_response("400 Bad Request", &body.to_string());
+        return crate::api_http::json_response("400 Bad Request", &body.to_string());
     }
     let conversation_id = match activity.conversation.as_ref().and_then(|c| c.id.as_deref()) {
         Some(id) => id.to_string(),
         None => {
             warn!("Teams: missing conversation.id");
-            return crate::api::json_response("400 Bad Request", r#"{"error":"missing_conversation"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"missing_conversation"}"#);
         }
     };
     if let Err(e) = akasha_core::check_prompt_injection(&text) {
         let body = serde_json::json!({ "error": "prompt_injection_rejected", "detail": e.to_string() });
-        return crate::api::json_response("400 Bad Request", &body.to_string());
+        return crate::api_http::json_response("400 Bad Request", &body.to_string());
     }
 
     let main_agent = main_agent.clone();
@@ -279,7 +352,7 @@ pub fn handle_teams_message(
         }
     });
 
-    crate::api::json_response("200 OK", "{}")
+    crate::api_http::json_response("200 OK", "{}")
 }
 
 async fn post_teams_reply(

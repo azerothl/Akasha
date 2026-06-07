@@ -6,6 +6,8 @@
 
 Un moteur de politique unique qui décide « qui peut faire quoi » : agent, mémoire, plugin, outil. Les règles sont évaluées aux points d’application (avant outil, avant accès mémoire, avant chargement/invocation plugin). Option de masquage (redaction) des données sensibles dans logs et réponses.
 
+**Note (plugins)** : l’invocation d’outils machine (`read_file`, `write_file`, `plugin.call`, etc.) côté worker conversation est **autorisée ou refusée par `tools_policy.yaml`** (et profils d’outils). Les métadonnées `routing_rules` des manifests de plugins **ne constituent pas** un second garde-fou d’exécution : elles peuvent enrichir le prompt à titre indicatif uniquement.
+
 ## 2. Modèle de règles
 
 - **Acteur** : `agent_id` / `role` / `channel` (ex. `conversation`, `slack`, `api`).

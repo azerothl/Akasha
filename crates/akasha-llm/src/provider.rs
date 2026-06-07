@@ -1748,7 +1748,7 @@ impl AkashaCoreProvider {
     }
 }
 
-/// Placeholder when no embedded model is available (spec 34: messages utiles, liens init/paths/doc).
+/// Placeholder response when no embedded model is available; keeps the system usable on fresh installs.
 fn placeholder_response(prompt_len: usize) -> CompletionResponse {
     let reply = format!(
         "Request received ({} chars). No local LLM available. For full replies: run Ollama (e.g. ollama run llama3) or add providers in llm_router.yaml. Setup: akasha init; paths: akasha paths; see Documentation tab for the guide.",
@@ -1822,15 +1822,19 @@ impl LLMProvider for AkashaCoreProvider {
                         });
                     }
                     Ok(Err(e)) => {
-                        warn!(error = ?e, "AkashaCoreProvider embedded LLM failed to complete prompt; falling back to placeholder response");
+                        warn!(error = ?e, "AkashaCoreProvider embedded LLM failed to complete prompt");
+                        return Err(ProviderError::Api(e.to_string()));
                     }
                     Err(join_err) => {
-                        warn!(error = ?join_err, "AkashaCoreProvider spawn_blocking for embedded LLM failed; falling back to placeholder response");
+                        warn!(error = ?join_err, "AkashaCoreProvider spawn_blocking for embedded LLM failed");
+                        return Err(ProviderError::Api(format!("spawn: {}", join_err)));
                     }
                 }
             }
         }
-        Ok(placeholder_response(request.prompt.len()))
+        let prompt_len = request.prompt.len();
+        let _ = request;
+        Ok(placeholder_response(prompt_len))
     }
 }
 

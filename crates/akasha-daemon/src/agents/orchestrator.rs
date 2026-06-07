@@ -1769,6 +1769,7 @@ async fn process_root_task(
                 image_data_urls,
                 execution_mode: None,
                 preferred_task_type: None,
+                incognito: false,
             })
             .await
             .map_err(|_| anyhow::anyhow!("conversation channel closed"))?;
@@ -1865,6 +1866,10 @@ async fn process_root_task(
         let mut first_child_spawned = false;
         let mut recovery_used = false;
         let mut cumulative_problem_sids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let root_studio_project_id: Option<String> = TaskStore::open(&store_path_buf)
+            .ok()
+            .and_then(|st| st.get(root_task_id).ok().flatten())
+            .and_then(|t| t.studio_project_id.clone());
         for (wave_idx, wave) in waves.iter().enumerate() {
             let mut batch: Vec<(Uuid, Arc<tokio::sync::Notify>, String, Vec<String>)> = Vec::new();
             for &idx in wave {
@@ -1954,6 +1959,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                             Some(child_message.clone())
                         }
                     },
+                    studio_project_id: root_studio_project_id.clone(),
                 };
                 // Open TaskStore in a short scope so it is dropped before any .await.
                 {
@@ -1961,6 +1967,19 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                     if store.insert(&task).is_err() {
                         continue;
                     }
+                    let at = Utc::now().to_rfc3339();
+                    let _ = store.insert_event(
+                        root_task_id,
+                        "worker_started",
+                        Some(&serde_json::json!({
+                            "worker_task_id": child_id.to_string(),
+                            "assigned_agent": agent_type,
+                            "step_id": &step.step_id,
+                            "delegation_reason": step.intent.clone(),
+                            "schema_version": 1
+                        })),
+                        &at,
+                    );
                 }
                 let _ = bus.send(
                     EventEnvelope::new(
@@ -1970,7 +1989,19 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                             "parent_id": root_task_id.to_string(),
                             "agent": agent_type,
                             "step_id": &step.step_id,
-                            "delegation_reason": serde_json::Value::Null
+                            "delegation_reason": step.intent.clone()
+                        })),
+                    )
+                    .with_correlation(root_task_id),
+                );
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::AgentDelegated,
+                        Some(serde_json::json!({
+                            "task_id": child_id.to_string(),
+                            "parent_id": root_task_id.to_string(),
+                            "agent": agent_type,
+                            "reason": step.intent.clone()
                         })),
                     )
                     .with_correlation(root_task_id),
@@ -2041,6 +2072,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                         image_data_urls: None,
                         execution_mode: None,
                         preferred_task_type: None,
+                        incognito: false,
                     })
                     .await
                     .is_err()
@@ -2159,6 +2191,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                             created_at: Utc::now(),
                             updated_at: Utc::now(),
                             initial_message: Some(format!("[recovery-retry {sid}]")),
+                            studio_project_id: root_studio_project_id.clone(),
                         };
                         let retry_inserted = {
                             TaskStore::open(&store_path_buf)
@@ -2176,6 +2209,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                                     image_data_urls: None,
                                     execution_mode: None,
                                     preferred_task_type: None,
+                                    incognito: false,
                                 })
                                 .await;
                             let retry_timed_out = tokio::time::timeout(
@@ -2255,6 +2289,7 @@ Use TOOL: write_file <exact_path> with real, substantive content for each entry 
                         created_at: Utc::now(),
                         updated_at: Utc::now(),
                         initial_message: Some(format!("[deliverable-retry {sid}]")),
+                        studio_project_id: root_studio_project_id.clone(),
                     };
                     let retry_inserted = {
                         TaskStore::open(&store_path_buf)
@@ -2272,6 +2307,7 @@ Use TOOL: write_file <exact_path> with real, substantive content for each entry 
                                 image_data_urls: None,
                                 execution_mode: None,
                                 preferred_task_type: None,
+                                incognito: false,
                             })
                             .await;
                         let _ = tokio::time::timeout(retry_timeout, notify_retry.notified()).await;
@@ -2338,6 +2374,25 @@ Use TOOL: write_file <exact_path> with real, substantive content for each entry 
                     )
                     .with_correlation(root_task_id),
                 );
+                let assigned_agent = step_ref
+                    .map(|s| s.agent_type.as_str())
+                    .unwrap_or("unknown");
+                if let Ok(store) = TaskStore::open(&store_path_buf) {
+                    let at = Utc::now().to_rfc3339();
+                    let _ = store.insert_event(
+                        root_task_id,
+                        "worker_completed",
+                        Some(&serde_json::json!({
+                            "worker_task_id": child_id.to_string(),
+                            "assigned_agent": assigned_agent,
+                            "step_id": sid,
+                            "success": success,
+                            "failed": failed,
+                            "schema_version": 1
+                        })),
+                        &at,
+                    );
+                }
             }
             cumulative_problem_sids.extend(problematic_this_wave.iter().cloned());
 
@@ -2407,6 +2462,7 @@ Reply with SHORT actionable guidance only: what the user should provide, which p
                                 .chain(std::iter::once('…'))
                                 .collect::<String>(),
                         ),
+                        studio_project_id: root_studio_project_id.clone(),
                     };
                     let recovery_ok = TaskStore::open(&store_path_buf)
                         .map(|s| s.insert(&recovery_task).is_ok())
@@ -2425,6 +2481,7 @@ Reply with SHORT actionable guidance only: what the user should provide, which p
                                 image_data_urls: None,
                                 execution_mode: None,
                                 preferred_task_type: None,
+                                incognito: false,
                             })
                             .await;
                         let _ =
@@ -2486,6 +2543,7 @@ Do not only describe the files — execute the tools."#,
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                     initial_message: Some(remediation_message.chars().take(500).collect()),
+                    studio_project_id: root_studio_project_id.clone(),
                 };
                 let remediation_ok = TaskStore::open(&store_path_buf)
                     .map(|s| s.insert(&remediation_task).is_ok())
@@ -2504,6 +2562,7 @@ Do not only describe the files — execute the tools."#,
                             image_data_urls: None,
                             execution_mode: None,
                             preferred_task_type: None,
+                            incognito: false,
                         })
                         .await;
                     let _ = tokio::time::timeout(per_child_timeout, notify_r.notified()).await;
@@ -2757,6 +2816,7 @@ Formatting rules (Markdown):
                         .chain(std::iter::once('…'))
                         .collect::<String>(),
                 ),
+                studio_project_id: root_studio_project_id.clone(),
             };
             // Open store in a short scope so it is dropped before the awaits below.
             let refinement_inserted = {
@@ -2775,6 +2835,7 @@ Formatting rules (Markdown):
                         image_data_urls: None,
                         execution_mode: None,
                         preferred_task_type: None,
+                        incognito: false,
                     })
                     .await;
                 if tokio::time::timeout(per_child_timeout, notify_refinement.notified())

@@ -104,9 +104,28 @@ pub struct PluginManifest {
     /// Optional declarative prompt routing rules loaded automatically when the plugin is installed.
     #[serde(default)]
     pub routing_rules: Vec<PluginRoutingRule>,
+    /// Optional hook event subscriptions (e.g. `task_completed`) handled by plugin hook bus.
+    #[serde(default)]
+    pub hook_events: Vec<String>,
     /// Optional HTTP sandbox when `permissions` includes `"network"`.
     #[serde(default)]
     pub network: Option<PluginNetworkConfig>,
+}
+
+/// Returns true if `id` is safe to use as a directory name under `plugins/` (no path traversal).
+pub fn is_safe_plugin_id(id: &str) -> bool {
+    if id.is_empty() || id == "." || id == ".." {
+        return false;
+    }
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return false;
+    }
+    use std::path::Component;
+    let mut comps = std::path::Path::new(id).components();
+    matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
 }
 
 impl PluginManifest {

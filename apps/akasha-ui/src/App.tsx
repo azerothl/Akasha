@@ -1,13 +1,66 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
-import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./claudeStyleChat";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type MutableRefObject, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./chatTranscriptExport";
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
-import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
-import { preprocessMessagePaths } from "./preprocessMessagePaths";
+import {
+  collapseStreamedProgressEvents,
+  isTaskActiveStatus,
+  mergeTaskEvents,
+  normalizeTaskStatus,
+} from "./taskEvents";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
 import { GeoMapView } from "./GeoMapView";
+import { SystemHealthPanel } from "./SystemHealthPanel";
+import { AppNavigation } from "./components/AppNavigation";
+import { PermissionsBell } from "./components/PermissionsBell";
+import { SteeringQueueBell } from "./components/SteeringQueueBell";
+import { OnboardingWizard, readSetupWizardPending } from "./components/OnboardingWizard";
+import { UserRagPanel } from "./components/UserRagPanel";
+import { PluginCatalogPanel } from "./components/PluginCatalogPanel";
+import { OpenClawMigrationPanel } from "./components/OpenClawMigrationPanel";
+import { ToolsPolicyPanel } from "./components/ToolsPolicyPanel";
+import { ConnectorsPanel } from "./components/ConnectorsPanel";
+import { NotificationCenter } from "./components/NotificationCenter";
+import { AppNotificationsSync } from "./components/AppNotificationsSync";
+import { useNotify } from "./notifications/useNotifyOnMessage";
+import { InfoTip, Tooltip } from "./components/Tooltip";
+import { ChatRenderer } from "./components/ChatRenderer";
+import { ChatCompositionBar } from "./components/ChatCompositionBar";
+import { MonoIcon } from "./components/MonoIcon";
+import { useHashRoute } from "./hooks/useHashRoute";
+import { NAV_ITEMS } from "./navigation/types";
+import { ComparePanel } from "./panels/ComparePanel";
+import { CookbookPanel } from "./panels/CookbookPanel";
+import { DeepResearchPanel } from "./panels/DeepResearchPanel";
+import {
+  buildMessageWithResearchContext,
+  type ChatResearchContext,
+} from "./chatResearchContext";
+import {
+  buildMessageWithNoteContext,
+  type ChatNoteContext,
+} from "./chatNoteContext";
+import { getNote, listNotes } from "./notesApi";
+import type { ResearchReportDocument } from "./researchReportExport";
+import {
+  buildCookbookPricingLookup,
+  lookupPriceRates,
+  parseUsageFromEventPayload,
+  type ModelPriceRates,
+  type ModelUsageStats,
+} from "./modelUsage";
+import { ModelUsageBadge } from "./components/ModelUsageBadge";
+import { TaskExecutionSteps } from "./components/TaskExecutionSteps";
+import { CreateTaskDialog } from "./components/CreateTaskDialog";
+import { NotesPanel } from "./components/NotesPanel";
+import { ThemeEditorPanel, applyThemeOverrides, loadThemeOverrides } from "./components/ThemeEditorPanel";
+import { buildExecutionSteps } from "./tasks/buildExecutionSteps";
+import { pollTaskUntilDone, type PollTaskUntilDoneDeps } from "./tasks/pollTaskUntilDone";
+import { THEME_IDS, THEME_STORAGE_KEY, type ThemeId } from "./themeTypes";
+
+export type { ThemeId } from "./themeTypes";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -20,15 +73,56 @@ function e2eDaemonHttpUrl(path: string): string {
   if (E2E_WEB) return `/__e2e_daemon${p}`;
   return `http://127.0.0.1:${DAEMON_PORT}${p}`;
 }
-const THEME_STORAGE_KEY = "akasha_theme";
 const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
 const TASK_ORCHESTRATION_DEBUG_STORAGE_KEY = "akasha_task_orchestration_debug";
+const TASK_SIDEBAR_STORAGE_KEY = "akasha_task_sidebar_open";
 const CHAT_TIPS_STORAGE_KEY = "akasha_ui_chat_tips";
 const CHAT_PROMPT_CHIPS_STORAGE_KEY = "akasha_ui_prompt_chips";
 const CHAT_BUDDY_STORAGE_KEY = "akasha_ui_buddy";
 const AKASHA_CHAT_THREADS_KEY = "akasha_chat_threads_v1";
+const DENSITY_STORAGE_KEY = "akasha_ui_density";
+const CHAT_AGENT_MODE_KEY = "akasha_chat_agent_mode";
+const CHAT_WEB_SEARCH_KEY = "akasha_chat_web_search";
+const CHAT_INCOGNITO_KEY = "akasha_chat_incognito";
+const CHAT_COMPANION_OPEN_KEY = "akasha_companion_open";
+const AKASHA_TASK_SESSIONS_KEY = "akasha_task_sessions_v1";
+
+function loadTaskSessionMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(AKASHA_TASK_SESSIONS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function persistTaskSession(taskId: string, sessionId: string) {
+  if (!taskId.trim() || !sessionId.trim()) return;
+  try {
+    const map = loadTaskSessionMap();
+    map[taskId] = sessionId;
+    const keys = Object.keys(map);
+    if (keys.length > 64) {
+      for (const k of keys.slice(0, keys.length - 64)) {
+        delete map[k];
+      }
+    }
+    localStorage.setItem(AKASHA_TASK_SESSIONS_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore */
+  }
+}
+
+function isGenericTaskLabel(label: string | undefined, taskId: string): boolean {
+  if (!label?.trim()) return true;
+  const suffix = taskId.length >= 8 ? taskId.slice(-8) : taskId;
+  return label.includes(`…${suffix}`) || label.includes(`...${suffix}`);
+}
 
 export type ChatThreadEntry = {
   id: string;
@@ -36,6 +130,9 @@ export type ChatThreadEntry = {
   createdAt: string;
   updatedAt: string;
   pendingTitle?: boolean;
+  lastSnippet?: string;
+  /** Optional session folder label for sidebar grouping (localStorage only). */
+  folder?: string;
 };
 
 function loadChatThreadsInitial(): ChatThreadEntry[] {
@@ -56,11 +153,8 @@ function loadChatThreadsInitial(): ChatThreadEntry[] {
   return [];
 }
 
-export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
-type UiMode = "simple" | "expert";
-type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
-const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
+type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
 function shouldChatStreamProgress(message: string): boolean {
   const m = message?.trim() ?? "";
@@ -293,7 +387,9 @@ function asRecord(v: unknown): Record<string, unknown> | null {
 }
 
 /** GET /api/tasks/:id/events → { task_id, events } — tolerate alternate key casings after IPC. */
-function normalizeTaskEventsInvokeResponse(data: unknown): Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> {
+function normalizeTaskEventsInvokeResponse(
+  data: unknown,
+): Array<{ schema_version?: number; kind?: string; event_type?: string; payload?: unknown; at?: string; task_id?: string }> {
   if (data == null || typeof data !== "object") return [];
   const o = data as Record<string, unknown>;
   const raw = o.events ?? o.Events;
@@ -301,8 +397,12 @@ function normalizeTaskEventsInvokeResponse(data: unknown): Array<{ event_type?: 
   return raw.map((e) => {
     if (e && typeof e === "object") {
       const ev = e as Record<string, unknown>;
+      const kind = (ev.kind ?? ev.Kind) as string | undefined;
+      const eventType = (ev.event_type ?? ev.EventType ?? ev.eventType ?? kind) as string | undefined;
       return {
-        event_type: (ev.event_type ?? ev.EventType ?? ev.eventType) as string | undefined,
+        schema_version: (ev.schema_version ?? ev.schemaVersion ?? ev.SchemaVersion) as number | undefined,
+        kind,
+        event_type: eventType,
         payload: ev.payload ?? ev.Payload,
         at: (ev.at ?? ev.created_at ?? ev.At) as string | undefined,
         task_id: (ev.task_id ?? ev.taskId) as string | undefined,
@@ -538,6 +638,7 @@ type ChatMessageRow = {
   streaming?: boolean;
   taskId?: string;
   mapVisual?: ChatMapVisual;
+  usage?: ModelUsageStats;
 };
 
 function findLastChatAssistantIndex(messages: ChatMessageRow[], taskId: string): number {
@@ -1173,8 +1274,8 @@ function isDeterministicAutoToolEvent(eventType?: string | null): boolean {
   );
 }
 
-type Tab = "chat" | "scheduled" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory" | "mission";
-
+type UiMode = "simple" | "expert";
+type UiDensity = "compact" | "comfortable" | "spacious";
 type SettingsSection = "display" | "system" | "agent" | "user" | "data";
 type AgentProfileSubTab = "identity" | "personality" | "traits" | "rules" | "can_do" | "cannot_do";
 
@@ -1286,6 +1387,7 @@ type RouterMetrics = Record<string, ModelMetricsEntry>;
 type PluginStatusEntry = {
   id?: string;
   name?: string;
+  description?: string;
   version?: string;
   kind?: string;
   enabled?: boolean;
@@ -1303,17 +1405,38 @@ function App() {
       })),
     [t]
   );
-  const [tab, setTab] = useState<Tab>("chat");
-  const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
+  const { tab, setTab } = useHashRoute("chat");
+  const [sidebarNavCollapsed, setSidebarNavCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [uiDensity, setUiDensity] = useState<UiDensity>(() => {
+    try {
+      const s = localStorage.getItem(DENSITY_STORAGE_KEY);
+      if (s === "compact" || s === "comfortable" || s === "spacious") return s;
+    } catch {
+      /* ignore */
+    }
+    return "comfortable";
+  });
+  const [chatAgentMode, setChatAgentMode] = useState(() => localStorage.getItem(CHAT_AGENT_MODE_KEY) !== "0");
+  const [chatWebSearch, setChatWebSearch] = useState(() => localStorage.getItem(CHAT_WEB_SEARCH_KEY) === "1");
+  const [chatIncognito, setChatIncognito] = useState(() => localStorage.getItem(CHAT_INCOGNITO_KEY) === "1");
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(() => {
+    try {
+      const raw = localStorage.getItem(TASK_SIDEBAR_STORAGE_KEY);
+      if (raw === "0") return false;
+      if (raw === "1") return true;
+    } catch {
+      /* ignore */
+    }
+    return true;
+  });
+  const [createTaskDialogOpen, setCreateTaskDialogOpen] = useState(false);
+  const [eventTriggers, setEventTriggers] = useState<
+    Array<{ id: string; name: string; enabled: boolean; trigger_type: string; last_fired_at?: string | null }>
+  >([]);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [uiMode, setUiMode] = useState<UiMode>(loadSavedUiMode);
-  const [showOnboarding, setShowOnboarding] = useState(() => {
-    try {
-      return localStorage.getItem("akasha_onboarding_dismissed") !== "1";
-    } catch {
-      return true;
-    }
-  });
+  const [showOnboarding, setShowOnboarding] = useState(() => readSetupWizardPending());
   const eventLabel = useCallback(
     (typ: string) => {
       const key = "events." + typ;
@@ -1357,6 +1480,54 @@ function App() {
       }
       if ((event.event_type === "task_completed" || event.event_type === "task_failed") && payload && typeof payload === "object" && "model_used" in payload && (payload as { model_used?: string | null }).model_used) {
         return `${t("tasks.model_used")}: ${String((payload as { model_used: string }).model_used)}`;
+      }
+      if (event.event_type === "llm_route_planned" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const provider = typeof p.provider === "string" ? p.provider : "?";
+        const model = typeof p.model === "string" ? p.model : "?";
+        return `${t("tasks.route_planned_summary")}: ${provider}/${model}`;
+      }
+      if (event.event_type === "llm_call_started" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const provider = typeof p.provider === "string" ? p.provider : "?";
+        const model = typeof p.model === "string" ? p.model : "?";
+        const round = typeof p.round === "number" ? p.round : undefined;
+        const base = `${t("tasks.llm_call_summary")}: ${provider}/${model}`;
+        return round != null ? `${base} · #${round}` : base;
+      }
+      if (event.event_type === "llm_call_finished" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const success = p.success === true;
+        const model = typeof p.model_used === "string" ? p.model_used : undefined;
+        const err = typeof p.error === "string" ? p.error : undefined;
+        const latency = typeof p.latency_ms === "number" ? p.latency_ms : undefined;
+        if (success && model) {
+          return latency != null
+            ? `${t("tasks.model_used")}: ${model} · ${latency} ms`
+            : `${t("tasks.model_used")}: ${model}`;
+        }
+        return err ? `${t("tasks.llm_call_summary")}: ${trimPreview(err, 120)}` : t("tasks.llm_call_summary");
+      }
+      if (event.event_type === "memory_recall_started" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const topK = typeof p.semantic_top_k === "number" ? p.semantic_top_k : undefined;
+        return topK != null ? `${t("events.memory_recall_started")} (top_k=${topK})` : t("events.memory_recall_started");
+      }
+      if (event.event_type === "memory_recall_finished" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const had = p.had_results === true;
+        const timedOut = p.timed_out === true;
+        if (timedOut) return `${t("events.memory_recall_finished")} · timeout`;
+        return had
+          ? `${t("events.memory_recall_finished")} · ${t("common.yes")}`
+          : `${t("events.memory_recall_finished")} · ${t("common.no")}`;
+      }
+      if (event.event_type === "pipeline_checkpoint" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const msg = typeof p.message === "string" ? p.message : "";
+        const pct = typeof p.progress_pct === "number" ? p.progress_pct : undefined;
+        if (msg) return trimPreview(msg, 160);
+        if (pct != null) return t("tasks.progress_pct_summary").replace("{{pct}}", String(pct));
       }
       if (event.event_type === "deterministic_preferred_tool_attempt" && payload && typeof payload === "object") {
         const p = payload as Record<string, unknown>;
@@ -1521,7 +1692,89 @@ function App() {
   );
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
+  const [chatResearchContext, setChatResearchContext] = useState<ChatResearchContext | null>(null);
+  const [chatNoteContext, setChatNoteContext] = useState<ChatNoteContext | null>(null);
+  const [notePickerOpen, setNotePickerOpen] = useState(false);
+  const [notePickerItems, setNotePickerItems] = useState<Array<{ id: string; title: string }>>([]);
+  const [notePickerLoading, setNotePickerLoading] = useState(false);
+  const [chatDeliveryMode, setChatDeliveryMode] = useState<"immediate" | "steering" | "follow_up">("immediate");
+  const [memoryHygieneHint, setMemoryHygieneHint] = useState<string | null>(null);
+  type MemoryAdvancedSettings = {
+    multi_query?: boolean;
+    hyde?: boolean;
+    rrf?: boolean;
+    rollup_days?: number;
+    semantic_top_k?: number;
+    graph_expand_hops?: number;
+    user_rag_top_k?: number;
+    workspace_graph_top_k?: number;
+  };
+  const [memoryAdvancedSettings, setMemoryAdvancedSettings] = useState<MemoryAdvancedSettings | null>(null);
+  const [memoryAdvancedSaving, setMemoryAdvancedSaving] = useState(false);
+  const [memoryAdvancedMessage, setMemoryAdvancedMessage] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
+  const [modelPricingLookup, setModelPricingLookup] = useState<Map<string, ModelPriceRates>>(new Map());
+
+  const enrichUsageWithPricing = useCallback(
+    (usage: ModelUsageStats | null | undefined): ModelUsageStats | undefined => {
+      if (!usage) return undefined;
+      const rates = lookupPriceRates(modelPricingLookup, usage.model);
+      return rates ? { ...usage, priceRates: rates } : usage;
+    },
+    [modelPricingLookup],
+  );
+
+  const discussResearchReport = useCallback(
+    (doc: ResearchReportDocument) => {
+      if (!doc.reportMarkdown.trim()) return;
+      setChatNoteContext(null);
+      setChatResearchContext({
+        topic: doc.topic,
+        reportMarkdown: doc.reportMarkdown,
+        category: doc.reportMeta?.category,
+      });
+      setTab("chat");
+    },
+    [setTab],
+  );
+
+  const discussNote = useCallback(
+    (ctx: ChatNoteContext) => {
+      setChatResearchContext(null);
+      setChatNoteContext(ctx);
+      setTab("chat");
+    },
+    [setTab],
+  );
+
+  const openNotePicker = useCallback(async () => {
+    setNotePickerLoading(true);
+    setNotePickerOpen(true);
+    try {
+      const notes = await listNotes(DAEMON_PORT);
+      setNotePickerItems(notes.map((n) => ({ id: n.id, title: n.title })));
+    } catch {
+      setNotePickerItems([]);
+    } finally {
+      setNotePickerLoading(false);
+    }
+  }, []);
+
+  const attachNoteToChat = useCallback(async (noteId: string) => {
+    try {
+      const doc = await getNote(noteId, DAEMON_PORT);
+      setChatResearchContext(null);
+      setChatNoteContext({
+        noteId: doc.id,
+        title: doc.title,
+        markdown: doc.content,
+        intent: "discuss",
+      });
+      setNotePickerOpen(false);
+    } catch {
+      /* ignore */
+    }
+  }, []);
   const exportChatTranscript = useCallback(() => {
     const body = exportChatPlainText(messages);
     const base = defaultExportBasename(messages);
@@ -1562,14 +1815,13 @@ function App() {
       return {};
     }
   });
-  /** Tâches : sections pliables (liste / étapes / événements), mémorisées localement. */
+  /** Tâches : sections pliables (étapes / événements), mémorisées localement. */
   const [taskPanelSections, setTaskPanelSections] = useState(() => {
     try {
       const raw = localStorage.getItem("akasha_task_panel_sections");
       if (raw) {
         const j = JSON.parse(raw) as { list?: boolean; steps?: boolean; events?: boolean };
         return {
-          list: j.list !== false,
           steps: j.steps !== false,
           events: j.events !== false,
         };
@@ -1577,7 +1829,7 @@ function App() {
     } catch {
       /* ignore */
     }
-    return { list: true, steps: true, events: true };
+    return { steps: true, events: true };
   });
   const [taskOrchestrationDebugLevel, setTaskOrchestrationDebugLevel] = useState<TaskOrchestrationDebugLevel>(() => {
     try {
@@ -1591,7 +1843,16 @@ function App() {
     }
     return loadSavedUiMode() === "expert" ? "normal" : "minimal";
   });
-  const toggleTaskPanelSection = useCallback((key: "list" | "steps" | "events") => {
+  const setTaskSidebarOpen = useCallback((open: boolean) => {
+    setRightSidebarOpen(open);
+    try {
+      localStorage.setItem(TASK_SIDEBAR_STORAGE_KEY, open ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const toggleTaskPanelSection = useCallback((key: "steps" | "events") => {
     setTaskPanelSections((prev) => {
       const next = { ...prev, [key]: !prev[key] };
       try {
@@ -1645,13 +1906,21 @@ function App() {
   }, [persistCollapsedTaskBranches]);
   const [taskStepsTodos, setTaskStepsTodos] = useState<Array<{ id?: string | null; title: string; status: string }>>([]);
   const selectedTaskIdForTodosRef = useRef<string | null>(null);
+  const tasksEventsTaskIdRef = useRef<string | null>(null);
   const fetchTaskStepsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
+  const fetchTasksEventsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
+  const trackTaskUntilDoneRef = useRef<(taskId: string) => void>(() => {});
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
+  const activeSteeringTaskId = useMemo(() => {
+    const ids = Object.keys(runningTaskChips);
+    return ids.length > 0 ? ids[ids.length - 1]! : null;
+  }, [runningTaskChips]);
   /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
   const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
   const chatToolBatchSummary = useMemo(() => {
     const names: string[] = [];
-    for (const evs of Object.values(runningTaskEvents)) {
+    for (const taskId of Object.keys(runningTaskChips)) {
+      const evs = runningTaskEvents[taskId] ?? [];
       for (const ev of evs) {
         const p = ev.payload;
         if (!p || typeof p !== "object") continue;
@@ -1666,7 +1935,7 @@ function App() {
       }
     }
     return heuristicToolBatchSummary(names);
-  }, [runningTaskEvents]);
+  }, [runningTaskEvents, runningTaskChips]);
   /** Human in the loop: when the agent asks for user input, we store question/context/choices per task_id. */
   const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[] }>>({});
   /** Task id for which the human-input modal is open (null = closed). */
@@ -1702,8 +1971,8 @@ function App() {
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
-  /** Fil d'activité des agents : ouvert par défaut pour suivre les étapes (style ChatGPT / Cursor). */
-  const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(false);
+  /** Fil d'activité des agents : ouvert par défaut pour suivre les étapes (assistant conversationnel). */
+  const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
   /** Per-root task: whether the discussion block is collapsed in the sub-agent panel (true = collapsed). */
   const [collapsedRootTasks, setCollapsedRootTasks] = useState<Record<string, boolean>>({});
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
@@ -1749,8 +2018,13 @@ function App() {
   const [calendarGridEvents, setCalendarGridEvents] = useState<CalendarGridEvent[]>([]);
   const [calendarGridDate, setCalendarGridDate] = useState(() => new Date());
   const [calendarCellDetail, setCalendarCellDetail] = useState<{ slotKey: string; slotLabel: string; events: CalendarGridEvent[] } | null>(null);
-  type CalendarSubTab = "grid" | "recent" | "schedules";
+  type CalendarSubTab = "grid" | "recent" | "schedules" | "wakeups";
   const [calendarSubTab, setCalendarSubTab] = useState<CalendarSubTab>("grid");
+  type WakeupRow = { id: string; session_id: string; fire_at: string; message: string; status: string; created_at?: string };
+  const [wakeups, setWakeups] = useState<WakeupRow[]>([]);
+  const [wakeupFormMinutes, setWakeupFormMinutes] = useState("60");
+  const [wakeupFormMessage, setWakeupFormMessage] = useState("");
+  const [wakeupSaving, setWakeupSaving] = useState(false);
   const calendarEventLabel = (ev: { label?: string; task_id: string }) => (ev.label && ev.label.trim()) ? ev.label : `Tâche …${ev.task_id.slice(-8)}`;
   const calendarGetParentKey = (ev: CalendarGridEvent) => ev.schedule_id ?? `task_${ev.task_id}`;
   const calendarGetEventStatusClass = (status: string) => {
@@ -2000,7 +2274,16 @@ function App() {
     }
   });
   const [chatThreads, setChatThreads] = useState<ChatThreadEntry[]>(() => loadChatThreadsInitial());
-  const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
+  const [chatThreadSearch, setChatThreadSearch] = useState("");
+  const [chatThreadFolderFilter, setChatThreadFolderFilter] = useState("");
+  const [handoffDialogOpen, setHandoffDialogOpen] = useState(false);
+  const [handoffTargetModel, setHandoffTargetModel] = useState("");
+  const [handoffTargetProvider, setHandoffTargetProvider] = useState("");
+  const [handoffTaskId, setHandoffTaskId] = useState("");
+  const [handoffModels, setHandoffModels] = useState<Array<{ provider: string; model: string }>>([]);
+  const [handoffBusy, setHandoffBusy] = useState(false);
+  const [handoffStatus, setHandoffStatus] = useState<string | null>(null);
+  const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string; index_status?: string; indexed_at?: string | null; index_error?: string | null }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
   const [dataSourcesSubTab, setDataSourcesSubTab] = useState<"rag" | "project_graph">("rag");
@@ -2023,7 +2306,6 @@ function App() {
   const [newProjectWsPath, setNewProjectWsPath] = useState("");
   const [projectWsBusyId, setProjectWsBusyId] = useState<string | null>(null);
   const [newProjectWsSubmitting, setNewProjectWsSubmitting] = useState(false);
-  const userRagFileInputRef = useRef<HTMLInputElement>(null);
   const agentAvatarFileInputRef = useRef<HTMLInputElement>(null);
   const userAvatarFileInputRef = useRef<HTMLInputElement>(null);
   /** Agent profile (name, role, gender, avatar, personality, rules, can_do, cannot_do, traits_override, preferred_mode) for Settings panel. */
@@ -2039,6 +2321,8 @@ function App() {
     cannot_do: string[];
     traits_override: Record<string, number>;
     preferred_mode: string;
+    temperature: string;
+    system_prompt: string;
   }>({
     name: "",
     role: "",
@@ -2051,6 +2335,8 @@ function App() {
     cannot_do: [],
     traits_override: {},
     preferred_mode: "",
+    temperature: "",
+    system_prompt: "",
   });
   /** User avatar (data URL) for chat display. Stored in localStorage. */
   const [userAvatar, setUserAvatar] = useState<string>(() => {
@@ -2076,13 +2362,24 @@ function App() {
   const [userProfileSaving, setUserProfileSaving] = useState(false);
   const [userProfileError, setUserProfileError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
+  const [systemSubTab, setSystemSubTab] = useState<"general" | "plugins" | "policy" | "connectors" | "health">("general");
+  const [pluginTableBusyId, setPluginTableBusyId] = useState<string | null>(null);
+  const [skillsCatalogText, setSkillsCatalogText] = useState<string | null>(null);
+  const [skillsCatalogLoading, setSkillsCatalogLoading] = useState(false);
   const [agentProfileSubTab, setAgentProfileSubTab] = useState<AgentProfileSubTab>("identity");
+  /** Constitution layer (agent_identity.yaml): tone, values, constraints. Name/role shared with agentProfile. */
+  const [agentConstitution, setAgentConstitution] = useState<{
+    tone: string;
+    values: string[];
+    constraints: string[];
+  }>({ tone: "", values: [], constraints: [] });
   const [rulesDraft, setRulesDraft] = useState("");
   const [canDoDraft, setCanDoDraft] = useState("");
   const [cannotDoDraft, setCannotDoDraft] = useState("");
   /** Attachments for the next message: images (vision) and documents (text appended to message). */
   const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const subagentsDetailRef = useRef<HTMLDivElement>(null);
   const chatInlineReplyRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2122,6 +2419,7 @@ function App() {
   });
   const [tipBannerText, setTipBannerText] = useState<string | null>(null);
   const [tipBannerDismissed, setTipBannerDismissed] = useState(false);
+  const [companionOpen, setCompanionOpen] = useState(() => localStorage.getItem(CHAT_COMPANION_OPEN_KEY) === "1");
 
   const setChatTipsEnabledAndSave = useCallback((next: boolean) => {
     setChatTipsEnabled(next);
@@ -2525,6 +2823,40 @@ function App() {
     [t],
   );
 
+  const chatThreadFolders = useMemo(() => {
+    const folders = new Set<string>();
+    for (const th of chatThreads) {
+      const f = th.folder?.trim();
+      if (f) folders.add(f);
+    }
+    return [...folders].sort((a, b) => a.localeCompare(b));
+  }, [chatThreads]);
+
+  const setActiveThreadFolder = useCallback((folder: string) => {
+    const sid = sessionIdRef.current?.trim();
+    if (!sid) return;
+    const trimmed = folder.trim();
+    setChatThreads((prev) =>
+      prev.map((th) =>
+        th.id === sid ? { ...th, folder: trimmed || undefined, updatedAt: new Date().toISOString() } : th,
+      ),
+    );
+  }, []);
+
+  const filteredChatThreads = useMemo(() => {
+    const q = chatThreadSearch.trim().toLowerCase();
+    const folderQ = chatThreadFolderFilter.trim().toLowerCase();
+    const base = [...chatThreads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return base.filter((th) => {
+      if (folderQ && (th.folder ?? "").trim().toLowerCase() !== folderQ) return false;
+      if (!q) return true;
+      const label = chatThreadLabel(th).toLowerCase();
+      const snippet = (th.lastSnippet ?? "").toLowerCase();
+      const folder = (th.folder ?? "").toLowerCase();
+      return label.includes(q) || snippet.includes(q) || th.id.toLowerCase().includes(q) || folder.includes(q);
+    });
+  }, [chatThreads, chatThreadLabel, chatThreadSearch, chatThreadFolderFilter]);
+
   const createChatThread = useCallback(() => {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
@@ -2601,7 +2933,9 @@ function App() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.setAttribute("data-ui-mode", uiMode);
-  }, [theme, uiMode]);
+    document.documentElement.setAttribute("data-density", uiDensity);
+    applyThemeOverrides(theme, loadThemeOverrides());
+  }, [theme, uiMode, uiDensity]);
 
   const setThemeAndSave = useCallback((next: ThemeId) => {
     setTheme(next);
@@ -2629,6 +2963,15 @@ function App() {
       });
     }
   }, [messages, loading, tab]);
+  // Keep sub-agent activity scrolled to latest events inside the detail panel
+  useEffect(() => {
+    if (tab !== "chat" || subAgentPanelCollapsed) return;
+    const el = subagentsDetailRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }, [runningTaskEvents, subAgentPanelCollapsed, tab]);
   // When a reply is pending and modal is not open, scroll the inline reply form into view
   const pendingHumanInputKeys = Object.keys(pendingHumanInput);
   useEffect(() => {
@@ -2671,21 +3014,20 @@ function App() {
   }, [pendingNotifOpen]);
 
   // Global keyboard shortcuts: 1–9 = switch tab (when not in a modal or input)
-  const tabsByIndex: Tab[] = ["chat", "scheduled", "router", "docs", "tasks", "calendar", "memory", "mission", "settings"];
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (humanInputModalTaskId != null) return;
       const target = e.target as HTMLElement;
       if (target?.closest("input") || target?.closest("textarea") || target?.closest("[role='dialog']")) return;
-      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : e.key === "8" ? 8 : e.key === "9" ? 9 : 0;
-      if (n >= 1 && n <= 9) {
+      const item = NAV_ITEMS.find((n) => n.shortcut === e.key);
+      if (item) {
         e.preventDefault();
-        setTab(tabsByIndex[n - 1]);
+        setTab(item.id);
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [humanInputModalTaskId]);
+  }, [humanInputModalTaskId, setTab]);
 
   const fetchMission = useCallback(async () => {
     setMissionLoading(true);
@@ -2823,8 +3165,9 @@ function App() {
     fetchDocs();
   }, [tab, fetchDocs]);
 
-  const fetchTasksList = useCallback(async (options?: { silent?: boolean }) => {
+  const fetchTasksList = useCallback(async (options?: { silent?: boolean; selectTaskId?: string }) => {
     const silent = options?.silent === true;
+    const selectTaskId = options?.selectTaskId;
     if (!silent) setTasksLoading(true);
     try {
       const data = await invoke<{ tasks?: Array<{ id?: string; status?: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string }> }>("get_tasks", {
@@ -2834,7 +3177,7 @@ function App() {
       const tasks: Array<TaskListItem> = list
         .map((t) => ({
           id: t.id ?? "",
-          status: t.status ?? "?",
+          status: normalizeTaskStatus(t.status),
           label: t.label,
           created_at: t.created_at,
           parent_task_id: t.parent_task_id,
@@ -2842,7 +3185,24 @@ function App() {
         }))
         .filter((t) => t.id);
       setTasksList((prev) => (tasksListsEqual(prev, tasks) ? prev : tasks));
-      setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
+      setRunningTaskChips((prev) => {
+        const activeIds = new Set(tasks.filter((t) => isTaskActiveStatus(t.status)).map((t) => t.id));
+        let changed = false;
+        const next = { ...prev };
+        for (const id of Object.keys(next)) {
+          if (!activeIds.has(id)) {
+            delete next[id];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+      if (selectTaskId) {
+        const idx = tasks.findIndex((t) => t.id === selectTaskId);
+        if (idx >= 0) setTasksSelected(idx);
+      } else {
+        setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
+      }
       setCached("tasks", tasks);
     } catch {
       setTasksList([]);
@@ -2851,12 +3211,24 @@ function App() {
     }
   }, []);
 
+  const openChatTaskDetail = useCallback(
+    (taskId: string) => {
+      void fetchTasksList({ selectTaskId: taskId });
+      setTab("tasks");
+      setTaskPanelSections((prev) => ({ ...prev, events: true }));
+    },
+    [fetchTasksList, setTab],
+  );
+
   const filteredTasksList = useMemo(() => {
     let list = tasksList;
     if (taskListFilter === "active") {
-      list = list.filter((t) => t.status === "pending" || t.status === "running");
+      list = list.filter((t) => isTaskActiveStatus(t.status));
     } else {
-      list = list.filter((t) => t.status === "completed" || t.status === "failed");
+      list = list.filter((t) => {
+        const s = normalizeTaskStatus(t.status);
+        return s === "completed" || s === "failed" || s === "cancelled" || s === "interrupted";
+      });
     }
     const q = taskSearchQuery.trim().toLowerCase();
     if (q) {
@@ -2975,9 +3347,10 @@ function App() {
   }, [taskTreeData, collapsedTaskBranches]);
 
   const visibleTaskEvents = useMemo(() => {
-    if (!isSimpleMode) return tasksEvents;
-    return [...tasksEvents].slice(-8).reverse();
-  }, [isSimpleMode, tasksEvents]);
+    const compact = collapseStreamedProgressEvents(tasksEvents, selectedTask?.id ?? "root");
+    if (!isSimpleMode) return compact;
+    return [...compact].slice(-8).reverse();
+  }, [isSimpleMode, tasksEvents, selectedTask]);
 
   const selectedTaskHierarchy = useMemo(() => {
     if (!selectedTask) return [] as TaskListItem[];
@@ -3024,23 +3397,47 @@ function App() {
     );
   }, [tasksList]);
 
-  const taskStepsSummary = useMemo(() => {
-    const total = taskStepsTodos.length;
-    const done = taskStepsTodos.filter((step) => step.status === "done").length;
-    const cancelled = taskStepsTodos.filter((step) => step.status === "cancelled").length;
-    const pending = Math.max(0, total - done - cancelled);
-    const progressPct = total > 0 ? Math.round((done / total) * 100) : 0;
-    return { total, done, cancelled, pending, progressPct };
-  }, [taskStepsTodos]);
+  const taskExecutionView = useMemo(() => {
+    return buildExecutionSteps(tasksEvents, tasksList, selectedTask?.id, taskStepsTodos);
+  }, [tasksEvents, tasksList, selectedTask?.id, taskStepsTodos]);
+
+  const fetchEventTriggers = useCallback(async () => {
+    try {
+      const data = await invoke<{ triggers?: Array<{ id?: string; name?: string; enabled?: boolean; trigger_type?: string; last_fired_at?: string | null }> }>(
+        "get_event_triggers",
+        { port: DAEMON_PORT }
+      );
+      setEventTriggers(
+        (data?.triggers ?? [])
+          .filter((t): t is { id: string; name: string; enabled: boolean; trigger_type: string; last_fired_at?: string | null } => Boolean(t.id))
+          .map((t) => ({
+            id: t.id!,
+            name: t.name ?? t.id!,
+            enabled: t.enabled !== false,
+            trigger_type: t.trigger_type ?? "webhook",
+            last_fired_at: t.last_fired_at,
+          }))
+      );
+    } catch {
+      setEventTriggers([]);
+    }
+  }, []);
 
   const selectedTaskSummary = useMemo(() => {
     if (!selectedTask) return null;
     const runningChip = selectedTask.status === "running" ? runningTaskChips[selectedTask.id] : undefined;
     const latestEvent = tasksEvents.length > 0 ? tasksEvents[tasksEvents.length - 1] : null;
+    const routeEvent = [...tasksEvents].reverse().find((e) => e.event_type === "llm_route_planned");
+    const llmEvent = [...tasksEvents].reverse().find((e) => e.event_type === "llm_call_started" || e.event_type === "llm_call_finished");
+    const routeHint =
+      (llmEvent ? summarizeTaskEvent(llmEvent) : "") ||
+      (routeEvent ? summarizeTaskEvent(routeEvent) : "");
     return {
       runningChip,
       latestEvent,
       latestSummary: latestEvent ? summarizeTaskEvent(latestEvent) : "",
+      routeHint: routeHint || undefined,
+      progressPct: runningChip?.pct,
     };
   }, [selectedTask, runningTaskChips, tasksEvents, summarizeTaskEvent]);
 
@@ -3273,16 +3670,21 @@ function App() {
     try {
       const data = await invoke<unknown>("get_task_events", { taskId, port: DAEMON_PORT });
       const list = normalizeTaskEventsInvokeResponse(data);
-      setTasksEvents(
-        list.map((e) => ({
-          event_type: e.event_type ?? "?",
-          payload: e.payload,
-          at: e.at ?? "",
-          task_id: e.task_id,
-        }))
-      );
+      const mapped = list.map((e) => ({
+        event_type: e.event_type ?? "?",
+        payload: e.payload,
+        at: e.at ?? "",
+        task_id: e.task_id,
+      }));
+      setTasksEvents((prev) => {
+        if (tasksEventsTaskIdRef.current !== taskId) {
+          tasksEventsTaskIdRef.current = taskId;
+          return mapped;
+        }
+        return mergeTaskEvents(prev, mapped);
+      });
     } catch {
-      setTasksEvents([]);
+      /* keep previous events on transient fetch errors */
     }
   }, []);
 
@@ -3308,6 +3710,10 @@ function App() {
   useEffect(() => {
     fetchTaskStepsRef.current = fetchTaskSteps;
   }, [fetchTaskSteps]);
+
+  useEffect(() => {
+    fetchTasksEventsRef.current = fetchTasksEvents;
+  }, [fetchTasksEvents]);
 
   useEffect(() => {
     selectedTaskIdForTodosRef.current = tasksList[tasksSelected]?.id ?? null;
@@ -3351,6 +3757,17 @@ function App() {
     }
   }, []);
 
+  const fetchWakeups = useCallback(async () => {
+    try {
+      const res = await fetch(e2eDaemonHttpUrl("/api/wakeups"));
+      if (!res.ok) throw new Error(String(res.status));
+      const data = (await res.json()) as { wakeups?: WakeupRow[] };
+      setWakeups(data.wakeups ?? []);
+    } catch {
+      setWakeups([]);
+    }
+  }, []);
+
   const fetchCalendarGridEvents = useCallback(async () => {
     const d = calendarGridDate;
     let from: Date;
@@ -3387,16 +3804,21 @@ function App() {
   }, [tab, fetchCalendarGridEvents]);
 
   useEffect(() => {
+    if (tab === "calendar" && calendarSubTab === "wakeups") void fetchWakeups();
+  }, [tab, calendarSubTab, fetchWakeups]);
+
+  useEffect(() => {
     if (tab !== "tasks") return;
     const cached = getCached<Array<TaskListItem>>("tasks");
     if (cached != null) {
       setTasksList(cached);
       setTasksSelected((prev) => (prev >= cached.length && cached.length > 0 ? cached.length - 1 : prev));
       setTasksLoading(false);
-      return;
+    } else {
+      fetchTasksList();
     }
-    fetchTasksList();
-  }, [tab, fetchTasksList]);
+    void fetchEventTriggers();
+  }, [tab, fetchTasksList, fetchEventTriggers]);
 
   const applyChatStreamProgress = useCallback((taskId: string, msg: string) => {
     if (!taskId) return;
@@ -3415,6 +3837,7 @@ function App() {
           taskId,
           streaming: false,
           mapVisual: cachedMap,
+          usage: next[idx].usage,
         };
         return next;
       });
@@ -3426,35 +3849,96 @@ function App() {
         if (idx < 0) return prev;
         const next = [...prev];
         const cachedMap = next[idx].mapVisual ?? chatMapByTaskIdRef.current[taskId];
-        next[idx] = { role: "assistant", text: msg, taskId, streaming: true, mapVisual: cachedMap };
+        next[idx] = { role: "assistant", text: msg, taskId, streaming: true, mapVisual: cachedMap, usage: next[idx].usage };
         return next;
       });
     }
   }, []);
 
   // SSE: subscribe to daemon events for real-time updates (< 1s) when daemon is healthy.
+  // On disconnect, fall back to polling task list every 5s (see agent_client_event_contract.md).
   useEffect(() => {
     if (!health?.ok) return;
-    const url = E2E_WEB
+    const sseTypes =
+      "progress_update,task_completed,task_failed,task_cancelled,todo_list_updated,user_steering_queued,user_follow_up_queued,user_steering_applied,user_follow_up_applied,user_queue_flushed";
+    const base = E2E_WEB
       ? e2eDaemonHttpUrl("/api/events")
       : `http://127.0.0.1:${health.port ?? DAEMON_PORT}/api/events`;
+    const url = `${base}?types=${encodeURIComponent(sseTypes)}`;
     let es: EventSource | null = null;
+    let pollFallbackId: number | null = null;
+    const startPollFallback = () => {
+      if (pollFallbackId != null) return;
+      pollFallbackId = window.setInterval(() => {
+        void fetchTasksList({ silent: true });
+        void fetchPendingHumanInput();
+      }, 5000);
+    };
+    const stopPollFallback = () => {
+      if (pollFallbackId != null) {
+        window.clearInterval(pollFallbackId);
+        pollFallbackId = null;
+      }
+    };
     try {
       es = new EventSource(url);
+      es.onopen = () => stopPollFallback();
       es.onmessage = (msgEv) => {
-        void fetchTasksList({ silent: true });
-        fetchPendingHumanInput();
         try {
           const d = JSON.parse(msgEv.data) as {
             event_type?: string;
-            payload?: { task_id?: string; message?: string } | Record<string, unknown>;
+            payload?: { task_id?: string; message?: string; text?: string } | Record<string, unknown>;
             correlation_id?: string | null;
           };
+          const shouldRefreshTaskList =
+            d.event_type === "task_completed" ||
+            d.event_type === "task_failed" ||
+            d.event_type === "task_cancelled" ||
+            d.event_type === "user_steering_queued" ||
+            d.event_type === "user_follow_up_queued" ||
+            d.event_type === "user_steering_applied" ||
+            d.event_type === "user_follow_up_applied" ||
+            d.event_type === "todo_list_updated";
+          if (shouldRefreshTaskList) void fetchTasksList({ silent: true });
+          if (d.event_type === "task_completed" || d.event_type === "task_failed" || d.event_type === "task_cancelled") {
+            void fetchPendingHumanInput();
+          }
           if (d.event_type === "progress_update" && d.payload && typeof d.payload === "object") {
             const p = d.payload as Record<string, unknown>;
             const tid = typeof p.task_id === "string" ? p.task_id : "";
             const streamMsg = typeof p.message === "string" ? p.message : "";
             if (tid && streamMsg) applyChatStreamProgress(tid, streamMsg);
+          }
+          if (
+            d.event_type === "user_steering_queued" ||
+            d.event_type === "user_follow_up_queued" ||
+            d.event_type === "user_steering_applied" ||
+            d.event_type === "user_follow_up_applied"
+          ) {
+            const p = d.payload && typeof d.payload === "object" ? (d.payload as Record<string, unknown>) : null;
+            const tid =
+              (p && typeof p.task_id === "string" ? p.task_id : "") ||
+              (typeof d.correlation_id === "string" ? d.correlation_id : "");
+            const hint =
+              (p && typeof p.text === "string" ? p.text : "") ||
+              (p && typeof p.message === "string" ? p.message : "") ||
+              d.event_type;
+            if (tid && hint) applyChatStreamProgress(tid, `[queue] ${hint}`);
+          }
+          if (d.event_type === "task_completed" || d.event_type === "task_failed" || d.event_type === "task_cancelled") {
+            const p = d.payload && typeof d.payload === "object" ? (d.payload as Record<string, unknown>) : null;
+            const tid = p && typeof p.task_id === "string" ? p.task_id : "";
+            if (tid) {
+              setRunningTaskChips((prev) => {
+                if (prev[tid] === undefined) return prev;
+                const next = { ...prev };
+                delete next[tid];
+                return next;
+              });
+              if (selectedTaskIdForTodosRef.current === tid) {
+                void fetchTasksEventsRef.current(tid);
+              }
+            }
           }
           if (d.event_type === "todo_list_updated") {
             const tid =
@@ -3472,20 +3956,37 @@ function App() {
       es.onerror = () => {
         es?.close();
         es = null;
+        startPollFallback();
       };
     } catch {
-      /* ignore */
+      startPollFallback();
     }
     return () => {
       es?.close();
+      stopPollFallback();
     };
   }, [health?.ok, health?.port, fetchTasksList, fetchPendingHumanInput, applyChatStreamProgress]);
 
   useEffect(() => {
     const task = tasksList[tasksSelected];
-    if (task?.id) fetchTasksEvents(task.id);
-    else setTasksEvents([]);
+    if (task?.id) {
+      void fetchTasksEvents(task.id);
+    } else {
+      tasksEventsTaskIdRef.current = null;
+      setTasksEvents([]);
+    }
   }, [tasksList, tasksSelected, fetchTasksEvents]);
+
+  useEffect(() => {
+    if (tab !== "tasks") return;
+    const task = tasksList[tasksSelected];
+    if (!task?.id || !isTaskActiveStatus(task.status)) return;
+    const taskId = task.id;
+    const timer = window.setInterval(() => {
+      void fetchTasksEventsRef.current(taskId);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [tab, tasksList, tasksSelected]);
 
   useEffect(() => {
     if (tab !== "calendar") return;
@@ -3728,8 +4229,17 @@ function App() {
     setPluginStatusLoading(true);
     setPluginStatusError(null);
     try {
-      const list = await invoke<PluginStatusEntry[]>("get_plugins", { port: DAEMON_PORT });
-      setPluginStatusList(Array.isArray(list) ? list : []);
+      let list: PluginStatusEntry[] = [];
+      if (E2E_WEB) {
+        const res = await fetch(e2eDaemonHttpUrl("/api/plugins"));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const j = (await res.json()) as unknown;
+        list = Array.isArray(j) ? (j as PluginStatusEntry[]) : [];
+      } else {
+        const inv = await invoke<PluginStatusEntry[]>("get_plugins", { port: DAEMON_PORT });
+        list = Array.isArray(inv) ? inv : [];
+      }
+      setPluginStatusList(list);
     } catch (e) {
       setPluginStatusError(String(e));
       setPluginStatusList([]);
@@ -3776,6 +4286,326 @@ function App() {
       setPluginReputationResetLoading(false);
     }
   }, [t, fetchPluginStatus]);
+
+  const reloadPluginsFromDisk = useCallback(async () => {
+    setPluginStatusError(null);
+    try {
+      if (E2E_WEB) {
+        const res = await fetch(e2eDaemonHttpUrl("/api/plugins/reload"), { method: "POST" });
+        if (!res.ok) throw new Error(await res.text());
+      } else {
+        await invoke("reload_plugins", { port: DAEMON_PORT });
+      }
+      await fetchPluginStatus();
+    } catch (e) {
+      setPluginStatusError(String(e));
+    }
+  }, [fetchPluginStatus]);
+
+  const setPluginRowEnabled = useCallback(
+    async (pluginId: string, enabled: boolean) => {
+      const id = pluginId.trim();
+      if (!id) return;
+      setPluginTableBusyId(id);
+      setPluginStatusError(null);
+      try {
+        if (E2E_WEB) {
+          const action = enabled ? "enable" : "disable";
+          const res = await fetch(e2eDaemonHttpUrl(`/api/plugins/${encodeURIComponent(id)}/${action}`), { method: "POST" });
+          if (!res.ok) throw new Error(await res.text());
+        } else {
+          await invoke("set_plugin_enabled", { pluginId: id, enabled, port: DAEMON_PORT });
+        }
+        await fetchPluginStatus();
+      } catch (e) {
+        setPluginStatusError(String(e));
+      } finally {
+        setPluginTableBusyId(null);
+      }
+    },
+    [fetchPluginStatus],
+  );
+
+  const uninstallPluginRow = useCallback(
+    async (pluginId: string) => {
+      const id = pluginId.trim();
+      if (!id) return;
+      const msg = t("settings.plugins_uninstall_confirm").replace("{id}", id);
+      if (!window.confirm(msg)) return;
+      setPluginTableBusyId(id);
+      setPluginStatusError(null);
+      try {
+        if (E2E_WEB) {
+          const res = await fetch(e2eDaemonHttpUrl(`/api/plugins/${encodeURIComponent(id)}/uninstall`), { method: "POST" });
+          if (!res.ok) throw new Error(await res.text());
+        } else {
+          await invoke("uninstall_plugin", { pluginId: id, port: DAEMON_PORT });
+        }
+        await fetchPluginStatus();
+      } catch (e) {
+        setPluginStatusError(String(e));
+      } finally {
+        setPluginTableBusyId(null);
+      }
+    },
+    [fetchPluginStatus, t],
+  );
+
+  const fetchSystemEndpoint = useCallback(async (path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; text: string }> => {
+    if (E2E_WEB) {
+      const res = await fetch(e2eDaemonHttpUrl(path), init);
+      return { ok: res.ok, status: res.status, text: await res.text() };
+    }
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "GET") {
+      return invoke<{ ok: boolean; status: number; text: string }>("daemon_get_text", {
+        path,
+        port: DAEMON_PORT,
+      });
+    }
+    const body = typeof init?.body === "string" ? init.body : undefined;
+    return invoke<{ ok: boolean; status: number; text: string }>("daemon_request", {
+      method,
+      path,
+      body,
+      port: DAEMON_PORT,
+    });
+  }, []);
+
+  const requestSystemEndpoint = useCallback(
+    async (method: string, path: string, body?: string) => fetchSystemEndpoint(path, { method, body }),
+    [fetchSystemEndpoint],
+  );
+
+  const notify = useNotify();
+  const [resumeBriefBusy, setResumeBriefBusy] = useState(false);
+
+  const handleResumeBrief = useCallback(async () => {
+    const sid = sessionId?.trim();
+    if (!sid) {
+      notify({
+        level: "warning",
+        title: locale === "en" ? "No active session" : "Aucune session active",
+        source: "resume",
+      });
+      return;
+    }
+    setResumeBriefBusy(true);
+    try {
+      const q = new URLSearchParams({ session_id: sid });
+      const res = await fetchSystemEndpoint(`/api/session/resume-brief?${q.toString()}`);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+      }
+      let summary = res.text;
+      try {
+        const j = JSON.parse(res.text) as {
+          short_term_turn_count?: number;
+          compaction_count?: number;
+          session_state?: { goals?: unknown; constraints?: unknown };
+        };
+        const turns = j.short_term_turn_count ?? 0;
+        const comp = j.compaction_count ?? 0;
+        summary =
+          locale === "en"
+            ? `Session resume: ${turns} turn(s), ${comp} compaction(s).`
+            : `Reprise session : ${turns} tour(s), ${comp} compaction(s).`;
+        const st = j.session_state;
+        if (st && (st.goals != null || st.constraints != null)) {
+          summary += `\n\n${JSON.stringify({ goals: st.goals, constraints: st.constraints }, null, 2)}`;
+        }
+      } catch {
+        /* keep raw text */
+      }
+      if (tab === "chat") {
+        setMessages((prev) => [...prev, { role: "system", text: summary }]);
+      } else {
+        notify({
+          level: "info",
+          title: locale === "en" ? "Session brief" : "Brief session",
+          detail: summary.slice(0, 600),
+          source: "resume",
+        });
+      }
+    } catch (e) {
+      notify({
+        level: "error",
+        title: locale === "en" ? "Resume failed" : "Échec reprise",
+        detail: String(e),
+        source: "resume",
+      });
+    } finally {
+      setResumeBriefBusy(false);
+    }
+  }, [sessionId, fetchSystemEndpoint, locale, notify, tab]);
+
+  const loadInstalledSkills = useCallback(async () => {
+    setSkillsCatalogLoading(true);
+    setSkillsCatalogText(null);
+    try {
+      const res = await fetchSystemEndpoint("/api/skills");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const list = JSON.parse(res.text) as Array<{ name?: string; description?: string }>;
+      if (!Array.isArray(list) || list.length === 0) {
+        setSkillsCatalogText(locale === "en" ? "No skills installed." : "Aucun skill installé.");
+      } else {
+        setSkillsCatalogText(
+          list
+            .map((s) => `• ${s.name ?? "?"}${s.description ? ` — ${s.description}` : ""}`)
+            .join("\n"),
+        );
+      }
+    } catch (e) {
+      setSkillsCatalogText(String(e));
+    } finally {
+      setSkillsCatalogLoading(false);
+    }
+  }, [fetchSystemEndpoint, locale]);
+
+  const loadHandoffModels = useCallback(async () => {
+    try {
+      const providers = await invoke<Record<string, string[]>>("get_router_models", { port: DAEMON_PORT });
+      const rows: Array<{ provider: string; model: string }> = [];
+      for (const [provider, models] of Object.entries(providers ?? {})) {
+        for (const model of models ?? []) rows.push({ provider, model });
+      }
+      setHandoffModels(rows);
+    } catch (e) {
+      setHandoffStatus(String(e));
+      setHandoffModels([]);
+    }
+  }, []);
+
+  const submitSessionHandoff = useCallback(async () => {
+    const sid = sessionId?.trim();
+    if (!sid) {
+      setHandoffStatus(locale === "en" ? "No active session." : "Aucune session active.");
+      return;
+    }
+    setHandoffBusy(true);
+    setHandoffStatus(null);
+    try {
+      const body = JSON.stringify({
+        session_id: sid,
+        target_model: handoffTargetModel || undefined,
+        target_provider: handoffTargetProvider || undefined,
+        task_id: handoffTaskId.trim() || undefined,
+      });
+      const res = await requestSystemEndpoint("POST", "/api/session/handoff", body);
+      if (!res.ok) throw new Error(res.text || `HTTP ${res.status}`);
+      setHandoffStatus(locale === "en" ? "Handoff sent." : "Handoff envoyé.");
+    } catch (e) {
+      setHandoffStatus(String(e));
+    } finally {
+      setHandoffBusy(false);
+    }
+  }, [handoffTargetModel, handoffTargetProvider, handoffTaskId, locale, requestSystemEndpoint, sessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchSystemEndpoint("/api/cookbook/recommendations");
+        if (cancelled || !res.ok) return;
+        const j = JSON.parse(res.text) as {
+          recommendations?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+          suggestions?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+          huggingface_local?: Array<{
+            provider: string;
+            model: string;
+            price_input_per_million?: number | null;
+            price_output_per_million?: number | null;
+          }>;
+        };
+        const items = [...(j.recommendations ?? []), ...(j.suggestions ?? []), ...(j.huggingface_local ?? [])];
+        if (!cancelled) setModelPricingLookup(buildCookbookPricingLookup(items));
+      } catch {
+        /* optional pricing data */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchSystemEndpoint]);
+
+  useEffect(() => {
+    if (tab !== "memory") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchSystemEndpoint("/api/memory/recall-metrics");
+        if (cancelled || !res.ok) return;
+        const j = JSON.parse(res.text) as { hygiene_last_suggestions?: number };
+        const n = j.hygiene_last_suggestions ?? 0;
+        if (n > 0) {
+          setMemoryHygieneHint(
+            locale === "en"
+              ? `Hygiene scan: ${n} possible duplicate cluster(s). Review long-term memory or run relation rebuild.`
+              : `Hygiène mémoire : ${n} groupe(s) de doublons possibles. Vérifiez la mémoire long terme ou reconstruisez les relations.`,
+          );
+        } else {
+          setMemoryHygieneHint(null);
+        }
+      } catch {
+        if (!cancelled) setMemoryHygieneHint(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, fetchSystemEndpoint, locale]);
+
+  useEffect(() => {
+    if (tab !== "memory") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchSystemEndpoint("/api/memory/advanced-settings");
+        if (cancelled || !res.ok) return;
+        const j = JSON.parse(res.text) as { settings?: MemoryAdvancedSettings };
+        if (j.settings) setMemoryAdvancedSettings(j.settings);
+      } catch {
+        if (!cancelled) setMemoryAdvancedSettings(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, fetchSystemEndpoint]);
+
+  const saveMemoryAdvancedSettings = useCallback(async () => {
+    if (!memoryAdvancedSettings) return;
+    setMemoryAdvancedSaving(true);
+    setMemoryAdvancedMessage(null);
+    try {
+      const res = await fetchSystemEndpoint(
+        "/api/memory/advanced-settings",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(memoryAdvancedSettings),
+        },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j = JSON.parse(res.text) as { settings?: MemoryAdvancedSettings };
+      if (j.settings) setMemoryAdvancedSettings(j.settings);
+      setMemoryAdvancedMessage(locale === "en" ? "Advanced memory settings saved." : "Paramètres mémoire avancés enregistrés.");
+    } catch (e) {
+      setMemoryAdvancedMessage(String(e));
+    } finally {
+      setMemoryAdvancedSaving(false);
+    }
+  }, [memoryAdvancedSettings, fetchSystemEndpoint, locale]);
 
   const fetchUserRagDocuments = useCallback(async () => {
     setUserRagLoading(true);
@@ -3848,6 +4678,8 @@ function App() {
         cannot_do?: string[];
         traits_override?: Record<string, number> | null;
         preferred_mode?: string | null;
+        temperature?: number | null;
+        system_prompt?: string | null;
       }>("get_agent_profile", { port: DAEMON_PORT });
       const to = data?.traits_override;
       const f = data?.formality;
@@ -3863,13 +4695,43 @@ function App() {
         cannot_do: Array.isArray(data?.cannot_do) ? data.cannot_do : [],
         traits_override: to && typeof to === "object" ? { ...to } : {},
         preferred_mode: data?.preferred_mode ?? "",
+        temperature: typeof data?.temperature === "number" ? String(data.temperature) : "",
+        system_prompt: data?.system_prompt ?? "",
       });
+      try {
+        const idRes = await requestSystemEndpoint("GET", "/api/agent-identity");
+        if (idRes.ok) {
+          const parsed = JSON.parse(idRes.text) as {
+            identity?: {
+              name?: string;
+              role?: string;
+              tone?: string;
+              values?: string[];
+              constraints?: string[];
+            };
+          };
+          const id = parsed.identity ?? {};
+          setAgentConstitution({
+            tone: id.tone ?? "",
+            values: Array.isArray(id.values) ? id.values : [],
+            constraints: Array.isArray(id.constraints) ? id.constraints : [],
+          });
+          if (id.name && !data?.name) {
+            setAgentProfile((p) => ({ ...p, name: id.name ?? p.name }));
+          }
+          if (id.role && !data?.role) {
+            setAgentProfile((p) => ({ ...p, role: id.role ?? p.role }));
+          }
+        }
+      } catch {
+        /* constitution optional */
+      }
     } catch (e) {
       setAgentProfileError(String(e));
     } finally {
       setAgentProfileLoading(false);
     }
-  }, []);
+  }, [requestSystemEndpoint]);
 
   const fetchUserProfile = useCallback(async () => {
     setUserProfileLoading(true);
@@ -3919,10 +4781,10 @@ function App() {
   }, [tab, settingsSection, fetchUserProfile]);
 
   useEffect(() => {
-    if (tab === "settings" && settingsSection === "system") {
+    if (tab === "settings" && settingsSection === "system" && systemSubTab === "plugins") {
       fetchPluginStatus();
     }
-  }, [tab, settingsSection, fetchPluginStatus]);
+  }, [tab, settingsSection, systemSubTab, fetchPluginStatus]);
 
   useEffect(() => {
     if (tab === "settings" && settingsSection === "data" && dataSourcesSubTab === "project_graph") {
@@ -4111,7 +4973,7 @@ function App() {
 /config set K V   — définir variable (K=V dans akasha.env)
 /vault list       — clés du vault (noms uniquement)
 /plugins          — liste des plugins
-/reload           — recharger les plugins
+/reload           — recharger plugins, tools_policy.yaml et llm_router.yaml (modèles)
 /skills            — liste des skills installés
 /skills list       — idem
 /skills install <url> — installer un skill depuis une URL (GitHub ou hôte autorisé)
@@ -4240,8 +5102,26 @@ function App() {
         .join("\n");
     }
     if (cmd === "reload") {
-      await invoke("reload_plugins", { port });
-      return "Plugins rechargés.";
+      const parts: string[] = [];
+      try {
+        await invoke("reload_plugins", { port });
+        parts.push("Plugins rechargés.");
+      } catch (e) {
+        parts.push(`Plugins : erreur (${String(e)}).`);
+      }
+      try {
+        const json = await invoke<{ reloaded?: boolean }>("reload_tools_policy", { port });
+        parts.push(json?.reloaded ? "tools_policy.yaml rechargé." : "tools_policy : erreur.");
+      } catch (e) {
+        parts.push(`tools_policy : erreur (${String(e)}).`);
+      }
+      try {
+        const json = await invoke<{ reloaded?: boolean }>("reload_router", { port });
+        parts.push(json?.reloaded ? "llm_router.yaml rechargé (modèles/routes)." : "llm_router : erreur.");
+      } catch (e) {
+        parts.push(`llm_router : erreur (${String(e)}).`);
+      }
+      return parts.join(" ");
     }
     if (cmd === "skills") {
       const sub = parts[1]?.toLowerCase() ?? "";
@@ -4509,6 +5389,98 @@ function App() {
     }
   }, [voiceRecording, sessionId]);
 
+  const pollTaskDeps = useMemo(
+    (): PollTaskUntilDoneDeps => ({
+      daemonPort: DAEMON_PORT,
+      sessionId: sessionId ?? "",
+      sessionIdRef: sessionIdRef as unknown as MutableRefObject<string>,
+      taskIdToSessionIdRef,
+      ackTextByTaskRef,
+      chatMapByTaskIdRef,
+      humanInputAutoOpenedRef,
+      replyWithTtsRef,
+      selectedTaskIdForTodosRef,
+      fetchTasksEventsRef,
+      chatInputRef: chatInputRef as unknown as MutableRefObject<HTMLTextAreaElement | null>,
+      akashaSessionIdKey: AKASHA_SESSION_ID_KEY,
+      normalizeTaskEventsInvokeResponse,
+      extractChatMapVisualFromTaskEvents,
+      extractChatMapVisualFromAssistantText,
+      findLastChatAssistantIndex: findLastChatAssistantIndex as PollTaskUntilDoneDeps["findLastChatAssistantIndex"],
+      chatMapMessageCacheKey,
+      applyChatStreamProgress,
+      fetchTasksList,
+      enrichUsageWithPricing,
+      setRunningTaskChips,
+      setRunningTaskEvents,
+      setTasksEvents,
+      setPendingHumanInput,
+      setHumanInputModalTaskId,
+      setChatMapByTaskId,
+      setMessages: setMessages as PollTaskUntilDoneDeps["setMessages"],
+      voiceTtsConfigured: !!voiceStatus?.tts_configured,
+    }),
+    [
+      sessionId,
+      applyChatStreamProgress,
+      fetchTasksList,
+      enrichUsageWithPricing,
+      voiceStatus?.tts_configured,
+    ],
+  );
+
+  const trackTaskUntilDone = useCallback(
+    (taskId: string) => {
+      void pollTaskUntilDone(taskId, pollTaskDeps);
+    },
+    [pollTaskDeps],
+  );
+
+  useEffect(() => {
+    trackTaskUntilDoneRef.current = trackTaskUntilDone;
+  }, [trackTaskUntilDone]);
+
+  const resumedActiveTasksRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    Object.assign(taskIdToSessionIdRef.current, loadTaskSessionMap());
+  }, []);
+
+  useEffect(() => {
+    if (!health?.ok || !sessionId?.trim()) return;
+    Object.assign(taskIdToSessionIdRef.current, loadTaskSessionMap());
+    if (tasksList.length === 0) {
+      void fetchTasksList({ silent: true });
+      return;
+    }
+    for (const task of tasksList) {
+      if (!isTaskActiveStatus(task.status)) continue;
+      if (taskIdToSessionIdRef.current[task.id] !== sessionId) continue;
+      if (resumedActiveTasksRef.current.has(task.id)) continue;
+      resumedActiveTasksRef.current.add(task.id);
+      setRunningTaskChips((prev) =>
+        prev[task.id] !== undefined ? prev : { ...prev, [task.id]: { pct: 5, message: "en cours…" } },
+      );
+      setMessages((prev) => {
+        if (prev.some((m) => m.taskId === task.id)) return prev;
+        const label = task.label?.trim();
+        const userText = label && !isGenericTaskLabel(label, task.id) ? label : null;
+        const next = [...prev];
+        if (userText && !prev.some((m) => m.role === "user" && m.text === userText)) {
+          next.push({ role: "user", text: userText });
+        }
+        next.push({
+          role: "assistant",
+          text: "Reprise de la tâche en cours…",
+          taskId: task.id,
+          streaming: true,
+        });
+        return next;
+      });
+      trackTaskUntilDone(task.id);
+    }
+  }, [health?.ok, sessionId, tasksList, trackTaskUntilDone, fetchTasksList]);
+
   const handleSend = async (overrideMessage?: string, fromVoice?: boolean) => {
     const content = (overrideMessage ?? message).trim();
     const hasContent = content || attachments.length > 0;
@@ -4516,10 +5488,29 @@ function App() {
 
     if (fromVoice) replyWithTtsRef.current = true;
     const userMessage = content || "(Pièce(s) jointe(s))";
+    const researchCtx = chatResearchContext;
+    const noteCtx = chatNoteContext;
+    let messageToSend = userMessage;
+    if (researchCtx) {
+      messageToSend = buildMessageWithResearchContext(userMessage, researchCtx, locale);
+    } else if (noteCtx) {
+      messageToSend = buildMessageWithNoteContext(userMessage, noteCtx, locale);
+    }
+    if (researchCtx) setChatResearchContext(null);
+    if (noteCtx) setChatNoteContext(null);
     setMessages((prev) => {
       const cleaned = prev.filter((m) => !(m.role === "assistant" && m.streaming));
       return [...cleaned, { role: "user", text: userMessage }];
     });
+    if (sessionId) {
+      setChatThreads((prev) =>
+        prev.map((th) =>
+          th.id === sessionId
+            ? { ...th, lastSnippet: userMessage.slice(0, 140), updatedAt: new Date().toISOString() }
+            : th,
+        ),
+      );
+    }
     if (overrideMessage === undefined) setMessage("");
     chatInputRef.current?.focus();
 
@@ -4551,13 +5542,36 @@ function App() {
       const useNewSession = pendingNewSessionAfterSlashRef.current;
       if (useNewSession) pendingNewSessionAfterSlashRef.current = false;
       const sessionAtSend = sessionId;
-      const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
-        message: userMessage,
+      const runningIds = Object.keys(runningTaskChips);
+      const steerTarget =
+        chatDeliveryMode !== "immediate" && runningIds.length > 0 ? runningIds[0] : undefined;
+      const ack = await invoke<{
+        task_id: string;
+        session_id: string;
+        message: string;
+        queued?: boolean;
+      }>("send_message_ack", {
+        message: messageToSend,
         sessionId: sessionId,
         attachments: attachmentsPayload,
         newSession: useNewSession ? true : undefined,
+        queueMode: steerTarget ? chatDeliveryMode : undefined,
+        targetTaskId: steerTarget,
+        incognito: chatIncognito ? true : undefined,
         port: DAEMON_PORT,
       });
+      if (ack?.queued) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "system",
+            text:
+              chatDeliveryMode === "steering"
+                ? "Message mis en file steering (injection prioritaire)."
+                : "Message mis en file follow-up (après le tour en cours).",
+          },
+        ]);
+      }
       setLoading(false);
       if (ack?.session_id) {
         setSessionId(ack.session_id);
@@ -4607,9 +5621,32 @@ function App() {
       }
       const ackText = ack?.message ?? "Request received. You can follow progress in the Tasks tab.";
       if (ack?.task_id) {
+        // #region agent log
+        fetch("http://127.0.0.1:7708/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "0d82aa" },
+          body: JSON.stringify({
+            sessionId: "0d82aa",
+            location: "App.tsx:handleSend",
+            message: "message_ack",
+            hypothesisId: "B",
+            data: {
+              taskId: ack.task_id,
+              sessionId: ack.session_id,
+              queued: !!ack.queued,
+              steerTarget: steerTarget ?? null,
+              runningTaskIds: runningIds,
+              chatDeliveryMode,
+              sessionAtSend,
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+        // #endregion
         const sidResolved = (ack.session_id || sessionAtSend || "").trim();
         if (sidResolved) {
           taskIdToSessionIdRef.current[ack.task_id] = sidResolved;
+          persistTaskSession(ack.task_id, sidResolved);
         }
         lastChatTaskIdRef.current = ack.task_id;
         ackTextByTaskRef.current[ack.task_id] = ackText;
@@ -4621,237 +5658,10 @@ function App() {
       if (ack?.task_id) {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
+        setCollapsedRootTasks((prev) => ({ ...prev, [ack.task_id]: false }));
         setSubAgentPanelCollapsed(false);
         void fetchTasksList({ silent: true });
-        const taskId = ack.task_id;
-        const pollUntilDone = async () => {
-          const maxWait = 600;
-          const MIN_INTERVAL = 1500;
-          const MAX_INTERVAL = 5000;
-          let pollIntervalMs = MIN_INTERVAL;
-          let ticksWithoutChange = 0;
-          let lastStatus = "";
-          let lastMsg = "";
-          for (let i = 0; i < maxWait; i++) {
-            await new Promise((r) => setTimeout(r, pollIntervalMs));
-            try {
-              const [raw, eventsPayloadRaw, humanInputData] = await Promise.all([
-                invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
-                invoke<unknown>("get_task_events", { taskId, port: DAEMON_PORT }).catch(() => null),
-                invoke<{ question?: string; context?: string; choices?: string[] }>("get_task_human_input", { taskId, port: DAEMON_PORT }).catch(() => null),
-              ]);
-              const eventsData = { events: normalizeTaskEventsInvokeResponse(eventsPayloadRaw ?? {}) };
-              const status = JSON.parse(raw) as {
-                status?: string;
-                progress?: Array<{ progress_pct?: number; message?: string }>;
-                tokens_used?: number;
-                cost_usd?: number;
-              };
-              const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
-              const msg = status?.progress?.slice(-1)[0]?.message ?? "";
-              const currentStatus = status?.status ?? "";
-              if (currentStatus === lastStatus && msg === lastMsg) {
-                ticksWithoutChange++;
-                if (ticksWithoutChange >= 4 && pollIntervalMs < MAX_INTERVAL) {
-                  pollIntervalMs = Math.min(pollIntervalMs + 1500, MAX_INTERVAL);
-                  ticksWithoutChange = 0;
-                }
-              } else {
-                lastStatus = currentStatus;
-                lastMsg = msg;
-                ticksWithoutChange = 0;
-                pollIntervalMs = MIN_INTERVAL;
-              }
-              setRunningTaskChips((prev) => {
-                if (prev[taskId] === undefined) return prev;
-                const cur = prev[taskId]!;
-                if (cur.pct === pct && cur.message === msg) return prev;
-                return { ...prev, [taskId]: { pct, message: msg } };
-              });
-              const events = (eventsData?.events ?? []).map((e) => ({
-                event_type: e.event_type ?? "?",
-                payload: e.payload,
-                at: e.at ?? "",
-                task_id: e.task_id,
-              }));
-              setRunningTaskEvents((prev) => {
-                if (prev[taskId] === undefined) return prev;
-                const oldE = prev[taskId]!;
-                try {
-                  if (JSON.stringify(oldE) === JSON.stringify(events)) return prev;
-                } catch {
-                  /* ignore */
-                }
-                return { ...prev, [taskId]: events };
-              });
-              const chatMapVis =
-                extractChatMapVisualFromTaskEvents(events) ?? extractChatMapVisualFromAssistantText(msg);
-              if (chatMapVis) {
-                chatMapByTaskIdRef.current[taskId] = chatMapVis;
-                setChatMapByTaskId((prev) => (prev[taskId] === chatMapVis ? prev : { ...prev, [taskId]: chatMapVis }));
-              }
-              const taskForActiveChat = taskIdToSessionIdRef.current[taskId] === sessionIdRef.current;
-              if (chatMapVis && taskForActiveChat) {
-                setMessages((prev) => {
-                  const idx = findLastChatAssistantIndex(prev, taskId);
-                  if (idx < 0) return prev;
-                  if (prev[idx]?.mapVisual === chatMapVis) return prev;
-                  const next = [...prev];
-                  next[idx] = { ...next[idx]!, mapVisual: chatMapVis };
-                  return next;
-                });
-              }
-              if (humanInputData?.question) {
-                setPendingHumanInput((prev) => ({ ...prev, [taskId]: { question: humanInputData.question ?? "", context: humanInputData.context ?? "", choices: humanInputData.choices } }));
-                if (!humanInputAutoOpenedRef.current.has(taskId)) {
-                  humanInputAutoOpenedRef.current.add(taskId);
-                  setHumanInputModalTaskId(taskId);
-                }
-              } else {
-                setPendingHumanInput((prev) => {
-                  const next = { ...prev };
-                  delete next[taskId];
-                  return next;
-                });
-                humanInputAutoOpenedRef.current.delete(taskId);
-              }
-              if (status?.status !== "completed" && status?.status !== "failed" && msg) {
-                applyChatStreamProgress(taskId, msg);
-              }
-              if (status?.status === "completed") {
-                setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                humanInputAutoOpenedRef.current.delete(taskId);
-                setHumanInputModalTaskId((c) => (c === taskId ? null : c));
-                const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
-                const doneMapVis =
-                  extractChatMapVisualFromTaskEvents(events) ??
-                  extractChatMapVisualFromAssistantText(finalMsg) ??
-                  chatMapByTaskIdRef.current[taskId] ??
-                  null;
-                if (doneMapVis) {
-                  chatMapByTaskIdRef.current[taskId] = doneMapVis;
-                  setChatMapByTaskId((prev) => (prev[taskId] === doneMapVis ? prev : { ...prev, [taskId]: doneMapVis }));
-                }
-                if (taskForActiveChat) {
-                  let storedMapVisual: ChatMapVisual | undefined;
-                  setMessages((prev) => {
-                    const idx = findLastChatAssistantIndex(prev, taskId);
-                    if (idx >= 0) {
-                      const next = [...prev];
-                      const keepMap = next[idx]!.mapVisual ?? doneMapVis ?? chatMapByTaskIdRef.current[taskId] ?? undefined;
-                      storedMapVisual = keepMap;
-                      next[idx] = { role: "assistant", text: finalMsg, taskId, mapVisual: keepMap };
-                      return next;
-                    }
-                    storedMapVisual = doneMapVis ?? undefined;
-                    return [...prev, { role: "assistant", text: finalMsg, taskId, mapVisual: doneMapVis ?? undefined }];
-                  });
-                  if (storedMapVisual && finalMsg.trim()) {
-                    try {
-                      const sid =
-                        (typeof sessionId === "string" && sessionId.trim()) ||
-                        localStorage.getItem(AKASHA_SESSION_ID_KEY) ||
-                        "";
-                      if (sid) {
-                        localStorage.setItem(
-                          chatMapMessageCacheKey(sid, finalMsg.trim()),
-                          JSON.stringify(storedMapVisual),
-                        );
-                      }
-                    } catch {
-                      /* ignore */
-                    }
-                  }
-                  delete ackTextByTaskRef.current[taskId];
-                }
-                if (replyWithTtsRef.current && voiceStatus?.tts_configured && finalMsg?.trim()) {
-                  replyWithTtsRef.current = false;
-                  invoke<{ data_url?: string }>("voice_tts", { text: finalMsg, port: DAEMON_PORT })
-                    .then((r) => {
-                      const url = r?.data_url;
-                      if (url) {
-                        const audio = new Audio(url);
-                        audio.play().catch(() => {});
-                      }
-                    })
-                    .catch(() => {});
-                }
-                requestAnimationFrame(() => chatInputRef.current?.focus());
-                return;
-              }
-              if (status?.status === "failed") {
-                setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
-                humanInputAutoOpenedRef.current.delete(taskId);
-                setHumanInputModalTaskId((c) => (c === taskId ? null : c));
-                replyWithTtsRef.current = false;
-                if (taskForActiveChat) {
-                  setMessages((prev) => {
-                    const idx = findLastChatAssistantIndex(prev, taskId);
-                    if (idx >= 0) {
-                      const next = [...prev];
-                      const MAX_FAILURE_CHAT_CHARS = 2500;
-                      const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
-                      const tokensUsed = status?.tokens_used;
-                      const costUsd = status?.cost_usd;
-                      const suffixParts: string[] = [];
-                      if (typeof tokensUsed === "number") suffixParts.push(`Tokens: ${tokensUsed}`);
-                      if (typeof costUsd === "number" && Number.isFinite(costUsd) && Math.abs(costUsd) > 0) suffixParts.push(`Coût: ${costUsd.toFixed(4)} USD`);
-                      const suffix = suffixParts.length > 0 ? `\n\n${suffixParts.join(" · ")}` : "";
-                      const composed = `${baseMsg}${suffix}`;
-                      const finalMsg = composed.length > MAX_FAILURE_CHAT_CHARS ? composed.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…" : composed;
-                      next[idx] = { role: "assistant", text: finalMsg, error: true };
-                      return next;
-                    }
-                    const MAX_FAILURE_CHAT_CHARS = 2500;
-                    const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
-                    const tokensUsed = status?.tokens_used;
-                    const costUsd = status?.cost_usd;
-                    const suffixParts: string[] = [];
-                    if (typeof tokensUsed === "number") suffixParts.push(`Tokens: ${tokensUsed}`);
-                    if (typeof costUsd === "number" && Number.isFinite(costUsd) && Math.abs(costUsd) > 0) suffixParts.push(`Coût: ${costUsd.toFixed(4)} USD`);
-                    const suffix = suffixParts.length > 0 ? `\n\n${suffixParts.join(" · ")}` : "";
-                    const composed = `${baseMsg}${suffix}`;
-                    const finalMsg = composed.length > MAX_FAILURE_CHAT_CHARS ? composed.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…" : composed;
-                    return [...prev, { role: "assistant", text: finalMsg, error: true }];
-                  });
-                  delete ackTextByTaskRef.current[taskId];
-                }
-                requestAnimationFrame(() => chatInputRef.current?.focus());
-                return;
-              }
-            } catch {
-              /* ignore */
-            }
-          }
-          setRunningTaskChips((prev) => {
-            const next = { ...prev };
-            delete next[taskId];
-            return next;
-          });
-          setRunningTaskEvents((prev) => {
-            const next = { ...prev };
-            delete next[taskId];
-            return next;
-          });
-          if (taskIdToSessionIdRef.current[taskId] === sessionIdRef.current) {
-            setMessages((prev) => {
-              const idx = findLastChatAssistantIndex(prev, taskId);
-              if (idx >= 0) {
-                const next = [...prev];
-                next[idx] = { role: "assistant", text: "Délai dépassé. Consultez Tâches.", taskId };
-                return next;
-              }
-              return [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches.", taskId }];
-            });
-            delete ackTextByTaskRef.current[taskId];
-          }
-          requestAnimationFrame(() => chatInputRef.current?.focus());
-        };
-        pollUntilDone();
+        trackTaskUntilDone(ack.task_id);
       }
     } catch (err) {
       setLoading(false);
@@ -4862,7 +5672,21 @@ function App() {
   handleSendRef.current = handleSend;
 
   return (
-    <div className={`app ui-mode-${uiMode}`}>
+    <div className={`app ui-mode-${uiMode}${mobileSidebarOpen ? " app--sidebar-open" : ""}`}>
+      <AppNotificationsSync
+        routerError={routerError}
+        docError={docError}
+        memoryError={memoryError}
+        missionError={missionError}
+        calendarTaskDetailError={calendarTaskDetailError}
+        scheduleDetailError={scheduleDetailError}
+        pluginStatusError={pluginStatusError}
+        pluginReputationResetError={pluginReputationResetError}
+        agentProfileError={agentProfileError}
+        userProfileError={userProfileError}
+        userRagError={userRagError}
+        projectGraphError={projectGraphError}
+      />
       <a href="#main-content" className="skip-link">Aller au contenu principal</a>
       {updateBannerInfo && (
         <div className="update-banner" role="region" aria-label={t("update.banner_label")}>
@@ -4904,103 +5728,20 @@ function App() {
         </div>
       )}
       <div className="app-body">
-        <aside className="sidebar-left" aria-label="Navigation principale">
+        {mobileSidebarOpen ? (
+          <button
+            type="button"
+            className="sidebar-mobile-backdrop"
+            aria-label={t("common.close")}
+            onClick={() => setMobileSidebarOpen(false)}
+          />
+        ) : null}
+        <aside className={`sidebar-left${mobileSidebarOpen ? " sidebar-left--open" : ""}${sidebarNavCollapsed ? " sidebar-left--collapsed" : ""}`} aria-label="Navigation principale">
           <div className="sidebar-left-top">
             <h1 className="logo">Akasha</h1>
             <p className="tagline">Local-first AI assistant</p>
           </div>
-          <nav className="tabs sidebar-nav" role="tablist" aria-label="Sections">
-            <button
-              role="tab"
-              aria-selected={tab === "chat"}
-              aria-controls="panel-chat"
-              id="tab-chat"
-              className={tab === "chat" ? "active" : ""}
-              onClick={() => setTab("chat")}
-            >
-              {t("tabs.chat")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "scheduled"}
-              aria-controls="panel-scheduled"
-              id="tab-scheduled"
-              className={tab === "scheduled" ? "active" : ""}
-              onClick={() => setTab("scheduled")}
-            >
-              {t("tabs.scheduled")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "router"}
-              aria-controls="panel-router"
-              id="tab-router"
-              className={tab === "router" ? "active" : ""}
-              onClick={() => setTab("router")}
-            >
-              {t("tabs.router")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "docs"}
-              aria-controls="panel-docs"
-              id="tab-docs"
-              className={tab === "docs" ? "active" : ""}
-              onClick={() => setTab("docs")}
-            >
-              {t("tabs.docs")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "tasks"}
-              aria-controls="panel-tasks"
-              id="tab-tasks"
-              className={tab === "tasks" ? "active" : ""}
-              onClick={() => setTab("tasks")}
-            >
-              {t("tabs.tasks")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "calendar"}
-              aria-controls="panel-calendar"
-              id="tab-calendar"
-              className={tab === "calendar" ? "active" : ""}
-              onClick={() => setTab("calendar")}
-            >
-              {t("tabs.calendar")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "memory"}
-              aria-controls="panel-memory"
-              id="tab-memory"
-              className={tab === "memory" ? "active" : ""}
-              onClick={() => setTab("memory")}
-            >
-              {t("tabs.memory")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "mission"}
-              aria-controls="panel-mission"
-              id="tab-mission"
-              className={tab === "mission" ? "active" : ""}
-              onClick={() => setTab("mission")}
-            >
-              {t("tabs.mission")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "settings"}
-              aria-controls="panel-settings"
-              id="tab-settings"
-              className={tab === "settings" ? "active" : ""}
-              onClick={() => setTab("settings")}
-            >
-              {t("tabs.settings")}
-            </button>
-          </nav>
+          <AppNavigation tab={tab} setTab={(t) => { setTab(t); setMobileSidebarOpen(false); }} t={t} collapsed={sidebarNavCollapsed} onToggleCollapse={() => setSidebarNavCollapsed((c) => !c)} />
           <div className="sidebar-left-bottom">
             <div className="daemon-status" role="status" aria-live="polite">
               <span
@@ -5013,6 +5754,15 @@ function App() {
                 <span>{t("sidebar.daemon_disconnected")} <code>akasha start</code></span>
               )}
             </div>
+            <button
+              type="button"
+              className="btn-secondary sidebar-resume-btn"
+              disabled={!health?.ok || resumeBriefBusy || !sessionId?.trim()}
+              onClick={() => void handleResumeBrief()}
+              title={locale === "en" ? "Fetch session resume brief from daemon" : "Charger le brief de reprise depuis le daemon"}
+            >
+              {resumeBriefBusy ? "…" : locale === "en" ? "Resume" : "Reprendre"}
+            </button>
             {Object.keys(pendingHumanInput).length > 0 && (
               <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label={t("pending_actions.region_label")}>
                 <button
@@ -5023,7 +5773,9 @@ function App() {
                   aria-haspopup="true"
                   title={t("pending_actions.title")}
                 >
-                  <span className="header-pending-actions-icon" aria-hidden>⚠</span>
+                  <span className="header-pending-actions-icon" aria-hidden>
+                    <MonoIcon name="warning" />
+                  </span>
                   <span className="header-pending-actions-badge">{Object.keys(pendingHumanInput).length}</span>
                   <span className="header-pending-actions-label">{t("pending_actions.action_required")}</span>
                 </button>
@@ -5060,57 +5812,64 @@ function App() {
           <div className="container-main-inner">
             <header className="view-header">
               <div className="view-header-main">
-                <h2 className="view-title">{t("tabs." + tab)}</h2>
-                <p className="view-subtitle">{isSimpleMode ? t("settings.ui_mode_hint") : t("chat.follow_tasks")}</p>
+                <h2 className="view-title">
+                  {t("tabs." + tab)}
+                  <InfoTip label={t("tabs." + tab)} content={isSimpleMode ? t("settings.ui_mode_hint") : t("chat.follow_tasks")} />
+                </h2>
               </div>
               <div className="view-header-actions">
-                <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
-                <span
-                  className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
-                  role="status"
-                  aria-live="polite"
-                  title={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
-                >
-                  {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
-                </span>
                 <button
                   type="button"
-                  className="sidebar-right-toggle"
-                  onClick={() => setRightSidebarOpen((o) => !o)}
-                  aria-expanded={rightSidebarOpen}
-                  aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
-                  title={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                  className="sidebar-mobile-toggle"
+                  onClick={() => setMobileSidebarOpen((o) => !o)}
+                  aria-expanded={mobileSidebarOpen}
+                  aria-label={t("nav.toggle_sidebar")}
                 >
-                  {rightSidebarOpen ? "▐" : "▌"}
+                  ☰
                 </button>
+                <NotificationCenter />
+                <PermissionsBell fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+                <SteeringQueueBell
+                  taskId={activeSteeringTaskId}
+                  fetchEndpoint={fetchSystemEndpoint}
+                  locale={locale}
+                />
+                <Tooltip content={uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}>
+                  <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
+                </Tooltip>
+                <Tooltip content={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}>
+                  <span
+                    className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+                  </span>
+                </Tooltip>
+                {tab !== "tasks" && (
+                  <Tooltip content={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}>
+                    <button
+                      type="button"
+                      className="sidebar-right-toggle"
+                      onClick={() => setRightSidebarOpen((o) => !o)}
+                      aria-expanded={rightSidebarOpen}
+                      aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                    >
+                      {rightSidebarOpen ? "▐" : "▌"}
+                    </button>
+                  </Tooltip>
+                )}
               </div>
             </header>
       <main className="main" id="main-content" tabIndex={-1}>
         {/* Onboarding: first steps modal (dismissible, "Ne plus afficher" stored in localStorage) */}
         {showOnboarding && (
-          <div className="human-input-overlay onboarding-overlay" role="dialog" aria-labelledby="onboarding-title" aria-modal="true">
-            <div className="human-input-modal onboarding-modal">
-              <h2 id="onboarding-title">{t("onboarding.title")}</h2>
-              <p className="onboarding-intro">{t("onboarding.intro")}</p>
-              <ul className="onboarding-steps">
-                <li>{t("onboarding.step0")}</li>
-                <li>{t("onboarding.step1")}</li>
-                <li>{t("onboarding.step2")}</li>
-                <li>{t("onboarding.step3")}</li>
-              </ul>
-              <div className="onboarding-actions">
-                <button type="button" className="onboarding-doc-btn" onClick={() => { setTab("docs"); setShowOnboarding(false); }}>
-                  {t("onboarding.open_doc")}
-                </button>
-                <button type="button" className="onboarding-dismiss" onClick={() => { try { localStorage.setItem("akasha_onboarding_dismissed", "1"); } catch { /* ignore */ } setShowOnboarding(false); }}>
-                  {t("onboarding.dismiss")}
-                </button>
-                <button type="button" className="human-input-close" onClick={() => setShowOnboarding(false)} aria-label={t("common.close")}>
-                  ×
-                </button>
-              </div>
-            </div>
-          </div>
+          <OnboardingWizard
+            locale={locale}
+            daemonOk={!!health?.ok}
+            onComplete={() => setShowOnboarding(false)}
+            t={t}
+          />
         )}
         {/* Human-in-the-loop: visible on all tabs */}
         {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (
@@ -5185,6 +5944,56 @@ function App() {
               <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label={t("common.close")}>
                 ×
               </button>
+            </div>
+          </div>
+        )}
+        {handoffDialogOpen && (
+          <div className="human-input-overlay" role="dialog" aria-modal="true">
+            <div className="human-input-modal">
+              <h2>{locale === "en" ? "Resume with another model" : "Reprendre avec un autre modèle"}</h2>
+              <label>
+                {locale === "en" ? "Provider" : "Provider"}
+                <input
+                  className="settings-input"
+                  value={handoffTargetProvider}
+                  onChange={(e) => setHandoffTargetProvider(e.target.value)}
+                  placeholder={locale === "en" ? "optional" : "optionnel"}
+                />
+              </label>
+              <label>
+                {locale === "en" ? "Model" : "Modèle"}
+                <input
+                  className="settings-input"
+                  list="handoff-models"
+                  value={handoffTargetModel}
+                  onChange={(e) => setHandoffTargetModel(e.target.value)}
+                  placeholder="provider/model"
+                />
+                <datalist id="handoff-models">
+                  {handoffModels.map((row) => (
+                    <option key={`${row.provider}:${row.model}`} value={row.model}>
+                      {row.provider}
+                    </option>
+                  ))}
+                </datalist>
+              </label>
+              <label>
+                task_id ({locale === "en" ? "optional" : "optionnel"})
+                <input
+                  className="settings-input"
+                  value={handoffTaskId}
+                  onChange={(e) => setHandoffTaskId(e.target.value)}
+                />
+              </label>
+              <div className="onboarding-actions">
+                <button type="button" className="btn-secondary" onClick={() => setHandoffDialogOpen(false)}>
+                  {locale === "en" ? "Close" : "Fermer"}
+                </button>
+                <button type="button" className="btn-primary" disabled={handoffBusy} onClick={() => void submitSessionHandoff()}>
+                  {handoffBusy ? "…" : locale === "en" ? "Send handoff" : "Envoyer le handoff"}
+                </button>
+              </div>
+              {handoffStatus ? <p className="muted">{handoffStatus}</p> : null}
             </div>
           </div>
         )}
@@ -5367,28 +6176,86 @@ function App() {
             id="panel-chat"
             role="tabpanel"
             aria-labelledby="tab-chat"
-            className="panel chat-panel"
+            className="panel chat-panel chat-panel-centered"
           >
-            <div className="panel-hero chat-panel-hero">
-              <div>
-                <h3 className="panel-hero-title">{t("chat.hero_title")}</h3>
-                <p className="panel-hero-text">{isSimpleMode ? t("chat.hero_simple") : t("chat.hero_expert")}</p>
-              </div>
-              {(messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
-                <div className="panel-hero-aside">
-                  {messages.length > 0 && (
-                    <button type="button" className="panel-hero-action panel-hero-action-secondary" onClick={exportChatTranscript}>
-                      {t("chat.export_transcript")}
+            {chatIncognito ? (
+              <p className="chat-incognito-banner" role="status">
+                {locale === "en" ? "Incognito — memory promotion disabled for this session (UI flag)." : "Incognito — promotion mémoire désactivée pour cette session (indicateur UI)."}
+              </p>
+            ) : null}
+            {(companionBubbleText || messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
+              <div className="chat-panel-top">
+                <div className="chat-panel-toolbar">
+                  {companionBubbleText ? (
+                    <button
+                      type="button"
+                      className="chat-companion-toggle"
+                      onClick={() => {
+                        setCompanionOpen((open) => {
+                          const next = !open;
+                          try {
+                            localStorage.setItem(CHAT_COMPANION_OPEN_KEY, next ? "1" : "0");
+                          } catch {
+                            /* ignore */
+                          }
+                          return next;
+                        });
+                      }}
+                      aria-expanded={companionOpen}
+                      aria-controls="chat-companion-message"
+                      aria-label={t("chat.companion_label")}
+                      title={t("chat.companion_label")}
+                    >
+                      <img src="/akasha-icon.png" alt="" className="chat-companion-icon" width={20} height={20} />
                     </button>
-                  )}
-                  {Object.keys(runningTaskChips).length > 0 && (
-                    <button type="button" className="panel-hero-action" onClick={() => setTab("tasks")}>
-                      {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
+                  ) : null}
+                  <div className="chat-panel-toolbar-actions">
+                    <button
+                      type="button"
+                      className="btn-secondary chat-toolbar-btn"
+                      onClick={() => {
+                        setHandoffDialogOpen(true);
+                        setHandoffStatus(null);
+                        void loadHandoffModels();
+                      }}
+                    >
+                      {locale === "en" ? "Resume with another model" : "Reprendre avec un autre modèle"}
                     </button>
-                  )}
+                    {messages.length > 0 && (
+                      <button type="button" className="btn-secondary chat-toolbar-btn" onClick={exportChatTranscript}>
+                        {t("chat.export_transcript")}
+                      </button>
+                    )}
+                    {Object.keys(runningTaskChips).length > 0 && (
+                      <button type="button" className="btn-secondary chat-toolbar-btn" onClick={() => setTab("tasks")}>
+                        {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
+                      </button>
+                    )}
+                  </div>
                 </div>
-              )}
-            </div>
+                {companionOpen && companionBubbleText ? (
+                  <div className="chat-companion-row chat-companion-row--open" role="status" aria-live="polite">
+                    <div id="chat-companion-message" className="chat-companion-bubble">
+                      <span className="chat-companion-label">{t("chat.companion_label")}</span>
+                      <span className="chat-companion-text">{companionBubbleText}</span>
+                    </div>
+                    {chatTipsEnabled && tipBannerText && !tipBannerDismissed ? (
+                      <button
+                        type="button"
+                        className="chat-companion-dismiss"
+                        onClick={() => {
+                          setTipBannerDismissed(true);
+                          setTipBannerText(null);
+                        }}
+                        aria-label={t("chat.tip_dismiss")}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            )}
             <div className="chat-area">
               {messages.length === 0 ? (
                 <div className="chat-placeholder">
@@ -5401,92 +6268,67 @@ function App() {
                   </p>
                 </div>
               ) : (
-                <>
-                  {messages.map((m, i) => {
-                    const askUserData = m.role === "assistant" ? parseAskUserMessage(m.text) : null;
-                    const assistantMapVisual =
-                      m.role === "assistant" ? (m.mapVisual ?? (m.taskId ? chatMapByTaskId[m.taskId] : undefined)) : undefined;
-                    return (
-                      <div
-                        key={i}
-                        className={`message ${m.role} ${m.error ? "error" : ""} ${askUserData ? "message-ask-user" : ""} ${m.streaming ? "message-streaming" : ""}`}
+                <ChatRenderer
+                  messages={messages}
+                  parseAskUser={parseAskUserMessage}
+                  onPathClick={handlePathClick}
+                  userAvatar={userAvatar}
+                  agentAvatar={agentProfile.avatar}
+                  agentName={agentProfile.name || "Akasha"}
+                  onOpenTaskDetail={openChatTaskDetail}
+                  taskDetailLabel={t("chat.view_task_detail")}
+                  renderAskUserChoice={(choice, j) => {
+                    const pendingTaskIdForReply = Object.keys(pendingHumanInput)[0] ?? null;
+                    return pendingTaskIdForReply ? (
+                      <button
+                        key={j}
+                        type="button"
+                        className="message-ask-user-choice-tag"
+                        onClick={async () => {
+                          try {
+                            await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, response: choice, port: DAEMON_PORT });
+                            setPendingHumanInput((prev) => {
+                              const next = { ...prev };
+                              delete next[pendingTaskIdForReply];
+                              return next;
+                            });
+                            setHumanInputModalTaskId((c) => (c === pendingTaskIdForReply ? null : c));
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
                       >
-                        <div className="message-head">
-                          {m.role === "user" ? (userAvatar ? <img src={userAvatar} alt="" className="message-avatar message-avatar-user" /> : null) : m.role === "assistant" ? (agentProfile.avatar ? <img src={agentProfile.avatar} alt="" className="message-avatar message-avatar-assistant" /> : null) : null}
-                          <span className="role" aria-hidden>
-                            {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : (agentProfile.name || "Akasha")}
-                          </span>
-                        </div>
-                        {m.role === "system" ? (
-                          <div className="text system-text" style={{ whiteSpace: "pre-wrap" }}>
-                            {m.text}
-                          </div>
-                        ) : askUserData ? (
-                          <div className="message-ask-user-card">
-                            <div className="message-ask-user-question markdown-rendered">
-                              <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
-                                {askUserData.question}
-                              </LazyMarkdownContent></Suspense>
-                            </div>
-                            {askUserData.context && (
-                              <p className="message-ask-user-context">{askUserData.context}</p>
-                            )}
-                            {askUserData.choices?.length ? (
-                              <div className="message-ask-user-choices">
-                                {askUserData.choices.map((choice, j) => {
-                                  const pendingTaskIdForReply = Object.keys(pendingHumanInput)[0] ?? null;
-                                  return pendingTaskIdForReply ? (
-                                    <button
-                                      key={j}
-                                      type="button"
-                                      className="message-ask-user-choice-tag"
-                                      onClick={async () => {
-                                        try {
-                                          await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, response: choice, port: DAEMON_PORT });
-                                          setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskIdForReply]; return next; });
-                                          setHumanInputModalTaskId((c) => (c === pendingTaskIdForReply ? null : c));
-                                        } catch (e) {
-                                          console.error(e);
-                                        }
-                                      }}
-                                    >
-                                      {choice}
-                                    </button>
-                                  ) : (
-                                    <span key={j} className="message-ask-user-choice-tag">{choice}</span>
-                                  );
-                                })}
-                              </div>
-                            ) : null}
-                            <p className="message-ask-user-hint">Répondre ci‑dessous (boutons ou champ texte) ou via « Action requise » sur la tâche.</p>
-                          </div>
-                        ) : (
-                          <div className="text markdown-rendered">
-                            <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent onPathClick={handlePathClick}>
-                              {preprocessMessagePaths(preprocessDataUrlImages(m.text))}
-                            </LazyMarkdownContent></Suspense>
-                            {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}
-                          </div>
-                        )}
-                        {assistantMapVisual ? (
-                          <div className="chat-message-map-embed">
-                            <MapPluginEventView
-                              visual={assistantMapVisual}
-                              t={t}
-                              width={460}
-                              height={160}
-                              toolbar="inline"
-                              variant="chat"
-                              showPanelHeading={false}
-                              onFullscreen={() => setEventVisualFullscreen({ visual: assistantMapVisual, sourceEventType: "chat_map" })}
-                              onExportCsv={() => exportAdvancedViewCsv(assistantMapVisual)}
-                            />
-                          </div>
-                        ) : null}
+                        {choice}
+                      </button>
+                    ) : (
+                      <span key={j} className="message-ask-user-choice-tag">
+                        {choice}
+                      </span>
+                    );
+                  }}
+                  renderMapVisual={(m) => {
+                    const assistantMapVisual =
+                      m.role === "assistant"
+                        ? ((m.mapVisual ?? (m.taskId ? chatMapByTaskId[m.taskId] : undefined)) as EventAdvancedView | undefined)
+                        : undefined;
+                    if (!assistantMapVisual || assistantMapVisual.kind !== "map") return null;
+                    return (
+                      <div className="chat-message-map-embed">
+                        <MapPluginEventView
+                          visual={assistantMapVisual}
+                          t={t}
+                          width={460}
+                          height={160}
+                          toolbar="inline"
+                          variant="chat"
+                          showPanelHeading={false}
+                          onFullscreen={() => setEventVisualFullscreen({ visual: assistantMapVisual, sourceEventType: "chat_map" })}
+                          onExportCsv={() => exportAdvancedViewCsv(assistantMapVisual)}
+                        />
                       </div>
                     );
-                  })}
-                </>
+                  }}
+                />
               )}
               {(loading || Object.keys(runningTaskChips).length > 0) && (
                 <div className="chat-loading-row" role="status" aria-live="polite">
@@ -5535,7 +6377,9 @@ function App() {
                   {chatToolBatchSummary}
                 </div>
               )}
-              {Object.keys(runningTaskChips).length > 0 && (
+              <div ref={chatEndRef} aria-hidden />
+            </div>
+            {Object.keys(runningTaskChips).length > 0 && (
                 <div className="chat-subagents-panel">
                   <button
                     type="button"
@@ -5557,7 +6401,7 @@ function App() {
                     </span>
                   </button>
                   {!subAgentPanelCollapsed && (
-                    <div id="subagents-detail" className="chat-subagents-detail" role="region" aria-label={t("chat.agent_activity_region")}>
+                    <div ref={subagentsDetailRef} id="subagents-detail" className="chat-subagents-detail" role="region" aria-label={t("chat.agent_activity_region")}>
                       {Object.entries(runningTaskEvents).filter(([, ev]) => ev.length > 0).length === 0 ? (
                         <p className="chat-subagents-empty">
                           {t("chat.no_events_yet")}
@@ -5637,7 +6481,7 @@ function App() {
                                           {tid === rootTaskId ? `${t("chat.root_task")}${tid.slice(-8)}` : `${t("chat.sub_task")}${tid.slice(-8)}`}
                                         </div>
                                         <ul className="chat-subagents-events">
-                                          {evs.map((ev, idx) => (
+                                          {collapseStreamedProgressEvents(evs, tid).map((ev, idx) => (
                                             <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type} data-event-kind={classifyEventKind(ev.event_type)}>
                                               <span className="chat-subagents-event-dot" aria-hidden />
                                               <div className="chat-subagents-event-body">
@@ -5673,8 +6517,17 @@ function App() {
                                                       </>
                                                     );
                                                   })() : null}
-                                                  {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
-                                                    <span className="chat-subagents-event-model">— {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
+                                                  {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") ? (
+                                                    (() => {
+                                                      const usage = enrichUsageWithPricing(parseUsageFromEventPayload(ev.payload));
+                                                      if (usage) {
+                                                        return <ModelUsageBadge usage={usage} compact className="chat-subagents-event-usage" />;
+                                                      }
+                                                      const p = ev.payload as { model_used?: string | null };
+                                                      return p.model_used ? (
+                                                        <span className="chat-subagents-event-model">— {t("tasks.model_used")}: {p.model_used}</span>
+                                                      ) : null;
+                                                    })()
                                                   ) : null}
                                                   {ev.payload && typeof ev.payload === "object" && ev.event_type === "task_decomposed" ? (
                                                     (() => {
@@ -5713,8 +6566,6 @@ function App() {
                   )}
                 </div>
               )}
-              <div ref={chatEndRef} aria-hidden />
-            </div>
             {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (() => {
               const pendingTaskId = Object.keys(pendingHumanInput)[0];
               const pending = pendingTaskId ? pendingHumanInput[pendingTaskId] : null;
@@ -5788,6 +6639,65 @@ function App() {
                 </div>
               );
             })()}
+            {chatResearchContext ? (
+              <div className="chat-research-context-banner" role="status">
+                <span>
+                  {locale === "en"
+                    ? `Discussing Deep Research report: ${chatResearchContext.topic}`
+                    : `Discussion du rapport Deep Research : ${chatResearchContext.topic}`}
+                </span>
+                <button
+                  type="button"
+                  className="chat-research-context-dismiss"
+                  onClick={() => setChatResearchContext(null)}
+                  aria-label={locale === "en" ? "Clear report context" : "Retirer le contexte du rapport"}
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
+            {chatNoteContext ? (
+              <div className="chat-note-context-banner" role="status">
+                <span>
+                  {locale === "en"
+                    ? `Note context: ${chatNoteContext.title}`
+                    : `Contexte note : ${chatNoteContext.title}`}
+                </span>
+                <button
+                  type="button"
+                  className="chat-research-context-dismiss"
+                  onClick={() => setChatNoteContext(null)}
+                  aria-label={locale === "en" ? "Clear note context" : "Retirer le contexte de la note"}
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
+            {notePickerOpen ? (
+              <div className="chat-note-picker" role="dialog" aria-label={t("notes.picker_title")}>
+                <div className="chat-note-picker-header">
+                  <strong>{t("notes.picker_title")}</strong>
+                  <button type="button" className="chat-research-context-dismiss" onClick={() => setNotePickerOpen(false)}>
+                    ×
+                  </button>
+                </div>
+                {notePickerLoading ? (
+                  <p>{t("common.loading")}</p>
+                ) : notePickerItems.length === 0 ? (
+                  <p>{t("notes.picker_empty")}</p>
+                ) : (
+                  <ul className="chat-note-picker-list">
+                    {notePickerItems.map((n) => (
+                      <li key={n.id}>
+                        <button type="button" onClick={() => void attachNoteToChat(n.id)}>
+                          {n.title.trim() || t("notes.untitled")}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : null}
             {attachments.length > 0 && (
               <div className="chat-attachments">
                 {attachments.map((a) => (
@@ -5821,30 +6731,68 @@ function App() {
                 ))}
               </div>
             )}
-            {companionBubbleText && (
-              <div className="chat-companion-row" role="status" aria-live="polite">
-                <span className="chat-companion-avatar" aria-hidden>
-                  🦆
-                </span>
-                <div className="chat-companion-bubble">
-                  <span className="chat-companion-label">{t("chat.companion_label")}</span>
-                  <span className="chat-companion-text">{companionBubbleText}</span>
-                </div>
-                {chatTipsEnabled && tipBannerText && !tipBannerDismissed && (
-                  <button
-                    type="button"
-                    className="chat-companion-dismiss"
-                    onClick={() => {
-                      setTipBannerDismissed(true);
-                      setTipBannerText(null);
-                    }}
-                    aria-label={t("chat.tip_dismiss")}
+            <div className="chat-footer-tools">
+            {Object.keys(runningTaskChips).length > 0 && (
+              <Tooltip
+                content={
+                  locale === "en"
+                    ? "Steering injects mid-task; follow-up runs after the current turn"
+                    : "Steering : injection prioritaire ; follow-up : après le tour en cours"
+                }
+              >
+                <div className="input-group chat-delivery-group" role="group" aria-label={locale === "en" ? "Delivery mode" : "Mode d'envoi"}>
+                  <span className="input-group-addon" id="chat-delivery-mode-label">
+                    {locale === "en" ? "Delivery" : "Envoi"}
+                  </span>
+                  <select
+                    id="chat-delivery-mode"
+                    className="input-group-field chat-delivery-select"
+                    value={chatDeliveryMode}
+                    onChange={(e) =>
+                      setChatDeliveryMode(e.target.value as "immediate" | "steering" | "follow_up")
+                    }
+                    disabled={loading}
+                    aria-labelledby="chat-delivery-mode-label"
                   >
-                    ×
-                  </button>
-                )}
-              </div>
+                    <option value="immediate">{locale === "en" ? "Immediate" : "Immédiat"}</option>
+                    <option value="steering">Steering</option>
+                    <option value="follow_up">Follow-up</option>
+                  </select>
+                </div>
+              </Tooltip>
             )}
+            <ChatCompositionBar
+              locale={locale}
+              agentMode={chatAgentMode}
+              onAgentModeChange={(v) => {
+                setChatAgentMode(v);
+                try {
+                  localStorage.setItem(CHAT_AGENT_MODE_KEY, v ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+              }}
+              webSearchEnabled={chatWebSearch}
+              onWebSearchChange={(v) => {
+                setChatWebSearch(v);
+                try {
+                  localStorage.setItem(CHAT_WEB_SEARCH_KEY, v ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+              }}
+              incognito={chatIncognito}
+              onIncognitoChange={(v) => {
+                setChatIncognito(v);
+                try {
+                  localStorage.setItem(CHAT_INCOGNITO_KEY, v ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+              }}
+              disabled={loading}
+            />
+            </div>
             <div className="input-area">
               <input
                 ref={fileInputRef}
@@ -5855,55 +6803,130 @@ function App() {
                 className="sr-only"
                 aria-hidden
               />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Joindre un fichier"
-                title="Joindre une image ou un document"
-              >
-                Joindre
-              </button>
-              {voiceStatus?.stt_configured && (
-                <button
-                  type="button"
-                  className={`chat-voice-btn ${voiceRecording ? "recording" : ""}`}
-                  onClick={handleVoiceMessageToggle}
+              <div className="input-group" role="group" aria-label={locale === "en" ? "Compose message" : "Composer un message"}>
+                <div className="input-group-prepend">
+                  <button
+                    type="button"
+                    className="input-group-btn btn-secondary"
+                    onClick={() => fileInputRef.current?.click()}
+                    aria-label={locale === "en" ? "Attach file" : "Joindre un fichier"}
+                    title={locale === "en" ? "Attach image or document" : "Joindre une image ou un document"}
+                  >
+                    <MonoIcon name="paperclip" />
+                    <span className="input-group-btn-label">{locale === "en" ? "Attach" : "Joindre"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="input-group-btn btn-secondary"
+                    onClick={() => void openNotePicker()}
+                    aria-label={t("notes.insert_in_chat")}
+                    title={t("notes.insert_in_chat")}
+                  >
+                    <MonoIcon name="note" />
+                    <span className="input-group-btn-label">{t("notes.insert_in_chat_short")}</span>
+                  </button>
+                  {voiceStatus?.stt_configured ? (
+                    <button
+                      type="button"
+                      className={`input-group-btn btn-secondary chat-voice-btn ${voiceRecording ? "recording" : ""}`}
+                      onClick={handleVoiceMessageToggle}
+                      disabled={loading}
+                      aria-label={
+                        voiceRecording
+                          ? locale === "en"
+                            ? "Stop recording and send"
+                            : "Arrêter l'enregistrement et envoyer"
+                          : locale === "en"
+                            ? "Voice message"
+                            : "Message vocal"
+                      }
+                      title={voiceRecording ? (locale === "en" ? "Stop and send" : "Arrêter et envoyer") : locale === "en" ? "Voice message" : "Message vocal"}
+                    >
+                      {voiceRecording ? (
+                        <span className="chat-voice-btn-inner">● {locale === "en" ? "Recording…" : "Enregistrement…"}</span>
+                      ) : (
+                        <MonoIcon name="mic" />
+                      )}
+                    </button>
+                  ) : null}
+                </div>
+                <label htmlFor="chat-input" className="sr-only">
+                  {locale === "en" ? "Your message" : "Votre message"}
+                </label>
+                <input
+                  ref={chatInputRef}
+                  id="chat-input"
+                  type="text"
+                  className="input-group-field"
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" || e.shiftKey) return;
+                    e.preventDefault();
+                    if (e.altKey) {
+                      setChatDeliveryMode("follow_up");
+                    } else if (runningTaskChips && Object.keys(runningTaskChips).length > 0) {
+                      setChatDeliveryMode("steering");
+                    } else {
+                      setChatDeliveryMode("immediate");
+                    }
+                    void handleSend();
+                  }}
+                  placeholder={locale === "en" ? "Your message…" : "Votre message…"}
                   disabled={loading}
-                  aria-label={voiceRecording ? "Arrêter l'enregistrement et envoyer" : "Message vocal (enregistrer puis ré-encliquer pour envoyer)"}
-                  title={voiceRecording ? "Arrêter et envoyer" : "Message vocal"}
-                >
-                  {voiceRecording ? (
-                    <span className="chat-voice-btn-inner">● Enregistrement…</span>
-                  ) : (
-                    <span className="chat-voice-btn-inner" aria-hidden>🎤</span>
-                  )}
-                </button>
-              )}
-              <label htmlFor="chat-input" className="sr-only">
-                Votre message
-              </label>
-              <input
-                ref={chatInputRef}
-                id="chat-input"
-                type="text"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSend()}
-                placeholder="Votre message…"
-                disabled={loading}
-                aria-describedby="send-hint"
-              />
-              <button
-                onClick={() => handleSend()}
-                disabled={loading || (!message.trim() && attachments.length === 0)}
-                aria-label="Envoyer le message"
-              >
-                Envoyer
-              </button>
+                  aria-describedby="send-hint"
+                />
+                <div className="input-group-append">
+                  <button
+                    type="button"
+                    className="input-group-btn btn-primary"
+                    onClick={() => handleSend()}
+                    disabled={loading || (!message.trim() && attachments.length === 0)}
+                    aria-label={locale === "en" ? "Send message" : "Envoyer le message"}
+                  >
+                    {locale === "en" ? "Send" : "Envoyer"}
+                  </button>
+                </div>
+              </div>
             </div>
             <p id="send-hint" className="hint sr-only">
-              Entrée pour envoyer
+              {locale === "en"
+                ? "Enter to send (steering when a task is running; Alt+Enter for follow-up)"
+                : "Entrée pour envoyer (steering si tâche active ; Alt+Entrée pour follow-up)"}
             </p>
+          </section>
+        )}
+
+        {tab === "compare" && (
+          <section id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" className="panel compare-panel-wrap">
+            <ComparePanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+          </section>
+        )}
+
+        <section
+          id="panel-research"
+          role="tabpanel"
+          aria-labelledby="tab-research"
+          className="panel research-panel"
+          hidden={tab !== "research"}
+          aria-hidden={tab !== "research"}
+        >
+          <DeepResearchPanel
+            fetchEndpoint={fetchSystemEndpoint}
+            locale={locale}
+            onDiscussReport={discussResearchReport}
+          />
+        </section>
+
+        {tab === "cookbook" && (
+          <section id="panel-cookbook" role="tabpanel" aria-labelledby="tab-cookbook" className="panel cookbook-panel-wrap">
+            <CookbookPanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+          </section>
+        )}
+
+        {tab === "notes" && (
+          <section id="panel-notes" role="tabpanel" aria-labelledby="tab-notes" className="panel notes-panel-wrap">
+            <NotesPanel t={t} locale={locale} daemonPort={DAEMON_PORT} onDiscussNote={discussNote} />
           </section>
         )}
 
@@ -5964,12 +6987,7 @@ function App() {
                 {t("common.loading")}
               </p>
             )}
-            {routerError && (
-              <div className="error-banner" role="alert">
-                {routerError}
-              </div>
-            )}
-            {!routerLoading && !routerError && routerMetrics && (
+            {!routerLoading && routerMetrics && (
               <>
                 <div className="router-metrics-toolbar">
                   <label htmlFor="router-metrics-period" className="router-metrics-period-label">
@@ -6057,13 +7075,7 @@ function App() {
                 {t("common.loading")}
               </p>
             )}
-            {docError && (
-              <div className="error-banner" role="alert">
-                {docError}
-                <p>Assurez-vous que le daemon est démarré (<code>akasha start</code>).</p>
-              </div>
-            )}
-            {!docLoading && !docError && docContent && (
+            {!docLoading && docContent && (
               <>
                 <button
                   type="button"
@@ -6090,16 +7102,34 @@ function App() {
             aria-labelledby="tab-tasks"
             className="panel activity-panel"
           >
-            <h2 className="panel-title">{t("tasks.title")}</h2>
-            <button
-              type="button"
-              className="refresh-btn"
-              onClick={() => void fetchTasksList()}
-              aria-label="Rafraîchir l’activité"
-              disabled={tasksLoading}
-            >
-              Rafraîchir
-            </button>
+            <div className="task-center-toolbar">
+              <h2 className="panel-title task-center-toolbar-title">{t("tasks.title")}</h2>
+              <div className="task-center-toolbar-actions">
+                <Tooltip content={rightSidebarOpen ? t("tasks.hide_task_list") : t("tasks.show_task_list")}>
+                  <button
+                    type="button"
+                    className="task-center-toolbar-btn sidebar-right-toggle"
+                    onClick={() => setTaskSidebarOpen(!rightSidebarOpen)}
+                    aria-expanded={rightSidebarOpen}
+                    aria-label={rightSidebarOpen ? t("tasks.hide_task_list") : t("tasks.show_task_list")}
+                  >
+                    {rightSidebarOpen ? "▐" : "▌"} {rightSidebarOpen ? t("tasks.hide_task_list") : t("tasks.show_task_list")}
+                  </button>
+                </Tooltip>
+                <button type="button" className="task-center-toolbar-btn btn-primary" onClick={() => setCreateTaskDialogOpen(true)}>
+                  + {t("tasks.create_button")}
+                </button>
+                <button
+                  type="button"
+                  className="task-center-toolbar-btn refresh-btn"
+                  onClick={() => void fetchTasksList()}
+                  aria-label={t("sidebar.refresh_tasks")}
+                  disabled={tasksLoading}
+                >
+                  {t("sidebar.refresh_tasks")}
+                </button>
+              </div>
+            </div>
             {!tasksLoading && tasksList.length > 0 && (
               <div className="task-center-summary">
                 <div className="task-center-summary-chips">
@@ -6130,9 +7160,17 @@ function App() {
                       <div className="task-center-selected-meta">
                         <span className={"activity-task-status-pill status-" + selectedTask.status}>{selectedTask.status}</span>
                         {selectedTask.assigned_agent && <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(selectedTask.assigned_agent)}>{selectedTask.assigned_agent}</span>}
+                        {selectedTaskSummary?.progressPct != null && selectedTask.status === "running" && (
+                          <span className="task-live-progress-pill">
+                            {t("tasks.progress_pct_summary").replace("{{pct}}", String(selectedTaskSummary.progressPct))}
+                          </span>
+                        )}
                         {selectedTask.created_at && <span>{formatRelativeTimeLabel(selectedTask.created_at, locale)}</span>}
                       </div>
                     </div>
+                    {selectedTaskSummary?.routeHint ? (
+                      <p className="task-center-selected-route">{selectedTaskSummary.routeHint}</p>
+                    ) : null}
                     {selectedTaskSummary?.latestSummary ? (
                       <p className="task-center-selected-text">{selectedTaskSummary.latestSummary}</p>
                     ) : selectedTaskSummary?.runningChip?.message ? (
@@ -6150,212 +7188,6 @@ function App() {
             )}
             {!tasksLoading && (
               <div className="activity-panel-body">
-                <div
-                  className={
-                    "activity-tasks-block task-panel-section " +
-                    (taskPanelSections.list ? "task-panel-section--open" : "task-panel-section--closed")
-                  }
-                >
-                  <div className="task-panel-section-head">
-                    <button
-                      type="button"
-                      className="task-panel-section-toggle"
-                      aria-expanded={taskPanelSections.list}
-                      aria-controls="task-panel-body-list"
-                      onClick={() => toggleTaskPanelSection("list")}
-                      aria-label={
-                        (taskPanelSections.list ? t("tasks.section_collapse") : t("tasks.section_expand")) +
-                        ": " +
-                        t("tasks.list_heading")
-                      }
-                    >
-                      <span className="task-panel-chevron" aria-hidden>
-                        {taskPanelSections.list ? "▼" : "▶"}
-                      </span>
-                    </button>
-                    <h3 className="task-panel-section-title" id="task-panel-heading-list">
-                      {t("tasks.list_heading")}
-                    </h3>
-                  </div>
-                  {taskPanelSections.list && (
-                    <div
-                      id="task-panel-body-list"
-                      role="region"
-                      aria-labelledby="task-panel-heading-list"
-                      className="task-panel-section-body"
-                    >
-                      {tasksList.length > 0 && (
-                        <>
-                          <div className="activity-tasks-filters" role="tablist" aria-label={t("tasks.filter_label")}>
-                            <button
-                              type="button"
-                              role="tab"
-                              aria-selected={taskListFilter === "active"}
-                              className={"activity-filter-tab" + (taskListFilter === "active" ? " active" : "")}
-                              onClick={() => setTaskListFilter("active")}
-                            >
-                              {t("tasks.filter_active")}
-                            </button>
-                            <button
-                              type="button"
-                              role="tab"
-                              aria-selected={taskListFilter === "completed"}
-                              className={"activity-filter-tab" + (taskListFilter === "completed" ? " active" : "")}
-                              onClick={() => setTaskListFilter("completed")}
-                            >
-                              {t("tasks.filter_completed")}
-                            </button>
-                          </div>
-                          <div className="activity-tasks-search-wrap">
-                            <input
-                              type="search"
-                              className="activity-tasks-search"
-                              placeholder={t("tasks.search_placeholder")}
-                              value={taskSearchQuery}
-                              onChange={(e) => setTaskSearchQuery(e.target.value)}
-                              aria-label={t("tasks.search_placeholder")}
-                            />
-                          </div>
-                          {taskTreeData.branchIds.size > 0 && (
-                            <div className="task-tree-toolbar" role="group" aria-label={t("tasks.tree_actions")}>
-                              <button
-                                type="button"
-                                className="task-tree-toolbar-btn"
-                                onClick={() => setAllTaskBranchesCollapsed(false)}
-                              >
-                                {t("tasks.expand_all")}
-                              </button>
-                              <button
-                                type="button"
-                                className="task-tree-toolbar-btn"
-                                onClick={() => setAllTaskBranchesCollapsed(true)}
-                              >
-                                {t("tasks.collapse_all")}
-                              </button>
-                            </div>
-                          )}
-                        </>
-                      )}
-                      {tasksList.length === 0 ? (
-                        <p className="empty-state">{t("tasks.empty")}</p>
-                      ) : taskTreeRows.length === 0 ? (
-                        <p className="empty-state">{t("tasks.no_match_filter")}</p>
-                      ) : (
-                        <ul className="activity-task-cards" role="list">
-                          {taskTreeRows.map((row) => {
-                            const task = row.task;
-                            const isSelected = tasksList[tasksSelected]?.id === task.id;
-                            const isAncestor = !isSelected && selectedTaskAncestorIds.has(task.id);
-                            const isActiveRoot = selectedTaskRootId === task.id;
-                            const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
-                            const snippet = runningChip?.message ? trimPreview(runningChip.message, isSimpleMode ? 90 : 140) : trimPreview(taskDisplayLabel(task), 100);
-                            const hierarchyLabel = row.depth > 0 ? t("tasks.subtask_badge") : t("tasks.root_badge");
-                            const childCountLabel = t("tasks.children_count").replace("{{count}}", String(row.visibleChildCount));
-                            const createdLabel = task.created_at ? (() => {
-                              try {
-                                const d = new Date(task.created_at);
-                                return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
-                              } catch {
-                                return task.created_at;
-                              }
-                            })() : null;
-                            return (
-                              <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "") + (isAncestor ? " activity-task-card-ancestor" : "") + (isActiveRoot ? " activity-task-card-active-root" : "") + (row.depth > 0 ? " activity-task-card-child" : " activity-task-card-root") }>
-                                <div
-                                  className={"activity-task-card-inner task-tree-row" + (row.depth > 0 ? " task-tree-row-child" : " task-tree-row-root")}
-                                  role="button"
-                                  tabIndex={0}
-                                  onClick={() => setTasksSelected(tasksList.findIndex((x) => x.id === task.id))}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter" || e.key === " ") {
-                                      e.preventDefault();
-                                      setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
-                                    }
-                                    if (e.key === "ArrowRight" && row.hasChildren && row.isCollapsed) {
-                                      e.preventDefault();
-                                      toggleTaskBranch(task.id);
-                                    }
-                                    if (e.key === "ArrowLeft" && row.hasChildren && !row.isCollapsed) {
-                                      e.preventDefault();
-                                      toggleTaskBranch(task.id);
-                                    }
-                                    const idx = taskTreeRows.findIndex((x) => x.task.id === task.id);
-                                    if (e.key === "ArrowDown" && idx < taskTreeRows.length - 1) {
-                                      const next = taskTreeRows[idx + 1].task;
-                                      setTasksSelected(tasksList.findIndex((x) => x.id === next.id));
-                                    }
-                                    if (e.key === "ArrowUp" && idx > 0) {
-                                      const prev = taskTreeRows[idx - 1].task;
-                                      setTasksSelected(tasksList.findIndex((x) => x.id === prev.id));
-                                    }
-                                  }}
-                                  style={{ marginLeft: `${row.depth * 1.25}rem` }}
-                                >
-                                  <div className="activity-task-card-head">
-                                    <div className="activity-task-card-heading">
-                                      <div className="task-tree-title-row">
-                                        {row.hasChildren ? (
-                                          <button
-                                            type="button"
-                                            className="task-tree-toggle"
-                                            aria-label={(row.isCollapsed ? t("tasks.expand_branch") : t("tasks.collapse_branch")) + ": " + taskDisplayLabel(task)}
-                                            aria-expanded={!row.isCollapsed}
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              toggleTaskBranch(task.id);
-                                            }}
-                                          >
-                                            <span aria-hidden>{row.isCollapsed ? "▶" : "▼"}</span>
-                                          </button>
-                                        ) : (
-                                          <span className="task-tree-toggle-spacer" aria-hidden>
-                                            {row.depth > 0 ? "•" : ""}
-                                          </span>
-                                        )}
-                                        <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
-                                          {taskDisplayLabel(task)}
-                                        </span>
-                                      </div>
-                                      <div className="task-tree-meta-row">
-                                        <span className={"task-tree-kind-badge " + (row.depth > 0 ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
-                                          {hierarchyLabel}
-                                        </span>
-                                        {row.hasChildren && <span className="task-tree-child-count">{childCountLabel}</span>}
-                                      </div>
-                                    </div>
-                                    <span className={"activity-task-status-pill status-" + task.status}>
-                                      {task.status}
-                                    </span>
-                                  </div>
-                                  <p className="activity-task-card-snippet">{snippet}</p>
-                                  {task.status === "running" && runningChip != null && (
-                                    <div className="activity-task-progress">
-                                      <div className="activity-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
-                                      <span className="activity-task-progress-pct">{runningChip.pct ?? 0}%</span>
-                                    </div>
-                                  )}
-                                  <div className="activity-task-meta">
-                                    <span className="activity-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
-                                    {createdLabel && <span className="activity-task-created">{createdLabel}</span>}
-                                    {task.created_at && <span className="activity-task-relative">{formatRelativeTimeLabel(task.created_at, locale)}</span>}
-                                    {task.assigned_agent && <span className="activity-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
-                                  </div>
-                                  <button
-                                    type="button"
-                                    className="activity-task-view-btn"
-                                    onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); }}
-                                  >
-                                    {t("tasks.view_task")}
-                                  </button>
-                                </div>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-                </div>
                 <div
                   className={
                     "activity-events-block task-steps-section task-panel-section " +
@@ -6390,77 +7222,16 @@ function App() {
                       aria-labelledby="task-panel-heading-steps"
                       className="task-panel-section-body"
                     >
-                      {taskStepsSummary.total > 0 && (
-                        <div className="task-steps-summary">
-                          <div className="task-steps-summary-topline">
-                            <span>{t("tasks.step_done")}: {taskStepsSummary.done}/{taskStepsSummary.total}</span>
-                            <span>{taskStepsSummary.progressPct}%</span>
-                          </div>
-                          <div className="task-steps-summary-bar">
-                            <div className="task-steps-summary-bar-fill" style={{ width: `${taskStepsSummary.progressPct}%` }} />
-                          </div>
-                        </div>
-                      )}
-                      {(() => {
-                        const planEv = tasksEvents.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
-                        let steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> = planEv?.payload && typeof planEv.payload === "object" && Array.isArray((planEv.payload as { steps?: unknown }).steps)
-                          ? (planEv.payload as { steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> }).steps
-                          : [];
-                        if (steps.length === 0) {
-                          const decomposed = tasksEvents.find((e) => e.event_type === "task_decomposed" && e.payload && typeof e.payload === "object" && "agents" in e.payload);
-                          const agents = decomposed?.payload && typeof decomposed.payload === "object" && Array.isArray((decomposed.payload as { agents?: unknown }).agents)
-                            ? (decomposed.payload as { agents: string[] }).agents
-                            : [];
-                          steps = agents.map((agent_type, i) => ({ step_id: `s${i}`, agent_type, intent_preview: "" }));
-                        }
-                        return steps.length > 0 ? (
-                          <div className="chat-subagents-plan task-panel-plan" role="region" aria-label={t("events.plan_proposed")}>
-                            <h4 className="chat-subagents-plan-title">{t("events.plan_proposed")}</h4>
-                            <ol className="chat-subagents-plan-steps">
-                              {steps.map((s, i) => (
-                                <li key={s.step_id ?? i} className="chat-subagents-plan-step">
-                                  {s.agent_type && <span className="chat-subagents-plan-agent agent-kind-pill" data-agent-kind={classifyAgentKind(s.agent_type)}>{s.agent_type}</span>}
-                                  {s.step_id != null && s.step_id !== "" && (
-                                    <span className="chat-subagents-plan-step-id">{s.step_id}</span>
-                                  )}
-                                  <span className="chat-subagents-plan-intent">{s.intent_preview || s.intent || ""}</span>
-                                  {s.acceptance_criteria_preview != null && s.acceptance_criteria_preview.trim() !== "" && (
-                                    <div className="chat-subagents-plan-meta">{s.acceptance_criteria_preview}</div>
-                                  )}
-                                  {Array.isArray(s.deliverables) && s.deliverables.length > 0 && (
-                                    <ul className="chat-subagents-plan-deliverables">
-                                      {s.deliverables.map((d, j) => (
-                                        <li key={j}>{d}</li>
-                                      ))}
-                                    </ul>
-                                  )}
-                                </li>
-                              ))}
-                            </ol>
-                          </div>
-                        ) : null;
-                      })()}
-                      {taskStepsTodos.length === 0 ? (
-                        <p className="empty-state task-steps-empty">{t("tasks.steps_empty")}</p>
-                      ) : (
-                        <ul className="task-steps-list" role="list" aria-label={t("tasks.steps_title")}>
-                          {taskStepsTodos.map((step, idx) => (
-                            <li key={`${step.id ?? idx}-${idx}`} className={`task-step task-step--${step.status}`}>
-                              <span className="task-step-check" aria-hidden>
-                                {step.status === "done" ? "☑" : step.status === "cancelled" ? "⊘" : "☐"}
-                              </span>
-                              <span className="task-step-title">{step.title}</span>
-                              <span className="task-step-badge">
-                                {step.status === "done"
-                                  ? t("tasks.step_done")
-                                  : step.status === "cancelled"
-                                    ? t("tasks.step_cancelled")
-                                    : t("tasks.step_pending")}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
+                      <TaskExecutionSteps
+                        steps={taskExecutionView.steps}
+                        emptyReason={taskExecutionView.emptyReason}
+                        t={t}
+                        classifyAgentKind={classifyAgentKind}
+                        onSelectChildTask={(childTaskId) => {
+                          const idx = tasksList.findIndex((x) => x.id === childTaskId);
+                          if (idx >= 0) setTasksSelected(idx);
+                        }}
+                      />
                     </div>
                   )}
                 </div>
@@ -6559,7 +7330,7 @@ function App() {
                     )}
                     {tasksList.length > 0 && tasksList[tasksSelected] && (() => {
                       const sel = tasksList[tasksSelected];
-                      const canCancel = sel.status === "pending" || sel.status === "running";
+                      const canCancel = isTaskActiveStatus(sel.status);
                       const canRetry = sel.status === "failed";
                       return (canCancel || canRetry) ? (
                         <div className="task-actions-row" role="group" aria-label="Actions sur la tâche">
@@ -6811,6 +7582,15 @@ function App() {
                 onClick={() => setCalendarSubTab("schedules")}
               >
                 {t("calendar.recurring")}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={calendarSubTab === "wakeups"}
+                className={calendarSubTab === "wakeups" ? "active" : ""}
+                onClick={() => setCalendarSubTab("wakeups")}
+              >
+                Rappels agent
               </button>
             </div>
             <button
@@ -7253,6 +8033,104 @@ function App() {
                 )}
               </div>
             )}
+            {!calendarLoading && calendarSubTab === "wakeups" && (
+              <div className="calendar-wakeups-panel">
+                <h3>Rappels agent (wakeups)</h3>
+                <p className="calendar-wakeups-hint muted">
+                  Messages programmés que l&apos;agent enverra dans la session courante à l&apos;heure prévue.
+                </p>
+                <form
+                  className="calendar-wakeup-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void (async () => {
+                      const minutes = parseInt(wakeupFormMinutes, 10);
+                      if (!sessionId || !wakeupFormMessage.trim() || !Number.isFinite(minutes) || minutes <= 0) return;
+                      setWakeupSaving(true);
+                      try {
+                        const fire_at = new Date(Date.now() + minutes * 60_000).toISOString();
+                        const res = await fetch(e2eDaemonHttpUrl("/api/wakeups"), {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            session_id: sessionId,
+                            message: wakeupFormMessage.trim(),
+                            fire_at,
+                          }),
+                        });
+                        if (res.ok) {
+                          setWakeupFormMessage("");
+                          await fetchWakeups();
+                        }
+                      } finally {
+                        setWakeupSaving(false);
+                      }
+                    })();
+                  }}
+                >
+                  <label className="calendar-wakeup-field">
+                    <span>Dans (minutes)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={525600}
+                      value={wakeupFormMinutes}
+                      onChange={(e) => setWakeupFormMinutes(e.target.value)}
+                      disabled={wakeupSaving}
+                    />
+                  </label>
+                  <label className="calendar-wakeup-field calendar-wakeup-field-grow">
+                    <span>Message</span>
+                    <input
+                      type="text"
+                      value={wakeupFormMessage}
+                      onChange={(e) => setWakeupFormMessage(e.target.value)}
+                      placeholder="Ex. Relancer la revue du PR"
+                      disabled={wakeupSaving}
+                    />
+                  </label>
+                  <button type="submit" className="refresh-btn" disabled={wakeupSaving || !sessionId}>
+                    {wakeupSaving ? "…" : "Programmer"}
+                  </button>
+                </form>
+                {!sessionId && (
+                  <p className="muted">Ouvrez ou démarrez une session de chat pour créer un rappel.</p>
+                )}
+                {wakeups.length === 0 ? (
+                  <p className="empty-state">Aucun rappel programmé.</p>
+                ) : (
+                  <ul className="calendar-wakeup-list" role="list">
+                    {wakeups.map((w) => (
+                      <li key={w.id} className={`calendar-wakeup-item calendar-wakeup-item--${w.status}`}>
+                        <div className="calendar-wakeup-meta">
+                          <strong>{new Date(w.fire_at).toLocaleString()}</strong>
+                          <span className="calendar-wakeup-status">{w.status}</span>
+                        </div>
+                        <p className="calendar-wakeup-message">{w.message}</p>
+                        {w.status === "pending" && (
+                          <button
+                            type="button"
+                            className="calendar-wakeup-delete"
+                            onClick={() => {
+                              void (async () => {
+                                try {
+                                  await fetch(e2eDaemonHttpUrl(`/api/wakeups/${encodeURIComponent(w.id)}`), { method: "DELETE" });
+                                  await fetchWakeups();
+                                } catch {
+                                  /* ignore */
+                                }
+                              })();
+                            }}
+                          >
+                            {t("settings.delete")}
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
             {calendarSelectedTaskId && (
                   <div
                     className="calendar-detail-modal-overlay"
@@ -7278,11 +8156,7 @@ function App() {
                       </div>
                       <div className="calendar-detail-modal-body">
                         {calendarTaskDetailError ? (
-                          <p className="error-inline" role="alert">
-                            {calendarTaskDetailError}
-                            <br />
-                            <small className="muted">Vérifiez que le daemon tourne (port {DAEMON_PORT}).</small>
-                          </p>
+                          <p className="muted">{t("notifications.check_center")}</p>
                         ) : calendarTaskDetail ? (
                           <>
                             {(() => {
@@ -7407,11 +8281,7 @@ function App() {
                       </div>
                       <div className="calendar-detail-modal-body">
                         {scheduleDetailError ? (
-                          <p className="error-inline" role="alert">
-                            Impossible de charger le détail : {scheduleDetailError}
-                            <br />
-                            <small>Vérifiez que le daemon tourne et que l’app est lancée via Tauri (pas uniquement en navigateur).</small>
-                          </p>
+                          <p className="muted">{t("notifications.check_center")}</p>
                         ) : scheduleDetail ? (
                           <>
                             <p><strong>ID (pour supprimer):</strong>{" "}
@@ -7506,6 +8376,140 @@ function App() {
             className="panel memory-panel"
           >
             <h2 className="panel-title">{t("memory.title")}</h2>
+            {memoryHygieneHint ? (
+              <p className="memory-hygiene-hint" role="status">
+                {memoryHygieneHint}
+              </p>
+            ) : null}
+            {memoryAdvancedSettings ? (
+              <details className="memory-advanced-settings">
+                <summary>{t("memory.advanced_settings_title")}</summary>
+                <div className="settings-list memory-advanced-settings-body">
+                  <label className="memory-advanced-toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAdvancedSettings.multi_query ?? false}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({ ...s!, multi_query: e.target.checked }))
+                      }
+                    />
+                    {t("memory.advanced_multi_query")}
+                  </label>
+                  <label className="memory-advanced-toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAdvancedSettings.hyde ?? false}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({ ...s!, hyde: e.target.checked }))
+                      }
+                    />
+                    {t("memory.advanced_hyde")}
+                  </label>
+                  <label className="memory-advanced-toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAdvancedSettings.rrf ?? true}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({ ...s!, rrf: e.target.checked }))
+                      }
+                    />
+                    {t("memory.advanced_rrf")}
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>{t("memory.advanced_rollup_days")}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={3650}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.rollup_days ?? 90}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          rollup_days: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>semantic_top_k</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.semantic_top_k ?? 8}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          semantic_top_k: Math.max(1, parseInt(e.target.value, 10) || 1),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>graph_expand_hops</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={8}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.graph_expand_hops ?? 2}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          graph_expand_hops: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>user_rag_top_k</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={50}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.user_rag_top_k ?? 6}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          user_rag_top_k: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="memory-advanced-rollup">
+                    <span>workspace_graph_top_k</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={50}
+                      className="settings-input"
+                      value={memoryAdvancedSettings.workspace_graph_top_k ?? 6}
+                      onChange={(e) =>
+                        setMemoryAdvancedSettings((s) => ({
+                          ...s!,
+                          workspace_graph_top_k: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }))
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={memoryAdvancedSaving}
+                    onClick={() => void saveMemoryAdvancedSettings()}
+                  >
+                    {memoryAdvancedSaving ? t("common.loading") : t("memory.advanced_save")}
+                  </button>
+                  {memoryAdvancedMessage ? (
+                    <p className="muted" role="status">{memoryAdvancedMessage}</p>
+                  ) : null}
+                  <p className="settings-doc muted">{t("memory.advanced_settings_hint")}</p>
+                </div>
+              </details>
+            ) : null}
             <button
               type="button"
               className="refresh-btn"
@@ -7515,18 +8519,13 @@ function App() {
             >
               Rafraîchir
             </button>
-            {memoryError && (
-              <p className="error-inline" role="alert">
-                {memoryError}
-              </p>
-            )}
             {memoryLoading && (
               <p className="panel-loading" aria-busy="true">
                 <span className="panel-loading-spinner" aria-hidden />
                 {t("common.loading")}
               </p>
             )}
-            {!memoryLoading && !memoryError && (
+            {!memoryLoading && (
               <div className="memory-content-wrap">
                 <div className="memory-subtabs" role="tablist" aria-label="Type de mémoire">
                   <button
@@ -7947,24 +8946,13 @@ function App() {
             aria-labelledby="tab-mission"
             className="panel memory-panel"
           >
-            <h2 className="panel-title">{t("mission.title")}</h2>
-            <p className="muted">{t("mission.description")}</p>
-            <p className="muted" style={{ marginTop: "0.35rem" }}>
-              {t("mission.intro_detail")}
-            </p>
+            <h2 className="panel-title">
+              {t("mission.title")}
+              <InfoTip label={t("mission.title")} content={<>{t("mission.description")}<br /><br />{t("mission.intro_detail")}</>} />
+            </h2>
             <button type="button" className="refresh-btn" onClick={() => void fetchMission()} disabled={missionLoading}>
               {missionLoading ? t("common.loading") : t("mission.refresh")}
             </button>
-            {missionError === "unavailable" && (
-              <p className="error-inline" role="alert">
-                {t("mission.unavailable")}
-              </p>
-            )}
-            {missionError && missionError !== "unavailable" && (
-              <p className="error-inline" role="alert">
-                {missionError}
-              </p>
-            )}
             {!missionLoading && mission && missionDraft && (
               <div className="memory-content-wrap mission-panel-body">
                 <nav className="settings-tabs" role="tablist" aria-label={t("mission.title")} style={{ marginBottom: "0.75rem" }}>
@@ -8430,6 +9418,9 @@ function App() {
                 </select>
                 <span className="settings-theme-hint">{t("settings.theme_saved")}</span>
               </dd>
+              <dd className="settings-theme-editor-cell">
+                <ThemeEditorPanel theme={theme} t={t} />
+              </dd>
               <dt>{t("settings.ui_mode")}</dt>
               <dd>
                 <select
@@ -8442,6 +9433,27 @@ function App() {
                   <option value="expert">{t("settings.ui_mode_expert")}</option>
                 </select>
                 <span className="settings-theme-hint">{t("settings.ui_mode_hint")}</span>
+              </dd>
+              <dt>{t("settings.ui_density")}</dt>
+              <dd>
+                <select
+                  aria-label={t("settings.ui_density")}
+                  className="settings-theme-select"
+                  value={uiDensity}
+                  onChange={(e) => {
+                    const next = e.target.value as UiDensity;
+                    setUiDensity(next);
+                    try {
+                      localStorage.setItem(DENSITY_STORAGE_KEY, next);
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                >
+                  <option value="compact">{t("settings.ui_density_compact")}</option>
+                  <option value="comfortable">{t("settings.ui_density_comfortable")}</option>
+                  <option value="spacious">{t("settings.ui_density_spacious")}</option>
+                </select>
               </dd>
               <dt>{t("settings.language")}</dt>
               <dd>
@@ -8525,122 +9537,335 @@ function App() {
             )}
             {settingsSection === "system" && (
               <div className="settings-section-content">
-                <dl className="settings-list">
-                  <dt>{t("settings.daemon_port")}</dt>
-                  <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
-                  <dt>{t("settings.data_dir")}</dt>
-                  <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
-                  <dt>{t("settings.documentation")}</dt>
-                  <dd>
-                    <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
-                      {t("settings.open_docs_tab")}
-                    </button>
-                    <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
-                  </dd>
-                </dl>
+                <div className="settings-system-subtabs" role="tablist" aria-label={t("settings.section_system")}>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={systemSubTab === "general"}
+                    className={systemSubTab === "general" ? "active" : ""}
+                    onClick={() => setSystemSubTab("general")}
+                  >
+                    {t("settings.system_subtab_general")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={systemSubTab === "plugins"}
+                    className={systemSubTab === "plugins" ? "active" : ""}
+                    onClick={() => setSystemSubTab("plugins")}
+                  >
+                    {t("settings.system_subtab_plugins")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={systemSubTab === "policy"}
+                    className={systemSubTab === "policy" ? "active" : ""}
+                    onClick={() => setSystemSubTab("policy")}
+                  >
+                    {t("settings.system_subtab_policy")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={systemSubTab === "connectors"}
+                    className={systemSubTab === "connectors" ? "active" : ""}
+                    onClick={() => setSystemSubTab("connectors")}
+                  >
+                    {t("settings.system_subtab_connectors")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={systemSubTab === "health"}
+                    className={systemSubTab === "health" ? "active" : ""}
+                    onClick={() => setSystemSubTab("health")}
+                  >
+                    {t("settings.system_subtab_health")}
+                  </button>
+                </div>
 
-                <h3 className="settings-subtitle">{t("settings.plugin_reputation_title")}</h3>
-                <p className="settings-doc muted">{t("settings.plugin_reputation_desc")}</p>
-                <div className="settings-plugin-reputation-controls">
-                  <div className="settings-plugin-status-row">
-                    <div className="settings-plugin-status-header">
-                      <h4 className="settings-plugin-status-title">{t("settings.plugins_status_title")}</h4>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        disabled={pluginStatusLoading}
-                        onClick={fetchPluginStatus}
-                      >
-                        {pluginStatusLoading ? t("common.loading") : t("sidebar.refresh_tasks")}
-                      </button>
-                    </div>
-                    {pluginStatusError && (
-                      <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
-                        {pluginStatusError}
+                {systemSubTab === "general" && (
+                  <>
+                    <dl className="settings-list">
+                      <dt>{t("settings.daemon_port")}</dt>
+                      <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
+                      <dt>{t("settings.data_dir")}</dt>
+                      <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
+                      <dt>{t("settings.documentation")}</dt>
+                      <dd>
+                        <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
+                          {t("settings.open_docs_tab")}
+                        </button>
+                        <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
+                      </dd>
+                      <dt>{t("settings.utility_model")}</dt>
+                      <dd>
+                        <p className="settings-doc muted">{t("settings.utility_model_hint")}</p>
+                      </dd>
+                    </dl>
+                    <OpenClawMigrationPanel locale={locale} fetchEndpoint={fetchSystemEndpoint} />
+                  </>
+                )}
+
+                {systemSubTab === "policy" && <ToolsPolicyPanel t={t} />}
+
+                {systemSubTab === "connectors" && <ConnectorsPanel t={t} />}
+
+                {systemSubTab === "plugins" && (
+                  <>
+                    <section className="settings-card">
+                      <h4>{locale === "en" ? "Skills catalog" : "Catalogue skills"}</h4>
+                      <p className="settings-doc muted">
+                        {locale === "en"
+                          ? "Browse community skills or list locally installed skills from the daemon."
+                          : "Parcourir le catalogue communautaire ou lister les skills installés via le daemon."}
                       </p>
-                    )}
+                      <div className="settings-row-actions">
+                        <a
+                          className="btn-secondary"
+                          href="https://azerothl.github.io/Akasha_app/skills.html"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {locale === "en" ? "Open gallery" : "Ouvrir la galerie"}
+                        </a>
+                        <a
+                          className="btn-secondary"
+                          href="https://github.com/azerothl/Akasha_skills"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          GitHub
+                        </a>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={skillsCatalogLoading}
+                          onClick={() => void loadInstalledSkills()}
+                        >
+                          {skillsCatalogLoading
+                            ? t("common.loading")
+                            : locale === "en"
+                              ? "List installed"
+                              : "Lister installés"}
+                        </button>
+                      </div>
+                      {skillsCatalogText ? (
+                        <pre className="onboarding-doctor-output">{skillsCatalogText}</pre>
+                      ) : null}
+                    </section>
+                    <PluginCatalogPanel
+                      fetchEndpoint={fetchSystemEndpoint}
+                      requestEndpoint={requestSystemEndpoint}
+                      installedIds={new Set(pluginStatusList.map((p) => p.id ?? "").filter(Boolean))}
+                      onInstalled={() => void fetchPluginStatus()}
+                      locale={locale}
+                    />
+                    <h3 className="settings-subtitle">{t("settings.plugins_status_title")}</h3>
+                    <p className="settings-doc muted">{t("settings.plugin_reputation_desc")}</p>
+                    <div className="settings-plugin-status-header">
+                      <div />
+                      <div className="settings-row-actions">
+                        <button type="button" className="btn-secondary" disabled={pluginStatusLoading} onClick={fetchPluginStatus}>
+                          {pluginStatusLoading ? t("common.loading") : t("sidebar.refresh_tasks")}
+                        </button>
+                        <button type="button" className="btn-secondary" disabled={!!pluginTableBusyId} onClick={reloadPluginsFromDisk}>
+                          {t("settings.plugins_reload")}
+                        </button>
+                      </div>
+                    </div>
                     {!pluginStatusError && pluginStatusList.length === 0 && !pluginStatusLoading && (
                       <p className="settings-doc muted">{t("doctor.no_plugins")}</p>
                     )}
                     {pluginStatusList.length > 0 && (
-                      <ul className="settings-plugin-status-list" role="list">
-                        {pluginStatusList.map((p) => {
-                          const id = p.id ?? "?";
-                          const enabled = p.enabled !== false;
-                          const disabledByReputation = !enabled && p.disabled_reason === "reputation";
-                          return (
-                            <li key={id} className="settings-plugin-status-item">
-                              <div className="settings-plugin-status-main">
-                                <span className="settings-plugin-status-id">{id}</span>
-                                <span className="settings-plugin-status-meta">{p.name ?? "?"} · {p.version ?? "?"}</span>
-                              </div>
-                              <div className="settings-plugin-status-badges">
-                                <span className={`settings-plugin-status-pill ${enabled ? "settings-plugin-status-pill-ok" : "settings-plugin-status-pill-off"}`}>
-                                  {enabled ? t("settings.plugins_status_enabled") : t("settings.plugins_status_disabled")}
-                                </span>
-                                {disabledByReputation && (
-                                  <span className="settings-plugin-status-pill settings-plugin-status-pill-reputation">
-                                    {t("settings.plugins_status_disabled_reputation")}
-                                  </span>
-                                )}
-                                {typeof p.score === "number" && (
-                                  <span className="settings-plugin-status-score">score: {p.score}</span>
-                                )}
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ul>
+                      <div className="settings-plugin-table-wrap">
+                        <table className="settings-plugin-table">
+                          <thead>
+                            <tr>
+                              <th>{t("settings.plugins_table_name")}</th>
+                              <th>{t("settings.plugins_table_description")}</th>
+                              <th>{t("settings.plugins_table_version")}</th>
+                              <th>{t("settings.plugins_table_score")}</th>
+                              <th>{t("settings.plugins_table_status")}</th>
+                              <th>{t("settings.plugins_table_actions")}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {pluginStatusList.map((p) => {
+                              const id = p.id ?? "?";
+                              const enabled = p.enabled !== false;
+                              const reason = typeof p.disabled_reason === "string" ? p.disabled_reason : null;
+                              const disabledByReputation = !enabled && reason === "reputation";
+                              const disabledByManual = !enabled && reason === "manual";
+                              const scoreVal = typeof p.score === "number" ? p.score : 100;
+                              const busy = pluginTableBusyId === id;
+                              return (
+                                <tr key={id}>
+                                  <td>
+                                    <div className="settings-plugin-table-namecell">
+                                      <span className="settings-plugin-table-name">{p.name ?? id}</span>
+                                      <span className="settings-plugin-table-id muted">{id}</span>
+                                    </div>
+                                  </td>
+                                  <td className="settings-plugin-desc-cell muted">{p.description?.trim() || "—"}</td>
+                                  <td>{p.version ?? "—"}</td>
+                                  <td>
+                                    <div className="settings-plugin-score-wrap">
+                                      <span className="settings-plugin-score-num">{scoreVal}/100</span>
+                                      <div className="settings-plugin-score-bar" aria-hidden>
+                                        <span style={{ width: `${Math.min(100, Math.max(0, scoreVal))}%` }} />
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td>
+                                    <div className="settings-plugin-status-badges">
+                                      <span className={`settings-plugin-status-pill ${enabled ? "settings-plugin-status-pill-ok" : "settings-plugin-status-pill-off"}`}>
+                                        {enabled ? t("settings.plugins_status_enabled") : t("settings.plugins_status_disabled")}
+                                      </span>
+                                      {disabledByReputation && (
+                                        <span className="settings-plugin-status-pill settings-plugin-status-pill-reputation">
+                                          {t("settings.plugins_status_disabled_reputation")}
+                                        </span>
+                                      )}
+                                      {disabledByManual && (
+                                        <span className="settings-plugin-status-pill settings-plugin-status-pill-manual">
+                                          {t("settings.plugins_status_disabled_manual")}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td>
+                                    <div className="settings-plugin-actions">
+                                      {enabled ? (
+                                        <button
+                                          type="button"
+                                          className="btn-secondary"
+                                          disabled={busy || !!pluginTableBusyId || id === "?"}
+                                          onClick={() => setPluginRowEnabled(id, false)}
+                                        >
+                                          {t("settings.plugins_action_disable")}
+                                        </button>
+                                      ) : null}
+                                      {!enabled && reason !== "reputation" && (
+                                        <button
+                                          type="button"
+                                          className="btn-secondary"
+                                          disabled={busy || !!pluginTableBusyId || id === "?"}
+                                          onClick={() => setPluginRowEnabled(id, true)}
+                                        >
+                                          {t("settings.plugins_action_enable")}
+                                        </button>
+                                      )}
+                                      {disabledByReputation && (
+                                        <button
+                                          type="button"
+                                          className="settings-link-btn"
+                                          disabled={pluginReputationResetLoading || busy || !!pluginTableBusyId || id === "?"}
+                                          onClick={() => resetPluginReputation(id)}
+                                        >
+                                          {t("settings.plugins_action_reset_reputation")}
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        className="settings-link-btn"
+                                        disabled={busy || !!pluginTableBusyId || id === "?"}
+                                        onClick={() => uninstallPluginRow(id)}
+                                      >
+                                        {t("settings.plugins_action_uninstall")}
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
                     )}
-                  </div>
-                  <div className="settings-plugin-reputation-row">
-                    <label htmlFor="plugin-reputation-target" className="settings-label">
-                      {t("settings.plugin_reputation_plugin_id")}
-                    </label>
-                    <input
-                      id="plugin-reputation-target"
-                      type="text"
-                      className="settings-input"
-                      value={pluginReputationTarget}
-                      onChange={(e) => setPluginReputationTarget(e.target.value)}
-                      placeholder="maps"
-                    />
-                    <button
-                      type="button"
-                      className="settings-link-btn"
-                      disabled={pluginReputationResetLoading || !pluginReputationTarget.trim()}
-                      onClick={() => resetPluginReputation(pluginReputationTarget)}
-                    >
-                      {pluginReputationResetLoading ? t("common.loading") : t("settings.plugin_reputation_reset_one")}
-                    </button>
-                  </div>
-                  <div className="settings-plugin-reputation-row">
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={pluginReputationResetLoading}
-                      onClick={() => resetPluginReputation()}
-                    >
-                      {t("settings.plugin_reputation_reset_all")}
-                    </button>
-                  </div>
-                  {pluginReputationResetMessage && (
-                    <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-ok" role="status">
-                      {pluginReputationResetMessage}
-                    </p>
-                  )}
-                  {pluginReputationResetError && (
-                    <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
-                      {pluginReputationResetError}
-                    </p>
-                  )}
-                </div>
+
+                    <details className="health-card" style={{ marginTop: "1.25rem" }}>
+                      <summary className="health-card-details-summary">{t("settings.plugins_reputation_section")}</summary>
+                      <h4 className="settings-plugin-status-title" style={{ marginTop: "0.75rem" }}>{t("settings.plugin_reputation_title")}</h4>
+                      <div className="settings-plugin-reputation-controls">
+                        <div className="settings-plugin-reputation-row">
+                          <label htmlFor="plugin-reputation-target" className="settings-label">
+                            {t("settings.plugin_reputation_plugin_id")}
+                          </label>
+                          <input
+                            id="plugin-reputation-target"
+                            type="text"
+                            className="settings-input"
+                            value={pluginReputationTarget}
+                            onChange={(e) => setPluginReputationTarget(e.target.value)}
+                            placeholder="maps"
+                          />
+                          <button
+                            type="button"
+                            className="settings-link-btn"
+                            disabled={pluginReputationResetLoading || !pluginReputationTarget.trim()}
+                            onClick={() => resetPluginReputation(pluginReputationTarget)}
+                          >
+                            {pluginReputationResetLoading ? t("common.loading") : t("settings.plugin_reputation_reset_one")}
+                          </button>
+                        </div>
+                        <div className="settings-plugin-reputation-row">
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={pluginReputationResetLoading}
+                            onClick={() => resetPluginReputation()}
+                          >
+                            {t("settings.plugin_reputation_reset_all")}
+                          </button>
+                        </div>
+                        {pluginReputationResetMessage && (
+                          <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-ok" role="status">
+                            {pluginReputationResetMessage}
+                          </p>
+                        )}
+                      </div>
+                    </details>
+                  </>
+                )}
+
+                {systemSubTab === "health" && (
+                  <SystemHealthPanel
+                    sessionId={sessionId}
+                    fetchEndpoint={fetchSystemEndpoint}
+                    requestEndpoint={requestSystemEndpoint}
+                    expert={uiMode === "expert"}
+                    locale={locale}
+                    labels={{
+                      title: t("settings.system_health_title"),
+                      resumeHeading: t("settings.system_health_resume"),
+                      toolsHeading: t("settings.system_health_tools"),
+                      noSession: t("settings.system_health_no_session"),
+                      docsMatrix: t("settings.system_health_doc_matrix"),
+                      docsWebhooks: t("settings.system_health_doc_webhooks"),
+                      docsMcp: t("settings.system_health_doc_mcp"),
+                      recallHeading: t("settings.system_health_recall"),
+                      mcpHeading: t("settings.system_health_mcp_status"),
+                      lifecycleHeading: t("settings.system_health_lifecycle"),
+                      terminalHeading: t("settings.system_health_terminal"),
+                      opsHeading: t("settings.system_health_ops"),
+                      loadError: t("settings.system_health_load_error"),
+                      detailsToggle: t("settings.system_health_details_toggle"),
+                      summaryUnavailable: t("settings.system_health_summary_unavailable"),
+                      editPolicy: t("settings.system_health_edit_policy"),
+                    }}
+                    onEditToolsPolicy={() => {
+                      setSettingsSection("system");
+                      setSystemSubTab("policy");
+                    }}
+                  />
+                )}
               </div>
             )}
             {settingsSection === "agent" && (
               <div className="settings-section-content">
                 <p className="settings-doc muted">{t("settings.agent_profile_desc")}</p>
-                {agentProfileError && <p className="error-inline" role="alert">{agentProfileError}</p>}
                 <div className="settings-agent-template-row">
                   <label htmlFor="agent-profile-template">{t("settings.agent_profile_apply_template")}</label>
                   <select id="agent-profile-template" className="settings-theme-select" value="" onChange={(e) => { const idx = e.target.value ? parseInt(e.target.value, 10) : -1; e.target.value = ""; if (idx >= 0 && idx < AGENT_PROFILE_TEMPLATES.length) { const tpl = AGENT_PROFILE_TEMPLATES[idx]; setAgentProfile((p) => ({ ...p, name: tpl.name, role: tpl.role ?? "", personality: tpl.personality, rules: [...tpl.rules], can_do: [...tpl.can_do], cannot_do: [...tpl.cannot_do] })); } }}>
@@ -8659,6 +9884,10 @@ function App() {
                     <div className="settings-agent-tab-content">
                       {agentProfileSubTab === "identity" && (
                         <>
+                          <p className="settings-doc muted settings-identity-hint">
+                            {t("settings.agent_identity_constitution_hint")}
+                            <InfoTip label={t("settings.agent_subtab_identity")} content={t("settings.agent_identity_constitution_hint")} />
+                          </p>
                           <dl className="settings-list">
                             <dt>{t("settings.agent_profile_name")}</dt>
                             <dd>
@@ -8718,6 +9947,112 @@ function App() {
                                 </div>
                               </div>
                             </dd>
+                            <dt>{t("settings.agent_constitution_tone")}</dt>
+                            <dd>
+                              <input
+                                type="text"
+                                aria-label={t("settings.agent_constitution_tone")}
+                                className="settings-input"
+                                maxLength={256}
+                                value={agentConstitution.tone}
+                                onChange={(e) => setAgentConstitution((c) => ({ ...c, tone: e.target.value.slice(0, 256) }))}
+                                placeholder={t("settings.agent_constitution_tone_placeholder")}
+                              />
+                            </dd>
+                            <dt>{t("settings.agent_constitution_values")}</dt>
+                            <dd>
+                              <div className="settings-list-editor">
+                                {agentConstitution.values.length === 0 ? (
+                                  <p className="settings-doc muted">{t("settings.agent_list_empty")}</p>
+                                ) : (
+                                  <ul className="settings-string-list">
+                                    {agentConstitution.values.map((line, i) => (
+                                      <li key={i} className="settings-list-item">
+                                        <input
+                                          type="text"
+                                          className="settings-input"
+                                          value={line}
+                                          onChange={(e) => {
+                                            const next = [...agentConstitution.values];
+                                            next[i] = e.target.value;
+                                            setAgentConstitution((c) => ({ ...c, values: next }));
+                                          }}
+                                        />
+                                        <button
+                                          type="button"
+                                          className="settings-list-item-delete"
+                                          onClick={() =>
+                                            setAgentConstitution((c) => ({
+                                              ...c,
+                                              values: c.values.filter((_, j) => j !== i),
+                                            }))
+                                          }
+                                          aria-label={t("settings.agent_delete_line")}
+                                        >
+                                          ×
+                                        </button>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  onClick={() =>
+                                    setAgentConstitution((c) => ({ ...c, values: [...c.values, ""] }))
+                                  }
+                                >
+                                  {t("settings.agent_add_line")}
+                                </button>
+                              </div>
+                            </dd>
+                            <dt>{t("settings.agent_constitution_constraints")}</dt>
+                            <dd>
+                              <div className="settings-list-editor">
+                                {agentConstitution.constraints.length === 0 ? (
+                                  <p className="settings-doc muted">{t("settings.agent_list_empty")}</p>
+                                ) : (
+                                  <ul className="settings-string-list">
+                                    {agentConstitution.constraints.map((line, i) => (
+                                      <li key={i} className="settings-list-item">
+                                        <input
+                                          type="text"
+                                          className="settings-input"
+                                          value={line}
+                                          onChange={(e) => {
+                                            const next = [...agentConstitution.constraints];
+                                            next[i] = e.target.value;
+                                            setAgentConstitution((c) => ({ ...c, constraints: next }));
+                                          }}
+                                        />
+                                        <button
+                                          type="button"
+                                          className="settings-list-item-delete"
+                                          onClick={() =>
+                                            setAgentConstitution((c) => ({
+                                              ...c,
+                                              constraints: c.constraints.filter((_, j) => j !== i),
+                                            }))
+                                          }
+                                          aria-label={t("settings.agent_delete_line")}
+                                        >
+                                          ×
+                                        </button>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  onClick={() =>
+                                    setAgentConstitution((c) => ({ ...c, constraints: [...c.constraints, ""] }))
+                                  }
+                                >
+                                  {t("settings.agent_add_line")}
+                                </button>
+                              </div>
+                            </dd>
                           </dl>
                         </>
                       )}
@@ -8727,6 +10062,16 @@ function App() {
                           <dd>
                             <textarea aria-label={t("settings.agent_profile_personality")} className="settings-textarea" rows={8} maxLength={AGENT_PROFILE_LIMITS.personality} value={agentProfile.personality} onChange={(e) => setAgentProfile((p) => ({ ...p, personality: e.target.value.slice(0, AGENT_PROFILE_LIMITS.personality) }))} placeholder={t("settings.agent_profile_personality")} />
                             <span className="settings-char-count">{agentProfile.personality.length} / {AGENT_PROFILE_LIMITS.personality}</span>
+                          </dd>
+                          <dt>{t("settings.agent_profile_system_prompt")}</dt>
+                          <dd>
+                            <textarea aria-label={t("settings.agent_profile_system_prompt")} className="settings-textarea" rows={6} maxLength={4000} value={agentProfile.system_prompt} onChange={(e) => setAgentProfile((p) => ({ ...p, system_prompt: e.target.value.slice(0, 4000) }))} placeholder={t("settings.agent_profile_system_prompt_hint")} />
+                            <span className="settings-char-count">{agentProfile.system_prompt.length} / 4000</span>
+                          </dd>
+                          <dt>{t("settings.agent_profile_temperature")}</dt>
+                          <dd>
+                            <input type="number" aria-label={t("settings.agent_profile_temperature")} className="settings-input" min={0} max={2} step={0.05} value={agentProfile.temperature} onChange={(e) => setAgentProfile((p) => ({ ...p, temperature: e.target.value }))} placeholder="0.7" />
+                            <span className="settings-doc muted">{t("settings.agent_profile_temperature_hint")}</span>
                           </dd>
                         </dl>
                       )}
@@ -8959,7 +10304,7 @@ function App() {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; const formality = agentProfile.formality === "formal" || agentProfile.formality === "informal" ? agentProfile.formality : null; await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, formality, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; const formality = agentProfile.formality === "formal" || agentProfile.formality === "informal" ? agentProfile.formality : null; const tempRaw = agentProfile.temperature.trim(); const temperature = tempRaw ? Math.min(2, Math.max(0, parseFloat(tempRaw))) : undefined; const profileName = agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name); const profileRole = agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role); await invoke("post_agent_profile", { body: { name: profileName || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: profileRole || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, formality, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined, system_prompt: agentProfile.system_prompt.trim().slice(0, 4000) || undefined, temperature: Number.isFinite(temperature) ? temperature : undefined }, port: DAEMON_PORT }); const idBody = JSON.stringify({ name: profileName || undefined, role: profileRole || undefined, tone: agentConstitution.tone.trim() || undefined, values: agentConstitution.values.map((v) => v.trim()).filter(Boolean), constraints: agentConstitution.constraints.map((v) => v.trim()).filter(Boolean) }); const idRes = await requestSystemEndpoint("POST", "/api/agent-identity", idBody); if (!idRes.ok) throw new Error(idRes.text.slice(0, 200)); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
                   </>
                 )}
               </div>
@@ -8967,7 +10312,6 @@ function App() {
             {settingsSection === "user" && (
               <div className="settings-section-content">
                 <p className="settings-doc muted">{t("settings.user_profile_desc")}</p>
-                {userProfileError && <p className="error-inline" role="alert">{userProfileError}</p>}
                 {userProfileLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
                 {!userProfileLoading && (
                   <>
@@ -9050,82 +10394,23 @@ function App() {
                 </div>
                 <div className="settings-data-scroll">
                   {dataSourcesSubTab === "rag" && (
-                    <>
-                      <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
-                      <p className="settings-doc muted">{t("settings.user_rag_desc")}</p>
-                      {userRagError && (
-                        <p className="error-inline" role="alert">{userRagError}</p>
-                      )}
-                      <input
-                        ref={userRagFileInputRef}
-                        type="file"
-                        accept=".txt,.md,.csv,.json,text/*"
-                        className="sr-only"
-                        aria-hidden
-                        onChange={async (e) => {
-                          const file = e.target.files?.[0];
-                          if (!file) return;
-                          try {
-                            const { content_base64, mime_type } = await readFileAsBase64(file);
-                            await invoke("add_user_rag_document", {
-                              name: file.name,
-                              content_base64: content_base64,
-                              mime_type: mime_type,
-                              port: DAEMON_PORT,
-                            });
-                            fetchUserRagDocuments();
-                          } catch (err) {
-                            setUserRagError(String(err));
-                          }
-                          e.target.value = "";
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="refresh-btn"
-                        onClick={() => userRagFileInputRef.current?.click()}
-                        disabled={userRagLoading}
-                      >
-                        {t("settings.add_document")}
-                      </button>
-                      {userRagLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
-                      {!userRagLoading && userRagDocuments.length === 0 && (
-                        <p className="empty-state">{t("settings.no_documents")}</p>
-                      )}
-                      {!userRagLoading && userRagDocuments.length > 0 && (
-                        <ul className="settings-doc-list" role="list">
-                          {userRagDocuments.map((d) => (
-                            <li key={d.id} className="settings-doc-item">
-                              <span className="settings-doc-name">{d.name}</span>
-                              <span className="settings-doc-meta">{d.added_at.slice(0, 10)}</span>
-                              <button
-                                type="button"
-                                className="settings-doc-delete"
-                                aria-label={`Supprimer ${d.name}`}
-                                onClick={async () => {
-                                  try {
-                                    await invoke("delete_user_rag_document", { id: d.id, port: DAEMON_PORT });
-                                    fetchUserRagDocuments();
-                                  } catch (err) {
-                                    setUserRagError(String(err));
-                                  }
-                                }}
-                              >
-                                {t("settings.delete")}
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </>
+                    <UserRagPanel
+                      t={t}
+                      locale={locale}
+                      daemonPort={DAEMON_PORT}
+                      documents={userRagDocuments}
+                      loading={userRagLoading}
+                      error={userRagError}
+                      onError={setUserRagError}
+                      onRefresh={fetchUserRagDocuments}
+                      fetchEndpoint={fetchSystemEndpoint}
+                      readFileAsBase64={readFileAsBase64}
+                    />
                   )}
                   {dataSourcesSubTab === "project_graph" && (
                     <>
                       <h3 className="settings-subtitle">{t("settings.workspace_graph_title")}</h3>
                       <p className="settings-doc muted">{t("settings.workspace_graph_desc")}</p>
-                      {projectGraphError && (
-                        <p className="error-inline" role="alert">{projectGraphError}</p>
-                      )}
                       {projectGraphSuccess && (
                         <p className="settings-doc" role="status">{projectGraphSuccess}</p>
                       )}
@@ -9311,7 +10596,7 @@ function App() {
               <button
                 type="button"
                 className="sidebar-right-close"
-                onClick={() => setRightSidebarOpen(false)}
+                onClick={() => (tab === "tasks" ? setTaskSidebarOpen(false) : setRightSidebarOpen(false))}
                 aria-label={tab === "chat" ? t("sidebar.hide_tasks") : t("sidebar.hide_tasks")}
               >
                 ×
@@ -9323,12 +10608,56 @@ function App() {
                   <button type="button" className="refresh-btn sidebar-right-refresh" onClick={createChatThread}>
                     {t("chat.new_thread")}
                   </button>
-                  {[...chatThreads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).length === 0 ? (
+                  <div className="sidebar-right-search-wrap">
+                    <input
+                      type="search"
+                      className="sidebar-right-search"
+                      placeholder={locale === "en" ? "Search sessions..." : "Rechercher une session..."}
+                      value={chatThreadSearch}
+                      onChange={(e) => setChatThreadSearch(e.target.value)}
+                      aria-label={locale === "en" ? "Search sessions" : "Rechercher une session"}
+                    />
+                  </div>
+                  {chatThreadFolders.length > 0 ? (
+                    <div className="sidebar-right-filters" role="tablist" aria-label={locale === "en" ? "Session folders" : "Dossiers de session"}>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={!chatThreadFolderFilter}
+                        className={!chatThreadFolderFilter ? "selected" : ""}
+                        onClick={() => setChatThreadFolderFilter("")}
+                      >
+                        {locale === "en" ? "All" : "Tous"}
+                      </button>
+                      {chatThreadFolders.map((f) => (
+                        <button
+                          key={f}
+                          type="button"
+                          role="tab"
+                          aria-selected={chatThreadFolderFilter === f}
+                          className={chatThreadFolderFilter === f ? "selected" : ""}
+                          onClick={() => setChatThreadFolderFilter(f)}
+                        >
+                          {f}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="sidebar-right-search-wrap">
+                    <input
+                      type="text"
+                      className="sidebar-right-search"
+                      placeholder={locale === "en" ? "Folder for active session" : "Dossier pour la session active"}
+                      value={chatThreads.find((th) => th.id === sessionId)?.folder ?? ""}
+                      onChange={(e) => setActiveThreadFolder(e.target.value)}
+                      aria-label={locale === "en" ? "Session folder" : "Dossier de session"}
+                    />
+                  </div>
+                  {filteredChatThreads.length === 0 ? (
                     <p className="empty-state">{t("chat.threads_empty")}</p>
                   ) : (
                     <ul className="sidebar-right-task-list" role="list">
-                      {[...chatThreads]
-                        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                      {filteredChatThreads
                         .map((th) => {
                           const active = sessionId === th.id;
                           return (
@@ -9351,6 +10680,9 @@ function App() {
                                   </span>
                                 </div>
                                 <div className="sidebar-right-task-meta">
+                                  {th.folder?.trim() ? (
+                                    <span className="sidebar-right-task-folder">{th.folder.trim()}</span>
+                                  ) : null}
                                   <span className="sidebar-right-task-relative">{formatRelativeTimeLabel(th.updatedAt, locale)}</span>
                                 </div>
                               </div>
@@ -9440,6 +10772,19 @@ function App() {
               )}
               {!tasksLoading && tasksList.length > 0 && taskTreeRows.length === 0 && (
                 <p className="empty-state">{t("tasks.no_match_filter")}</p>
+              )}
+              {tab === "tasks" && eventTriggers.length > 0 && (
+                <div className="sidebar-right-triggers">
+                  <h4 className="sidebar-right-triggers-title">{t("tasks.triggers_heading")}</h4>
+                  <ul className="sidebar-right-triggers-list" role="list">
+                    {eventTriggers.map((tr) => (
+                      <li key={tr.id} className={"sidebar-right-trigger-item" + (tr.enabled ? "" : " disabled")}>
+                        <span className="sidebar-right-trigger-name">{tr.name}</span>
+                        <span className="sidebar-right-trigger-type">{t("tasks.trigger_type_" + tr.trigger_type)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
               {!tasksLoading && taskTreeRows.length > 0 && (
                 <ul className="sidebar-right-task-list" role="list">
@@ -9553,6 +10898,28 @@ function App() {
           </aside>
         )}
       </div>
+      <CreateTaskDialog
+        open={createTaskDialogOpen}
+        onClose={() => setCreateTaskDialogOpen(false)}
+        sessionId={sessionId ?? ""}
+        t={t}
+        eventTriggersEnabled
+        onImmediateCreated={(taskId) => {
+          taskIdToSessionIdRef.current[taskId] = sessionId ?? "";
+          persistTaskSession(taskId, sessionId ?? "");
+          setRunningTaskChips((prev) => ({ ...prev, [taskId]: { pct: 0, message: "en cours…" } }));
+          setRunningTaskEvents((prev) => (prev[taskId] ? prev : { ...prev, [taskId]: [] }));
+          trackTaskUntilDone(taskId);
+          void fetchTasksList({ selectTaskId: taskId });
+          setTaskPanelSections((prev) => ({ ...prev, events: true }));
+        }}
+        onScheduleCreated={() => {
+          void fetchEventTriggers();
+        }}
+        onTriggerCreated={() => {
+          void fetchEventTriggers();
+        }}
+      />
     </div>
   );
 }

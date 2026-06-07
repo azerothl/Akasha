@@ -2,6 +2,8 @@
 # Fichier absent ou vide = tout refusé. Pour autoriser lecture/écriture de fichiers, ajoutez
 # des préfixes de chemins (répertoires ou fichiers) sous allowed_read_paths / allowed_write_paths.
 # L'agent peut alors utiliser read_file / write_file pour les chemins sous ces préfixes.
+# L'outil write_code (fichiers source .ts, .rs, etc.) hérite des mêmes droits que write_file
+# dans default_profile (pas besoin d'ajouter write_code si write_file est déjà listé).
 #
 # Projets longs (roman, BD, projet de code) : pour isoler le projet du reste du système, créez
 # un répertoire dédié par projet et listez-le SEUL ici. N'utilisez pas "." ou un répertoire parent
@@ -48,9 +50,12 @@ command_timeout_secs: 60
 # blocked_web_domains: []
 # Exemple : blocked_web_domains: ["evil.com", "tracker.example.org"]
 
-# Optionnel : activer la recherche web (Brave API). Si true + BRAVE_API_KEY (ou vault brave_api_key),
-# l'agent utilisera web_search pour chercher lui-même météo, actualités, etc. au lieu de suggérer des sites.
+# Optionnel : recherche web multi-fournisseurs (style Odysseus). Sans clé API : SearXNG + DuckDuckGo.
+# Avec clés (vault ou env) : Brave, Tavily, Serper, Google PSE — voir search_provider / search_fallback_chain.
 # web_search_enabled: false
+# search_provider: auto          # auto | brave | searxng | duckduckgo | tavily | serper | google_pse | disabled
+# search_fallback_chain: []      # ex. ["duckduckgo", "searxng"]
+# searxng_url: https://searx.be  # ou SEARXNG_URL
 
 # Optionnel : crawl de site entier via Cloudflare Browser Rendering (/crawl).
 # Si activé, l'agent peut utiliser web_crawl et web_crawl_status. Nécessite un compte Cloudflare.
@@ -67,6 +72,7 @@ command_timeout_secs: 60
 #   dev_sandbox:
 #     - read_file
 #     - write_file
+#     # write_code : optionnel — autorisé automatiquement si write_file est présent (même profil)
 #     - delete_file
 #     - search_files
 #     - grep_content
@@ -130,3 +136,15 @@ command_timeout_secs: 60
 # Recommandé pour install_playwright (téléchargement lourd) : require_approval: [..., install_playwright]
 # Éviter d'ajouter « browser » ici : chaque navigate/snapshot demanderait une approbation.
 # require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file, device_invoke, install_playwright]
+
+# Optionnel : politique MCP (outils `mcp_<server>_<tool>`). Si la section est présente, seuls les serveurs listés sont autorisés.
+# mcp_max_calls_per_task: 20
+# mcp_servers:
+#   filesystem:
+#     enabled: true
+#     allowed_tools: ["*"]
+#     blocked_tools: []
+#     max_calls_per_task: 10
+#   github:
+#     enabled: true
+#     allowed_tools: ["search_repositories", "get_file_contents"]

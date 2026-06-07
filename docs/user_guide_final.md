@@ -2,7 +2,7 @@
 
 Ce guide s'adresse aux utilisateurs qui ont téléchargé les **binaires précompilés** d'Akasha (sans compiler l'application). Il décrit les commandes, la configuration et les interfaces disponibles. Cette documentation est affichée dans l'onglet **Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`.
 
-**Maintenance** : le workflow Release copie ce fichier vers `docs/user_guide.md` dans les archives. Le guide **développeur** (dépôt source, build, détails techniques) est [spec/user_guide.md](../spec/user_guide.md). Le site public **Akasha_app** (`docs.html`, anglais) est tenu manuellement ; une checklist de synchronisation figure dans le dépôt **Akasha_app** (`docs/DOCUMENTATION_SYNC.md`).
+**Maintenance** : le workflow Release copie ce fichier vers `docs/user_guide.md` dans les archives. Le site public **Akasha_app** (`docs.html`, anglais) est tenu manuellement ; une checklist de synchronisation figure dans le dépôt **Akasha_app** (`docs/DOCUMENTATION_SYNC.md`).
 
 ---
 
@@ -94,7 +94,259 @@ Le répertoire de données est créé automatiquement par `akasha init` ou `akas
 
 Les archives de release incluent un sous-dossier **`spec/`** avec des **fichiers d'exemple** (politique d'outils, routeur vocal, routeur LLM) utilisés par `akasha init` pour générer la configuration par défaut lorsque ces fichiers sont présents. Le daemon résout le dossier `spec` utilisé à l'exécution dans cet ordre : variable d'environnement **`AKASHA_SPEC_DIR`** (si elle pointe vers un répertoire existant) → **`spec/` à côté du binaire `akasha-daemon`** → **`data_dir/spec`** s'il existe → sinon le chemin relatif **`spec`** (cas habituel du dépôt source lancé depuis la racine du projet). La commande **`akasha paths`** affiche le chemin retenu et la source (variable, binaire, données, ou relatif).
 
-L'onglet **Doc** des interfaces charge le guide depuis `spec/user_guide.md`, ou à défaut depuis **`docs/user_guide.md`** à côté des binaires (puis éventuellement `data_dir/docs/user_guide.md`). Les spécifications et documents d'architecture complets du dépôt Git ne sont pas tous inclus dans le zip utilisateur ; ils restent disponibles dans le dépôt source sous **`spec/`**.
+L'onglet **Doc** des interfaces charge le guide depuis **`docs/user_guide.md`** à côté des binaires (puis, si besoin, depuis `data_dir/docs/user_guide.md`).
+
+---
+
+## 2bis. Exemples et référence exhaustive des propriétés de configuration
+
+Cette section complète la vue d’ensemble de la section 2 avec des **exemples de fichiers** et un **tableau exhaustif des propriétés** que vous pouvez définir dans les fichiers de configuration utilisateur.
+
+### `llm_router.yaml`
+
+Exemple minimal :
+
+```yaml
+version: "1.0"
+global:
+  enable_metrics: true
+  enable_fallback: true
+  default_timeout_secs: 300
+  default_max_retries: 2
+providers:
+  ollama:
+    base_url: "http://localhost:11434"
+  openai:
+    api_key_ref: "vault://openai_api_key"
+task_types:
+  conversation:
+    primary:
+      provider: akasha_embedded
+      model: default
+    fallback:
+      - provider: akasha_core
+        model: core
+```
+
+Propriétés supportées :
+
+| Propriété | Type | Description |
+|---|---|---|
+| `version` | string | Version indicative du fichier. |
+| `global.enable_metrics` | bool | Active les métriques du routeur. |
+| `global.enable_fallback` | bool | Active le fallback entre providers. |
+| `global.default_timeout_secs` | int | Timeout par requête LLM (secondes). |
+| `global.default_max_retries` | int | Nombre de retries par requête. |
+| `providers.<nom>.base_url` | string | URL du provider (`ollama`, `openai`, `azure_openai`, `openrouter`, `bitnet`). |
+| `providers.<nom>.api_key_ref` | string | Référence de clé (`vault://...` ou nom de variable d’environnement). |
+| `providers.<nom>.organization` | string | Organisation (provider compatible). |
+| `providers.<nom>.version` | string | Version API (provider compatible). |
+| `providers.openrouter.site_url` | string | HTTP-Referer OpenRouter (sinon `OPENROUTER_SITE_URL`). |
+| `providers.openrouter.app_title` | string | X-Title OpenRouter (sinon `OPENROUTER_APP_TITLE`). |
+| `model_options.<modele>.context_length_max` | int | Contexte max du modèle. |
+| `model_options.<modele>.num_ctx` | int | Contexte effectif (notamment Ollama). |
+| `model_options.<modele>.family` | string | Famille du modèle (ex. llama). |
+| `model_options.<modele>.parameter_size` | string | Taille paramètre (ex. `3B`). |
+| `task_types.<type>.primary.provider` | string | Provider principal (`akasha_embedded`, `akasha_core`, `ollama`, `openai`, `azure_openai`, `openrouter`, `bitnet`). |
+| `task_types.<type>.primary.model` | string | Modèle principal. |
+| `task_types.<type>.primary.config.<clé>` | objet libre | Paramètres provider (ex. `temperature`, `top_p`, `top_k`, `max_tokens`, `thinking_level`, etc.). |
+| `task_types.<type>.fallback[]` | liste | Routes de secours (`provider`, `model`, `config?`). |
+| `task_types.<type>.constraints.max_cost_per_request` | number | Coût max/requête. |
+| `task_types.<type>.constraints.max_latency_secs` | int | Latence max/requête. |
+
+Types de tâche reconnus : `conversation`, `code_generation`, `creative_writing`, `scientific_analysis`, `data_analysis`, `system_diagnostic`, `system`, `orchestrator`.
+
+### `tools_policy.yaml`
+
+Exemple minimal :
+
+```yaml
+allowed_read_paths:
+  - "."
+allowed_write_paths:
+  - "."
+allowed_commands:
+  - "git"
+  - "cargo"
+command_timeout_secs: 60
+web_search_enabled: false
+browser_enabled: false
+```
+
+Propriétés supportées :
+
+| Propriété | Type | Description |
+|---|---|---|
+| `allowed_read_paths` | list[string] | Préfixes autorisés en lecture. |
+| `allowed_write_paths` | list[string] | Préfixes autorisés en écriture. |
+| `allowed_commands` | list[string] | Exécutables autorisés (`run_command`). |
+| `blocked_commands` | list[string] | Commandes interdites (prioritaires). |
+| `command_timeout_secs` | int | Timeout commandes shell. |
+| `run_command_default_cwd_workspace` | bool | Définit le cwd par défaut au workspace de tâche. |
+| `allowed_web_domains` | list[string] | Domaines autorisés pour `web_fetch`. |
+| `blocked_web_domains` | list[string] | Domaines interdits pour `web_fetch` (prioritaires). |
+| `web_search_enabled` | bool | Active la recherche web (Brave). |
+| `web_crawl_enabled` | bool | Active le crawl web Cloudflare (`web_crawl`). |
+| `cloudflare_account_id` | string | Account ID Cloudflare Browser Rendering. |
+| `cloudflare_api_key_ref` | string | Clé API Cloudflare (vault/env). |
+| `tool_profiles` | map[string,list[string]] | Profils d’outils nommés. |
+| `default_profile` | string | Profil d’outils actif par défaut. |
+| `allowed_skill_install_hosts` | list[string] | Hôtes autorisés pour `install_skill`. |
+| `allowed_device_interfaces` | list[string] | Interfaces appareil autorisées (`device_discover`/`device_invoke`). |
+| `blocked_device_interfaces` | list[string] | Interfaces appareil interdites (prioritaires). |
+| `browser_enabled` | bool | Active l’outil navigateur (`browser`). |
+| `browser_allowed_domains` | list[string] | Domaines autorisés pour `browser navigate`. |
+| `browser_blocked_domains` | list[string] | Domaines interdits navigateur (prioritaires). |
+| `browser_headless` | bool | Exécution headless Playwright. |
+| `browser_action_timeout_secs` | int | Timeout par action navigateur. |
+| `browser_session_timeout_secs` | int | Timeout session navigateur. |
+| `require_approval` | list[string] | Outils nécessitant approbation utilisateur. |
+
+### `voice_router.yaml` (optionnel)
+
+Exemple minimal :
+
+```yaml
+tts:
+  base_url: "http://localhost:8765"
+stt:
+  base_url: "http://localhost:8766"
+```
+
+Propriétés supportées :
+
+| Propriété | Type | Description |
+|---|---|---|
+| `tts.base_url` | string | URL du service TTS (`POST /tts`). |
+| `stt.base_url` | string | URL du service STT (`POST /stt`). |
+
+### `agent_profile.json`
+
+Exemple minimal :
+
+```json
+{
+  "name": "Akasha",
+  "role": "concise technical assistant",
+  "personality": "You are a concise technical assistant.",
+  "gender": "neutral",
+  "formality": "formal",
+  "rules": [],
+  "can_do": [],
+  "cannot_do": []
+}
+```
+
+Propriétés supportées :
+
+| Propriété | Type | Description |
+|---|---|---|
+| `name` | string | Nom agent (défaut produit : `Akasha`). |
+| `personality` | string | Description de ton/personnalité (anglais recommandé). |
+| `role` | string | Rôle explicite de l’agent. |
+| `gender` | string | `male`, `female`, `neutral`. |
+| `formality` | string/null | `formal`, `informal`, ou null. |
+| `avatar` | string | URL/data URL avatar (affichage UI). |
+| `rules` | list[string] | Règles comportementales. |
+| `can_do` | list[string] | Comportements autorisés. |
+| `cannot_do` | list[string] | Comportements interdits. |
+| `traits_override` | map[string,number] | Surcharge traits (0..1). |
+| `preferred_mode` | string | `assistant`, `operator`, `architect`, `onboarding`. |
+
+### `autonomous_mission.yaml` (optionnel)
+
+Exemple minimal :
+
+```yaml
+enabled: false
+global_context: ""
+horizon: medium
+objective: ""
+heartbeat_interval_minutes: 120
+report_dir: autonomous_mission/reports
+session_id: autonomous:default
+status: paused
+```
+
+Propriétés supportées :
+
+| Propriété | Type | Description |
+|---|---|---|
+| `enabled` | bool | Active la mission autonome. |
+| `global_context` | string | Contexte global injecté en mission. |
+| `horizon` | string | `short`, `medium`, `long`. |
+| `objective` | string | Objectif mission. |
+| `heartbeat_interval_minutes` | int | Fréquence des cycles mission. |
+| `report_dir` | string | Dossier de rapports (relatif data_dir). |
+| `session_id` | string | Session associée à la mission. |
+| `status` | string | `active`, `paused`, `completed`. |
+| `operating_rules` | string | Règles d’exécution mission. |
+| `role_definitions` | list[object] | Rôles d’orchestration (nom, responsabilité, type préféré). |
+| `heartbeat_preferred_task_type` | string | Type d’agent privilégié au heartbeat. |
+
+### `akasha.env`
+
+Exemple minimal :
+
+```env
+AKASHA_PORT=3876
+AKASHA_LOG=info
+AKASHA_SYSTEM_TASK_MAX_TOKENS=4096
+AKASHA_TELEGRAM_ENABLED=1
+```
+
+Clés supportées (principales et documentées) :
+
+| Clé | Type / valeurs | Description |
+|---|---|---|
+| `AKASHA_PORT` | int | Port HTTP daemon. |
+| `AKASHA_LOG` | string | Niveau log (`trace`,`debug`,`info`,`warn`,`error`). |
+| `AKASHA_DATA_DIR` | path | Répertoire données. |
+| `AKASHA_MAX_RESPONSE_TOKENS` | int | Tokens max réponses chat. |
+| `AKASHA_SYSTEM_TASK_MAX_TOKENS` | int | Budget tokens tâches internes. |
+| `AKASHA_LLM_TIMEOUT_SECS` | int | Timeout global LLM. |
+| `AKASHA_LLM_STREAM_IDLE_SECS` | int | Timeout inactivité stream LLM. |
+| `AKASHA_LLM_FIRST_CHUNK_SECS` | int | Timeout premier chunk stream LLM. |
+| `AKASHA_LOG_LLM_RESPONSE` | `1`/vide | Log réponse LLM brute. |
+| `AKASHA_EMBEDDED_MODEL` | string | Modèle embarqué (`qwen3_0_6b`, `baguettotron`). |
+| `AKASHA_VAULT_MASTER_KEY` | string | Clé maître vault. |
+| `AKASHA_SPEC_DIR` | path | Dossier `spec` forcé. |
+| `AKASHA_APP_BASE_URL` | URL | Base URL vérification release. |
+| `AKASHA_TELEGRAM_ENABLED` | `1`/vide | Active Telegram. |
+| `AKASHA_SLACK_ENABLED` | `1`/vide | Active Slack. |
+| `AKASHA_DISCORD_ENABLED` | `1`/vide | Active Discord. |
+| `AKASHA_TELEGRAM_NOTIFY_CHAT_ID` | string | Chat de notification Telegram. |
+| `AKASHA_DEGRADED_MODE` | `1`/vide | Mode dégradé local. |
+| `AKASHA_CLUSTER_ENABLED` | `1`/vide | Active mode cluster. |
+| `AKASHA_NODE_ID` | string | Identifiant nœud cluster. |
+| `AKASHA_NATS_TLS_CA` | path | CA NATS TLS. |
+| `AKASHA_NATS_CLIENT_CERT` | path | Certificat client NATS. |
+| `AKASHA_NATS_CLIENT_KEY` | path | Clé client NATS. |
+
+### `connectors.env`
+
+Exemple minimal :
+
+```env
+AKASHA_TELEGRAM_ENABLED=1
+AKASHA_SLACK_ENABLED=
+AKASHA_DISCORD_ENABLED=
+```
+
+Propriétés supportées :
+
+| Clé | Type / valeurs | Description |
+|---|---|---|
+| `AKASHA_TELEGRAM_ENABLED` | `1`/vide | Active le connecteur Telegram. |
+| `AKASHA_SLACK_ENABLED` | `1`/vide | Active le connecteur Slack. |
+| `AKASHA_DISCORD_ENABLED` | `1`/vide | Active le connecteur Discord. |
+
+### Où trouver les exemples complets officiels
+
+- `spec/llm_router.example.yaml`
+- `spec/tools_policy.example.yaml`
+- `spec/autonomous_mission.example.yaml`
+- `spec/35_configuration_reference.md` (référence technique complète)
 
 ---
 
@@ -159,6 +411,8 @@ L'onglet **Doc** des interfaces charge le guide depuis `spec/user_guide.md`, ou 
 | `akasha plugin uninstall ID` | Désinstalle un plugin. |
 | `akasha plugin catalog` | Affiche le catalogue local des plugins. |
 
+**Sélection des plugins (daemon)** : pour chaque message utilisateur (hors petit-talk et tâches Code Studio disque), le daemon interroge brièvement le modèle configuré pour la route **`system`** dans `llm_router.yaml` afin de choisir quels plugins WASM (tool) sont pertinents d’après leur **description** ; un bloc récapitulatif est ajouté au prompt. Les anciennes règles `routing_rules` des manifests ne bloquent plus les autres outils (`write_file`, etc.) — seule la politique **`tools_policy.yaml`** s’applique à l’exécution.
+
 ### Interfaces
 
 | Commande | Description |
@@ -201,6 +455,7 @@ En cas de fichier manquant, `akasha doctor --fix` crée le data_dir et des fichi
 | `AKASHA_MAX_RESPONSE_TOKENS` | Nombre max de tokens pour les réponses chat | 4096 |
 | `AKASHA_APP_BASE_URL` | URL du site des releases (pour `akasha update check`) | https://azerothl.github.io/Akasha_app |
 | `AKASHA_SYSTEM_TASK_MAX_TOKENS` | Tokens max pour les tâches système (mémoire, décomposition). À augmenter (ex. 8192) si un modèle « thinking » renvoie des réponses vides | 4096 |
+| `AKASHA_PLUGIN_SELECT_MAX_TOKENS` | Tokens max pour la réponse JSON du sélecteur de plugins (route `system`) | 512 |
 | `OLLAMA_HOST` | URL d'Ollama si non configuré ailleurs | http://localhost:11434 |
 | `AKASHA_TELEGRAM_ENABLED` | `1` pour activer Telegram | — |
 | `AKASHA_DISCORD_ENABLED` | `1` pour activer Discord | — |
@@ -228,7 +483,7 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 - **Données** : dans Paramètres → **Données**, deux sous-onglets — **RAG utilisateur** (documents texte indexés, extraits injectés dans le contexte de l’agent) et **Graphe projet** (plusieurs dossiers de projet enregistrés, index SQLite + rapports sous `workspace_graph/out/<id>/` ; ouverture du HTML par workspace ; agents enrichis automatiquement et outil `workspace_graph_search` si autorisé). Sans interface web, gérer via `/api/user-rag/...` et `/api/workspace-graph/workspaces` (voir le guide complet).
 - **Profil de l'agent** : dans Paramètres → Profil de l'agent, vous pouvez définir le nom, le rôle, la personnalité, les règles et les comportements autorisés/interdits ; des modèles (Neutre, Bienveillant, Concis/technique, etc.) sont proposés. Depuis la version **0.8.0**, un réglage **Tutoiement / vouvoiement** (formel, informel ou par défaut) oriente le registre de l'agent — en français, cela correspond au vouvoiement ou au tutoiement ; dans les autres langues, le registre s'adapte de la même manière.
 - **Mission autonome** : onglet **Mission** pour définir un objectif de fond, le contexte, des règles, des rôles (organisation) et la fréquence des **heartbeats**. Tant que la mission est activée et **active**, le daemon lance périodiquement une tâche orchestrée (type d’agent du premier pas configurable, souvent *chef de projet*) ; l’orchestrateur peut déléguer à d’autres agents. Les rapports Markdown vont dans le répertoire configuré (relatif au data_dir). Fichier **`autonomous_mission.yaml`** ; API **`GET` / `PUT /api/autonomous-mission`**, pause/reprise **`POST`** sur `/api/autonomous-mission/pause` et `/resume`. L’historique des événements de mission est consultable via **`GET /api/autonomous-mission/events`** (paramètres optionnels `limit`, `since` en date ISO). Pour appliquer aussi au **chat** le mode « sans questions » lié à la mission, utilisez le même **`session_id`** que dans la fiche mission. *Exemple* : maintenir un fichier `CHANGELOG_HEBDO.md` à jour dans un dépôt — renseignez l’objectif et le contexte (chemin du dépôt), horizon moyen, heartbeat 120 min, consultez les rapports sous le dossier indiqué après quelques cycles.
-- **Plugins** : la vue plugins affiche l’état d’activation, les règles de routage dynamiques et permet de réinitialiser la réputation d’un plugin (ou de tous les plugins) si nécessaire.
+- **Plugins** : la vue plugins affiche l’état d’activation et permet de réinitialiser la réputation d’un plugin (ou de tous les plugins) si nécessaire. Les règles `routing_rules` des manifests ne sont plus appliquées pour forcer ou bloquer des outils en runtime (sélection par description via le modèle `system` + `tools_policy.yaml` pour l’exécution).
 
 Le daemon écoute par défaut sur le port **3876**. Pour que l'onglet Doc affiche ce guide, lancez `akasha start` depuis le dossier où vous avez extrait l'archive (contenant le dossier `docs`).
 
@@ -346,7 +601,7 @@ Les variables d'activation sont chargées depuis le fichier **connectors.env** d
 | Vérifier une mise à jour | `akasha update check` |
 | Ouvrir la page de téléchargement | `akasha update install` |
 
-Cette documentation est également affichée dans l'**onglet Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`. Pour les contributeurs et développeurs, la documentation technique (spécifications, architecture, runbooks) est disponible dans le dépôt source (dossier `spec/` et README à la racine).
+Cette documentation est également affichée dans l'**onglet Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`.
 
 ---
 

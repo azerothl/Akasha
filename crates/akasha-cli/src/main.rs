@@ -25,6 +25,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Ensure daemon is running (start if needed) and print status summary
+    Up,
     /// Start the Akasha daemon (with watchdog supervision in background)
     Start {
         /// Run in foreground without watchdog
@@ -44,6 +46,9 @@ enum Commands {
         /// Fix missing or minimal config: create missing files in data_dir (llm_router.yaml, tools_policy.yaml, connectors.env, akasha.env, agent_profile.json)
         #[arg(long)]
         fix: bool,
+        /// With --fix: set AKASHA_MEMORY_ENCRYPT=1 in akasha.env (SQLCipher / field-at-rest encryption foundation; see memory_encryption_rfc.md)
+        #[arg(long)]
+        encrypt_memory: bool,
     },
     /// Vault: manage secrets (Phase 3)
     Vault {
@@ -54,6 +59,11 @@ enum Commands {
     Plugin {
         #[command(subcommand)]
         sub: PluginSub,
+    },
+    /// Review pending tool permission requests
+    Permissions {
+        #[command(subcommand)]
+        sub: PermissionsSub,
     },
     /// LLM Router: metrics, complete (Phase 6)
     Router {
@@ -85,6 +95,133 @@ enum Commands {
         #[command(subcommand)]
         sub: ServicesSub,
     },
+    /// Tool profiles + effective tool gates (operator toolsets)
+    Toolset {
+        #[command(subcommand)]
+        sub: ToolsetSub,
+    },
+    /// Git worktree helpers (list / add / remove)
+    Worktree {
+        #[command(subcommand)]
+        sub: WorktreeSub,
+    },
+    /// MCP: validate config JSON, optional stdio probe (operator compatibility)
+    Mcp {
+        #[command(subcommand)]
+        sub: McpSub,
+    },
+    /// Migration helpers (OpenClaw compatibility)
+    Migrate {
+        #[command(subcommand)]
+        sub: MigrateSub,
+    },
+    /// Terminal / PTY: capabilities from daemon (requires daemon on AKASHA_PORT)
+    Terminal {
+        #[command(subcommand)]
+        sub: TerminalSub,
+    },
+    /// Task operations: watch status/events and cancel a run
+    Task {
+        #[command(subcommand)]
+        sub: TaskSub,
+    },
+    /// Telegram access lifecycle (pairing approvals, roles)
+    Telegram {
+        #[command(subcommand)]
+        sub: TelegramSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelegramSub {
+    List,
+    Approve { code_or_user_id: String },
+    Reject { user_id: i64 },
+    Remove { user_id: i64 },
+    Promote { user_id: i64 },
+    Demote { user_id: i64 },
+    Reset,
+}
+
+#[derive(Subcommand)]
+enum TerminalSub {
+    /// GET /api/terminal/capabilities (PTY + one-shot tools)
+    Capabilities,
+}
+
+#[derive(Subcommand)]
+enum TaskSub {
+    /// Poll one task status until terminal state
+    Watch {
+        /// Task UUID
+        task_id: String,
+        /// Polling interval in milliseconds
+        #[arg(long, default_value_t = 1500)]
+        interval_ms: u64,
+    },
+    /// Fetch task events (`GET /api/tasks/:id/events`)
+    Events {
+        /// Task UUID
+        task_id: String,
+        /// Show only the last N events in human mode
+        #[arg(long, default_value_t = 40)]
+        limit: usize,
+        /// Print full JSON payload
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a queued/running task
+    Cancel {
+        /// Task UUID
+        task_id: String,
+    },
+    /// Inspect or clear steering / follow-up message queue
+    Queue {
+        #[command(subcommand)]
+        sub: TaskQueueSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskQueueSub {
+    /// GET /api/tasks/:id/queue
+    List { task_id: String },
+    /// DELETE /api/tasks/:id/queue
+    Clear { task_id: String },
+}
+
+#[derive(Subcommand)]
+enum PermissionsSub {
+    /// Permission review queue (daemon must be running)
+    Queue {
+        #[command(subcommand)]
+        sub: PermissionsQueueSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermissionsQueueSub {
+    /// List queue items (`GET /api/permissions/queue`)
+    List {
+        #[arg(long, default_value = "pending")]
+        status: String,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Approve a pending request
+    Approve {
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Deny a pending request
+    Deny {
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Expire a pending request (operator)
+    Expire { id: String },
 }
 
 #[derive(Subcommand)]
@@ -117,6 +254,110 @@ enum ServicesSub {
         #[arg(long)]
         compose_dir: Option<PathBuf>,
     },
+    /// Tail logs for a compose service (docker compose logs --tail)
+    Logs {
+        /// Service name as in docker-compose.yml (e.g. ollama, voice-tts)
+        service: String,
+        #[arg(long, default_value_t = 200)]
+        tail: u32,
+        #[arg(long)]
+        compose_dir: Option<PathBuf>,
+    },
+    /// Restart one compose service
+    Restart {
+        service: String,
+        #[arg(long)]
+        compose_dir: Option<PathBuf>,
+    },
+    /// Show compose ps and quick health hints (Ollama / BitNet URLs)
+    Doctor {
+        #[arg(long)]
+        compose_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ToolsetSub {
+    /// Show tool_profiles keys and default_profile from tools_policy.yaml (offline)
+    Profiles,
+    /// Show effective allow/deny per tool (requires daemon GET /api/tools/effective)
+    Effective,
+}
+
+#[derive(Subcommand)]
+enum McpSub {
+    /// Validate a JSON file with top-level `mcpServers` (IDE-style MCP JSON)
+    Validate {
+        /// Path to mcp.json or similar
+        config: PathBuf,
+    },
+    /// Run a short stdio handshake (initialize [+ tools/list]) against one server from the config
+    Probe {
+        config: PathBuf,
+        /// Server name under mcpServers (defaults to first key)
+        #[arg(long)]
+        name: Option<String>,
+        /// Also send tools/list after initialize
+        #[arg(long)]
+        tools: bool,
+        /// Timeout per I/O phase (seconds)
+        #[arg(long, default_value_t = 8)]
+        timeout_secs: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateSub {
+    /// OpenClaw pack migration helpers (preview/apply through daemon API)
+    Openclaw {
+        #[command(subcommand)]
+        sub: OpenclawMigrateSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum OpenclawMigrateSub {
+    /// Preview OpenClaw migration (no files copied)
+    Preview {
+        #[arg(long)]
+        source_dir: PathBuf,
+    },
+    /// Apply OpenClaw migration (optionally dry-run)
+    Apply {
+        #[arg(long)]
+        source_dir: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorktreeSub {
+    /// List worktrees for a repo (`git worktree list`)
+    List {
+        /// Path to git repository (directory containing .git)
+        repo: PathBuf,
+    },
+    /// Add a worktree (`git worktree add <path> <branch>`)
+    Add {
+        repo: PathBuf,
+        /// Branch to checkout in the new worktree
+        branch: String,
+        /// Path for the new worktree directory
+        path: PathBuf,
+    },
+    /// Remove a worktree (`git worktree remove <path>`)
+    Remove {
+        /// Main repo path (used as `-C` for git)
+        repo: PathBuf,
+        /// Worktree path to remove
+        path: PathBuf,
+    },
+    /// Quick diagnostics for worktree setup (`git rev-parse`, branch, cleanliness, worktrees)
+    Doctor {
+        /// Path to git repository (directory containing .git)
+        repo: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -137,6 +378,8 @@ enum UpdateSub {
 
 #[derive(Subcommand)]
 enum ConfigSub {
+    /// Validate that llm_router.yaml and tools_policy.yaml parse (offline)
+    Validate,
     /// Show paths used for config and data (same as `akasha paths`)
     Paths,
     /// Fetch Ollama model info (context_length_max, num_ctx, etc.) for models in llm_router.yaml and write to config
@@ -252,12 +495,20 @@ enum RouterSub {
 
 #[derive(Subcommand)]
 enum PluginSub {
+    /// Load-cycle metrics (last duration, errors) from daemon
+    Metrics,
     /// List installed plugins (from daemon)
     List,
     /// Reload plugins (no daemon restart)
     Reload,
-    /// Install a plugin from a directory (manifest + .wasm)
-    Install { path: PathBuf },
+    /// Install a plugin from a directory (manifest + .wasm) or from the remote catalog
+    Install {
+        /// Install from catalog by plugin id (POST /api/plugins/install on daemon)
+        #[arg(long)]
+        catalog: Option<String>,
+        /// Local directory containing manifest.toml and plugin.wasm
+        path: Option<PathBuf>,
+    },
     /// Uninstall a plugin by id
     Uninstall { id: String },
     /// Show local catalog of available plugins
@@ -380,11 +631,18 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Up => cmd_up(),
         Commands::Start { foreground } => cmd_start(foreground),
         Commands::Stop => cmd_stop(),
-        Commands::Doctor { json, advice, fix } => cmd_doctor(json, advice, fix),
+        Commands::Doctor {
+            json,
+            advice,
+            fix,
+            encrypt_memory,
+        } => cmd_doctor(json, advice, fix, encrypt_memory),
         Commands::Vault { sub } => cmd_vault(sub),
         Commands::Plugin { sub } => cmd_plugin(sub),
+        Commands::Permissions { sub } => cmd_permissions(sub),
         Commands::Router { sub } => cmd_router(sub),
         Commands::Init { defaults } => cmd_init(defaults),
         Commands::Tui => cmd_tui(),
@@ -392,7 +650,601 @@ fn main() -> anyhow::Result<()> {
         Commands::Paths => cmd_paths(),
         Commands::Update { sub } => cmd_update(sub),
         Commands::Services { sub } => cmd_services(sub),
+        Commands::Toolset { sub } => cmd_toolset(sub),
+        Commands::Worktree { sub } => cmd_worktree(sub),
+        Commands::Mcp { sub } => cmd_mcp(sub),
+        Commands::Migrate { sub } => cmd_migrate(sub),
+        Commands::Terminal { sub } => cmd_terminal(sub),
+        Commands::Task { sub } => cmd_task(sub),
+        Commands::Telegram { sub } => cmd_telegram(sub),
     }
+}
+
+fn cmd_terminal(sub: TerminalSub) -> anyhow::Result<()> {
+    match sub {
+        TerminalSub::Capabilities => {
+            let client = reqwest::blocking::Client::new();
+            let base = daemon_base_url();
+            let resp = client
+                .get(format!("{}/api/terminal/capabilities", base))
+                .timeout(std::time::Duration::from_secs(8))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Daemon error: {}", resp.status());
+            }
+            let j: serde_json::Value = resp.json()?;
+            println!("{}", serde_json::to_string_pretty(&j)?);
+        }
+    }
+    Ok(())
+}
+
+fn is_terminal_task_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
+}
+
+fn cmd_task(sub: TaskSub) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    match sub {
+        TaskSub::Watch {
+            task_id,
+            interval_ms,
+        } => {
+            let sleep_ms = interval_ms.clamp(500, 60_000);
+            let mut last_line = String::new();
+            println!("Watching task {} (interval={}ms)", task_id, sleep_ms);
+            loop {
+                let resp = client
+                    .get(format!("{}/api/tasks/{}", base, task_id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                let j: serde_json::Value = resp.json()?;
+                let status = j
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let task = j
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&task_id)
+                    .to_string();
+                let mut line = format!("status={} task={}", status, task);
+                if let Some(progress) = j.get("progress").and_then(|v| v.as_array()) {
+                    if let Some(last) = progress.last() {
+                        let pct = last
+                            .get("progress_pct")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let msg = last
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !msg.trim().is_empty() {
+                            line.push_str(&format!(" progress={} message={}", pct, msg));
+                        }
+                    }
+                }
+                if status == "failed" || status == "cancelled" {
+                    if let Some(detail) = j.get("failure_detail").and_then(|v| v.as_str()) {
+                        if !detail.trim().is_empty() {
+                            line.push_str(&format!(" detail={}", detail));
+                        }
+                    }
+                }
+                if line != last_line {
+                    println!("{}", line);
+                    last_line = line;
+                }
+                if is_terminal_task_status(&status) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(sleep_ms));
+            }
+        }
+        TaskSub::Events {
+            task_id,
+            limit,
+            json,
+        } => {
+            let resp = client
+                .get(format!("{}/api/tasks/{}/events", base, task_id))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Daemon error: {}", resp.status());
+            }
+            let j: serde_json::Value = resp.json()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&j)?);
+                return Ok(());
+            }
+            let events = j
+                .get("events")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let take = limit.max(1);
+            let start = events.len().saturating_sub(take);
+            println!(
+                "Task events {} (showing {}/{}):",
+                task_id,
+                events.len().saturating_sub(start),
+                events.len()
+            );
+            for row in events.into_iter().skip(start) {
+                let at = row.get("at").and_then(|v| v.as_str()).unwrap_or("-");
+                let event_type = row
+                    .get("event_type")
+                    .or_else(|| row.get("kind"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let payload = row.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let preview = if payload.is_null() {
+                    String::from("null")
+                } else {
+                    let raw = payload.to_string();
+                    if raw.chars().count() > 220 {
+                        format!("{}…", raw.chars().take(220).collect::<String>())
+                    } else {
+                        raw
+                    }
+                };
+                println!("- {} | {} | {}", at, event_type, preview);
+            }
+        }
+        TaskSub::Cancel { task_id } => {
+            let resp = client
+                .post(format!("{}/api/tasks/{}/cancel", base, task_id))
+                .send()?;
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            if !status.is_success() {
+                anyhow::bail!("Daemon error {}: {}", status, body);
+            }
+            println!("{}", body);
+        }
+        TaskSub::Queue { sub } => match sub {
+            TaskQueueSub::List { task_id } => {
+                let resp = client
+                    .get(format!("{}/api/tasks/{}/queue", base, task_id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", serde_json::to_string_pretty(&resp.json::<serde_json::Value>()?)?);
+            }
+            TaskQueueSub::Clear { task_id } => {
+                let resp = client
+                    .delete(format!("{}/api/tasks/{}/queue", base, task_id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+        },
+    }
+    Ok(())
+}
+
+fn cmd_permissions(sub: PermissionsSub) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    match sub {
+        PermissionsSub::Queue { sub } => match sub {
+            PermissionsQueueSub::List { status, limit } => {
+                let resp = client
+                    .get(format!(
+                        "{}/api/permissions/queue?status={}&limit={}",
+                        base, status, limit
+                    ))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", serde_json::to_string_pretty(&resp.json::<serde_json::Value>()?)?);
+            }
+            PermissionsQueueSub::Approve { id, note } => {
+                let body = note.map(|n| serde_json::json!({ "note": n }));
+                let mut req = client.post(format!("{}/api/permissions/queue/{}/approve", base, id));
+                if let Some(b) = body {
+                    req = req.json(&b);
+                }
+                let resp = req.send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+            PermissionsQueueSub::Deny { id, note } => {
+                let body = note.map(|n| serde_json::json!({ "note": n }));
+                let mut req = client.post(format!("{}/api/permissions/queue/{}/deny", base, id));
+                if let Some(b) = body {
+                    req = req.json(&b);
+                }
+                let resp = req.send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+            PermissionsQueueSub::Expire { id } => {
+                let resp = client
+                    .post(format!("{}/api/permissions/queue/{}/expire", base, id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                println!("{}", resp.text().unwrap_or_default());
+            }
+        },
+    }
+    Ok(())
+}
+
+fn cmd_up() -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let running = client
+        .get(format!("{}/api/status", base))
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    if !running {
+        cmd_start(false)?;
+    }
+    let verify = client
+        .get(format!("{}/api/status", base))
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    if !verify {
+        anyhow::bail!("Daemon is not reachable after startup.");
+    }
+    let status = client
+        .get(format!("{}/api/status", base))
+        .send()?
+        .text()
+        .unwrap_or_else(|_| "{\"ok\":true}".to_string());
+    println!("akasha up: daemon running");
+    println!("{}", status);
+    Ok(())
+}
+
+fn cmd_telegram(sub: TelegramSub) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()?;
+    match sub {
+        TelegramSub::List => {
+            let resp = client
+                .get(format!("{}/api/channel-access/telegram/users", base))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Daemon error: {}", resp.status());
+            }
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Approve { code_or_user_id } => {
+            let body = if let Ok(user_id) = code_or_user_id.parse::<i64>() {
+                serde_json::json!({ "user_id": user_id })
+            } else {
+                serde_json::json!({ "pairing_code": code_or_user_id })
+            };
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/approve", base))
+                .json(&body)
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Reject { user_id } => {
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/reject", base))
+                .json(&serde_json::json!({ "user_id": user_id }))
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Remove { user_id } => {
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/remove", base))
+                .json(&serde_json::json!({ "user_id": user_id }))
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Promote { user_id } => {
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/promote", base))
+                .json(&serde_json::json!({ "user_id": user_id }))
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Demote { user_id } => {
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/demote", base))
+                .json(&serde_json::json!({ "user_id": user_id }))
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Reset => {
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/reset", base))
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+    }
+    Ok(())
+}
+
+fn validate_mcp_config_json_local(root: &serde_json::Value) -> Result<(), String> {
+    let servers = root
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| "missing object \"mcpServers\"".to_string())?;
+    if servers.is_empty() {
+        return Err("mcpServers is empty".to_string());
+    }
+    for (name, entry) in servers {
+        let cmd = entry
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if cmd.is_none() {
+            return Err(format!("server {:?}: missing non-empty \"command\"", name));
+        }
+        if let Some(args) = entry.get("args") {
+            if !args.is_null() && !args.is_array() {
+                return Err(format!("server {:?}: \"args\" must be array or omitted", name));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write one MCP stdio framed message: `Content-Length: <n>\r\n\r\n<json_body>`.
+async fn mcp_write_framed_local<W: tokio::io::AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    msg: &serde_json::Value,
+) -> std::io::Result<()> {
+    let body = msg.to_string();
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    writer.write_all(header.as_bytes()).await?;
+    writer.write_all(body.as_bytes()).await?;
+    writer.flush().await
+}
+
+/// Read one MCP stdio framed message by consuming `Content-Length` headers then the body.
+async fn mcp_read_framed_local<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut tokio::io::BufReader<R>,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut line = String::new();
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read header: {}", e))?;
+        if n == 0 {
+            return Err("connection closed before response headers".to_string());
+        }
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(val) = trimmed.strip_prefix("Content-Length:") {
+            content_length = val.trim().parse().ok();
+        }
+    }
+    let len = content_length
+        .ok_or_else(|| "no Content-Length header in response".to_string())?;
+    let mut body = vec![0u8; len];
+    reader
+        .read_exact(&mut body)
+        .await
+        .map_err(|e| format!("read body ({} bytes): {}", len, e))?;
+    let s = std::str::from_utf8(&body).map_err(|e| format!("non-UTF-8 body: {}", e))?;
+    serde_json::from_str(s).map_err(|e| format!("invalid JSON in body: {}", e))
+}
+
+async fn probe_stdio_mcp_local(
+    program: &str,
+    args: &[String],
+    include_tools_list: bool,
+    deadline: Duration,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::BufReader;
+    use tokio::process::Command;
+    use tokio::time::timeout;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("spawn {:?}: {}", program, e))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "stdin not available".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "stdout not available".to_string())?;
+    let mut stderr = child.stderr.take();
+
+    let init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "akasha-cli-mcp-probe", "version": env!("CARGO_PKG_VERSION") }
+        }
+    });
+    timeout(deadline, mcp_write_framed_local(&mut stdin, &init))
+        .await
+        .map_err(|_| "timeout writing initialize".to_string())?
+        .map_err(|e| format!("write initialize: {}", e))?;
+
+    let mut reader = BufReader::new(stdout);
+    let init_resp: serde_json::Value = match timeout(deadline, mcp_read_framed_local(&mut reader)).await {
+        Err(_) => serde_json::json!({ "error": "timeout_reading_response" }),
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => serde_json::json!({ "error": "framing_error", "detail": e }),
+    };
+
+    let mut tools_resp = serde_json::Value::Null;
+    if include_tools_list {
+        // MCP spec: client must send notifications/initialized before tool requests.
+        let initialized_notif = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        });
+        let _ = timeout(deadline, mcp_write_framed_local(&mut stdin, &initialized_notif)).await;
+
+        let list = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        });
+        let _ = timeout(deadline, mcp_write_framed_local(&mut stdin, &list)).await;
+        if let Ok(Ok(v)) = timeout(deadline, mcp_read_framed_local(&mut reader)).await {
+            tools_resp = v;
+        }
+    }
+
+    let mut err_tail = String::new();
+    if let Some(mut err) = stderr.take() {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let _ = timeout(Duration::from_millis(400), err.read_to_end(&mut buf)).await;
+        err_tail = String::from_utf8_lossy(&buf).chars().take(2000).collect();
+    }
+
+    let _ = child.kill().await;
+
+    Ok(serde_json::json!({
+        "initialize": init_resp,
+        "tools_list": tools_resp,
+        "stderr_tail": err_tail,
+    }))
+}
+
+fn cmd_mcp(sub: McpSub) -> anyhow::Result<()> {
+    match sub {
+        McpSub::Validate { config } => {
+            let raw = std::fs::read_to_string(&config)?;
+            let v: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+            validate_mcp_config_json_local(&v).map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!("OK: {}", config.display());
+            Ok(())
+        }
+        McpSub::Probe {
+            config,
+            name,
+            tools,
+            timeout_secs,
+        } => {
+            let raw = std::fs::read_to_string(&config)?;
+            let v: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+            validate_mcp_config_json_local(&v).map_err(|e| anyhow::anyhow!("{}", e))?;
+            let servers = v["mcpServers"].as_object().unwrap();
+            let (srv_name, entry) = if let Some(n) = name.as_deref() {
+                let e = servers
+                    .get(n)
+                    .ok_or_else(|| anyhow::anyhow!("unknown server {:?}", n))?;
+                (n.to_string(), e)
+            } else {
+                servers
+                    .iter()
+                    .next()
+                    .map(|(k, v)| (k.clone(), v))
+                    .ok_or_else(|| anyhow::anyhow!("no servers"))?
+            };
+            let program = entry["command"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("command missing"))?;
+            let args: Vec<String> = entry
+                .get("args")
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            println!("Probing MCP server {:?} (command={} args={:?})…", srv_name, program, args);
+            let rt = tokio::runtime::Runtime::new()?;
+            let deadline = Duration::from_secs(timeout_secs.max(1));
+            let out = rt
+                .block_on(probe_stdio_mcp_local(program, &args, tools, deadline))
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(())
+        }
+    }
+}
+
+fn cmd_migrate(sub: MigrateSub) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()?;
+    match sub {
+        MigrateSub::Openclaw { sub } => match sub {
+            OpenclawMigrateSub::Preview { source_dir } => {
+                let body = serde_json::json!({
+                    "source_dir": source_dir,
+                });
+                let resp = client
+                    .post(format!("{}/api/migrate/openclaw/preview", base))
+                    .json(&body)
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                let j: serde_json::Value = resp.json()?;
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            }
+            OpenclawMigrateSub::Apply {
+                source_dir,
+                dry_run,
+            } => {
+                let body = serde_json::json!({
+                    "source_dir": source_dir,
+                    "dry_run": dry_run,
+                });
+                let resp = client
+                    .post(format!("{}/api/migrate/openclaw/apply", base))
+                    .json(&body)
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                let j: serde_json::Value = resp.json()?;
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            }
+        },
+    }
+    Ok(())
 }
 
 fn cmd_router(sub: RouterSub) -> anyhow::Result<()> {
@@ -509,6 +1361,148 @@ fn daemon_base_url() -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
+fn cmd_toolset(sub: ToolsetSub) -> anyhow::Result<()> {
+    let data_dir = akasha_data_dir();
+    let tp = data_dir.join("tools_policy.yaml");
+    match sub {
+        ToolsetSub::Profiles => {
+            if !tp.exists() {
+                println!("(no {})", tp.display());
+                return Ok(());
+            }
+            let raw = std::fs::read_to_string(&tp)?;
+            let v: serde_yaml::Value = serde_yaml::from_str(&raw)?;
+            let def = v
+                .get("default_profile")
+                .and_then(|x| x.as_str())
+                .unwrap_or("(none)");
+            println!("default_profile: {}", def);
+            if let Some(m) = v.get("tool_profiles").and_then(|x| x.as_mapping()) {
+                println!("tool_profiles ({}):", m.len());
+                for k in m.keys() {
+                    if let Some(name) = k.as_str() {
+                        println!("  - {}", name);
+                    }
+                }
+            } else {
+                println!("tool_profiles: (none)");
+            }
+        }
+        ToolsetSub::Effective => {
+            let client = reqwest::blocking::Client::new();
+            let base = daemon_base_url();
+            let resp = client
+                .get(format!("{}/api/tools/effective", base))
+                .timeout(std::time::Duration::from_secs(8))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Daemon error: {}", resp.status());
+            }
+            let j: serde_json::Value = resp.json()?;
+            println!("{}", serde_json::to_string_pretty(&j)?);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_worktree(sub: WorktreeSub) -> anyhow::Result<()> {
+    match sub {
+        WorktreeSub::List { repo } => {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["worktree", "list"])
+                .output()?;
+            if !out.status.success() {
+                anyhow::bail!(
+                    "git worktree list failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+        }
+        WorktreeSub::Add { repo, branch, path } => {
+            let st = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .arg("worktree")
+                .arg("add")
+                .arg(&path)
+                .arg(&branch)
+                .status()?;
+            if !st.success() {
+                anyhow::bail!("git worktree add failed (status {:?})", st.code());
+            }
+            println!("Worktree added at {}", path.display());
+        }
+        WorktreeSub::Remove { repo, path } => {
+            let st = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .arg("worktree")
+                .arg("remove")
+                .arg(&path)
+                .status()?;
+            if !st.success() {
+                anyhow::bail!("git worktree remove failed (status {:?})", st.code());
+            }
+            println!("Worktree removed: {}", path.display());
+        }
+        WorktreeSub::Doctor { repo } => {
+            let top = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "--show-toplevel"])
+                .output()?;
+            if !top.status.success() {
+                anyhow::bail!(
+                    "git rev-parse failed: {}",
+                    String::from_utf8_lossy(&top.stderr)
+                );
+            }
+            let top_s = String::from_utf8_lossy(&top.stdout).trim().to_string();
+            println!("repo_root: {}", top_s);
+
+            let branch = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()?;
+            if branch.status.success() {
+                println!("branch: {}", String::from_utf8_lossy(&branch.stdout).trim());
+            }
+
+            let porcelain = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["status", "--porcelain"])
+                .output()?;
+            if porcelain.status.success() {
+                let dirty = !String::from_utf8_lossy(&porcelain.stdout).trim().is_empty();
+                println!("worktree_clean: {}", if dirty { "false" } else { "true" });
+            }
+
+            let wt = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["worktree", "list"])
+                .output()?;
+            if wt.status.success() {
+                let wt_text = String::from_utf8_lossy(&wt.stdout).to_string();
+                let lines: Vec<&str> = wt_text
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .collect();
+                println!("worktree_count: {}", lines.len());
+                for line in lines {
+                    println!("  {}", line);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
     let data_dir = akasha_data_dir();
     let plugins_dir = data_dir.join("plugins");
@@ -517,6 +1511,17 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
     let base = daemon_base_url();
 
     match sub {
+        PluginSub::Metrics => {
+            let resp = client
+                .get(format!("{}/api/plugins/metrics", base))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Daemon error: {}", resp.status());
+            }
+            let j: serde_json::Value = resp.json()?;
+            println!("{}", serde_json::to_string_pretty(&j)?);
+        }
         PluginSub::List => {
             let resp = client
                 .get(format!("{}/api/plugins", base))
@@ -551,7 +1556,40 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
             }
             println!("Plugins reloaded.");
         }
-        PluginSub::Install { path } => {
+        PluginSub::Install { catalog, path } => {
+            if let Some(id) = catalog {
+                if path.is_some() {
+                    anyhow::bail!("Use either --catalog <id> or a local path, not both");
+                }
+                let resp = client
+                    .post(format!("{}/api/plugins/install", base))
+                    .json(&serde_json::json!({ "id": id }))
+                    .timeout(std::time::Duration::from_secs(120))
+                    .send()?;
+                let status = resp.status();
+                let j: serde_json::Value = resp.json().unwrap_or(serde_json::json!({}));
+                if !status.is_success() {
+                    let err = j
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("install failed");
+                    anyhow::bail!("Catalog install failed: {}", err);
+                }
+                let installed = j.get("id").and_then(|v| v.as_str()).unwrap_or(&id);
+                println!(
+                    "Installed plugin {} from catalog.",
+                    installed
+                );
+                if let Some(msg) = j.get("message").and_then(|v| v.as_str()) {
+                    println!("{}", msg);
+                }
+                return Ok(());
+            }
+            let Some(path) = path else {
+                anyhow::bail!(
+                    "Provide --catalog <id> or a local directory path (manifest.toml + plugin.wasm)"
+                );
+            };
             if !path.is_dir() {
                 anyhow::bail!(
                     "Install path must be a directory containing manifest.toml and plugin.wasm"
@@ -565,7 +1603,7 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
                 })?;
             let manifest = akasha_plugin_api::PluginManifest::load_from_path(&manifest_path)
                 .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
-            if !is_safe_plugin_id(&manifest.id) {
+            if !akasha_plugin_api::is_safe_plugin_id(&manifest.id) {
                 anyhow::bail!(
                     "Invalid plugin id '{}': expected only [A-Za-z0-9_-], no path separators",
                     manifest.id
@@ -631,21 +1669,6 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn is_safe_plugin_id(id: &str) -> bool {
-    if id.is_empty() || id == "." || id == ".." {
-        return false;
-    }
-    if !id
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return false;
-    }
-    use std::path::Component;
-    let mut comps = std::path::Path::new(id).components();
-    matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
 }
 
 fn cmd_vault(sub: VaultSub) -> anyhow::Result<()> {
@@ -1067,6 +2090,78 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
             println!("Services arrêtés.");
             Ok(())
         }
+        ServicesSub::Logs {
+            service,
+            tail,
+            compose_dir,
+        } => {
+            let compose_dir = find_models_compose_dir(compose_dir.as_ref()).ok_or_else(|| {
+                anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
+            })?;
+            let compose_file = compose_dir.join("docker-compose.yml");
+            let cf = compose_file.to_str().ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            let out = Command::new("docker")
+                .args([
+                    "compose",
+                    "-f",
+                    cf,
+                    "logs",
+                    "--tail",
+                    &tail.to_string(),
+                    &service,
+                ])
+                .current_dir(&compose_dir)
+                .output()?;
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            if !out.stderr.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&out.stderr));
+            }
+            if !out.status.success() {
+                anyhow::bail!("docker compose logs failed: {}", out.status);
+            }
+            Ok(())
+        }
+        ServicesSub::Restart { service, compose_dir } => {
+            let compose_dir = find_models_compose_dir(compose_dir.as_ref()).ok_or_else(|| {
+                anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
+            })?;
+            let compose_file = compose_dir.join("docker-compose.yml");
+            let cf = compose_file.to_str().ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            let out = Command::new("docker")
+                .args(["compose", "-f", cf, "restart", &service])
+                .current_dir(&compose_dir)
+                .output()?;
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            if !out.stderr.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&out.stderr));
+            }
+            if !out.status.success() {
+                anyhow::bail!("docker compose restart failed: {}", out.status);
+            }
+            println!("Service {} redémarré.", service);
+            Ok(())
+        }
+        ServicesSub::Doctor { compose_dir } => {
+            let compose_dir = find_models_compose_dir(compose_dir.as_ref()).ok_or_else(|| {
+                anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
+            })?;
+            let compose_file = compose_dir.join("docker-compose.yml");
+            let cf = compose_file.to_str().ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            println!("Compose: {}", compose_dir.display());
+            let out = Command::new("docker")
+                .args(["compose", "-f", cf, "ps", "-a"])
+                .current_dir(&compose_dir)
+                .output()?;
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            if !out.stderr.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&out.stderr));
+            }
+            println!("\nIndices santé (si ports par défaut) :");
+            println!("  • Ollama: GET http://127.0.0.1:11434/api/tags");
+            println!("  • BitNet (Rbitnet): GET http://127.0.0.1:8080/v1/models (selon compose)");
+            println!("  • Voice TTS/STT: ports 8765 / 8766 selon akasha-models");
+            Ok(())
+        }
     }
 }
 
@@ -1486,6 +2581,26 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir)?;
     match sub {
         ConfigSub::Paths => unreachable!(),
+        ConfigSub::Validate => {
+            let path = llm_router_path();
+            if path.exists() {
+                akasha_llm::RoutingConfig::load_from_path(&path)
+                    .map_err(|e| anyhow::anyhow!("llm_router.yaml: {}", e))?;
+                println!("OK: {}", path.display());
+            } else {
+                println!("Skip (missing): {}", path.display());
+            }
+            let tp = data_dir.join("tools_policy.yaml");
+            if tp.exists() {
+                akasha_tools::ToolsPolicy::load_from_path(&tp)
+                    .map_err(|e| anyhow::anyhow!("tools_policy.yaml: {}", e))?;
+                println!("OK: {}", tp.display());
+            } else {
+                println!("Skip (missing): {}", tp.display());
+            }
+            println!("akasha config validate: done.");
+            return Ok(());
+        }
         ConfigSub::Models { sub: models_sub } => {
             let path = llm_router_path();
             if !path.exists() {
@@ -1941,7 +3056,7 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
                     || apply.eq_ignore_ascii_case("o")
                     || apply.eq_ignore_ascii_case("y")
                 {
-                    let fixes = run_doctor_fixes(&data_dir)?;
+                    let fixes = run_doctor_fixes(&data_dir, false)?;
                     if !fixes.is_empty() {
                         println!("\nFichiers créés ou réparés :");
                         for f in &fixes {
@@ -2418,7 +3533,8 @@ command_timeout_secs: 60
     // --- 5. RAG / Memory ---
     println!("\n--- RAG & Memory ---");
     println!("  RAG : le dossier spec/ (et spec/runbooks/) du projet est utilisé par défaut.");
-    println!("  Memory : non configuré en MVP (à venir).");
+    println!("  Memory : configurez via l'assistant de premier lancement (OnboardingWizard Tauri),");
+    println!("           `akasha doctor --fix`, ou le profil mémoire dans Paramètres avancés Tauri.");
 
     // --- 5b. Services Docker (optionnel) ---
     if !use_defaults {
@@ -2793,8 +3909,9 @@ fn embedded_tools_policy_example_value(data_dir: &Path) -> anyhow::Result<serde_
 
 /// Apply fixes for missing or minimal config when `akasha doctor --fix` is run.
 /// Templates are embedded at compile time (`embedded_spec`); user values are preserved via merge.
+/// When `encrypt_memory` is true, sets `AKASHA_MEMORY_ENCRYPT=1` in akasha.env (foundation for field-at-rest encryption).
 /// Returns a list of messages describing what was fixed.
-fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
+fn run_doctor_fixes(data_dir: &Path, encrypt_memory: bool) -> anyhow::Result<Vec<String>> {
     let mut fixes = Vec::new();
 
     if !data_dir.exists() {
@@ -2938,6 +4055,35 @@ OLLAMA_HOST=http://localhost:11434
             &mut fixes,
         )?;
     }
+    let memory_encrypt_requested = encrypt_memory
+        || std::env::var("AKASHA_MEMORY_ENCRYPT")
+            .ok()
+            .as_deref()
+            == Some("1");
+    if memory_encrypt_requested {
+        doctor_fix_env_file(
+            &akasha_env_path,
+            "akasha.env",
+            &["AKASHA_MEMORY_ENCRYPT"],
+            "# Memory encryption foundation (S-MEM-05): field-at-rest path — SQLCipher memory.db OR per-row content+embedding AES-GCM (see spec/dev/roadmap/memory_encryption_rfc.md). Full SQLCipher integration is deferred pending bench.",
+            &mut fixes,
+        )?;
+        let env_content = std::fs::read_to_string(&akasha_env_path).unwrap_or_default();
+        let (env_map, _) = parse_env_file_content(&env_content);
+        if env_map.get("AKASHA_MEMORY_ENCRYPT").map(String::as_str) != Some("1") {
+            let mut out = env_content.trim_end().to_string();
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str("# Field-at-rest encryption spike: scripts/bench-memory-encryption.ps1\n");
+            out.push_str("AKASHA_MEMORY_ENCRYPT=1\n");
+            std::fs::write(&akasha_env_path, out)?;
+            fixes.push("akasha.env: set AKASHA_MEMORY_ENCRYPT=1.".to_string());
+        }
+        fixes.push(
+            "Memory encryption foundation enabled: AKASHA_MEMORY_ENCRYPT=1 (field-at-rest path documented in memory_encryption_rfc.md; run scripts/bench-memory-encryption.ps1 for SQLCipher spike steps).".to_string(),
+        );
+    }
 
     let agent_profile_path = data_dir.join("agent_profile.json");
     {
@@ -3051,7 +4197,7 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
     out
 }
 
-fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
+fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyhow::Result<()> {
     let port: u16 = std::env::var("AKASHA_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -3063,7 +4209,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
 
     let data_dir = akasha_data_dir();
     if fix {
-        let fixes = run_doctor_fixes(&data_dir)?;
+        let fixes = run_doctor_fixes(&data_dir, encrypt_memory)?;
         if !json && !fixes.is_empty() {
             println!("--fix applied:");
             for msg in &fixes {
@@ -3133,6 +4279,99 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
 
     // Config file checks (existence + valid format)
     checks.extend(run_config_checks(&data_dir));
+
+    // Auto-triage: when daemon is up, sample LLM router summary + task queue depth.
+    if daemon_healthy {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build();
+        if let Ok(client) = client {
+            if let Ok(resp) = client
+                .get(format!("http://127.0.0.1:{}/api/metrics/summary", port))
+                .send()
+            {
+                if resp.status().is_success() {
+                    if let Ok(summary) = resp.json::<serde_json::Value>() {
+                        let mut total_fb: u64 = 0;
+                        let mut total_req: u64 = 0;
+                        let mut total_fail: u64 = 0;
+                        if let Some(obj) = summary.as_object() {
+                            for (_k, v) in obj {
+                                if let Some(m) = v.as_object() {
+                                    total_fb += m
+                                        .get("fallback_triggered")
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0);
+                                    total_req += m
+                                        .get("total_requests")
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0);
+                                    total_fail += m
+                                        .get("failed_requests")
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0);
+                                }
+                            }
+                        }
+                        let fb_rate = if total_req > 0 {
+                            total_fb as f64 / total_req as f64
+                        } else {
+                            0.0
+                        };
+                        let fail_rate = if total_req > 0 {
+                            total_fail as f64 / total_req as f64
+                        } else {
+                            0.0
+                        };
+                        let fb_ok = !(total_req >= 10 && fb_rate > 0.25);
+                        checks.push((
+                            "triage_router_fallback".to_string(),
+                            fb_ok,
+                            format!(
+                                "Router fallback ratio ≈ {:.2} ({} triggers / {} reqs; warn if >0.25 with ≥10 reqs)",
+                                fb_rate, total_fb, total_req
+                            ),
+                        ));
+                        let fail_ok = !(total_req >= 10 && fail_rate > 0.20);
+                        checks.push((
+                            "triage_llm_failures".to_string(),
+                            fail_ok,
+                            format!(
+                                "LLM failure ratio ≈ {:.2} ({} failed / {} reqs; warn if >0.20 with ≥10 reqs)",
+                                fail_rate, total_fail, total_req
+                            ),
+                        ));
+                    }
+                }
+            }
+            if let Ok(resp) = client
+                .get(format!("http://127.0.0.1:{}/api/metrics", port))
+                .send()
+            {
+                if resp.status().is_success() {
+                    if let Ok(j) = resp.json::<serde_json::Value>() {
+                        let pending = j
+                            .pointer("/tasks/pending")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        let running = j
+                            .pointer("/tasks/running")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        let queue_ok = pending < 80 && running < 40;
+                        checks.push((
+                            "triage_task_queue".to_string(),
+                            queue_ok,
+                            format!(
+                                "Task queue depth pending={} running={} (warn if pending≥80 or running≥40)",
+                                pending, running
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     let all_ok = checks.iter().all(|(_, ok, _)| *ok);
 
@@ -3388,7 +4627,7 @@ mod tests {
     fn doctor_fix_creates_missing_akasha_env() {
         let data_dir = make_temp_dir("doctor-fix-env");
 
-        let fixes = run_doctor_fixes(&data_dir).unwrap();
+        let fixes = run_doctor_fixes(&data_dir, false).unwrap();
         let akasha_env_path = data_dir.join("akasha.env");
         let akasha_env = std::fs::read_to_string(&akasha_env_path).unwrap();
         let akasha_env_check = run_config_checks(&data_dir)
@@ -3414,7 +4653,7 @@ mod tests {
         )
         .unwrap();
 
-        let fixes = run_doctor_fixes(&data_dir).expect("doctor --fix");
+        let fixes = run_doctor_fixes(&data_dir, false).expect("doctor --fix");
         assert!(fixes.iter().any(|m| m.contains("llm_router.yaml")));
         let cfg =
             akasha_llm::RoutingConfig::load_from_path(&data_dir.join("llm_router.yaml")).unwrap();

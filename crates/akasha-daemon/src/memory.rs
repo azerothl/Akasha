@@ -76,9 +76,47 @@ impl ShortTermStore {
         *g.entry(session_id.to_string()).or_insert(0) += 1;
     }
 
-    /// Rough token estimate (chars / 4).
+    /// Reset compaction counter (continuous session mode — avoid forcing a new session).
+    pub async fn reset_compaction_count(&self, session_id: &str) {
+        let mut g = self.compaction_count.write().await;
+        g.insert(session_id.to_string(), 0);
+    }
+
+    /// Rough token estimate (chars / 4) — legacy default when provider/model unknown.
     pub fn estimate_tokens(s: &str) -> usize {
-        s.chars().count().max(1) / 4
+        Self::estimate_tokens_calibrated("default", "default", s)
+    }
+
+    /// Heuristic chars-per-token by provider/model family (calibrated heuristic; better than chars/4 alone).
+    pub fn chars_per_token_hint(provider: &str, model: &str) -> f64 {
+        let p = provider.to_ascii_lowercase();
+        let m = model.to_ascii_lowercase();
+        if p.contains("anthropic") || m.contains("claude") {
+            return 3.5;
+        }
+        if p.contains("google") || m.contains("gemini") {
+            return 3.8;
+        }
+        if p.contains("openai") || m.contains("gpt-4") || m.contains("gpt-5") || m.contains("o1") || m.contains("o3") {
+            return 3.9;
+        }
+        if m.contains("gpt-3.5") {
+            return 4.2;
+        }
+        if p == "ollama" || p.contains("llama") || m.contains("llama") || m.contains("mistral") || m.contains("qwen") {
+            return 3.6;
+        }
+        if p == "akasha_embedded" || p == "akasha_core" {
+            return 3.5;
+        }
+        4.0
+    }
+
+    /// Token estimate using [`chars_per_token_hint`](Self::chars_per_token_hint).
+    pub fn estimate_tokens_calibrated(provider: &str, model: &str, s: &str) -> usize {
+        let c = s.chars().count().max(1) as f64;
+        let div = Self::chars_per_token_hint(provider, model).max(1.0);
+        (c / div).ceil() as usize
     }
 
     pub async fn get_turns(&self, session_id: &str) -> Vec<ConversationTurn> {
@@ -172,6 +210,15 @@ impl ShortTermStore {
     /// Total estimated tokens for a list of turns.
     pub fn turns_tokens(turns: &[ConversationTurn]) -> usize {
         turns.iter().map(|t| Self::estimate_tokens(&t.content)).sum()
+    }
+
+    /// Total estimated tokens with provider/model calibration (used for compaction triggers).
+    pub fn turns_tokens_calibrated(provider: &str, model: &str, turns: &[ConversationTurn]) -> usize {
+        let chars_per_token_hint = Self::chars_per_token_hint(provider, model).max(1.0);
+        turns
+            .iter()
+            .map(|t| ((t.content.chars().count().max(1) as f64) / chars_per_token_hint).ceil() as usize)
+            .sum()
     }
 
     /// Build context string from turns for the LLM prompt (oldest first).

@@ -1,5 +1,14 @@
 //! Task prompt (layer 3) and role prompt helpers (Plan: Architecture agents et pipeline — Phase 7).
 
+/// Calendar date block injected into chat context so time-sensitive requests use the real "today".
+pub fn current_date_context_block(now: chrono::DateTime<chrono::Local>) -> String {
+    format!(
+        "[Current date]\nToday is {} ({}). Use this calendar date for time-sensitive questions (latest news, \"today\", \"this week\", deadlines); do not assume an outdated or fictional date.\n\n",
+        now.format("%Y-%m-%d"),
+        now.format("%A"),
+    )
+}
+
 /// Builds the task prompt (layer 3): objective, optional context, success criteria, and required output format.
 /// Prepended to the agent message so the agent receives a structured instruction.
 pub fn build_task_prompt(
@@ -175,6 +184,15 @@ mod tests {
         assert!(s.contains("[Orchestrated — disk deliverables REQUIRED]"));
         assert!(s.contains("write_file"));
         assert!(s.contains(ORCHESTRATOR_DELIVERABLES_TOOL_HINT));
+    }
+
+    #[test]
+    fn current_date_context_block_includes_iso_date() {
+        use chrono::TimeZone;
+        let now = chrono::Local.with_ymd_and_hms(2026, 6, 5, 12, 0, 0).unwrap();
+        let block = super::current_date_context_block(now);
+        assert!(block.contains("2026-06-05"));
+        assert!(block.contains("[Current date]"));
     }
 
     #[test]

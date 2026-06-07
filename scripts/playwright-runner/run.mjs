@@ -2,7 +2,7 @@
 /**
  * Akasha browser automation runner (spec 39).
  * Reads JSON commands from stdin (one per line), executes via Playwright, writes JSON result to stdout.
- * Commands: init, navigate, snapshot, close.
+ * Commands: init, navigate, snapshot, click, fill, wait, screenshot, close.
  * Usage: node run.mjs [--headless]  (default headless=true)
  */
 
@@ -26,6 +26,19 @@ let page = null;
 
 function send(obj) {
   console.log(JSON.stringify(obj));
+}
+
+function formatPlaywrightError(e, action, timeoutSecs) {
+  const msg = e?.message || String(e);
+  const looksLikeTimeout = /timed out|timeout/i.test(msg);
+  const looksLikeMissingBrowser = /Executable doesn't exist|browserType\.launch|playwright install/i.test(msg);
+  if (looksLikeMissingBrowser) {
+    return `${action}: Playwright browser is not installed. Run "npx playwright install chromium" (or use install_playwright in Akasha tools).`;
+  }
+  if (looksLikeTimeout) {
+    return `${action}: timed out after ${timeoutSecs}s. Retry with a higher timeout_secs. If browser binaries are missing, run "npx playwright install chromium" (install_playwright).`;
+  }
+  return msg;
 }
 
 async function handleInit(params = {}) {
@@ -58,16 +71,18 @@ async function handleNavigate(params) {
   }
   try {
     const url = params.url || '';
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      send({ ok: false, error: 'Only http and https URLs are allowed.' });
+    const allowHttp = !!params.allow_http;
+    if (!url.startsWith('https://') && !(allowHttp && url.startsWith('http://'))) {
+      send({ ok: false, error: allowHttp ? 'Invalid URL: expected http(s) URL.' : 'Domain policy: only https URLs are allowed by default (set allow_http=true only for trusted local/test domains).' });
       return;
     }
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: (params.timeout_secs || 30) * 1000 });
+    const timeoutSecs = params.timeout_secs ?? 30;
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutSecs * 1000 });
     const title = await page.title();
     const status = response ? response.status() : 0;
     send({ ok: true, result: { title, status: status, url: page.url() } });
   } catch (e) {
-    send({ ok: false, error: e.message || String(e) });
+    send({ ok: false, error: formatPlaywrightError(e, 'navigate', params.timeout_secs ?? 30) });
   }
 }
 
@@ -98,6 +113,85 @@ async function handleSnapshot() {
       return as.slice(0, 100).map(a => ({ href: a.href, text: (a.textContent || '').trim().slice(0, 80) }));
     });
     send({ ok: true, result: { text: text.slice(0, 100000), links } });
+  } catch (e) {
+    send({ ok: false, error: formatPlaywrightError(e, 'snapshot', 30) });
+  }
+}
+
+async function handleClick(params) {
+  if (!page) {
+    send({ ok: false, error: 'Browser not initialized; send init first.' });
+    return;
+  }
+  try {
+    const sel = (params && params.selector) || '';
+    if (!sel) {
+      send({ ok: false, error: 'click requires params.selector (CSS selector)' });
+      return;
+    }
+    const timeout = (params.timeout_secs ?? 30) * 1000;
+    await page.click(sel, { timeout });
+    send({ ok: true, result: { clicked: true, selector: sel } });
+  } catch (e) {
+    send({ ok: false, error: formatPlaywrightError(e, 'click', params.timeout_secs ?? 30) });
+  }
+}
+
+async function handleFill(params) {
+  if (!page) {
+    send({ ok: false, error: 'Browser not initialized; send init first.' });
+    return;
+  }
+  try {
+    const sel = (params && params.selector) || '';
+    const value = (params && params.value) != null ? String(params.value) : '';
+    if (!sel) {
+      send({ ok: false, error: 'fill requires params.selector' });
+      return;
+    }
+    const timeout = (params.timeout_secs ?? 30) * 1000;
+    await page.fill(sel, value, { timeout });
+    send({ ok: true, result: { filled: true, selector: sel } });
+  } catch (e) {
+    send({ ok: false, error: formatPlaywrightError(e, 'fill', params.timeout_secs ?? 30) });
+  }
+}
+
+async function handleWait(params) {
+  if (!page) {
+    send({ ok: false, error: 'Browser not initialized; send init first.' });
+    return;
+  }
+  try {
+    const ms = params && params.milliseconds;
+    const sel = params && params.selector;
+    if (typeof ms === 'number' && ms >= 0 && !sel) {
+      const capped = Math.min(ms, 120000);
+      await new Promise((r) => setTimeout(r, capped));
+      send({ ok: true, result: { waited_ms: capped } });
+      return;
+    }
+    if (!sel || typeof sel !== 'string') {
+      send({ ok: false, error: 'wait requires params.selector (string) or params.milliseconds (number)' });
+      return;
+    }
+    const timeout = (params.timeout_secs ?? 30) * 1000;
+    await page.waitForSelector(sel, { timeout });
+    send({ ok: true, result: { waited: true, selector: sel } });
+  } catch (e) {
+    send({ ok: false, error: e.message || String(e) });
+  }
+}
+
+async function handleScreenshot(params) {
+  if (!page) {
+    send({ ok: false, error: 'Browser not initialized; send init first.' });
+    return;
+  }
+  try {
+    const fullPage = !!(params && params.full_page);
+    const buf = await page.screenshot({ type: 'png', fullPage });
+    send({ ok: true, result: { format: 'png', data_base64: buf.toString('base64') } });
   } catch (e) {
     send({ ok: false, error: e.message || String(e) });
   }
@@ -136,6 +230,18 @@ async function dispatch(line) {
       break;
     case 'snapshot':
       await handleSnapshot();
+      break;
+    case 'click':
+      await handleClick(params);
+      break;
+    case 'fill':
+      await handleFill(params);
+      break;
+    case 'wait':
+      await handleWait(params);
+      break;
+    case 'screenshot':
+      await handleScreenshot(params);
       break;
     case 'close':
       await handleClose();

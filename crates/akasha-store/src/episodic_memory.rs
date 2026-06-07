@@ -31,6 +31,7 @@ pub struct EpisodicFilter {
     pub entity_id: Option<String>,
     pub process_id: Option<String>,
     pub session_id: Option<String>,
+    pub task_id: Option<String>,
     pub scope: Option<String>,
     pub event_type: Option<String>,
     pub min_importance: Option<i64>,
@@ -122,6 +123,10 @@ impl EpisodicStore {
         if let Some(ref s) = filter.session_id {
             conditions.push("session_id = ?");
             params.push(Box::new(s.clone()));
+        }
+        if let Some(ref t) = filter.task_id {
+            conditions.push("task_id = ?");
+            params.push(Box::new(t.clone()));
         }
         if let Some(ref sc) = filter.scope {
             conditions.push("scope = ?");

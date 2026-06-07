@@ -13,15 +13,105 @@ use futures_util::future::Either;
 use tracing::{error, info, warn, Instrument};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask, TaskPersistenceMsg};
-use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
+use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_steering_queue_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
 use crate::studio::new_studio_disk_root_registry;
+use crate::studio_worktree::new_studio_worktree_registry;
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
 use crate::latency::env_usize;
+use akasha_store::TaskStatus;
+use uuid::Uuid;
 
 const HEALTHCHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 3876;
+
+// #region agent log
+fn agent_debug_log_daemon(location: &str, message: &str, hypothesis_id: &str, data: serde_json::Value) {
+    let payload = serde_json::json!({
+        "sessionId": "0d82aa",
+        "timestamp": chrono::Utc::now().timestamp_millis(),
+        "location": location,
+        "message": message,
+        "hypothesisId": hypothesis_id,
+        "data": data,
+    });
+    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-0d82aa.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", payload);
+    }
+}
+// #endregion
+
+fn is_recoverable_direct_agent(agent: &str) -> bool {
+    // Only re-queue lightweight chat tasks — not studio/orchestrator specialists (would flood conv_rx).
+    agent == "conversation" || agent == "llm"
+}
+
+/// Fail stale pending/running chat tasks after daemon restart (in-memory conv queue is lost).
+fn recover_orphaned_conversation_tasks(store_path: PathBuf) {
+    tokio::spawn(async move {
+        let Ok(store) = TaskStore::open(store_path.as_path()) else {
+            return;
+        };
+        let Ok(candidates) = store.get_pending_or_running() else {
+            return;
+        };
+        let stale_fail_age = chrono::Duration::minutes(5);
+        let now = chrono::Utc::now();
+        for task in candidates {
+            if task.parent_task_id.is_some() || !is_recoverable_direct_agent(&task.assigned_agent) {
+                continue;
+            }
+            let age = now.signed_duration_since(task.created_at);
+            if age <= stale_fail_age {
+                continue;
+            }
+            let _ = store.update_status(task.id, TaskStatus::Failed);
+            let _ = store.insert_event(
+                task.id,
+                "task_failed",
+                Some(&serde_json::json!({
+                    "reason": "stale_pending_on_startup",
+                    "message": "Tâche interrompue (daemon redémarré). Renvoyez votre message."
+                })),
+                &now.to_rfc3339(),
+            );
+            // #region agent log
+            agent_debug_log_daemon(
+                "daemon.rs:recover_orphaned",
+                "fail_stale_pending_task",
+                "D",
+                serde_json::json!({ "task_id": task.id.to_string(), "age_secs": age.num_seconds() }),
+            );
+            // #endregion
+        }
+    });
+}
+
+fn fail_task_on_worker_slot_timeout(
+    store_path: &std::path::Path,
+    task_id: Uuid,
+    reason: &str,
+) {
+    if let Ok(store) = TaskStore::open(store_path) {
+        let _ = store.update_status(task_id, TaskStatus::Failed);
+        let _ = store.insert_event(
+            task_id,
+            "task_failed",
+            Some(&serde_json::json!({
+                "reason": reason,
+                "message": "Trop de tâches en parallèle — réessayez dans quelques instants."
+            })),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+    }
+}
 
 fn bind_loopback_listener(port: u16) -> std::io::Result<TcpListener> {
     let addr = format!("127.0.0.1:{port}").parse().map_err(|e| {
@@ -66,6 +156,29 @@ fn log_bind_port_failure(port: u16, err: &std::io::Error) {
     );
 }
 
+fn log_upgrade_heritage_reminder(data_dir: &std::path::Path) {
+    let marker = data_dir.join(".daemon-version");
+    let current = env!("CARGO_PKG_VERSION");
+    match std::fs::read_to_string(&marker) {
+        Ok(prev) => {
+            let prev_trimmed = prev.trim();
+            if !prev_trimmed.is_empty() && prev_trimmed != current {
+                info!(
+                    previous_version = prev_trimmed,
+                    current_version = current,
+                    "Daemon version changed; heritage reminder: review migrations and memory continuity notes."
+                );
+            }
+        }
+        Err(_) => {
+            // First run or marker missing: nothing to compare.
+        }
+    }
+    if let Err(e) = std::fs::write(&marker, format!("{current}\n")) {
+        warn!(error = %e, path = %marker.display(), "Failed to persist daemon version marker");
+    }
+}
+
 /// Outcome of a daemon run. Used so that main can exit with the right code (e.g. 85 for restart).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
@@ -95,6 +208,7 @@ impl Daemon {
 
     /// Run the daemon (blocks until shutdown)
     pub async fn run(&self) -> anyhow::Result<RunOutcome> {
+        log_upgrade_heritage_reminder(&self.data_dir);
         // Load specs at startup
         match load_specs(&self.spec_dir) {
             Ok(specs) => {
@@ -166,8 +280,20 @@ impl Daemon {
                 return Err(e.into());
             }
         };
+        let plugin_state = match crate::plugins::PluginStateStore::open(&self.data_dir) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                warn!(error = %e, "Plugin state store open failed");
+                return Err(e.into());
+            }
+        };
         let plugins_dir = self.data_dir.join("plugins");
-        let plugin_registry = Arc::new(crate::plugins::PluginRegistry::new(plugins_dir, reputation, trust_store));
+        let plugin_registry = Arc::new(crate::plugins::PluginRegistry::new(
+            plugins_dir,
+            reputation,
+            plugin_state,
+            trust_store,
+        ));
         plugin_registry.load_all();
 
         // Phase 6: LLM Router (task classifier, providers, fallback, degraded mode)
@@ -509,7 +635,7 @@ impl Daemon {
                 match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
                     Ok(mut policy) => {
                         if let Ok(v) = &vault {
-                            policy.brave_api_key = v.get("brave_api_key").ok();
+                            policy.apply_vault_api_keys(|k| v.get(k).ok());
                         }
                         policy.workspace_root = Some(self.data_dir.clone());
                         Some(Arc::new(tokio::sync::RwLock::new(Arc::new(
@@ -549,12 +675,15 @@ impl Daemon {
             let device_bridge = std::sync::Arc::new(crate::device_bridge::DeviceBridge::new());
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
+            let steering_queue = new_steering_queue_store();
             let workspace_store = new_task_workspace_store();
             let studio_disk_registry = new_studio_disk_root_registry();
+            let studio_worktree_registry = new_studio_worktree_registry();
             let browser_registry: crate::browser::BrowserSessionRegistry =
                 Arc::new(RwLock::new(std::collections::HashMap::new()));
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
+            let notes_store = crate::notes::NotesStore::new_shared(&data_dir);
             let autonomous_mission = match crate::autonomous_mission_config::load_and_sync_db(data_dir, db_path.as_path()) {
                 Ok(c) => Some(c),
                 Err(e) => {
@@ -630,6 +759,16 @@ impl Daemon {
                     info!(path = %memory_db_path.display(), "Long-term memory actor started");
                     client
                 });
+            if let Some(ref lt) = long_term_client {
+                crate::memory_hygiene::spawn_scheduler(Some(lt.clone()), Some(llm_router.clone()));
+                crate::memory_agent_identity::bootstrap_agent_identity(&data_dir, Some(lt));
+            }
+            if long_term_client.is_some() {
+                crate::memory_fact_extract::init_fact_extract_worker(
+                    llm_router.clone(),
+                    memory_db_path.clone(),
+                );
+            }
             if long_term_client.is_some() {
                 let st_dir = short_term_dir.clone();
                 let router = llm_router.clone();
@@ -679,6 +818,8 @@ impl Daemon {
                 let progress = progress.clone();
                 let task_completion = task_completion.clone();
                 let delegation_sem = delegation_sem.clone();
+                let studio_disk_registry = studio_disk_registry.clone();
+                let studio_worktree_registry = studio_worktree_registry.clone();
                 async move {
                     run_delegation_handler(
                         delegation_rx,
@@ -688,6 +829,8 @@ impl Daemon {
                         progress,
                         task_completion,
                         delegation_sem,
+                        studio_disk_registry,
+                        studio_worktree_registry,
                     )
                     .await;
                 }
@@ -751,8 +894,21 @@ impl Daemon {
                 let delegation_tx = delegation_tx.clone();
                 let autonomous_mission_worker = autonomous_mission.clone();
                 let studio_disk_registry = studio_disk_registry.clone();
+                let studio_worktree_registry = studio_worktree_registry.clone();
+                let steering_queue = steering_queue.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
+                        // #region agent log
+                        agent_debug_log_daemon(
+                            "daemon.rs:conv_worker",
+                            "conv_worker_dequeued",
+                            "D",
+                            serde_json::json!({
+                                "task_id": task.task_id.to_string(),
+                                "session_id": task.session_id,
+                            }),
+                        );
+                        // #endregion
                         // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
                         // Phase 2 AI OS: skip if task was paused.
                         if let Ok(store) = akasha_store::TaskStore::open(store_path.as_path()) {
@@ -784,10 +940,7 @@ impl Daemon {
                             .map(|t| t.parent_task_id.is_some())
                             .unwrap_or(false);
                         if is_subagent {
-                            let permit = match subtask_llm_sem.clone().acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
+                            let subtask_llm_sem = subtask_llm_sem.clone();
                             let bus = bus.clone();
                             let llm_router = llm_router.clone();
                             let store_path = store_path.clone();
@@ -801,6 +954,7 @@ impl Daemon {
                             let process_registry = process_registry.clone();
                             let conv_tx = conv_tx.clone();
                             let human_input_store = human_input_store.clone();
+                            let steering_queue = steering_queue.clone();
                             let task_completion = task_completion.clone();
                             let agent_profile_cache = agent_profile_cache.clone();
                             let task_usage_store = task_usage_store.clone();
@@ -809,13 +963,53 @@ impl Daemon {
                             let browser_registry = browser_registry.clone();
                             let delegation_tx = delegation_tx.clone();
                             let studio_reg = studio_disk_registry.clone();
+                            let studio_worktree_registry = studio_worktree_registry.clone();
                             let task_id = task.task_id;
                             let message = task.message;
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
                             let preferred_task_type_override = task.preferred_task_type.clone();
+                            let incognito = task.incognito;
                             let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
+                                // #region agent log
+                                agent_debug_log_daemon(
+                                    "daemon.rs:conv_worker",
+                                    "conv_worker_sem_wait_start",
+                                    "D",
+                                    serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": true }),
+                                );
+                                // #endregion
+                                let permit = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(120),
+                                    subtask_llm_sem.acquire_owned(),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(p)) => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_acquired",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": true }),
+                                        );
+                                        p
+                                    }
+                                    _ => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_timeout",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": true }),
+                                        );
+                                        fail_task_on_worker_slot_timeout(
+                                            store_path.as_path(),
+                                            task_id,
+                                            "subtask_llm_sem_timeout",
+                                        );
+                                        return;
+                                    }
+                                };
                                 run_message_via_llm(
                                     bus,
                                     llm_router,
@@ -835,6 +1029,7 @@ impl Daemon {
                                     Some(process_registry),
                                     Some(conv_tx),
                                     Some(human_input_store),
+                                    Some(steering_queue),
                                     Some(delegation_tx),
                                     Some(task_completion),
                                     Some(agent_profile_cache),
@@ -844,16 +1039,15 @@ impl Daemon {
                                     Some(browser_registry),
                                     autonomous_mission,
                                     studio_reg,
+                                    studio_worktree_registry,
+                                    incognito,
                                 )
                                 .instrument(span)
                                 .await;
                                 drop(permit);
                             });
                         } else {
-                            let permit = match root_llm_sem.clone().acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
+                            let root_llm_sem = root_llm_sem.clone();
                             let bus = bus.clone();
                             let llm_router = llm_router.clone();
                             let store_path = store_path.clone();
@@ -867,6 +1061,7 @@ impl Daemon {
                             let process_registry = process_registry.clone();
                             let conv_tx = conv_tx.clone();
                             let human_input_store = human_input_store.clone();
+                            let steering_queue = steering_queue.clone();
                             let task_completion = task_completion.clone();
                             let agent_profile_cache = agent_profile_cache.clone();
                             let task_usage_store = task_usage_store.clone();
@@ -875,13 +1070,53 @@ impl Daemon {
                             let browser_registry = browser_registry.clone();
                             let delegation_tx = delegation_tx.clone();
                             let studio_reg = studio_disk_registry.clone();
+                            let studio_worktree_registry = studio_worktree_registry.clone();
                             let task_id = task.task_id;
                             let message = task.message;
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
                             let preferred_task_type_override = task.preferred_task_type.clone();
+                            let incognito = task.incognito;
                             let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
+                                // #region agent log
+                                agent_debug_log_daemon(
+                                    "daemon.rs:conv_worker",
+                                    "conv_worker_sem_wait_start",
+                                    "D",
+                                    serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": false }),
+                                );
+                                // #endregion
+                                let permit = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(120),
+                                    root_llm_sem.acquire_owned(),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(p)) => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_acquired",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": false }),
+                                        );
+                                        p
+                                    }
+                                    _ => {
+                                        agent_debug_log_daemon(
+                                            "daemon.rs:conv_worker",
+                                            "conv_worker_sem_timeout",
+                                            "D",
+                                            serde_json::json!({ "task_id": task_id.to_string(), "is_subagent": false }),
+                                        );
+                                        fail_task_on_worker_slot_timeout(
+                                            store_path.as_path(),
+                                            task_id,
+                                            "root_llm_sem_timeout",
+                                        );
+                                        return;
+                                    }
+                                };
                                 run_message_via_llm(
                                     bus,
                                     llm_router,
@@ -901,6 +1136,7 @@ impl Daemon {
                                     Some(process_registry),
                                     Some(conv_tx),
                                     Some(human_input_store),
+                                    Some(steering_queue),
                                     Some(delegation_tx),
                                     Some(task_completion),
                                     Some(agent_profile_cache),
@@ -910,6 +1146,8 @@ impl Daemon {
                                     Some(browser_registry),
                                     autonomous_mission,
                                     studio_reg,
+                                    studio_worktree_registry,
+                                    incognito,
                                 )
                                 .instrument(span)
                                 .await;
@@ -919,6 +1157,7 @@ impl Daemon {
                     }
                 }
             });
+            recover_orphaned_conversation_tasks(db_path.clone());
             tokio::spawn({
                 let bus = bus.clone();
                 let progress = progress.clone();
@@ -972,6 +1211,16 @@ impl Daemon {
                     }
                 }
             });
+            tokio::spawn({
+                let studio_worktree_registry = studio_worktree_registry.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(900));
+                    loop {
+                        interval.tick().await;
+                        crate::studio_worktree::gc_stale_worktrees(&studio_worktree_registry, 24).await;
+                    }
+                }
+            });
 
             if let Some(ref am) = autonomous_mission {
                 let store_path = db_path.clone();
@@ -980,6 +1229,70 @@ impl Daemon {
                 let tx = normal_tx.clone();
                 tokio::spawn(async move {
                     crate::autonomous_heartbeat::run_autonomous_heartbeat(store_path, dd, cfg, tx).await;
+                });
+            }
+
+            // Event triggers: dispatch worker + subscribers + pollers.
+            {
+                let (trigger_fire_tx, trigger_fire_rx) = tokio::sync::mpsc::channel(64);
+                let trigger_dispatch =
+                    crate::event_trigger_engine::TriggerDispatch::new(trigger_fire_tx);
+                let trigger_orch_tx = normal_tx.clone();
+                crate::event_trigger_engine::init_trigger_engine(
+                    crate::event_trigger_engine::TriggerEngineHandles {
+                        store_path: db_path.clone(),
+                        dispatch: trigger_dispatch,
+                        orch_tx: trigger_orch_tx.clone(),
+                        bus: bus.clone(),
+                    },
+                );
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx.clone();
+                    let bus = bus.clone();
+                    async move {
+                        crate::event_trigger_engine::run_trigger_dispatch_worker(
+                            store_path,
+                            orch_tx,
+                            bus,
+                            trigger_fire_rx,
+                        )
+                        .await;
+                    }
+                });
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx.clone();
+                    let bus = bus.clone();
+                    async move {
+                        crate::event_trigger_engine::run_trigger_event_subscriber(
+                            store_path, orch_tx, bus,
+                        )
+                        .await;
+                    }
+                });
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx.clone();
+                    let bus = bus.clone();
+                    async move {
+                        crate::event_trigger_engine::run_filesystem_trigger_poller(
+                            store_path, orch_tx, bus,
+                        )
+                        .await;
+                    }
+                });
+                tokio::spawn({
+                    let store_path = db_path.clone();
+                    let orch_tx = trigger_orch_tx;
+                    let bus = bus.clone();
+                    let llm_router = llm_router.clone();
+                    async move {
+                        crate::event_trigger_engine::run_model_catalog_poller(
+                            store_path, orch_tx, bus, llm_router,
+                        )
+                        .await;
+                    }
                 });
             }
 
@@ -1048,9 +1361,10 @@ impl Daemon {
                         if notify_chat_id.is_some() {
                             info!("Telegram startup notification enabled (NOTIFY_CHAT_ID set)");
                         }
+                        let telegram_data_dir = self.data_dir.clone();
                         tokio::spawn(async move {
                             if let Err(e) =
-                                crate::channels::telegram::run_telegram_bot(token, daemon_url, notify_chat_id).await
+                                crate::channels::telegram::run_telegram_bot(token, daemon_url, notify_chat_id, telegram_data_dir).await
                             {
                                 warn!(error = %e, "Telegram bot failed");
                             }
@@ -1134,7 +1448,9 @@ impl Daemon {
                 let short_term = short_term.clone();
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
+                let steering_queue = steering_queue.clone();
                 let user_rag_store = user_rag_store.clone();
+                let notes_store = notes_store.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
                                 let autonomous_mission_http = autonomous_mission.clone();
@@ -1170,8 +1486,13 @@ impl Daemon {
                                         _ => buf,
                                     };
                                     let (method, path, body, headers) = parse_request(&full_buf);
-                                    if method == "GET" && path == "/api/events" {
-                                        let _ = crate::api::stream_sse_events(&bus_clone, &mut stream).await;
+                                    let (path_only, _) = crate::api_security::split_path_query(&path);
+                                    if method == "GET" && path_only == "/api/events" {
+                                        let (_, query) = crate::api_security::split_path_query(&path);
+                                        let filter = crate::api::parse_sse_event_filter(query);
+                                        let _ =
+                                            crate::api::stream_sse_events(&bus_clone, &mut stream, filter)
+                                                .await;
                                         return;
                                     }
                                     let response = if method == "OPTIONS" {
@@ -1198,7 +1519,9 @@ impl Daemon {
                                             Some(short_term),
                                             long_term_client,
                                             Some(human_input_store),
+                                            Some(steering_queue.clone()),
                                             &user_rag_store,
+                                            &notes_store,
                                             &agent_profile_cache,
                                             &update_check_cache_clone,
                                             task_usage_store.as_ref(),

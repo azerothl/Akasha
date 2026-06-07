@@ -5,7 +5,7 @@ mod kinds;
 mod manifest;
 
 pub use kinds::PluginKind;
-pub use manifest::{PluginManifest, PluginNetworkConfig, PluginRoutingRule};
+pub use manifest::{is_safe_plugin_id, PluginManifest, PluginNetworkConfig, PluginRoutingRule};
 
 /// Common metadata for any plugin.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -89,13 +89,32 @@ pub trait MemoryPlugin: Send + Sync {
     fn retrieve(&self, key: &str) -> Result<Option<String>, PluginError>;
 }
 
-/// Model plugin: multi-LLM / routing (spec 16). Stub for Phase 5.
+/// Minimal HTTP delegation envelope for memory plugin adapters (Wave 6 G2).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemoryDelegateRequest {
+    pub operation: String,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemoryDelegateResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// Model plugin: multi-LLM / routing (spec 16). **Reporter** — HTTP `llm_router.yaml` covers routing (S-PLG-02).
 pub trait ModelPlugin: Send + Sync {
     fn meta(&self) -> &PluginMeta;
     fn complete(&self, prompt: &str, options: &str) -> Result<String, PluginError>;
 }
 
-/// Security plugin: vault, HSM, audit (spec 16). Stub for Phase 5.
+/// Security plugin: vault, HSM, audit (spec 16). **Reporter** — vault core + policy suffice (S-PLG-03).
 pub trait SecurityPlugin: Send + Sync {
     fn meta(&self) -> &PluginMeta;
     fn check(&self, context: &str) -> Result<bool, PluginError>;

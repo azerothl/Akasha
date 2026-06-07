@@ -73,6 +73,9 @@ pub struct Task {
     /// User message or context that started the task (title/summary for calendar and lists).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_message: Option<String>,
+    /// Code Studio: projet UUID (`studio-projects/<id>/`) pour retrouver le workspace disque si le registre mémoire a été vidé (redémarrage daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub studio_project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,8 +148,38 @@ impl TaskStore {
         if has_col == 0 {
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN initial_message TEXT", []);
         }
+        let has_studio_pid: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='studio_project_id'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+        if has_studio_pid == 0 {
+            let _ = conn.execute("ALTER TABLE tasks ADD COLUMN studio_project_id TEXT", []);
+        }
         crate::todos::create_task_todos_table(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// Walk parents up to the root task id (same lineage as `workspace_lineage_root_task_id`).
+    pub fn lineage_root_task_id(&self, mut task_id: Uuid) -> anyhow::Result<Uuid> {
+        for _ in 0..32 {
+            let t = self
+                .get(task_id)?
+                .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+            match t.parent_task_id {
+                Some(p) => task_id = p,
+                None => return Ok(task_id),
+            }
+        }
+        Ok(task_id)
+    }
+
+    /// Code Studio project UUID stored on the lineage root, if any.
+    pub fn lineage_root_studio_project_id(&self, task_id: Uuid) -> anyhow::Result<Option<String>> {
+        let root_id = self.lineage_root_task_id(task_id)?;
+        Ok(self
+            .get(root_id)?
+            .and_then(|t| t.studio_project_id.clone()))
     }
 
     /// Acquire or refresh a lease for a running task.
@@ -298,8 +331,8 @@ impl TaskStore {
     pub fn insert(&self, task: &Task) -> anyhow::Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO tasks (id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO tasks (id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message, studio_project_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
             rusqlite::params![
                 task.id.to_string(),
@@ -309,6 +342,7 @@ impl TaskStore {
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
                 task.initial_message.as_deref(),
+                task.studio_project_id.as_deref(),
             ],
         )?;
         Ok(())
@@ -334,7 +368,7 @@ impl TaskStore {
 
     pub fn get_all(&self) -> anyhow::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message FROM tasks ORDER BY created_at",
+            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message, studio_project_id FROM tasks ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |row| {
             let status_str: String = row.get(2)?;
@@ -351,6 +385,7 @@ impl TaskStore {
                     .unwrap()
                     .with_timezone(&Utc),
                 initial_message: row.get(6).ok(),
+                studio_project_id: row.get(7).ok(),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -372,7 +407,7 @@ impl TaskStore {
 
     pub fn get(&self, id: Uuid) -> anyhow::Result<Option<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message FROM tasks WHERE id = ?1",
+            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message, studio_project_id FROM tasks WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id.to_string()])?;
         if let Some(row) = rows.next()? {
@@ -390,6 +425,7 @@ impl TaskStore {
                     .unwrap()
                     .with_timezone(&Utc),
                 initial_message: row.get(6).ok(),
+                studio_project_id: row.get(7).ok(),
             }));
         }
         Ok(None)
@@ -403,7 +439,7 @@ impl TaskStore {
         limit: usize,
     ) -> anyhow::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message FROM tasks \
+            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message, studio_project_id FROM tasks \
              WHERE created_at >= ?1 AND created_at <= ?2 ORDER BY created_at ASC LIMIT ?3",
         )?;
         let rows = stmt.query_map(
@@ -423,6 +459,7 @@ impl TaskStore {
                         .unwrap()
                         .with_timezone(&Utc),
                     initial_message: row.get(6).ok(),
+                    studio_project_id: row.get(7).ok(),
                 })
             },
         )?;
@@ -431,7 +468,7 @@ impl TaskStore {
 
     pub fn get_children(&self, parent_id: Uuid) -> anyhow::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message FROM tasks WHERE parent_task_id = ?1 ORDER BY created_at",
+            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message, studio_project_id FROM tasks WHERE parent_task_id = ?1 ORDER BY created_at",
         )?;
         let rows = stmt.query_map([parent_id.to_string()], |row| {
             let status_str: String = row.get(2)?;
@@ -448,6 +485,7 @@ impl TaskStore {
                     .unwrap()
                     .with_timezone(&Utc),
                 initial_message: row.get(6).ok(),
+                studio_project_id: row.get(7).ok(),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

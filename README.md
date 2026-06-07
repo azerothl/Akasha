@@ -88,6 +88,8 @@ cargo build
 
 **Arrêter** : `akasha stop`
 
+**Toujours actif (one-command)** : `akasha up` démarre le daemon si nécessaire puis vérifie l’état via `/api/status`.
+
 **Chemins** : `akasha paths` affiche le répertoire de données et les fichiers de config (utile sous WSL).
 
 Détail de l’onboarding : [spec/onboarding.md](spec/onboarding.md).
@@ -106,6 +108,7 @@ akasha tui
 - **Onglets** : Chat, **Retours planifiés** (réponses des tâches récurrentes / planifiées), Routeur (métriques LLM), Doc (guide servi par le daemon), Tâches, Calendrier, Mémoire.
 - **Chat** : envoi de messages au daemon ; réponses via l’orchestrateur (ack immédiat, traitement en arrière-plan). Défilement : ↑↓, PgUp/PgDn, Home/End.
 - **Commandes slash** (dans le chat, identiques en TUI et Tauri) : `/help`, `/status`, `/doctor`, `/advice`, `/embedded`, `/embedded reload`, `/metrics`, `/models`, `/models list`, `/models set CATÉGORIE PROVIDER MODÈLE`, `/routes`, `/config list` / `get` / `set`, `/vault list`, `/plugins`, `/reload`, `/skills reload`, `/skills uninstall <nom>`, `/restart`, `/task create "msg"`, `/schedule create` / `delete`, `/stop TASK_ID`, `/cancel TASK_ID`, `/newsession`. Liste complète : taper `/help` dans le chat.
+- **Commandes cross-channel (Telegram)** : `/status`, `/budget`, `/permissions` (`ask_me` / `allow_all`), `/memory`, `/tasks`, en plus de `/akasha`.
 - **Raccourcis** : Tab = changer d’onglet ; R = rafraîchir (Routeur, Retours planifiés ou liste des tâches selon l’onglet) ; Échap / Ctrl+Q = quitter. **Tâches** : ↑/↓ pour sélectionner, D = filtrer les racines. **Mémoire** : / ou S = recherche, G = vue graphe, D ou Suppr = supprimer une entrée long terme. Détail : [docs/user_guide_final.md](docs/user_guide_final.md) § 6.
 
 ### Interface web (Tauri)
@@ -186,6 +189,7 @@ Quand le daemon tourne, le guide utilisateur est servi en markdown via **GET /ap
 - **Phase 2** — Main Agent (ack &lt; 500 ms), Orchestrator, workers, POST /api/message, GET /api/tasks/:id, event bus ✅  
 - **Phase 3** — Vault (keyring + fichier chiffré), RBAC, redaction, prompt injection, trust store, CLI vault ✅  
 - **Phase 4** — Canaux Slack, Discord, Telegram (slash / commande, vault, polling tâche) ✅  
+- **Gouvernance Telegram** — Pairing code, pending approvals, rôles admin/member, promote/demote/remove/reset via API et CLI `akasha telegram ...` ✅
 - **Phase 5** — Plugin API, sandbox WASM, registre, réputation, CLI plugin ✅  
 - **Phase 6** — LLM Router (classifier, Ollama/OpenAI/OpenRouter, fallback, métriques, mode dégradé) ✅  
 - **Phase 7** — Cluster NATS, élection de leader, mTLS optionnel, réplication log ✅  

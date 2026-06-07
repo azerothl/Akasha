@@ -1,0 +1,5 @@
+{
+  "on_schedule_fire": [
+    ["powershell", "-NoProfile", "-Command", "Write-Host \"Akasha schedule fired: $env:AKASHA_SCHEDULE_ID task=$env:AKASHA_TASK_ID\""]
+  ]
+}

@@ -251,6 +251,12 @@ struct App {
     pending_human_input: Option<(String, String, String, Option<Vec<String>>)>,
     /// All tasks currently waiting for user input (from GET /api/pending-human-input), so we can show them after relaunch or when user was away.
     pending_human_input_list: Vec<(String, String, String, Option<Vec<String>>)>,
+    /// Operator snapshot (schedules, task_runs, process watch, terminal, tools, recall, MCP, lifecycle hooks).
+    operator_ops_text: String,
+    /// Vertical scroll for the operator snapshot block on the Router tab.
+    operator_ops_scroll: usize,
+    /// Background receiver for operator snapshot (set while a fetch is in flight).
+    operator_ops_rx: Option<mpsc::Receiver<String>>,
 }
 
 fn trim_tui(s: &str, max: usize) -> String {
@@ -409,6 +415,9 @@ impl App {
             chat_history_loaded: false,
             pending_human_input: None,
             pending_human_input_list: Vec::new(),
+            operator_ops_text: String::new(),
+            operator_ops_scroll: 0,
+            operator_ops_rx: None,
         }
     }
 
@@ -525,6 +534,10 @@ impl App {
     fn trigger_mode_entered(&mut self) {
         if self.mode == Mode::Router {
             self.fetch_metrics();
+            self.operator_ops_text = String::new();
+            self.operator_ops_rx = None;
+            self.fetch_operator_ops_snapshot();
+            self.operator_ops_scroll = 0;
         }
         if self.mode == Mode::Doc && self.doc_content.is_empty() {
             self.fetch_doc();
@@ -1134,6 +1147,75 @@ impl App {
         }
     }
 
+    /// Fetch operator HTTP endpoints for display under router metrics (daemon cockpit).
+    /// Spawns a background thread so the TUI event loop is not blocked by slow endpoints.
+    fn fetch_operator_ops_snapshot(&mut self) {
+        // Mark as loading immediately to prevent re-triggering while in flight.
+        self.operator_ops_text = "(chargement…)".to_string();
+        let base = daemon_base_url(self.port);
+        let (tx, rx) = mpsc::channel::<String>();
+        self.operator_ops_rx = Some(rx);
+        thread::spawn(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => {
+                    let _ = tx.send("(client HTTP)".to_string());
+                    return;
+                }
+            };
+            let paths: [(&str, &str); 9] = [
+                ("schedules", "/api/schedules"),
+                ("task_runs", "/api/task_runs"),
+                ("process_watch", "/api/process/watch/recent?limit=12"),
+                ("terminal", "/api/terminal/capabilities"),
+                ("tools", "/api/tools/effective"),
+                ("recall", "/api/memory/recall-metrics"),
+                ("mcp", "/api/mcp/status"),
+                ("mcp_runtime", "/api/mcp/runtime"),
+                ("lifecycle", "/api/lifecycle/hooks"),
+            ];
+            // Fetch all endpoints concurrently to keep total wall time bounded.
+            let results: Vec<(String, bool)> = std::thread::scope(|s| {
+                let handles: Vec<_> = paths
+                    .iter()
+                    .enumerate()
+                    .map(|(_i, (label, path))| {
+                        let client = &client;
+                        let url = format!("{base}{path}");
+                        s.spawn(move || {
+                            match client.get(&url).send() {
+                                Ok(r) => {
+                                    let status = r.status();
+                                    let ok = status.is_success();
+                                    let body = r.text().unwrap_or_default();
+                                    (format!("{label} {path} → {status}\n{}", trim_tui(&body, 1400)), ok)
+                                }
+                                Err(e) => (format!("{label} {path} → (error: {e})"), false),
+                            }
+                        })
+                    })
+                    .collect();
+                // Joining in collection order preserves the original endpoint order.
+                handles
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, h)| h.join().unwrap_or_else(|_| {
+                        let (label, path) = paths[i];
+                        (format!("{label} {path} → (thread panicked)"), false)
+                    }))
+                    .collect()
+            });
+            let ok = results.iter().filter(|(_, s)| *s).count();
+            let parts: Vec<String> = results.into_iter().map(|(s, _)| s).collect();
+            let mut out = vec![format!("Cockpit health: {ok}/{} endpoints OK", parts.len())];
+            out.extend(parts);
+            let _ = tx.send(out.join("\n---\n"));
+        });
+    }
+
     /// Non-blocking: POST /api/message, send ack via tx, then poll and send final reply (FR-025).
     /// If progress_tx is Some, sends (task_id, progress_pct) on each poll for TUI progress display.
     fn send_message_non_blocking(
@@ -1143,6 +1225,8 @@ impl App {
         port: u16,
         session_id: Option<String>,
         new_session: bool,
+        delivery_mode: Option<&str>,
+        target_task_id: Option<&str>,
         i18n: I18n,
     ) {
         let base = daemon_base_url(port);
@@ -1157,13 +1241,24 @@ impl App {
                 return;
             }
         };
-        let body = if new_session {
+        let mut body = if new_session {
             serde_json::json!({ "message": message, "new_session": true })
         } else if let Some(ref s) = session_id {
             serde_json::json!({ "message": message, "session_id": s })
         } else {
             serde_json::json!({ "message": message })
         };
+        if let Some(mode) = delivery_mode {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("message_delivery_mode".into(), serde_json::Value::String(mode.to_string()));
+                obj.insert("queue_mode".into(), serde_json::Value::String(mode.to_string()));
+            }
+        }
+        if let Some(tid) = target_task_id {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("target_task_id".into(), serde_json::Value::String(tid.to_string()));
+            }
+        }
         let resp = match client.post(&url).json(&body).send() {
             Ok(r) => r,
             Err(e) => {
@@ -1182,10 +1277,15 @@ impl App {
                 return;
             }
         };
+        let queued = json.get("queued").and_then(|v| v.as_bool()).unwrap_or(false);
         let task_id = json.get("task_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let session_id = json.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let default_ack = i18n.t("chat.ack_default");
         let ack_msg = json.get("message").and_then(|v| v.as_str()).unwrap_or_else(|| default_ack.as_str());
+        if queued && !task_id.is_empty() {
+            let _ = tx.send(Ok((ack_msg.to_string(), session_id, Some(task_id))));
+            return;
+        }
         let ack_text = if task_id.is_empty() {
             ack_msg.to_string()
         } else {
@@ -1393,7 +1493,7 @@ impl App {
   /config set K V   — définir variable (K=V dans akasha.env)
   /vault list       — clés du vault (noms uniquement)
   /plugins          — liste des plugins
-  /reload           — recharger les plugins
+  /reload           — recharger plugins, tools_policy.yaml et llm_router.yaml (modèles)
   /skills            — liste des skills installés
   /skills list       — idem
   /skills install <url> — installer un skill depuis une URL (GitHub ou hôte autorisé)
@@ -1623,12 +1723,30 @@ impl App {
                 return "Impossible de lister les plugins.".to_string();
             }
             "reload" => {
-                let url = format!("{}/api/plugins/reload", base);
-                match client.post(&url).send() {
-                    Ok(r) if r.status().is_success() => return "Plugins rechargés.".to_string(),
-                    Ok(r) => return format!("Erreur: {}", r.status()),
-                    Err(e) => return format!("Erreur: {}", e),
+                let mut parts: Vec<String> = Vec::new();
+                let plugins_url = format!("{}/api/plugins/reload", base);
+                match client.post(&plugins_url).send() {
+                    Ok(r) if r.status().is_success() => parts.push("Plugins rechargés.".to_string()),
+                    Ok(r) => parts.push(format!("Plugins : erreur ({})", r.status())),
+                    Err(e) => parts.push(format!("Plugins : erreur ({})", e)),
                 }
+                let tools_url = format!("{}/api/tools/reload", base);
+                match client.post(&tools_url).send() {
+                    Ok(r) if r.status().is_success() => {
+                        parts.push("tools_policy.yaml rechargé.".to_string())
+                    }
+                    Ok(r) => parts.push(format!("tools_policy : erreur ({})", r.status())),
+                    Err(e) => parts.push(format!("tools_policy : erreur ({})", e)),
+                }
+                let router_url = format!("{}/api/router/reload", base);
+                match client.post(&router_url).send() {
+                    Ok(r) if r.status().is_success() => {
+                        parts.push("llm_router.yaml rechargé (modèles/routes).".to_string())
+                    }
+                    Ok(r) => parts.push(format!("llm_router : erreur ({})", r.status())),
+                    Err(e) => parts.push(format!("llm_router : erreur ({})", e)),
+                }
+                return parts.join(" ");
             }
             "skills" => {
                 let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
@@ -2260,6 +2378,10 @@ fn ui(f: &mut Frame, app: &mut App) {
             f.render_widget(block, content_area);
         }
         Mode::Router => {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(45), Constraint::Min(4)])
+                .split(content_area);
             let rows: Vec<Row> = app
                 .metrics
                 .iter()
@@ -2302,7 +2424,24 @@ fn ui(f: &mut Frame, app: &mut App) {
                     .title(app.i18n.t("tui.router_block"))
                     .border_style(theme.block_border()),
             );
-            f.render_widget(table, content_area);
+            f.render_widget(table, split[0]);
+            let snap_h = split[1].height.saturating_sub(2).max(1) as usize;
+            let snap_lines = app.operator_ops_text.lines().count().max(1);
+            let snap_max = snap_lines.saturating_sub(snap_h);
+            if app.operator_ops_scroll > snap_max {
+                app.operator_ops_scroll = snap_max;
+            }
+            let snap_para = Paragraph::new(app.operator_ops_text.clone())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(app.i18n.t("tui.router_operator_title"))
+                        .border_style(theme.block_border()),
+                )
+                .style(Style::default().fg(theme.palette().muted))
+                .wrap(Wrap { trim: false })
+                .scroll((app.operator_ops_scroll as u16, 0));
+            f.render_widget(snap_para, split[1]);
         }
         Mode::Doc => {
             let content_width = content_area.width as usize;
@@ -2835,8 +2974,20 @@ fn run_app(
             }
             last_health = std::time::Instant::now();
         }
-        if app.mode == Mode::Router && app.metrics.is_empty() {
-            app.fetch_metrics();
+        if app.mode == Mode::Router {
+            if app.metrics.is_empty() {
+                app.fetch_metrics();
+            }
+            if app.operator_ops_text.is_empty() && app.operator_ops_rx.is_none() {
+                app.fetch_operator_ops_snapshot();
+            }
+        }
+        // Drain background operator-snapshot result if ready.
+        if let Some(rx) = &app.operator_ops_rx {
+            if let Ok(text) = rx.try_recv() {
+                app.operator_ops_text = text;
+                app.operator_ops_rx = None;
+            }
         }
         while let Ok((task_id, pct)) = progress_rx.try_recv() {
             if app.pending_reply_task_id.as_deref() == Some(&task_id) {
@@ -3143,8 +3294,34 @@ fn run_app(
                             app.force_new_session = false;
                             let progress_tx = app.progress_tx.clone();
                             let i18n = app.i18n.clone();
+                            let pending_task = app.pending_reply_task_id.clone();
+                            let (delivery, target, text) = if msg.starts_with("/steer ") {
+                                (
+                                    Some("steering".to_string()),
+                                    pending_task,
+                                    msg.trim_start_matches("/steer ").to_string(),
+                                )
+                            } else if msg.starts_with("/follow ") {
+                                (
+                                    Some("follow_up".to_string()),
+                                    pending_task,
+                                    msg.trim_start_matches("/follow ").to_string(),
+                                )
+                            } else {
+                                (None, None, msg)
+                            };
                             thread::spawn(move || {
-                                App::send_message_non_blocking(tx, progress_tx, msg, port, session_id, new_session, i18n);
+                                App::send_message_non_blocking(
+                                    tx,
+                                    progress_tx,
+                                    text,
+                                    port,
+                                    session_id,
+                                    new_session,
+                                    delivery.as_deref(),
+                                    target.as_deref(),
+                                    i18n,
+                                );
                             });
                         }
                         }
@@ -3181,6 +3358,15 @@ fn run_app(
                     }
                     (Mode::Router, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_metrics();
+                        app.operator_ops_text = String::new();
+                        app.operator_ops_rx = None;
+                        app.fetch_operator_ops_snapshot();
+                    }
+                    (Mode::Router, KeyCode::PageUp, _) => {
+                        app.operator_ops_scroll = app.operator_ops_scroll.saturating_sub(8);
+                    }
+                    (Mode::Router, KeyCode::PageDown, _) => {
+                        app.operator_ops_scroll = app.operator_ops_scroll.saturating_add(8);
                     }
                     (Mode::ScheduleReports, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_schedule_reports();

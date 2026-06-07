@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentProfile {
@@ -40,6 +42,12 @@ pub struct AgentProfile {
     /// Preferred personality mode: "assistant" | "operator" | "architect" | "onboarding".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_mode: Option<String>,
+    /// Optional LLM sampling temperature override (0.0–2.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Optional extra system prompt block prepended to agent context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 pub(crate) fn formality_prompt_line(formality: Option<&str>) -> Option<String> {
@@ -70,6 +78,8 @@ impl AgentProfile {
             && self.cannot_do.is_empty()
             && self.traits_override.as_ref().map_or(true, |m| m.is_empty())
             && self.preferred_mode.is_none()
+            && self.temperature.is_none()
+            && self.system_prompt.as_ref().map_or(true, |s| s.trim().is_empty())
     }
 
     /// Load profile from data_dir/agent_profile.json. Returns default empty profile if file missing or invalid.
@@ -172,7 +182,46 @@ impl AgentProfile {
                 out.push_str(&format!("  • {}\n", c));
             }
         }
+        if let Some(ref sp) = self.system_prompt {
+            let sp = sp.trim();
+            if !sp.is_empty() {
+                out.push_str("- Additional system instructions:\n");
+                out.push_str(sp);
+                if !sp.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+        }
         out.push_str("\n");
         out
     }
+}
+
+/// In-memory cache for [`AgentProfile`] to avoid repeated disk reads.
+pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
+
+pub fn new_agent_profile_cache() -> AgentProfileCache {
+    Arc::new(RwLock::new(None))
+}
+
+/// Load profile from cache or disk and update cache.
+pub async fn get_or_load_agent_profile(data_dir: &Path, cache: &AgentProfileCache) -> AgentProfile {
+    {
+        let g = cache.read().await;
+        if let Some(ref p) = *g {
+            return p.clone();
+        }
+    }
+    let profile = AgentProfile::load(data_dir);
+    {
+        let mut g = cache.write().await;
+        *g = Some(profile.clone());
+    }
+    profile
+}
+
+/// Update cache after profile save (call after writing to disk).
+pub async fn set_agent_profile_cache(cache: &AgentProfileCache, profile: AgentProfile) {
+    let mut g = cache.write().await;
+    *g = Some(profile);
 }

@@ -28,6 +28,7 @@ pub fn built_in_tool_capabilities(tool_name: &str) -> ToolCapabilities {
     match name.as_str() {
         "read_file" | "search_files" | "grep_content" | "file_diff" | "diff_unified" | "dir_compare"
         | "git_status" | "git_diff" | "git_log" | "git_rev_parse" | "web_search" | "web_fetch"
+        | "web_crawl" | "web_crawl_status"
         | "read_todos" | "memory_search" | "memory_stats" | "workspace_graph_search" => {
             ToolCapabilities {
                 name: "read_only",
@@ -72,7 +73,7 @@ mod tests {
         let calls = vec![
             ("read_file".to_string(), vec!["a.md".to_string()]),
             ("search_files".to_string(), vec!["src".to_string()]),
-            ("write_file".to_string(), vec!["a.md".to_string(), "x".to_string()]),
+            ("write_code".to_string(), vec!["a.ts".to_string(), "x".to_string()]),
             ("read_file".to_string(), vec!["b.md".to_string()]),
         ];
         let lanes = schedule_tool_calls(&calls);

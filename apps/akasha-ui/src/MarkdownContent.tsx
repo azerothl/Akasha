@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
+import { renderToStaticMarkup } from "react-dom/server";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
@@ -198,6 +199,35 @@ function MarkdownDataImage({ src, alt }: { src: string; alt: string }) {
 }
 
 type MarkdownContentProps = { children?: string; className?: string; onPathClick?: (path: string, openFolder?: boolean) => void };
+
+/** Server-side HTML for research export / preview windows (same pipeline as chat markdown). */
+export function renderMarkdownStaticHtml(children: string): string {
+  const processed = preprocessDataUrlAudio(preprocessDataUrlImages(children));
+  const pretty = autoFormatLongUnstructuredPlainText(processed);
+  return renderToStaticMarkup(
+    <div className="markdown-rendered">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
+        urlTransform={markdownUrlTransform}
+        components={{
+          img: ({ src, alt }) => {
+            if (!src?.trim()) return null;
+            if (src.startsWith("data:") && !SAFE_DATA_IMAGE_RE.test(src)) return null;
+            return <img src={src} alt={alt ?? ""} />;
+          },
+          a: ({ href, children: linkChildren }) => (
+            <a href={href} target="_blank" rel="noopener noreferrer">
+              {linkChildren}
+            </a>
+          ),
+        }}
+      >
+        {pretty}
+      </ReactMarkdown>
+    </div>
+  );
+}
 
 /** Lazy-loaded markdown renderer to reduce initial bundle (react-markdown + remark-gfm in separate chunk). */
 export default function MarkdownContent({ children = "", className, onPathClick }: MarkdownContentProps) {

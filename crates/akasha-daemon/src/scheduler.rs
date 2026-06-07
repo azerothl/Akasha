@@ -2,7 +2,8 @@
 
 use akasha_core::{EventEnvelope, EventType};
 use akasha_store::{
-    Schedule, ScheduleExceptionType, ScheduleStore, Task, TaskRun, TaskRunStatus, TaskStatus, TaskStore,
+    platform_extras::WakeupStore, Schedule, ScheduleExceptionType, ScheduleStore, Task, TaskRun,
+    TaskRunStatus, TaskStatus, TaskStore,
 };
 use chrono::{Duration, Utc};
 use rrule::{RRuleSet, Tz as RruleTz};
@@ -111,12 +112,49 @@ async fn tick(
                 }
                 let task_id = Uuid::new_v4();
                 let run_id = Uuid::new_v4();
-                let initial_message = schedule
-                    .channel_context
-                    .as_deref()
-                    .map(String::from)
-                    .or_else(|| Some(schedule.name.clone()))
-                    .filter(|s| !s.is_empty());
+                // Resolve the final message/session_id first so both `initial_message` (stored
+                // on the Task) and the orchestrator payload use the same human-readable string.
+                let mut message = if schedule.name.trim().is_empty() {
+                    "Exécution planifiée.".to_string()
+                } else {
+                    schedule.name.clone()
+                };
+                let mut session_id = format!("schedule:{}", schedule.id);
+                if let Some(ctx) = schedule.channel_context.as_deref() {
+                    match serde_json::from_str::<serde_json::Value>(ctx) {
+                        Ok(v) => {
+                            // If the JSON value is itself a plain string, use it directly.
+                            if let Some(s) = v.as_str() {
+                                let s = s.trim();
+                                if !s.is_empty() {
+                                    message = s.to_string();
+                                }
+                            } else {
+                                // JSON object: prefer explicit `message` field.
+                                if let Some(m) = v.get("message").and_then(|s| s.as_str()) {
+                                    let m = m.trim();
+                                    if !m.is_empty() {
+                                        message = m.to_string();
+                                    }
+                                }
+                                if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
+                                    let sid = sid.trim();
+                                    if !sid.is_empty() {
+                                        session_id = sid.to_string();
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Not JSON: use the raw channel_context as the message.
+                            let ctx = ctx.trim();
+                            if !ctx.is_empty() {
+                                message = ctx.to_string();
+                            }
+                        }
+                    }
+                }
+                let initial_message = Some(message.clone()).filter(|s| !s.is_empty());
                 let task = Task {
                     id: task_id,
                     parent_task_id: None,
@@ -125,6 +163,7 @@ async fn tick(
                     created_at: now,
                     updated_at: now,
                     initial_message,
+                    studio_project_id: None,
                 };
                 task_store.insert(&task)?;
                 let task_run = TaskRun {
@@ -138,6 +177,26 @@ async fn tick(
                     dedup_key: dedup_key.clone(),
                 };
                 schedule_store.insert_task_run(&task_run)?;
+                let data_dir = store_path
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                crate::lifecycle_hooks::fire_on_schedule_fire_async(&data_dir, schedule.id, task_id);
+                let hook_payload = serde_json::json!({
+                    "schedule_id": schedule.id.to_string(),
+                    "task_id": task_id.to_string(),
+                    "planned_for": planned_for.to_rfc3339(),
+                    "dedup_key": dedup_key,
+                });
+                let hook_data_dir = data_dir.clone();
+                let payload = hook_payload.to_string();
+                tokio::task::spawn_blocking(move || {
+                    crate::plugin_hook_bus::dispatch_hook_event(
+                        &hook_data_dir,
+                        "on_schedule_fire",
+                        &payload,
+                    );
+                });
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::TaskRunCreated,
@@ -151,12 +210,6 @@ async fn tick(
                     )
                     .with_correlation(task_id),
                 );
-                let message = schedule
-                    .channel_context
-                    .as_deref()
-                    .unwrap_or("Exécution planifiée.")
-                    .to_string();
-                let session_id = format!("schedule:{}", schedule.id);
                 pending.push((run_id, task_id, message, session_id));
             }
         }
@@ -175,6 +228,7 @@ async fn tick(
                 image_data_urls: None,
                 execution_mode: None,
                 preferred_task_type: None,
+                incognito: false,
             })
             .await
         {
@@ -202,6 +256,58 @@ async fn tick(
         }
     }
 
+    process_due_wakeups(store_path, orch_tx, bus, now).await?;
+
+    Ok(())
+}
+
+/// Fire pending wakeups: inject orchestrator message into session (lighter than full schedule).
+async fn process_due_wakeups(
+    store_path: &PathBuf,
+    orch_tx: &mpsc::Sender<OrchestratorTask>,
+    bus: &crate::agents::EventBus,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let due = {
+        let store = WakeupStore::open(store_path)?;
+        store.list_pending_before(now)?
+    };
+    for w in due {
+        let task_id = Uuid::new_v4();
+        let msg = format!("[Agent wakeup] {}", w.message);
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "message": msg,
+                    "session_id": w.session_id,
+                    "wakeup_id": w.id.to_string()
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        let _ = orch_tx
+            .send(OrchestratorTask {
+                task_id,
+                message: msg.clone(),
+                session_id: w.session_id.clone(),
+                image_data_urls: None,
+                execution_mode: None,
+                preferred_task_type: None,
+                incognito: false,
+            })
+            .await;
+        let store = WakeupStore::open(store_path)?;
+        store.mark_fired(&w.id)?;
+        crate::api_routes_kinbot::insert_notification(
+            store_path,
+            "agent_wakeup",
+            "Rappel agent",
+            &w.message,
+            Some(task_id),
+        );
+    }
     Ok(())
 }
 
@@ -334,6 +440,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 initial_message: None,
+                studio_project_id: None,
             })
             .expect("insert task");
 

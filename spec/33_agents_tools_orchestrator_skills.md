@@ -66,6 +66,10 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 | `sessions_list` | `sessions_list [limit]` | Lister les tâches récentes. |
 | `sessions_spawn` | `sessions_spawn <message> [session_id]` | Créer une sous-tâche. |
 | `session_status` | `session_status <task_id>` | Statut d'une tâche. |
+| `schedule_task` | `schedule_task <cron> <prompt> [title]` | Créer une tâche planifiée (cron) depuis l'agent. |
+| `list_scheduled_tasks` | `list_scheduled_tasks [limit]` | Lister les tâches planifiées. |
+| `cancel_scheduled_task` | `cancel_scheduled_task <schedule_id>` | Supprimer une tâche planifiée par identifiant. |
+| `budget_status` | `budget_status [session_id]` | Afficher le budget actif (limite, seuil, usage estimé). |
 | `message` | `message send <channel> <text>` | Envoyer un message (webhook). |
 | `browser` | `browser navigate <url>` \| `browser snapshot` \| (Phase 2: click, fill, screenshot, wait) | Automation navigateur gérée (une instance Playwright par tâche). Voir [spec 39](39_browser_automation.md). navigate : ouvre l'URL (domaine autorisé). snapshot : texte + liens de la page. |
 | `image`, `pdf` | (stubs) | Prévu phase 3. |
