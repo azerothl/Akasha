@@ -5641,28 +5641,6 @@ function App() {
       }
       const ackText = ack?.message ?? "Request received. You can follow progress in the Tasks tab.";
       if (ack?.task_id) {
-        // #region agent log
-        fetch("http://127.0.0.1:7708/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "0d82aa" },
-          body: JSON.stringify({
-            sessionId: "0d82aa",
-            location: "App.tsx:handleSend",
-            message: "message_ack",
-            hypothesisId: "B",
-            data: {
-              taskId: ack.task_id,
-              sessionId: ack.session_id,
-              queued: !!ack.queued,
-              steerTarget: steerTarget ?? null,
-              runningTaskIds: runningIds,
-              chatDeliveryMode,
-              sessionAtSend,
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
         const sidResolved = (ack.session_id || sessionAtSend || "").trim();
         if (sidResolved) {
           taskIdToSessionIdRef.current[ack.task_id] = sidResolved;

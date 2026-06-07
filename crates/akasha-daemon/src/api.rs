@@ -8975,28 +8975,6 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
     any_write_success
 }
 
-// #region agent log
-fn agent_debug_log(location: &str, message: &str, hypothesis_id: &str, data: serde_json::Value) {
-    let payload = serde_json::json!({
-        "sessionId": "0d82aa",
-        "timestamp": chrono::Utc::now().timestamp_millis(),
-        "location": location,
-        "message": message,
-        "hypothesisId": hypothesis_id,
-        "data": data,
-    });
-    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-0d82aa.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{}", payload);
-    }
-}
-// #endregion
-
 fn insert_task_tracking_event(
     store_path: &std::path::Path,
     task_id: Uuid,
@@ -9065,14 +9043,6 @@ pub(crate) async fn run_message_via_llm(
         )
         .with_correlation(task_id),
     );
-    // #region agent log
-    agent_debug_log(
-        "api.rs:run_message_via_llm",
-        "progress_5_sent",
-        "A",
-        serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
-    );
-    // #endregion
     // Start stall/progress watchdogs immediately after the first progress line so a hang in
     // studio setup, session_state I/O, or context assembly still surfaces updates and can fail the task.
     let meaningful_progress_flag =
@@ -9150,18 +9120,6 @@ pub(crate) async fn run_message_via_llm(
     let task_snapshot = TaskStore::open(&store_path)
         .ok()
         .and_then(|s| s.get(task_id).ok().flatten());
-    // #region agent log
-    agent_debug_log(
-        "api.rs:run_message_via_llm",
-        "tool_disk_setup_done",
-        "A",
-        serde_json::json!({
-            "task_id": task_id.to_string(),
-            "session_id": session_id,
-            "code_studio_disk_task": code_studio_disk_task,
-        }),
-    );
-    // #endregion
     let assigned_agent = task_snapshot
         .as_ref()
         .map(|t| t.assigned_agent.clone())
@@ -9202,24 +9160,8 @@ pub(crate) async fn run_message_via_llm(
         );
     }
     if let Some(ref sq) = steering_queue {
-        // #region agent log
-        agent_debug_log(
-            "api.rs:run_message_via_llm",
-            "steering_register_start",
-            "B",
-            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
-        );
-        // #endregion
         sq.register_active(task_id, session_id.clone(), !is_subagent)
             .await;
-        // #region agent log
-        agent_debug_log(
-            "api.rs:run_message_via_llm",
-            "steering_register_done",
-            "B",
-            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
-        );
-        // #endregion
     }
     if code_studio_disk_task && !is_subagent {
         let dd = data_dir_for_studio_flags.to_path_buf();
@@ -9272,14 +9214,6 @@ pub(crate) async fn run_message_via_llm(
         let data_dir_goal = store_path.parent().unwrap_or_else(|| store_path.as_ref()).to_path_buf();
         let goal_text = clean_message.chars().take(240).collect::<String>();
         let session_id_goal = session_id.clone();
-        // #region agent log
-        agent_debug_log(
-            "api.rs:run_message_via_llm",
-            "session_state_merge_start",
-            "A",
-            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
-        );
-        // #endregion
         let merge_outcome = tokio::time::timeout(
             std::time::Duration::from_secs(8),
             tokio::task::spawn_blocking(move || {
@@ -9291,19 +9225,6 @@ pub(crate) async fn run_message_via_llm(
             }),
         )
         .await;
-        // #region agent log
-        agent_debug_log(
-            "api.rs:run_message_via_llm",
-            "session_state_merge_done",
-            "A",
-            serde_json::json!({
-                "task_id": task_id.to_string(),
-                "session_id": session_id,
-                "ok": matches!(merge_outcome, Ok(Ok(Ok(_)))),
-                "timed_out": matches!(merge_outcome, Err(_)),
-            }),
-        );
-        // #endregion
     }
     let timeline_correlation = resolve_root_task_id(&store_path, task_id)
         .or_else(|| task_snapshot.as_ref().and_then(|t| t.parent_task_id))
@@ -9738,27 +9659,6 @@ pub(crate) async fn run_message_via_llm(
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
     };
-    // #region agent log
-    {
-        let turn_count = if let Some(st) = &short_term {
-            st.get_turns(&session_id).await.len()
-        } else {
-            0usize
-        };
-        agent_debug_log(
-            "api.rs:run_message_via_llm",
-            "session_turns_snapshot",
-            "A",
-            serde_json::json!({
-                "task_id": task_id.to_string(),
-                "session_id": session_id,
-                "turns_empty": turns_empty,
-                "turn_count": turn_count,
-                "semantic_top_k": memory_profile.semantic_top_k,
-            }),
-        );
-    }
-    // #endregion
     let process_id_for_recall = resolve_root_task_id(store_path.as_path(), task_id)
         .map(|id| id.to_string())
         .unwrap_or_else(|| task_id.to_string());
@@ -9880,18 +9780,6 @@ pub(crate) async fn run_message_via_llm(
                 "semantic_top_k": memory_profile.semantic_top_k,
             }),
         );
-        // #region agent log
-        agent_debug_log(
-            "api.rs:run_message_via_llm",
-            "memory_recall_start",
-            "A",
-            serde_json::json!({
-                "task_id": task_id.to_string(),
-                "session_id": session_id,
-                "timeout_secs": recall_timeout.as_secs(),
-            }),
-        );
-        // #endregion
         let (fused, recall_timed_out) = match tokio::time::timeout(
             recall_timeout,
             crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params),
@@ -9905,32 +9793,12 @@ pub(crate) async fn run_message_via_llm(
                     timeout_secs = recall_timeout.as_secs(),
                     "memory recall timed out; continuing without long-term context"
                 );
-                // #region agent log
-                agent_debug_log(
-                    "api.rs:run_message_via_llm",
-                    "memory_recall_timeout",
-                    "A",
-                    serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
-                );
-                // #endregion
                 (
                     crate::memory_orchestrator::FusedMemoryContext::default(),
                     true,
                 )
             }
         };
-        // #region agent log
-        agent_debug_log(
-            "api.rs:run_message_via_llm",
-            "memory_recall_done",
-            "A",
-            serde_json::json!({
-                "task_id": task_id.to_string(),
-                "session_id": session_id,
-                "had_results": !fused.to_context_string().is_empty(),
-            }),
-        );
-        // #endregion
         insert_task_tracking_event(
             store_path.as_path(),
             task_id,
@@ -10357,14 +10225,6 @@ pub(crate) async fn run_message_via_llm(
             )
             .with_correlation(task_id),
         );
-        // #region agent log
-        agent_debug_log(
-            "api.rs:run_message_via_llm",
-            "progress_12_llm_loop_start",
-            "A",
-            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
-        );
-        // #endregion
         let mut max_tool_rounds = std::env::var("AKASHA_MAX_TOOL_ROUNDS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -13306,18 +13166,6 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         if studio_verify_error.is_some() {
             let _ = store.update_status(task_id, TaskStatus::Failed);
         } else {
-            // #region agent log
-            agent_debug_log(
-                "api.rs:run_message_via_llm",
-                "task_completed",
-                "A",
-                serde_json::json!({
-                    "task_id": task_id.to_string(),
-                    "session_id": session_id,
-                    "final_status": final_status_str,
-                }),
-            );
-            // #endregion
             let _ = store.update_status(task_id, TaskStatus::Completed);
             if let Ok(events) = store.get_events(task_id) {
                 if let Some(ticket_id) = events
@@ -16029,18 +15877,6 @@ pub async fn handle_api(
                         "session_id": session_id,
                         "message": "Message mis en file pour la tâche en cours."
                     });
-                    // #region agent log
-                    agent_debug_log(
-                        "api.rs:post_message",
-                        "message_queued_to_running_task",
-                        "B",
-                        serde_json::json!({
-                            "task_id": tid.to_string(),
-                            "session_id": session_id,
-                            "queue_mode": queued.mode,
-                        }),
-                    );
-                    // #endregion
                     return json_response("200 OK", &body.to_string());
                 }
             }

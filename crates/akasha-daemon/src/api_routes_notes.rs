@@ -77,6 +77,33 @@ pub async fn try_handle(
                 &serde_json::json!({ "error": e.to_string() }).to_string(),
             )),
         }
+    } else if method == "GET" && path.starts_with("/api/notes/") && path.contains("/assets/") {
+        let after_notes = path.trim_start_matches("/api/notes/");
+        let (note_id, asset_part) = after_notes.split_once("/assets/")?;
+        if note_id.is_empty() || asset_part.is_empty() || note_id.contains('/') {
+            return None;
+        }
+        let filename = asset_part.split('?').next().unwrap_or("").trim();
+        if filename.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"filename_required"}"#));
+        }
+        let store = notes_store.lock().await;
+        match store.read_asset(note_id, filename) {
+            Ok(Some((bytes, mime))) => {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let body = serde_json::json!({
+                    "filename": filename,
+                    "mime_type": mime,
+                    "content_base64": b64,
+                });
+                Some(json_response("200 OK", &body.to_string()))
+            }
+            Ok(None) => Some(json_response("404 Not Found", r#"{"error":"asset_not_found"}"#)),
+            Err(e) => Some(json_response(
+                "400 Bad Request",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            )),
+        }
     } else if method == "GET" && path.starts_with("/api/notes/") {
         let rest = path.trim_start_matches("/api/notes/").trim();
         if rest.is_empty() || rest.contains('/') {
@@ -163,33 +190,6 @@ pub async fn try_handle(
             }
             Err(e) => Some(json_response(
                 "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            )),
-        }
-    } else if method == "GET" && path.starts_with("/api/notes/") && path.contains("/assets/") {
-        let after_notes = path.trim_start_matches("/api/notes/");
-        let (note_id, asset_part) = after_notes.split_once("/assets/")?;
-        if note_id.is_empty() || asset_part.is_empty() || note_id.contains('/') {
-            return None;
-        }
-        let filename = asset_part.split('?').next().unwrap_or("").trim();
-        if filename.is_empty() {
-            return Some(json_response("400 Bad Request", r#"{"error":"filename_required"}"#));
-        }
-        let store = notes_store.lock().await;
-        match store.read_asset(note_id, filename) {
-            Ok(Some((bytes, mime))) => {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                let body = serde_json::json!({
-                    "filename": filename,
-                    "mime_type": mime,
-                    "content_base64": b64,
-                });
-                Some(json_response("200 OK", &body.to_string()))
-            }
-            Ok(None) => Some(json_response("404 Not Found", r#"{"error":"asset_not_found"}"#)),
-            Err(e) => Some(json_response(
-                "400 Bad Request",
                 &serde_json::json!({ "error": e.to_string() }).to_string(),
             )),
         }
