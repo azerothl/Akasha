@@ -54,7 +54,7 @@ Document de suivi des idées empruntées à Odysseus sans diluer le positionneme
 | Modèle utilitaire | Compaction, titres, mémoire fichier | `task_type: system` | **Existe · haute** (`task_types.utility`) | B | `llm_router.example.yaml`, `api.rs` |
 | Presets / personas | Température, system prompt | Profils agent | Partiel · moyenne | B | Settings agent |
 | Mémoire vectorielle | ChromaDB + keyword | LTM SQLite + graphe | Existe · haute | — | — |
-| Documents / notes | Éditeur multi-onglets | Code Studio (dev) | Partiel · moyenne | C | Notes légères (roadmap) |
+| Documents / notes | Éditeur multi-onglets | Code Studio (dev) | **Existe · moyenne** (2026-06-07) | C | `notes.rs`, `NotesPanel.tsx`, TipTap WYSIWYG, `/api/notes` |
 | Email IMAP | Triage IA | Absent | **Absent · évalué** | — | [`caldav-email-evaluation.md`](../integrations/caldav-email-evaluation.md) |
 | CalDAV | Sync calendriers externes | Calendrier interne seulement | **Absent · évalué** | — | idem |
 | Thèmes éditables | Éditeur couleurs + effets | 5 thèmes fixes | Partiel · moyenne ; tokens densité | A+ | `styles.css` |
