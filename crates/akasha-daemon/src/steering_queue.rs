@@ -133,8 +133,6 @@ impl SteeringQueueStore {
     pub async fn remove_task(&self, task_id: Uuid) {
         let mut g = self.inner.write().await;
         g.remove(&task_id);
-        let mut a = self.active.write().await;
-        a.remove(&task_id);
     }
 
     pub async fn register_active(&self, task_id: Uuid, session_id: String, is_root: bool) {
@@ -150,8 +148,10 @@ impl SteeringQueueStore {
     }
 
     pub async fn unregister_active(&self, task_id: Uuid) {
-        let mut a = self.active.write().await;
-        a.remove(&task_id);
+        {
+            let mut a = self.active.write().await;
+            a.remove(&task_id);
+        }
         self.remove_task(task_id).await;
     }
 
@@ -267,5 +267,27 @@ mod tests {
         assert_eq!(QueueMode::parse("steer"), Some(QueueMode::Steering));
         assert_eq!(QueueMode::parse("follow-up"), Some(QueueMode::FollowUp));
         assert!(QueueMode::parse("immediate").is_none());
+    }
+
+    #[tokio::test]
+    async fn unregister_active_does_not_deadlock_and_releases_register() {
+        let store = SteeringQueueStore::new();
+        let task_id = Uuid::new_v4();
+        store
+            .register_active(task_id, "sess".into(), true)
+            .await;
+        store
+            .enqueue(task_id, QueueMode::Steering, "x".into())
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), store.unregister_active(task_id))
+            .await
+            .expect("unregister_active must not deadlock");
+        let task_id2 = Uuid::new_v4();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            store.register_active(task_id2, "sess".into(), true),
+        )
+        .await
+        .expect("register_active after unregister must not block");
     }
 }

@@ -9019,9 +9019,50 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .and_then(|t| t.parent_task_id)
         .is_some();
+    let router_task_type_early = if preferred_task_type_override.as_deref()
+        == Some("image_generation")
+        || assigned_agent == "image_generation"
+    {
+        llm_router.resolve_task_type_for_agent("conversation")
+    } else {
+        preferred_task_type_override
+            .clone()
+            .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
+    };
+    if let Some((provider, model)) =
+        llm_router.primary_route_for_task_type(&router_task_type_early)
+    {
+        insert_task_tracking_event(
+            store_path.as_path(),
+            task_id,
+            "llm_route_planned",
+            serde_json::json!({
+                "task_type": router_task_type_early,
+                "provider": provider,
+                "model": model,
+                "phase": "pre_context",
+            }),
+        );
+    }
     if let Some(ref sq) = steering_queue {
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "steering_register_start",
+            "B",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
         sq.register_active(task_id, session_id.clone(), !is_subagent)
             .await;
+        // #region agent log
+        agent_debug_log(
+            "api.rs:run_message_via_llm",
+            "steering_register_done",
+            "B",
+            serde_json::json!({ "task_id": task_id.to_string(), "session_id": session_id }),
+        );
+        // #endregion
     }
     if code_studio_disk_task && !is_subagent {
         let dd = data_dir_for_studio_flags.to_path_buf();
@@ -10219,31 +10260,6 @@ pub(crate) async fn run_message_via_llm(
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or_else(|| llm_router.default_timeout_secs());
-        let router_task_type_for_llm = if preferred_task_type_override.as_deref()
-            == Some("image_generation")
-            || assigned_agent == "image_generation"
-        {
-            llm_router.resolve_task_type_for_agent("conversation")
-        } else {
-            preferred_task_type_override
-                .clone()
-                .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
-        };
-        if let Some((provider, model)) =
-            llm_router.primary_route_for_task_type(&router_task_type_for_llm)
-        {
-            insert_task_tracking_event(
-                store_path.as_path(),
-                task_id,
-                "llm_route_planned",
-                serde_json::json!({
-                    "task_type": router_task_type_for_llm,
-                    "provider": provider,
-                    "model": model,
-                    "timeout_secs": llm_timeout_secs,
-                }),
-            );
-        }
         let idle_timeout_secs = std::env::var("AKASHA_LLM_STREAM_IDLE_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
