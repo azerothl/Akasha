@@ -56,7 +56,7 @@ Document de suivi des idées empruntées à Odysseus sans diluer le positionneme
 | Mémoire vectorielle | ChromaDB + keyword | LTM SQLite + graphe | Existe · haute | — | — |
 | Documents / notes | Éditeur multi-onglets | Code Studio (dev) | **Existe · moyenne** (2026-06-07) | C | `notes.rs`, `NotesPanel.tsx`, TipTap WYSIWYG, `/api/notes` |
 | Email IMAP | Triage IA | Absent | **Absent · évalué** | — | [`caldav-email-evaluation.md`](../integrations/caldav-email-evaluation.md) |
-| CalDAV | Sync calendriers externes | Calendrier interne seulement | **Absent · évalué** | — | idem |
+| CalDAV | Sync calendriers externes | ICS import/export, sidecar CalDAV, outbox bidirectionnel | **Existe · moyenne** | — | [`caldav-integration.md`](../integrations/caldav-integration.md) |
 | Thèmes éditables | Éditeur couleurs + effets | 5 thèmes fixes | Partiel · moyenne ; tokens densité | A+ | `styles.css` |
 | PWA / mobile | Responsive, SW | Tauri desktop | Absent | D+ | — |
 | Auth multi-user | Comptes, 2FA | Single-user local | Absent | D | — |

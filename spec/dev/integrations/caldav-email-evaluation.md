@@ -1,7 +1,7 @@
 # Évaluation — CalDAV et Email (inspiration Odysseus)
 
-**Statut:** Évaluation produit — **non implémenté** (2026-06-03)  
-**Contexte:** Odysseus intègre IMAP/SMTP + CalDAV ; Akasha reste focalisé daemon/opérateur.
+**Statut:** CalDAV **implémenté** (phases 1–3, 2026-06-07) ; Email **non implémenté**  
+**Contexte:** Odysseus intègre IMAP/SMTP + CalDAV ; Akasha reste focalisé daemon/opérateur avec calendrier externe en modèle parallèle.
 
 ---
 
@@ -13,23 +13,31 @@
 - Couleurs par calendrier, import/export `.ics`
 - Agent « calendrier-aware »
 
-### État Akasha
+### État Akasha (2026-06-07)
 
-- Calendrier **interne** (récurrences, occurrences, scheduler) — voir `spec/36_ui_architecture.md`
-- **Aucun connecteur CalDAV** dans le monorepo
+| Livrable | Statut |
+|----------|--------|
+| Modèle `external_calendar_events` + comptes CalDAV | Livré |
+| `GET/POST /api/calendar/ics` import/export | Livré |
+| `GET /api/calendar/events` merge runs + `type: external` | Livré |
+| Sidecar `Akasha_plugins/caldav-channel` (PROPFIND, REPORT, outbox PUT/DELETE) | Livré |
+| Outils agent `calendar_query`, `calendar_create`, `calendar_update`, `calendar_delete` | Livré |
+| UI Tauri onglet CalDAV / ICS + styles événements externes | Livré |
+| Spec [`caldav-integration.md`](caldav-integration.md) | Livré |
 
-### Effort estimé
+Calendrier **opérateur** (schedules, task runs) inchangé ; événements personnels CalDAV/ICS dans un cache séparé (pas fusionné dans `ScheduleStore`).
 
-| Composant | Effort |
-|-----------|--------|
-| Client CalDAV Rust (sync pull/push) | 3–5 semaines |
-| Résolution conflits + mapping événements | 2 semaines |
-| UI comptes + statut sync | 1 semaine |
-| Tests multi-fournisseurs | 1–2 semaines |
+### Effort réalisé vs estimation initiale
 
-### Recommandation
+| Composant | Estimation initiale | Réalisé |
+|-----------|---------------------|---------|
+| Fondation ICS + API | ~1 sem | Phase 1 |
+| Sidecar pull + comptes | 3–4 sem | Phase 2 |
+| Bidirectionnel + outils write | ~4 sem | Phase 3 |
 
-**Reporter (P3)** sauf demande utilisateur explicite. Alternative intermédiaire : export/import `.ics` manuel via API (`GET/POST /api/calendar/ics`) — effort ~3 jours.
+### Recommandation (mise à jour)
+
+**CalDAV en production partielle** : ICS + sync sidecar + écriture via outbox. OAuth Apple / tests CI Radicale restent backlog ; voir [`caldav-integration.md`](caldav-integration.md).
 
 ---
 
@@ -64,7 +72,7 @@
 
 | Intégration | Décision | Prochaine étape |
 |-------------|----------|-----------------|
-| CalDAV | Non retenu v0.x | Spec `.ics` import/export si besoin calendrier externe |
+| CalDAV | **Retenu — livré v0.x (ICS + sidecar + outbox)** | CI Radicale, OAuth Apple si demande |
 | Email | Non retenu v0.x | Documenter pattern webhook/gateway pour alertes |
 
 Réviser cette évaluation si le positionnement produit évolue vers « workspace grand public » type Odysseus.
