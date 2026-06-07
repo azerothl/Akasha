@@ -32,7 +32,9 @@ type Props = {
     loadError: string;
     detailsToggle: string;
     summaryUnavailable: string;
+    editPolicy?: string;
   };
+  onEditToolsPolicy?: () => void;
 };
 
 function tryParseJson(text: string): unknown | null {
@@ -233,7 +235,7 @@ function HealthCard({
  * User-friendly system health (tools, memory, MCP, terminal, lifecycle, schedules).
  * Raw JSON is shown under "Détails techniques" in expert mode only.
  */
-export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, expert, locale, labels }: Props) {
+export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, expert, locale, labels, onEditToolsPolicy }: Props) {
   const [opsSummary, setOpsSummary] = useState<string>("");
   const [resumeJson, setResumeJson] = useState<string>("");
   const [toolsJson, setToolsJson] = useState<string>("");
@@ -419,6 +421,13 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, e
         expert={expert}
         detailsLabel={labels.detailsToggle}
       />
+      {onEditToolsPolicy && labels.editPolicy ? (
+        <p className="settings-doc">
+          <button type="button" className="settings-link-btn" onClick={onEditToolsPolicy}>
+            {labels.editPolicy}
+          </button>
+        </p>
+      ) : null}
       <HealthCard
         title={labels.recallHeading}
         lines={recallLines}
