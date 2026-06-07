@@ -36,7 +36,7 @@ Une ligne = une capacité **KinBot** (README / doc amont) ; la colonne **Akasha*
 | PLUG | Marketplace plugins (npm, Git URL, hot reload UI) | **Partiel** | `POST /api/plugins/install` (catalog id ou URL), `akasha plugin catalog|install` ; circuit-breaker plugins (3 échecs / 1h → auto-disable dans `reputation.rs`) ; pas registry npm |
 | DASH | Mini Apps / dashboards agent (HTML sandbox) | **Implémenté** | `GET/POST/DELETE /api/dashboards`, `GET …/html` — sandbox HTML agent |
 | SSE | Streaming SSE multiplexé + filtrage types | **Partiel** | `GET /api/events` + `parse_sse_event_filter` (task_id, types) ; UI poll fallback sur certains écrans |
-| MATRIX | Canal Matrix | **Partiel** | Plugin `Akasha_plugins/matrix-channel` — WASM catalogue + **sidecar** `sidecar/` (sync Matrix → `POST /api/message` quand `MATRIX_HOMESERVER_URL` + token) |
+| MATRIX | Canal Matrix | **Production** (registre S-PLG-04) | Plugin `Akasha_plugins/matrix-channel` — WASM catalogue + **sidecar** `sidecar/` (sync Matrix → `POST /api/message` quand `MATRIX_HOMESERVER_URL` + token). Parité ops KinBot (sync E2E industrialisée) : **Partiel** — voir README plugin |
 | ONBOARD | Wizard premier lancement (Docker / Tauri) | **Partiel** | Wizard Tauri 6 étapes (`OnboardingWizard.tsx` : bienvenue, doctor --fix, provider, canaux, profil, fin) + `akasha init` CLI ; pas de wizard Docker intégré type KinBot |
 | — | Mémoire chiffrée AES-256 (vault + DB) | **Partiel** | Vault chiffré ; `memory.db` en clair — [memory_encryption_rfc.md](./memory_encryption_rfc.md) (wave 6) |
 | — | Auth multi-utilisateur + rôles + invitations | **Hors scope** | Instance mono-opérateur locale ; gouvernance Telegram v0.8+ |
@@ -64,7 +64,7 @@ Une ligne = une capacité **KinBot** (README / doc amont) ; la colonne **Akasha*
 | 2 | Wakeups, HITL, profils, délégation | WAKE, PROF, DEL | HITL | — |
 | 3 | Inter-agent, contacts, notifications | INTER, CONT, NOTIF | — | — |
 | 4 | Plugins, dashboards, SSE | DASH | PLUG, SSE | — |
-| 5 | Matrix, onboarding, doc parité | DOC (ce doc) | ONBOARD | MATRIX |
+| 5 | Matrix, onboarding, doc parité | DOC (ce doc), MATRIX (S-PLG-04) | ONBOARD | — |
 
 ---
 
@@ -75,4 +75,4 @@ Une ligne = une capacité **KinBot** (README / doc amont) ; la colonne **Akasha*
 - [reference-products-parity-matrix.md](./reference-products-parity-matrix.md) (colonne KinBot)
 - Code : `crates/akasha-daemon/src/api_routes_kinbot.rs`, `inter_agent.rs`, `memory_orchestrator.rs`
 
-**Dernière mise à jour :** 2026-06-06 (phase 2A — B5 knowledge base panel `UserRagPanel` ; MEM rollup + branch API).
+**Dernière mise à jour :** 2026-06-07 (resync registre v1.2.0 — MATRIX → Production S-PLG-04).

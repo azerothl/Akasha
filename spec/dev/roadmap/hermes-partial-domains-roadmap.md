@@ -1,4 +1,4 @@
-> **Archive:** Ce document est archivé. Statut : **Livré / Archivé** (2026-06-06). Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md).
+> **Archive:** Ce document est archivé. Statut : **Livré / Archivé** (2026-06-06). Source de vérité active : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md) v1.2.0.
 
 # Partial domains roadmap — operator parity (Phase 4)
 

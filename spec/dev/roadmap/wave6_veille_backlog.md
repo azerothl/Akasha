@@ -20,4 +20,4 @@ Références : [`memory_phase4_backlog.md`](memory_phase4_backlog.md), [`memory_
 | pi-mono | RPC stdio JSONL | **Reporter** |
 | pi-mono | CSI / TUI différentiel | **Reporter** |
 
-**Dernière mise à jour :** 2026-06-06 (clôture roadmap — voir [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md)).
+**Dernière mise à jour :** 2026-06-07 (registre v1.2.0 — voir [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md)).

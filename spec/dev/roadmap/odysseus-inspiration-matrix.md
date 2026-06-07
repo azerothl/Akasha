@@ -99,3 +99,4 @@ Document de suivi des idées empruntées à Odysseus sans diluer le positionneme
 - **1.0.2** (2026-06-03): Deep Research IterResearch (moteur daemon, poll UI, viz sous-agents, export HTML enrichi).
 - **1.0.3** (2026-06-06): resync setup in-app — wizard Tauri `OnboardingWizard.tsx` (4 étapes) documenté ; reste Partiel vs `/setup` Odysseus.
 - **1.0.4** (2026-06-06): incognito + floutage secrets → **Existe · haute** (wave 7) — `App.tsx` incognito banner, `ChatRenderer.tsx` `blurSecrets`, `POST /api/message` flags.
+- **1.0.5** (2026-06-07): notes Tauri → **Existe · moyenne** — suivi post-clôture registre v1.2.0 ; `notes.rs`, `/api/notes`, `NotesPanel.tsx`.

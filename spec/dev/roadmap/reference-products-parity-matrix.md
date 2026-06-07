@@ -1,9 +1,9 @@
-> **Archive:** Ce document est archivé pour le suivi actif. Source de vérité : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md). La matrice reste la référence produit ; les mises à jour roadmap passent par le registre.
+> **Archive:** Ce document est archivé. Source de vérité : [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md) v1.2.0. La matrice reste la référence produit ; les mises à jour roadmap passent par le registre.
 
 # Matrice de parité — produits de référence ↔ Akasha
 
-**Version:** 3.0.0  
-**Date:** 2026-06-06  
+**Version:** 3.0.1  
+**Date:** 2026-06-07  
 
 Document **central** : une ligne = un **domaine fonctionnel** ; les colonnes *Hermes … Mercury* résument ce que chaque produit **expose typiquement** sur ce point (**indicatif** — vérifier chez l’éditeur). La colonne **jcode (RFC)** renvoie aux [concepts internes](./jcode_inspired_integration_rfc.md) (pas un produit concurrent). **État Akasha** reprend l’ancienne paire statut / maturité (synthèse).
 
@@ -141,6 +141,7 @@ Légende : **C** = core · **Doc** = doc / site · **Cat** = catalogues skills/p
 
 ## Changelog
 
+- **3.0.1** (2026-06-07): resync registre [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md) v1.2.0 — M-* post-clôture, preuves lifecycle/Matrix ; notes Odysseus en suivi post-clôture.
 - **3.0.0** (2026-06-06): **roadmap-complete** — satellites §7 Studio + plugins ● (handoff, fork, recall-metrics, trust-catalog `hook_events`) ; clôture registre [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md) v1.1.0.
 - **2.1.1** (2026-06-06): Phase 1 matrice closure — sessions Reprendre (Tauri + Studio), webhooks recent cockpit, MCP OAuth refresh, skills browse UI, worktree doc site, browser health hint, OpenClaw import memory, S-ORCH-01 runbook ; M-01…M-15 → Existe.
 - **2.1.0** (2026-06-06): wave 7 resync — OpenClaw migration CLI+UI → Existe · moyenne ; cache HTTP généralisé (`http_get_cache.rs` 8 routes) → Existe · haute ; sessions/reprise + recherche threads Tauri → Existe · haute ; constitution recall filter (`constitution.rs`, S-RAG-02).
