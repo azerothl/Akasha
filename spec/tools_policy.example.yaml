@@ -148,3 +148,8 @@ command_timeout_secs: 60
 #   github:
 #     enabled: true
 #     allowed_tools: ["search_repositories", "get_file_contents"]
+
+# Optionnel : calendrier externe (CalDAV / ICS). Lecture via calendar_query ; écriture via calendar_create/update/delete.
+# calendar_read_enabled: true    # défaut true — autorise calendar_query
+# calendar_write_enabled: false  # défaut false — calendar_create/update/delete (enqueue outbox CalDAV)
+# Recommandé en production : calendar_write_enabled: false et require_approval: [calendar_create, calendar_update, calendar_delete]

@@ -83,7 +83,7 @@ Tous les stubs sont en statut terminal **Production**, **Reporter** ou **Degrade
 | PWA mobile | **Reporter** | Desktop-first (Tauri + Studio) |
 | RPC stdio pi-mono | **Reporter** | HTTP API + tâches suffisent |
 | Email IMAP | **Reporter** | Hors scope court terme |
-| CalDAV | **Reporter** | MVP ICS import/export uniquement |
+| CalDAV | **Production** | ICS + sidecar pull/push + outils agent ; voir [`caldav-integration.md`](../integrations/caldav-integration.md) |
 | @mentions multi-Kin | **Reporter** | `agent-profiles` suffit |
 | GraphRAG hypergraphes D6 | **Reporter R&D** | Pilote `project:*` si demande |
 | ModelPlugin trait | **Reporter** | `llm_router.yaml` + providers HTTP (S-PLG-02) |

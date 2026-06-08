@@ -1777,6 +1777,10 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("list_scheduled_tasks", "list_scheduled_tasks [limit] — lister les schedules actifs."),
     ("cancel_scheduled_task", "cancel_scheduled_task <schedule_id> — supprimer un schedule par UUID."),
     ("wake_in", "wake_in <minutes> <message> — programmer un rappel agent unique dans la session courante (plus léger que schedule_task)."),
+    ("calendar_query", "calendar_query <from_iso> <to_iso> [account_id] — lister les événements calendrier externes (CalDAV/ICS) sur une plage ISO8601."),
+    ("calendar_create", "calendar_create <summary> <from_iso> <to_iso> [account_id] [description] — créer un événement calendrier externe (file d'attente sync CalDAV)."),
+    ("calendar_update", "calendar_update <event_id> <json_fields> — mettre à jour un événement (summary, dtstart, dtend, description, location)."),
+    ("calendar_delete", "calendar_delete <event_id> — supprimer (soft-delete) un événement externe."),
     ("budget_status", "budget_status [session_id] — état budget (usage tokens/coût, seuil, auto-concise)."),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
     ("browser", "browser navigate <url> — navigate (http/https; domain allowed). browser snapshot — texte + liens. browser screenshot | browser click <css> | browser fill <css> <texte> | browser wait <css_selector|ms> — automation Playwright (spec 39)."),
@@ -5317,6 +5321,243 @@ pub(crate) async fn execute_tool_call_impl(
                     }
                 }
                 None => (false, "[wake_in] store not available".to_string(), None),
+            }
+        }
+        "calendar_query" => {
+            if !executor.policy.calendar_read_enabled {
+                return (
+                    false,
+                    "[calendar_query] calendar_read_enabled is false in tools_policy.yaml".to_string(),
+                    None,
+                );
+            }
+            let from_s = args.first().map(String::as_str).unwrap_or("");
+            let to_s = args.get(1).map(String::as_str).unwrap_or("");
+            let account_id = args
+                .get(2)
+                .and_then(|s| Uuid::parse_str(s.trim()).ok());
+            let from = chrono::DateTime::parse_from_rfc3339(from_s)
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+            let to = chrono::DateTime::parse_from_rfc3339(to_s)
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| from + chrono::Duration::days(1));
+            match store_path {
+                Some(path) => (
+                    true,
+                    crate::api_routes_calendar::calendar_query_compact(path, from, to, account_id),
+                    None,
+                ),
+                None => (false, "[calendar_query] store not available".to_string(), None),
+            }
+        }
+        "calendar_create" => {
+            if !executor.policy.calendar_write_enabled {
+                return (
+                    false,
+                    "[calendar_create] calendar_write_enabled is false (enable in tools_policy.yaml)".to_string(),
+                    None,
+                );
+            }
+            if args.len() < 3 {
+                return (
+                    false,
+                    "[calendar_create] usage: calendar_create <summary> <from_iso> <to_iso> [account_id] [description]".to_string(),
+                    None,
+                );
+            }
+            let summary = args[0].clone();
+            let from_s = &args[1];
+            let to_s = &args[2];
+            let mut account_id = akasha_store::default_ics_account_id();
+            let description = if args.len() > 3 {
+                if let Ok(parsed) = Uuid::parse_str(args[3].trim()) {
+                    account_id = parsed;
+                    if args.len() > 4 {
+                        Some(args[4..].join(" "))
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(args[3..].join(" "))
+                }
+            } else {
+                None
+            };
+            let dtstart = chrono::DateTime::parse_from_rfc3339(from_s)
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+            let dtend = chrono::DateTime::parse_from_rfc3339(to_s)
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .ok();
+            match store_path {
+                Some(path) => match akasha_store::ExternalCalendarStore::open(path) {
+                    Ok(store) => {
+                        let id = Uuid::new_v4();
+                        let uid = format!("akasha-{}", id);
+                        let row = akasha_store::ExternalCalendarEvent {
+                            id,
+                            account_id,
+                            uid,
+                            href: None,
+                            etag: None,
+                            summary,
+                            description,
+                            location: None,
+                            dtstart,
+                            dtend,
+                            timezone: None,
+                            rrule: None,
+                            exdates_json: "[]".to_string(),
+                            source: "local".to_string(),
+                            synced_at: Some(chrono::Utc::now()),
+                            deleted: false,
+                        };
+                        match store.upsert_event(&row) {
+                            Ok(()) => {
+                                let payload = serde_json::to_string(&row).unwrap_or_default();
+                                let _ = store.enqueue_outbox(&akasha_store::CalDavOutboxRow {
+                                    id: Uuid::new_v4(),
+                                    account_id: row.account_id,
+                                    event_id: Some(id),
+                                    operation: "create".to_string(),
+                                    payload_json: payload,
+                                    created_at: chrono::Utc::now(),
+                                    applied_at: None,
+                                    error: None,
+                                });
+                                (
+                                    true,
+                                    format!("[calendar_create] created event_id={id}"),
+                                    None,
+                                )
+                            }
+                            Err(e) => (false, format!("[calendar_create] {e}"), None),
+                        }
+                    }
+                    Err(e) => (false, format!("[calendar_create] store: {e}"), None),
+                },
+                None => (false, "[calendar_create] store not available".to_string(), None),
+            }
+        }
+        "calendar_update" => {
+            if !executor.policy.calendar_write_enabled {
+                return (
+                    false,
+                    "[calendar_update] calendar_write_enabled is false".to_string(),
+                    None,
+                );
+            }
+            if args.len() < 2 {
+                return (
+                    false,
+                    "[calendar_update] usage: calendar_update <event_id> <json>".to_string(),
+                    None,
+                );
+            }
+            let Ok(event_id) = Uuid::parse_str(args[0].trim()) else {
+                return (false, "[calendar_update] invalid event_id".to_string(), None);
+            };
+            let json_part = args[1..].join(" ");
+            let Ok(j) = serde_json::from_str::<serde_json::Value>(&json_part) else {
+                return (false, "[calendar_update] invalid json".to_string(), None);
+            };
+            match store_path {
+                Some(path) => match akasha_store::ExternalCalendarStore::open(path) {
+                    Ok(store) => {
+                        let Some(mut row) = store.get_event(event_id).ok().flatten() else {
+                            return (false, "[calendar_update] not found".to_string(), None);
+                        };
+                        if let Some(s) = j.get("summary").and_then(|v| v.as_str()) {
+                            row.summary = s.to_string();
+                        }
+                        if let Some(s) = j.get("description").and_then(|v| v.as_str()) {
+                            row.description = Some(s.to_string());
+                        }
+                        if let Some(s) = j.get("location").and_then(|v| v.as_str()) {
+                            row.location = Some(s.to_string());
+                        }
+                        if let Some(s) = j.get("dtstart").and_then(|v| v.as_str()) {
+                            if let Ok(d) = chrono::DateTime::parse_from_rfc3339(s) {
+                                row.dtstart = d.with_timezone(&chrono::Utc);
+                            }
+                        }
+                        if let Some(s) = j.get("dtend").and_then(|v| v.as_str()) {
+                            if let Ok(d) = chrono::DateTime::parse_from_rfc3339(s) {
+                                row.dtend = Some(d.with_timezone(&chrono::Utc));
+                            }
+                        }
+                        row.synced_at = Some(chrono::Utc::now());
+                        match store.upsert_event(&row) {
+                            Ok(()) => {
+                                let payload = serde_json::to_string(&row).unwrap_or_default();
+                                let _ = store.enqueue_outbox(&akasha_store::CalDavOutboxRow {
+                                    id: Uuid::new_v4(),
+                                    account_id: row.account_id,
+                                    event_id: Some(event_id),
+                                    operation: "update".to_string(),
+                                    payload_json: payload,
+                                    created_at: chrono::Utc::now(),
+                                    applied_at: None,
+                                    error: None,
+                                });
+                                (true, format!("[calendar_update] updated {event_id}"), None)
+                            }
+                            Err(e) => (false, format!("[calendar_update] {e}"), None),
+                        }
+                    }
+                    Err(e) => (false, format!("[calendar_update] store: {e}"), None),
+                },
+                None => (false, "[calendar_update] store not available".to_string(), None),
+            }
+        }
+        "calendar_delete" => {
+            if !executor.policy.calendar_write_enabled {
+                return (
+                    false,
+                    "[calendar_delete] calendar_write_enabled is false".to_string(),
+                    None,
+                );
+            }
+            let Ok(event_id) = Uuid::parse_str(args.first().map(String::as_str).unwrap_or("").trim()) else {
+                return (
+                    false,
+                    "[calendar_delete] usage: calendar_delete <event_id>".to_string(),
+                    None,
+                );
+            };
+            match store_path {
+                Some(path) => match akasha_store::ExternalCalendarStore::open(path) {
+                    Ok(store) => {
+                        let row = store.get_event(event_id).ok().flatten();
+                        match store.soft_delete_event(event_id) {
+                            Ok(true) => {
+                                if let Some(ref r) = row {
+                                    let payload = serde_json::json!({
+                                        "event_id": event_id.to_string(),
+                                        "href": r.href,
+                                        "uid": r.uid,
+                                    });
+                                    let _ = store.enqueue_outbox(&akasha_store::CalDavOutboxRow {
+                                        id: Uuid::new_v4(),
+                                        account_id: r.account_id,
+                                        event_id: Some(event_id),
+                                        operation: "delete".to_string(),
+                                        payload_json: payload.to_string(),
+                                        created_at: chrono::Utc::now(),
+                                        applied_at: None,
+                                        error: None,
+                                    });
+                                }
+                                (true, format!("[calendar_delete] deleted {event_id}"), None)
+                            }
+                            Ok(false) => (false, "[calendar_delete] not found".to_string(), None),
+                            Err(e) => (false, format!("[calendar_delete] {e}"), None),
+                        }
+                    }
+                    Err(e) => (false, format!("[calendar_delete] store: {e}"), None),
+                },
+                None => (false, "[calendar_delete] store not available".to_string(), None),
             }
         }
         "budget_status" => {
@@ -9635,6 +9876,9 @@ pub(crate) async fn run_message_via_llm(
     });
     if !is_small_talk_fast_lane && !code_studio_disk_task {
         user_prefix.push_str(&crate::agents::current_date_context_block(chrono::Local::now()));
+        if let Some(hint) = crate::agents::calendar_tools_hint_if_relevant(clean_message) {
+            user_prefix.push_str(&hint);
+        }
     }
     if let Some(ref am) = autonomous_mission {
         let g = am.read().await;
@@ -13583,6 +13827,26 @@ pub async fn handle_api(
         return resp;
     }
 
+    let header_pairs: Vec<(String, String)> = headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if let Some(resp) = crate::api_routes_calendar::try_handle(
+        method,
+        path_only,
+        Some(query_str),
+        body.as_deref(),
+        &header_pairs,
+        &crate::api_routes_calendar::CalendarRouteCtx {
+            store_path,
+            data_dir,
+        },
+    )
+    .await
+    {
+        return resp;
+    }
+
     if let Some(resp) = crate::api_routes_kinbot::try_handle(
         method,
         path_only,
@@ -15014,6 +15278,100 @@ pub async fn handle_api(
             "description": playwright_pkg_desc
         }));
 
+        // Calendar / CalDAV (external events cache + sidecar sync status)
+        let (cal_account_count, cal_accounts_err, cal_ext_count, cal_sync_desc) =
+            match akasha_store::ExternalCalendarStore::open(store_path) {
+                Ok(store) => {
+                    let accounts = store.list_accounts().unwrap_or_default();
+                    let err_count = accounts
+                        .iter()
+                        .filter(|a| a.last_sync_error.as_ref().is_some_and(|e| !e.is_empty()))
+                        .count();
+                    let now = chrono::Utc::now();
+                    let ext_count = store
+                        .list_events_between(
+                            now - chrono::Duration::days(30),
+                            now + chrono::Duration::days(90),
+                            None,
+                        )
+                        .map(|v| v.len())
+                        .unwrap_or(0);
+                    let sync_path = data_dir.join("calendar_sync_status.json");
+                    let sync_json: Option<serde_json::Value> = std::fs::read_to_string(&sync_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok());
+                    let connected = sync_json
+                        .as_ref()
+                        .and_then(|j| j.get("connected").and_then(|v| v.as_bool()))
+                        .unwrap_or(false);
+                    let last_err = sync_json
+                        .as_ref()
+                        .and_then(|j| j.get("last_error").and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    let last_at = sync_json
+                        .as_ref()
+                        .and_then(|j| j.get("last_sync_at").and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    let desc = if accounts.is_empty() {
+                        format!(
+                            "No CalDAV accounts ({ext_count} external events in cache; ICS import OK)"
+                        )
+                    } else if !last_err.is_empty() {
+                        format!(
+                            "{} account(s), last sync error: {last_err}",
+                            accounts.len()
+                        )
+                    } else if connected {
+                        format!(
+                            "{} account(s), sidecar connected, last sync {last_at}",
+                            accounts.len()
+                        )
+                    } else {
+                        format!(
+                            "{} account(s), sidecar idle (run caldav-channel sidecar)",
+                            accounts.len()
+                        )
+                    };
+                    (accounts.len(), err_count, ext_count, desc)
+                }
+                Err(e) => (0, 0, 0, format!("External calendar store: {e}")),
+            };
+        let cal_sync_ok = cal_accounts_err == 0;
+        checks.push(serde_json::json!({
+            "id": "calendar_accounts",
+            "ok": cal_sync_ok,
+            "description": cal_sync_desc
+        }));
+        checks.push(serde_json::json!({
+            "id": "calendar_external_events",
+            "ok": true,
+            "description": format!("External calendar events (next 90d window): {cal_ext_count}")
+        }));
+        if cal_account_count > 0 {
+            let mut missing_pw = 0usize;
+            if let Ok(vault) = akasha_vault::open_vault(data_dir) {
+                if let Ok(store) = akasha_store::ExternalCalendarStore::open(store_path) {
+                    if let Ok(accounts) = store.list_accounts() {
+                        for a in accounts {
+                            let key = format!("caldav_{}_password", a.id);
+                            if vault.get(&key).is_err() {
+                                missing_pw += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            checks.push(serde_json::json!({
+                "id": "calendar_vault_passwords",
+                "ok": missing_pw == 0,
+                "description": if missing_pw == 0 {
+                    "CalDAV vault passwords present for all accounts".to_string()
+                } else {
+                    format!("{missing_pw} CalDAV account(s) missing vault key caldav_<id>_password")
+                }
+            }));
+        }
+
         let playwright_json = serde_json::json!({
             "runner_path": runner_path_str,
             "runner_found": runner_ok,
@@ -16289,10 +16647,7 @@ pub async fn handle_api(
             }
         }
     }
-    if method == "GET" && path.starts_with("/api/calendar/events") {
-        return get_calendar_events(store_path, path).await;
-    }
-    if method == "GET" && path == "/api/task_runs" {
+    if method == "GET" && path.starts_with("/api/task_runs") {
         return get_task_runs_list(store_path, path).await;
     }
     if method == "GET" && path.starts_with("/api/task_runs/") {
@@ -18945,80 +19300,6 @@ fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> String {
             format!("Tâche …{suffix}")
         }
     }
-}
-
-async fn get_calendar_events(store_path: &Path, path: &str) -> String {
-    let query = path.split('?').nth(1).unwrap_or("");
-    let from_ts = query
-        .split('&')
-        .find(|p| p.starts_with("from="))
-        .and_then(|p| p.strip_prefix("from="))
-        .and_then(|s| urlencoding::decode(s).ok())
-        .and_then(|decoded| chrono::DateTime::parse_from_rfc3339(&decoded).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc));
-    let to_ts = query
-        .split('&')
-        .find(|p| p.starts_with("to="))
-        .and_then(|p| p.strip_prefix("to="))
-        .and_then(|s| urlencoding::decode(s).ok())
-        .and_then(|decoded| chrono::DateTime::parse_from_rfc3339(&decoded).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc));
-    let (from_ts, to_ts) = match (from_ts, to_ts) {
-        (Some(f), Some(t)) if f <= t => (f, t),
-        _ => {
-            let now = chrono::Utc::now();
-            let start = now - chrono::Duration::days(7);
-            (start, now)
-        }
-    };
-    let task_store = TaskStore::open(store_path);
-    let mut events: Vec<serde_json::Value> = Vec::new();
-    if let Ok(schedule_store) = ScheduleStore::open(store_path) {
-        if let Ok(runs) = schedule_store.list_task_runs_between(from_ts, to_ts, 500) {
-            for r in runs {
-                let at = r.started_at.unwrap_or(r.planned_for);
-                let label = task_store
-                    .as_ref()
-                    .ok()
-                    .and_then(|ts| ts.get(r.task_id).ok().flatten())
-                    .map(|t| task_label(t.initial_message.as_ref(), &r.task_id))
-                    .unwrap_or_else(|| task_label(None, &r.task_id));
-                events.push(serde_json::json!({
-                    "at": at.to_rfc3339(),
-                    "task_id": r.task_id.to_string(),
-                    "type": "run",
-                    "status": r.status.as_str(),
-                    "run_id": r.id.to_string(),
-                    "planned_for": r.planned_for.to_rfc3339(),
-                    "label": label,
-                    "schedule_id": r.schedule_id.map(|u| u.to_string()),
-                }));
-            }
-        }
-    }
-    if let Ok(ref task_store) = task_store {
-        if let Ok(tasks) = task_store.list_tasks_created_between(from_ts, to_ts, 500) {
-            for t in tasks {
-                if t.parent_task_id.is_none() {
-                    let label = task_label(t.initial_message.as_ref(), &t.id);
-                    events.push(serde_json::json!({
-                        "at": t.created_at.to_rfc3339(),
-                        "task_id": t.id.to_string(),
-                        "type": "ad_hoc",
-                        "status": t.status.as_str(),
-                        "label": label,
-                    }));
-                }
-            }
-        }
-    }
-    events.sort_by(|a, b| {
-        let a_at = a.get("at").and_then(|v| v.as_str()).unwrap_or("");
-        let b_at = b.get("at").and_then(|v| v.as_str()).unwrap_or("");
-        a_at.cmp(b_at)
-    });
-    let body = serde_json::json!({ "events": events });
-    json_response("200 OK", &body.to_string())
 }
 
 async fn get_task_runs_list(store_path: &Path, path: &str) -> String {

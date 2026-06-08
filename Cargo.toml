@@ -5,6 +5,7 @@ members = [
     "crates/akasha-embedded-llm",
     "crates/akasha-embeddings",
     "crates/akasha-store",
+    "crates/akasha-calendar",
     "crates/akasha-tools",
     "crates/akasha-vault",
     "crates/akasha-plugin-api",

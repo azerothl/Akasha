@@ -26,6 +26,8 @@ pub mod deep_research;
 pub mod api_routes_mission;
 pub mod api_routes_kinbot;
 pub mod api_routes_profiles;
+pub mod api_routes_calendar;
+pub mod calendar_oauth;
 pub mod api_tool_parser;
 pub mod api_tool_dispatch;
 pub mod api_llm_loop;

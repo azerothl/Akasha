@@ -20,6 +20,7 @@ import { OnboardingWizard, readSetupWizardPending } from "./components/Onboardin
 import { UserRagPanel } from "./components/UserRagPanel";
 import { PluginCatalogPanel } from "./components/PluginCatalogPanel";
 import { OpenClawMigrationPanel } from "./components/OpenClawMigrationPanel";
+import { CalDavAccountsPanel } from "./components/CalDavAccountsPanel";
 import { ToolsPolicyPanel } from "./components/ToolsPolicyPanel";
 import { ConnectorsPanel } from "./components/ConnectorsPanel";
 import { NotificationCenter } from "./components/NotificationCenter";
@@ -2014,20 +2015,31 @@ function App() {
     const [_calendarRunsCollapsed, _setCalendarRunsCollapsed] = useState(false);
   type CalendarGridView = "day" | "week" | "month";
   const [calendarGridView, setCalendarGridView] = useState<CalendarGridView>("week");
-  type CalendarGridEvent = { at: string; task_id: string; type: string; status: string; label?: string; schedule_id?: string | null };
+  type CalendarGridEvent = { at: string; task_id?: string; type: string; status: string; label?: string; schedule_id?: string | null; event_id?: string };
   const [calendarGridEvents, setCalendarGridEvents] = useState<CalendarGridEvent[]>([]);
   const [calendarGridDate, setCalendarGridDate] = useState(() => new Date());
   const [calendarCellDetail, setCalendarCellDetail] = useState<{ slotKey: string; slotLabel: string; events: CalendarGridEvent[] } | null>(null);
-  type CalendarSubTab = "grid" | "recent" | "schedules" | "wakeups";
+  type CalendarSubTab = "grid" | "recent" | "schedules" | "wakeups" | "external";
   const [calendarSubTab, setCalendarSubTab] = useState<CalendarSubTab>("grid");
   type WakeupRow = { id: string; session_id: string; fire_at: string; message: string; status: string; created_at?: string };
   const [wakeups, setWakeups] = useState<WakeupRow[]>([]);
   const [wakeupFormMinutes, setWakeupFormMinutes] = useState("60");
   const [wakeupFormMessage, setWakeupFormMessage] = useState("");
   const [wakeupSaving, setWakeupSaving] = useState(false);
-  const calendarEventLabel = (ev: { label?: string; task_id: string }) => (ev.label && ev.label.trim()) ? ev.label : `Tâche …${ev.task_id.slice(-8)}`;
-  const calendarGetParentKey = (ev: CalendarGridEvent) => ev.schedule_id ?? `task_${ev.task_id}`;
-  const calendarGetEventStatusClass = (status: string) => {
+  const calendarEventLabel = (ev: { label?: string; task_id?: string; type?: string }) => {
+    if (ev.label && ev.label.trim()) return ev.label;
+    if (ev.type === "external") return ev.label?.trim() || (locale === "en" ? "External event" : "Événement externe");
+    const tid = ev.task_id ?? "";
+    return tid ? `Tâche …${tid.slice(-8)}` : (locale === "en" ? "Event" : "Événement");
+  };
+  const calendarGetParentKey = (ev: CalendarGridEvent) =>
+    ev.type === "external" ? `external_${ev.event_id ?? ev.at}` : ev.schedule_id ?? `task_${ev.task_id}`;
+  const calendarOpenGridEvent = (e: CalendarGridEvent) => {
+    if (e.type === "external" || !e.task_id) return;
+    setCalendarSelectedTaskId(e.task_id);
+  };
+  const calendarGetEventStatusClass = (status: string, type?: string) => {
+    if (type === "external") return "calendar-event--external";
     const s = (status ?? "").toLowerCase();
     if (s === "completed") return "calendar-event--completed";
     if (s === "running") return "calendar-event--running";
@@ -2069,7 +2081,8 @@ function App() {
   };
   // Precompute deduped event groups per slot to avoid per-cell recomputation during render.
   const calendarGridDedupedBySlot = useMemo(() => {
-    const getParentKey = (ev: CalendarGridEvent) => ev.schedule_id ?? `task_${ev.task_id}`;
+    const getParentKey = (ev: CalendarGridEvent) =>
+      ev.type === "external" ? `external_${ev.event_id ?? ev.at}` : ev.schedule_id ?? `task_${ev.task_id}`;
     const dedupe = (evs: CalendarGridEvent[]) => {
       const byParent = new Map<string, CalendarGridEvent[]>();
       evs.forEach((ev) => {
@@ -7590,6 +7603,15 @@ function App() {
               >
                 Rappels agent
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={calendarSubTab === "external"}
+                className={calendarSubTab === "external" ? "active" : ""}
+                onClick={() => setCalendarSubTab("external")}
+              >
+                {locale === "en" ? "CalDAV / ICS" : "CalDAV / ICS"}
+              </button>
             </div>
             <button
               type="button"
@@ -7802,7 +7824,7 @@ function App() {
                                     <div className="calendar-cell-inner">
                                       <ul className="calendar-grid-slot-events" role="list">
                                         {(calendarGridDedupedBySlot.byDate.get(key) ?? []).slice(0, 2).map(({ representative: e, count }, i) => (
-                                          <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} role="button" tabIndex={0} onClick={() => setCalendarSelectedTaskId(e.task_id)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setCalendarSelectedTaskId(e.task_id); } }}>
+                                          <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status, e.type)}`} title={`${e.type}${e.type === "external" ? "" : ` — ${e.status}`}`} role="button" tabIndex={0} onClick={() => calendarOpenGridEvent(e)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); calendarOpenGridEvent(e); } }}>
                                             <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
                                             <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
                                           </li>
@@ -7831,9 +7853,9 @@ function App() {
                         <ul className="calendar-cell-detail-list" style={{ listStyle: "none", margin: 0, padding: 0 }}>
                           {calendarDedupeByParent(calendarCellDetail.events).map(({ representative: e, count }, i) => (
                             <li key={i} style={{ marginBottom: "0.5rem" }}>
-                              <button type="button" className={`calendar-event-block calendar-cell-detail-item ${calendarGetEventStatusClass(e.status)}`} style={{ width: "100%", textAlign: "left", cursor: "pointer" }} onClick={() => { setCalendarCellDetail(null); setCalendarSelectedTaskId(e.task_id); }}>
-                                <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
-                                <span className="calendar-event-time">{new Date(e.at).toLocaleString("fr-FR", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" })} — {e.status}</span>
+                              <button type="button" className={`calendar-event-block calendar-cell-detail-item ${calendarGetEventStatusClass(e.status, e.type)}`} style={{ width: "100%", textAlign: "left", cursor: e.task_id && e.type !== "external" ? "pointer" : "default" }} onClick={() => { if (e.task_id && e.type !== "external") { setCalendarCellDetail(null); setCalendarSelectedTaskId(e.task_id); } }}>
+                                <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}{e.type === "external" ? " · externe" : ""}</span>
+                                <span className="calendar-event-time">{new Date(e.at).toLocaleString("fr-FR", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" })}{e.type === "external" ? "" : ` — ${e.status}`}</span>
                               </button>
                             </li>
                           ))}
@@ -8127,6 +8149,11 @@ function App() {
                     ))}
                   </ul>
                 )}
+              </div>
+            )}
+            {!calendarLoading && calendarSubTab === "external" && (
+              <div className="calendar-external-scroll">
+                <CalDavAccountsPanel locale={locale} fetchEndpoint={fetchSystemEndpoint} />
               </div>
             )}
             {calendarSelectedTaskId && (

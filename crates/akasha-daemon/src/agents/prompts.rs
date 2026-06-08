@@ -9,6 +9,34 @@ pub fn current_date_context_block(now: chrono::DateTime<chrono::Local>) -> Strin
     )
 }
 
+/// When the user message looks calendar-related, hint the agent to use `calendar_query`.
+pub fn calendar_tools_hint_if_relevant(user_message: &str) -> Option<String> {
+    let lower = user_message.to_lowercase();
+    const KEYWORDS: &[&str] = &[
+        "calendrier",
+        "calendar",
+        "rendez-vous",
+        "appointment",
+        "demain",
+        "tomorrow",
+        "aujourd'hui",
+        "today",
+        "caldav",
+        "agenda",
+        "événement",
+        "evenement",
+        "event",
+        "ics",
+    ];
+    if KEYWORDS.iter().any(|k| lower.contains(k)) {
+        Some(
+            "[Calendar hint]\nFor personal/external calendar events (not scheduler task runs), use TOOL: calendar_query <from_iso> <to_iso>. Write operations require calendar_write_enabled in tools_policy.yaml.\n\n".to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 /// Builds the task prompt (layer 3): objective, optional context, success criteria, and required output format.
 /// Prepended to the agent message so the agent receives a structured instruction.
 pub fn build_task_prompt(
@@ -184,6 +212,14 @@ mod tests {
         assert!(s.contains("[Orchestrated — disk deliverables REQUIRED]"));
         assert!(s.contains("write_file"));
         assert!(s.contains(ORCHESTRATOR_DELIVERABLES_TOOL_HINT));
+    }
+
+    #[test]
+    fn calendar_tools_hint_triggers_on_agenda_keywords() {
+        let hint = super::calendar_tools_hint_if_relevant("Qu'ai-je demain dans mon calendrier ?");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("calendar_query"));
+        assert!(super::calendar_tools_hint_if_relevant("hello world").is_none());
     }
 
     #[test]

@@ -21,4 +21,5 @@ pub use supervisor::{classify_execution_mode, ExecutionMode};
 pub use orchestrator::Orchestrator;
 pub use progress_subscriber::{run_events_subscriber, run_progress_subscriber, TaskPersistenceMsg, TaskPersistenceTx};
 pub use prompts::current_date_context_block;
+pub use prompts::calendar_tools_hint_if_relevant;
 pub use worker::run_worker;

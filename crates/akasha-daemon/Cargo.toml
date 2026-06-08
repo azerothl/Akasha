@@ -22,6 +22,7 @@ embedded-mkl = ["akasha-llm/embedded-mkl"]
 [dependencies]
 akasha-core = { path = "../akasha-core" }
 akasha-store = { path = "../akasha-store" }
+akasha-calendar = { path = "../akasha-calendar" }
 akasha-embeddings = { path = "../akasha-embeddings", optional = true, default-features = false }
 akasha-vault = { path = "../akasha-vault" }
 akasha-plugin-api = { path = "../akasha-plugin-api" }

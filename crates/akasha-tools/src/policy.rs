@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+fn default_calendar_read_enabled() -> bool {
+    true
+}
+
 fn path_normalize(p: &Path) -> PathBuf {
     let s = p.to_string_lossy().replace('\\', "/").to_lowercase();
     PathBuf::from(s)
@@ -43,6 +47,12 @@ pub struct ToolsPolicy {
     /// Optional: enable Cloudflare Browser Rendering crawl (`web_crawl` / `web_crawl_status`). See spec/53.
     #[serde(default)]
     pub web_crawl_enabled: bool,
+    /// Optional: allow agent `calendar_query` (read external calendar cache).
+    #[serde(default = "default_calendar_read_enabled")]
+    pub calendar_read_enabled: bool,
+    /// Optional: allow agent calendar_create/update/delete (default deny).
+    #[serde(default)]
+    pub calendar_write_enabled: bool,
     /// Cloudflare account id for `/browser-rendering/crawl` (or set `CLOUDFLARE_ACCOUNT_ID` env).
     #[serde(default)]
     pub cloudflare_account_id: Option<String>,
@@ -60,8 +70,8 @@ pub struct ToolsPolicy {
     /// Cloudflare API token (vault `cloudflare_api_token` or env `CLOUDFLARE_API_TOKEN`). Not serialized in YAML.
     #[serde(skip)]
     pub cloudflare_api_token: Option<String>,
-    /// Project root for resolving workspace:/ paths and "." in allowed_read_paths/allowed_write_paths.
-    /// Set by the daemon from its data_dir (see daemon.rs).
+    /// Akasha data directory (daemon `data_dir`). Used to resolve `workspace:/` paths and `"."`
+    /// in allowed_read_paths/allowed_write_paths.
     #[serde(skip)]
     pub workspace_root: Option<PathBuf>,
     /// Optional: tool profiles (profile_name -> list of tool names). If default_profile is set, only tools in that profile are allowed.
@@ -732,6 +742,16 @@ impl ToolsPolicy {
                     notes.push("operational:missing_cloudflare_api_token".to_string());
                 }
             }
+            "calendar_query" => {
+                if !self.calendar_read_enabled {
+                    notes.push("operational:calendar_read_disabled".to_string());
+                }
+            }
+            "calendar_create" | "calendar_update" | "calendar_delete" => {
+                if !self.calendar_write_enabled {
+                    notes.push("operational:calendar_write_disabled".to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -748,6 +768,8 @@ impl ToolsPolicy {
                     && self.resolved_cloudflare_account_id().is_some()
                     && self.resolved_cloudflare_api_token().is_some()
             }
+            "calendar_query" => self.calendar_read_enabled,
+            "calendar_create" | "calendar_update" | "calendar_delete" => self.calendar_write_enabled,
             _ => true,
         }
     }
@@ -981,6 +1003,30 @@ mod tests {
             "path inside allowed directory must be allowed");
         assert!(p.can_write(Path::new("/home/app/data/output.txt")),
             "path inside allowed directory must be allowed for write");
+    }
+
+    #[test]
+    fn data_dir_not_allowed_without_tools_policy_paths() {
+        let root = PathBuf::from("/home/user/akasha");
+        let p = ToolsPolicy {
+            workspace_root: Some(root),
+            ..Default::default()
+        };
+        assert!(!p.can_read(Path::new("/home/user/akasha/notes/draft.md")));
+        assert!(!p.can_write(Path::new("/home/user/akasha/games/save.json")));
+        assert!(!p.can_read(Path::new("/home/user/other/file.txt")));
+        assert!(!p.can_write(Path::new("/home/user/other/file.txt")));
+    }
+
+    #[test]
+    fn data_dir_path_traversal_still_blocked() {
+        let root = PathBuf::from("/home/user/akasha");
+        let p = ToolsPolicy {
+            workspace_root: Some(root),
+            ..Default::default()
+        };
+        assert!(!p.can_read(Path::new("/home/user/akasha/../secret")));
+        assert!(!p.can_write(Path::new("notes/../secret")));
     }
 
     #[test]
