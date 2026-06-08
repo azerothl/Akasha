@@ -12,10 +12,6 @@ struct CandlePipeline {
     >,
 }
 
-pub fn is_available() -> bool {
-    true
-}
-
 pub fn is_loaded() -> bool {
     PIPELINE.read().map(|g| g.is_some()).unwrap_or(false)
 }

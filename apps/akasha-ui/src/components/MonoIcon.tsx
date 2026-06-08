@@ -1,4 +1,4 @@
-type IconName = "bell" | "lock" | "mic" | "paperclip" | "warning" | "note";
+type IconName = "bell" | "lock" | "mic" | "paperclip" | "warning" | "note" | "queue";
 
 type Props = {
   name: IconName;
@@ -60,6 +60,17 @@ export function MonoIcon({ name, className }: Props) {
           <path d="M14 2v6h6" />
           <path d="M8 13h8" />
           <path d="M8 17h5" />
+        </svg>
+      );
+    case "queue":
+      return (
+        <svg className={cls} {...svgProps} aria-hidden>
+          <path d="M8 6h13" />
+          <path d="M8 12h13" />
+          <path d="M8 18h13" />
+          <path d="M3 6h.01" />
+          <path d="M3 12h.01" />
+          <path d="M3 18h.01" />
         </svg>
       );
     default:

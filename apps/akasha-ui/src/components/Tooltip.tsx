@@ -65,7 +65,7 @@ export function Tooltip({ content, children, placement = "top", info = false, cl
           <div
             ref={refs.setFloating}
             style={floatingStyles}
-            className={`akasha-tooltip-bubble akasha-tooltip-bubble--floating akasha-tooltip-bubble--${placement}`}
+            className="akasha-tooltip-bubble akasha-tooltip-bubble--floating"
             {...getFloatingProps()}
           >
             {content}
