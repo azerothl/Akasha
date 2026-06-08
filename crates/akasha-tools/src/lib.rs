@@ -3,6 +3,9 @@
 mod policy;
 mod tools;
 mod tool_contract;
+mod tabular;
+#[cfg(feature = "web")]
+mod agent_catalog;
 #[cfg(feature = "web")]
 mod web_search;
 
@@ -19,6 +22,9 @@ pub use tools::{
     git_status, grep_content, move_tree, read_file, rename_path, run_command, search_files, search_replace,
     write_file, ToolResult,
 };
+pub use tabular::analyze_table;
+#[cfg(feature = "web")]
+pub use agent_catalog::{arxiv_search, github_repo_info, http_probe, search_skills_catalog};
 #[cfg(feature = "web")]
 pub use tools::{web_crawl_start, web_crawl_status, web_fetch, web_search};
 #[cfg(feature = "web")]
@@ -190,6 +196,30 @@ impl ToolExecutor {
     #[cfg(feature = "web")]
     pub async fn web_crawl_job_status(&self, job_id: &str) -> anyhow::Result<(String, ToolResult)> {
         web_crawl_status(job_id, &self.policy).await
+    }
+
+    pub async fn analyze_table(&self, action: &str, path: &Path) -> anyhow::Result<(String, ToolResult)> {
+        analyze_table(action, path, &self.policy).await
+    }
+
+    #[cfg(feature = "web")]
+    pub async fn search_skills_catalog(&self, query: &str, max: usize) -> anyhow::Result<(String, ToolResult)> {
+        search_skills_catalog(query, max).await
+    }
+
+    #[cfg(feature = "web")]
+    pub async fn github_repo_info(&self, owner: &str, repo: &str) -> anyhow::Result<(String, ToolResult)> {
+        github_repo_info(owner, repo).await
+    }
+
+    #[cfg(feature = "web")]
+    pub async fn arxiv_search(&self, query: &str, max: u32) -> anyhow::Result<(String, ToolResult)> {
+        arxiv_search(query, max).await
+    }
+
+    #[cfg(feature = "web")]
+    pub async fn http_probe(&self, method: &str, url: &str, body: Option<&str>) -> anyhow::Result<(String, ToolResult)> {
+        http_probe(method, url, body, &self.policy).await
     }
 
     /// Run a command in a container (work_dir must be allowed for read). Feature "container".

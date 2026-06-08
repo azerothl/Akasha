@@ -90,6 +90,16 @@ command_timeout_secs: 60
 #     - edit_file
 #     - apply_patch
 #     - search_replace
+#     - web_search
+#     - web_fetch
+#     - search_skills_catalog
+#     - github_repo_info
+#     - analyze_table
+#     - arxiv_search
+#     - http_probe
+#     - list_skills
+#     - read_skill
+#     - install_skill
 #     # Code Studio (chef de projet) : pour que `studio_project_manager` puisse déléguer via
 #     # `delegate_to_agent`, ajoutez aussi :
 #     # - delegate_to_agent

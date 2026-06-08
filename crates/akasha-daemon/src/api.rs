@@ -1804,7 +1804,12 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_todos", "read_todos — retourne la liste des étapes (todos) de la tâche courante."),
     ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
     ("list_skills", "list_skills — retourne la liste des skills installés (nom et description). Utiliser avant read_skill pour charger le détail d'un skill."),
+    ("search_skills_catalog", "search_skills_catalog <query> [max] — rechercher dans la galerie Akasha_skills (skills.json distant)"),
     ("read_skill", "read_skill <name> — charge le contenu (instructions, usage) du skill. À utiliser quand tu as besoin du détail d'un skill avant de l'invoquer par son nom."),
+    ("github_repo_info", "github_repo_info <owner> <repo> — métadonnées GitHub (stars, langue, licence, activité)"),
+    ("analyze_table", "analyze_table <inspect|summary> <path.csv> — analyse tabulaire CSV native (SQL/XLSX: skill tabular-insights)"),
+    ("arxiv_search", "arxiv_search <query> [max] — recherche arXiv (API Atom)"),
+    ("http_probe", "http_probe <METHOD> <url> [body] — sonde HTTP contrôlée (domaines allowed_web_domains)"),
     ("plugin.call", "plugin.call <plugin_id> <json_or_args...> — exécuter un plugin de type tool chargé dans le daemon. Exemple: TOOL: plugin.call maps {\"action\":\"distance\",\"from\":{\"lat\":45.698,\"lon\":0.328},\"to\":{\"lat\":49.009,\"lon\":2.547},\"mode\":\"car\"}"),
     ("maps_distance", "maps_distance <from_lat> <from_lon> <to_lat> <to_lon> [mode] — via plugin maps, calcule distance et durée estimée."),
     ("maps_route", "maps_route <from_lat> <from_lon> <to_lat> <to_lon> [mode] — via plugin maps, retourne un itinéraire simplifié avec geometry map-ready."),
@@ -7066,6 +7071,78 @@ pub(crate) async fn execute_tool_call_impl(
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[web_crawl_status] {}", e), None),
+            }
+        }
+        "search_skills_catalog" => {
+            let (query, max) = if args.len() >= 2 {
+                let last = args.last().unwrap();
+                if last.parse::<usize>().is_ok() {
+                    (args[..args.len() - 1].join(" "), last.parse().unwrap_or(10))
+                } else {
+                    (args.join(" "), 10usize)
+                }
+            } else {
+                (args.join(" "), 10usize)
+            };
+            if query.trim().is_empty() {
+                return (false, "[search_skills_catalog] usage: search_skills_catalog <query> [max]".to_string(), None);
+            }
+            match executor.search_skills_catalog(query.trim(), max).await {
+                Ok((body, res)) => (res.success, format!("[search_skills_catalog] {} — {}", res.summary, body), None),
+                Err(e) => (false, format!("[search_skills_catalog] failed: {}", e), None),
+            }
+        }
+        "github_repo_info" => {
+            let owner = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let repo = args.get(1).map(String::as_str).unwrap_or("").trim();
+            if owner.is_empty() || repo.is_empty() {
+                return (false, "[github_repo_info] usage: github_repo_info <owner> <repo>".to_string(), None);
+            }
+            match executor.github_repo_info(owner, repo).await {
+                Ok((body, res)) => (res.success, format!("[github_repo_info] {} — {}", res.summary, body), None),
+                Err(e) => (false, format!("[github_repo_info] failed: {}", e), None),
+            }
+        }
+        "analyze_table" => {
+            let action = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let path = path_arg(1);
+            if action.is_empty() || path.is_none() {
+                return (false, "[analyze_table] usage: analyze_table <inspect|summary> <path.csv>".to_string(), None);
+            }
+            match executor.analyze_table(action, path.as_ref().unwrap()).await {
+                Ok((body, res)) => (res.success, format!("[analyze_table] {} — {}", res.summary, body), None),
+                Err(e) => (false, format!("[analyze_table] failed: {}", e), None),
+            }
+        }
+        "arxiv_search" => {
+            let (query, max) = if args.len() >= 2 {
+                let last = args.last().unwrap();
+                if last.parse::<u32>().is_ok() {
+                    (args[..args.len() - 1].join(" "), last.parse().unwrap_or(10))
+                } else {
+                    (args.join(" "), 10u32)
+                }
+            } else {
+                (args.join(" "), 10u32)
+            };
+            if query.trim().is_empty() {
+                return (false, "[arxiv_search] usage: arxiv_search <query> [max]".to_string(), None);
+            }
+            match executor.arxiv_search(query.trim(), max).await {
+                Ok((body, res)) => (res.success, format!("[arxiv_search] {} — {}", res.summary, body), None),
+                Err(e) => (false, format!("[arxiv_search] failed: {}", e), None),
+            }
+        }
+        "http_probe" => {
+            let method = args.get(0).map(String::as_str).unwrap_or("GET").trim();
+            let url = args.get(1).map(String::as_str).unwrap_or("").trim();
+            let body_arg = if args.len() > 2 { Some(args[2..].join(" ")) } else { None };
+            if url.is_empty() {
+                return (false, "[http_probe] usage: http_probe <METHOD> <url> [body]".to_string(), None);
+            }
+            match executor.http_probe(method, url, body_arg.as_deref()).await {
+                Ok((body, res)) => (res.success, format!("[http_probe] {} — {}", res.summary, body), None),
+                Err(e) => (false, format!("[http_probe] failed: {}", e), None),
             }
         }
         "run_in_container" => {
@@ -17085,6 +17162,54 @@ pub async fn handle_api(
         let list = skill_registry.list().await;
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
         return json_response("200 OK", &body);
+    }
+    if method == "GET" && path.starts_with("/api/skills/search") {
+        let query = path
+            .strip_prefix("/api/skills/search")
+            .and_then(|rest| {
+                let q = rest.trim_start_matches('?');
+                if q.is_empty() {
+                    None
+                } else if q.starts_with("q=") {
+                    urlencoding::decode(q.trim_start_matches("q=")).ok().map(|s| s.into_owned())
+                } else {
+                    Some(q.to_string())
+                }
+            })
+            .or_else(|| {
+                body.as_deref().and_then(|b| {
+                    serde_json::from_slice::<serde_json::Value>(b)
+                        .ok()
+                        .and_then(|j| j.get("q").and_then(|v| v.as_str()).map(String::from))
+                })
+            })
+            .unwrap_or_default();
+        let max = 20usize;
+        if query.trim().is_empty() {
+            let body = serde_json::json!({ "error": "missing_q", "detail": "Provide ?q=search terms" }).to_string();
+            return json_response("400 Bad Request", &body);
+        }
+        if let Some(exec_lock) = tools_executor {
+            let exec = exec_lock.read().await.clone();
+            match exec.search_skills_catalog(query.trim(), max).await {
+                Ok((text, res)) => {
+                    let body = serde_json::json!({
+                        "query": query,
+                        "summary": res.summary,
+                        "success": res.success,
+                        "results": text,
+                    })
+                    .to_string();
+                    return json_response("200 OK", &body);
+                }
+                Err(e) => {
+                    let body = serde_json::json!({ "error": "search_failed", "detail": e.to_string() }).to_string();
+                    return json_response("500 Internal Server Error", &body);
+                }
+            }
+        }
+        let body = serde_json::json!({ "error": "tools_unavailable" }).to_string();
+        return json_response("503 Service Unavailable", &body);
     }
     if method == "POST" && path == "/api/skills/reload" {
         match skill_registry.reload(data_dir, spec_dir).await {
