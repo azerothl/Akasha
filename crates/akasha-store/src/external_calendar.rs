@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS caldav_accounts (
     last_sync_error TEXT,
     sync_token TEXT,
     provider_id TEXT,
+    auth_method TEXT NOT NULL DEFAULT 'app_password',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -89,6 +90,7 @@ pub struct CalDavAccount {
     pub last_sync_error: Option<String>,
     pub sync_token: Option<String>,
     pub provider_id: Option<String>,
+    pub auth_method: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -117,12 +119,16 @@ impl ExternalCalendarStore {
             "ALTER TABLE caldav_accounts ADD COLUMN provider_id TEXT",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE caldav_accounts ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'app_password'",
+            [],
+        );
         Ok(Self { conn })
     }
 
     pub fn list_accounts(&self) -> anyhow::Result<Vec<CalDavAccount>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, label, url, username, calendar_path, enabled, last_sync_at, last_sync_error, sync_token, provider_id, created_at, updated_at FROM caldav_accounts ORDER BY created_at",
+            "SELECT id, label, url, username, calendar_path, enabled, last_sync_at, last_sync_error, sync_token, provider_id, auth_method, created_at, updated_at FROM caldav_accounts ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |row| Ok(row_to_account(row)?))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -130,7 +136,7 @@ impl ExternalCalendarStore {
 
     pub fn get_account(&self, id: Uuid) -> anyhow::Result<Option<CalDavAccount>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, label, url, username, calendar_path, enabled, last_sync_at, last_sync_error, sync_token, provider_id, created_at, updated_at FROM caldav_accounts WHERE id = ?1",
+            "SELECT id, label, url, username, calendar_path, enabled, last_sync_at, last_sync_error, sync_token, provider_id, auth_method, created_at, updated_at FROM caldav_accounts WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id.to_string()])?;
         if let Some(row) = rows.next()? {
@@ -141,13 +147,14 @@ impl ExternalCalendarStore {
 
     pub fn upsert_account(&self, a: &CalDavAccount) -> anyhow::Result<()> {
         self.conn.execute(
-            "INSERT INTO caldav_accounts (id, label, url, username, calendar_path, enabled, last_sync_at, last_sync_error, sync_token, provider_id, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+            "INSERT INTO caldav_accounts (id, label, url, username, calendar_path, enabled, last_sync_at, last_sync_error, sync_token, provider_id, auth_method, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
              ON CONFLICT(id) DO UPDATE SET
                label=excluded.label, url=excluded.url, username=excluded.username,
                calendar_path=excluded.calendar_path, enabled=excluded.enabled,
                last_sync_at=excluded.last_sync_at, last_sync_error=excluded.last_sync_error,
-               sync_token=excluded.sync_token, provider_id=excluded.provider_id, updated_at=excluded.updated_at",
+               sync_token=excluded.sync_token, provider_id=excluded.provider_id,
+               auth_method=excluded.auth_method, updated_at=excluded.updated_at",
             params![
                 a.id.to_string(),
                 a.label,
@@ -159,6 +166,7 @@ impl ExternalCalendarStore {
                 a.last_sync_error,
                 a.sync_token,
                 a.provider_id,
+                a.auth_method,
                 a.created_at.to_rfc3339(),
                 a.updated_at.to_rfc3339(),
             ],
@@ -350,8 +358,11 @@ fn row_to_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<CalDavAccount> {
         last_sync_error: row.get(7)?,
         sync_token: row.get(8)?,
         provider_id: row.get(9)?,
-        created_at: parse_ts(&row.get::<_, String>(10)?).unwrap_or_else(|_| Utc::now()),
-        updated_at: parse_ts(&row.get::<_, String>(11)?).unwrap_or_else(|_| Utc::now()),
+        auth_method: row
+            .get::<_, Option<String>>(10)?
+            .unwrap_or_else(|| "app_password".to_string()),
+        created_at: parse_ts(&row.get::<_, String>(11)?).unwrap_or_else(|_| Utc::now()),
+        updated_at: parse_ts(&row.get::<_, String>(12)?).unwrap_or_else(|_| Utc::now()),
     })
 }
 

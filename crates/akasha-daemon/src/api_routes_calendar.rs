@@ -116,6 +116,7 @@ fn ensure_default_ics_account(store: &ExternalCalendarStore) -> anyhow::Result<(
             last_sync_error: None,
             sync_token: None,
             provider_id: None,
+            auth_method: "app_password".to_string(),
             created_at: now,
             updated_at: now,
         })?;
@@ -211,8 +212,79 @@ pub async fn try_handle(
 
     if method == "GET" && path == "/api/calendar/providers" {
         let presets = akasha_calendar::caldav_provider_presets();
-        let body = serde_json::json!({ "providers": presets });
+        let oauth_cfg = crate::calendar_oauth::oauth_config_json(ctx.data_dir);
+        let body = serde_json::json!({
+            "providers": presets,
+            "oauth": oauth_cfg,
+        });
         return Some(json_response("200 OK", &body.to_string()));
+    }
+
+    if method == "GET" && path == "/api/calendar/oauth/config" {
+        let body = crate::calendar_oauth::oauth_config_json(ctx.data_dir);
+        return Some(json_response("200 OK", &body.to_string()));
+    }
+
+    if method == "POST" && path == "/api/calendar/oauth/start" {
+        let Some(j) = parse_json(body) else {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#));
+        };
+        let provider_id = j
+            .get("provider_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let label = j.get("label").and_then(|v| v.as_str()).map(String::from);
+        match crate::calendar_oauth::oauth_start(ctx.data_dir, provider_id, label).await {
+            Ok(out) => return Some(json_response("200 OK", &out.to_string())),
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ))
+            }
+        }
+    }
+
+    if method == "GET" && path == "/api/calendar/oauth/status" {
+        let state = query_str
+            .and_then(|qs| parse_query(qs, "state"))
+            .unwrap_or_default();
+        let body = crate::calendar_oauth::oauth_status(ctx.data_dir, &state).await;
+        return Some(json_response("200 OK", &body.to_string()));
+    }
+
+    if method == "GET" && path == "/api/calendar/oauth/callback" {
+        let qs = query_str.unwrap_or("");
+        let code = parse_query(qs, "code").unwrap_or_default();
+        let state = parse_query(qs, "state").unwrap_or_default();
+        let locale = parse_query(qs, "locale").unwrap_or_else(|| "fr".to_string());
+        if code.is_empty() || state.is_empty() {
+            let html = crate::calendar_oauth::oauth_error_html("Paramètres manquants.");
+            return Some(format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                html.len(),
+                html
+            ));
+        }
+        match crate::calendar_oauth::oauth_callback(ctx.data_dir, ctx.store_path, &code, &state).await
+        {
+            Ok(_) => {
+                let html = crate::calendar_oauth::oauth_success_html(&locale);
+                return Some(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    html.len(),
+                    html
+                ));
+            }
+            Err(e) => {
+                let html = crate::calendar_oauth::oauth_error_html(&e);
+                return Some(format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    html.len(),
+                    html
+                ));
+            }
+        }
     }
 
     if method == "GET" && path == "/api/calendar/accounts" {
@@ -267,6 +339,11 @@ pub async fn try_handle(
             last_sync_error: None,
             sync_token: None,
             provider_id,
+            auth_method: j
+                .get("auth_method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("app_password")
+                .to_string(),
             created_at: now,
             updated_at: now,
         };
@@ -274,6 +351,12 @@ pub async fn try_handle(
             return Some(json_response(
                 "400 Bad Request",
                 r#"{"error":"url_and_username_required"}"#,
+            ));
+        }
+        if account.auth_method == "oauth" {
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"use_oauth_flow_for_oauth_accounts"}"#,
             ));
         }
         let Some(store) = open_cal_store(ctx.store_path) else {

@@ -20,6 +20,34 @@ Comptes : table `caldav_accounts`. Outbox push : `caldav_outbox`.
 
 ---
 
+## OAuth (Google, Microsoft)
+
+En plus du mot de passe d'application (CalDAV), **Google Calendar** et **Outlook / Microsoft 365** supportent une connexion **OAuth** lorsque l'administrateur a enregistré des identifiants client dans le vault :
+
+| Clé vault | Usage |
+|-----------|--------|
+| `google_calendar_oauth_client_id` | Client OAuth Google Cloud |
+| `google_calendar_oauth_client_secret` | Secret client Google |
+| `microsoft_calendar_oauth_client_id` | App registration Azure |
+| `microsoft_calendar_oauth_client_secret` | Secret client Microsoft |
+
+Redirect URI à déclarer chez le fournisseur : `http://127.0.0.1:3876/api/calendar/oauth/callback` (ou port `AKASHA_PORT`).
+
+### API OAuth
+
+| Méthode | Route | Description |
+|---------|-------|-------------|
+| GET | `/api/calendar/oauth/config` | Fournisseurs OAuth configurés |
+| POST | `/api/calendar/oauth/start` | `{ provider_id, label? }` → `{ auth_url, state }` |
+| GET | `/api/calendar/oauth/callback` | Callback navigateur (code + state) |
+| GET | `/api/calendar/oauth/status?state=` | Polling UI après ouverture du navigateur |
+
+Tokens stockés dans le vault : `caldav_<account_id>_oauth`. Compte créé avec `auth_method: oauth`.
+
+**Limite actuelle :** la sync sidecar utilise encore l'auth CalDAV (mot de passe) ; le support OAuth côté sidecar (Google Calendar API / Microsoft Graph) est le prochain jalon.
+
+---
+
 ## API HTTP
 
 | Méthode | Route | Description |

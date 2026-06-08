@@ -5600,10 +5600,33 @@ a.settings-link-btn.refresh-btn {
 .caldav-panel { margin-top: 1rem; padding: 1rem; border: 1px solid var(--akasha-border); border-radius: var(--akasha-radius-md); background: var(--akasha-bg-surface); }
 .caldav-panel h3, .caldav-panel h4 { margin: 0 0 0.75rem; font-size: 1rem; }
 .caldav-add-section { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--akasha-border-subtle); }
-.caldav-sync-status { font-size: 0.875rem; margin: 0 0 0.75rem; }
+.caldav-intro { font-size: 0.875rem; line-height: 1.5; margin: 0 0 1rem; color: var(--akasha-text); }
+.caldav-sync-status { font-size: 0.875rem; margin: 0 0 0.75rem; padding: 0.5rem 0.65rem; border-radius: var(--akasha-radius-sm); background: color-mix(in srgb, var(--akasha-text-dim) 8%, var(--akasha-bg-surface)); }
+.caldav-sync-status--ok { background: color-mix(in srgb, var(--akasha-success) 12%, var(--akasha-bg-surface)); }
+.caldav-sync-guide { margin-top: 1.25rem; padding: 0.85rem; border: 1px solid var(--akasha-border-subtle); border-radius: var(--akasha-radius-md); background: color-mix(in srgb, var(--akasha-accent) 4%, var(--akasha-bg-surface)); }
+.caldav-sync-guide h4 { margin: 0 0 0.5rem; font-size: 0.9375rem; }
+.caldav-steps { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; line-height: 1.45; color: var(--akasha-text); }
+.caldav-steps li { margin-bottom: 0.35rem; }
+.caldav-advanced { margin-top: 1rem; font-size: 0.8125rem; }
+.caldav-advanced summary { cursor: pointer; color: var(--akasha-text-dim); font-weight: 500; }
+.caldav-advanced-list { list-style: none; margin: 0.5rem 0; padding: 0; }
+.caldav-advanced-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.4rem 0; border-bottom: 1px solid var(--akasha-border-subtle); }
+.caldav-advanced-label { flex: 1 1 100%; color: var(--akasha-text-dim); }
+.caldav-account-id { font-size: 0.75rem; word-break: break-all; padding: 0.15rem 0.35rem; background: var(--akasha-bg); border-radius: 4px; }
+.caldav-copy-btn { font-size: 0.75rem; padding: 0.15rem 0.5rem; }
+.caldav-advanced-cli { margin-top: 0.5rem; font-size: 0.75rem; }
+.caldav-last-sync { color: var(--akasha-text-dim); }
 .caldav-accounts-list { list-style: none; margin: 0 0 1rem; padding: 0; }
 .caldav-accounts-list li { padding: 0.5rem 0; border-bottom: 1px solid var(--akasha-border-subtle); font-size: 0.875rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .caldav-provider-badge { font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.04em; padding: 0.1rem 0.4rem; border-radius: 4px; background: color-mix(in srgb, #7c6cf0 18%, var(--akasha-bg-surface)); color: var(--akasha-text); }
+.caldav-oauth-badge { font-size: 0.6875rem; padding: 0.1rem 0.4rem; border-radius: 4px; background: color-mix(in srgb, var(--akasha-accent) 15%, var(--akasha-bg-surface)); color: var(--akasha-accent); }
+.caldav-auth-mode { margin: 0.5rem 0 0.75rem; }
+.caldav-auth-mode-label { display: block; font-size: 0.8125rem; color: var(--akasha-text-dim); margin-bottom: 0.35rem; }
+.caldav-auth-mode-tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.caldav-auth-mode-tabs button { font-size: 0.8125rem; padding: 0.35rem 0.65rem; border: 1px solid var(--akasha-border); border-radius: var(--akasha-radius-sm); background: var(--akasha-bg); cursor: pointer; }
+.caldav-auth-mode-tabs button.active { border-color: var(--akasha-accent); background: color-mix(in srgb, var(--akasha-accent) 10%, var(--akasha-bg-surface)); }
+.caldav-auth-mode-tabs button:disabled { opacity: 0.45; cursor: not-allowed; }
+.caldav-oauth-panel { display: flex; flex-direction: column; gap: 0.65rem; }
 .caldav-account-meta { color: var(--akasha-text-dim); font-size: 0.8125rem; flex: 1 1 100%; }
 .caldav-error { color: var(--akasha-error); }
 .caldav-provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }

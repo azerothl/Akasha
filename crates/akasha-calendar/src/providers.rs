@@ -17,6 +17,10 @@ pub struct CalDavProviderPreset {
     pub password_hint_en: String,
     pub password_hint_fr: String,
     pub docs_url: Option<String>,
+    /// OAuth sign-in supported when operator configured client id/secret in vault.
+    pub oauth_available: bool,
+    pub oauth_label_en: String,
+    pub oauth_label_fr: String,
 }
 
 pub fn caldav_provider_presets() -> Vec<CalDavProviderPreset> {
@@ -34,6 +38,9 @@ pub fn caldav_provider_presets() -> Vec<CalDavProviderPreset> {
             password_hint_en: "Google App Password (Account → Security → 2-Step Verification → App passwords). CalDAV must be enabled.".into(),
             password_hint_fr: "Mot de passe d'application Google (Compte → Sécurité → Validation en 2 étapes → Mots de passe des applications).".into(),
             docs_url: Some("https://support.google.com/calendar/answer/37648".into()),
+            oauth_available: true,
+            oauth_label_en: "Sign in with Google".into(),
+            oauth_label_fr: "Se connecter avec Google".into(),
         },
         CalDavProviderPreset {
             id: "outlook".into(),
@@ -48,6 +55,9 @@ pub fn caldav_provider_presets() -> Vec<CalDavProviderPreset> {
             password_hint_en: "App password from Microsoft account security settings (if MFA is on).".into(),
             password_hint_fr: "Mot de passe d'application depuis la sécurité du compte Microsoft (si MFA activée).".into(),
             docs_url: Some("https://support.microsoft.com/en-us/office/outlook-com".into()),
+            oauth_available: true,
+            oauth_label_en: "Sign in with Microsoft".into(),
+            oauth_label_fr: "Se connecter avec Microsoft".into(),
         },
         CalDavProviderPreset {
             id: "apple_icloud".into(),
@@ -62,6 +72,9 @@ pub fn caldav_provider_presets() -> Vec<CalDavProviderPreset> {
             password_hint_en: "App-specific password from appleid.apple.com → Sign-In and Security.".into(),
             password_hint_fr: "Mot de passe spécifique à l'app depuis appleid.apple.com → Connexion et sécurité.".into(),
             docs_url: Some("https://support.apple.com/en-us/HT204316".into()),
+            oauth_available: false,
+            oauth_label_en: String::new(),
+            oauth_label_fr: String::new(),
         },
         CalDavProviderPreset {
             id: "fastmail".into(),
@@ -76,6 +89,9 @@ pub fn caldav_provider_presets() -> Vec<CalDavProviderPreset> {
             password_hint_en: "App password from Fastmail Settings → Privacy & Security.".into(),
             password_hint_fr: "Mot de passe d'application : Fastmail → Paramètres → Confidentialité.".into(),
             docs_url: Some("https://www.fastmail.com/help/technical/caldav.html".into()),
+            oauth_available: false,
+            oauth_label_en: String::new(),
+            oauth_label_fr: String::new(),
         },
         CalDavProviderPreset {
             id: "nextcloud".into(),
@@ -90,6 +106,9 @@ pub fn caldav_provider_presets() -> Vec<CalDavProviderPreset> {
             password_hint_en: "Account password or app token from Nextcloud security settings.".into(),
             password_hint_fr: "Mot de passe du compte ou jeton d'application Nextcloud.".into(),
             docs_url: Some("https://docs.nextcloud.com/server/latest/user_manual/en/pim/sync_calendar.html".into()),
+            oauth_available: false,
+            oauth_label_en: String::new(),
+            oauth_label_fr: String::new(),
         },
         CalDavProviderPreset {
             id: "custom".into(),
@@ -104,6 +123,9 @@ pub fn caldav_provider_presets() -> Vec<CalDavProviderPreset> {
             password_hint_en: "CalDAV password or app password from your provider.".into(),
             password_hint_fr: "Mot de passe CalDAV ou mot de passe d'application.".into(),
             docs_url: None,
+            oauth_available: false,
+            oauth_label_en: String::new(),
+            oauth_label_fr: String::new(),
         },
     ]
 }

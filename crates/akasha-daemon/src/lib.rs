@@ -26,6 +26,8 @@ pub mod deep_research;
 pub mod api_routes_mission;
 pub mod api_routes_kinbot;
 pub mod api_routes_profiles;
+pub mod api_routes_calendar;
+pub mod calendar_oauth;
 pub mod api_tool_parser;
 pub mod api_tool_dispatch;
 pub mod api_llm_loop;
@@ -90,7 +92,6 @@ pub mod memory_retrieval_enhance;
 pub mod user_rag;
 pub mod user_rag_indexer;
 pub mod notes;
-pub mod api_routes_calendar;
 pub mod api_routes_notes;
 
 pub use daemon::{Daemon, RunOutcome};
