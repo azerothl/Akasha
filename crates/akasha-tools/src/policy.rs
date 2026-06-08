@@ -70,8 +70,9 @@ pub struct ToolsPolicy {
     /// Cloudflare API token (vault `cloudflare_api_token` or env `CLOUDFLARE_API_TOKEN`). Not serialized in YAML.
     #[serde(skip)]
     pub cloudflare_api_token: Option<String>,
-    /// Project root for resolving workspace:/ paths and "." in allowed_read_paths/allowed_write_paths.
-    /// Set by the daemon from its data_dir (see daemon.rs).
+    /// Akasha data directory (daemon `data_dir`). Paths under this root are always allowed for
+    /// read and write without listing them in `allowed_*_paths`. Also used to resolve
+    /// `workspace:/` paths and `"."` in allowed_read_paths/allowed_write_paths.
     #[serde(skip)]
     pub workspace_root: Option<PathBuf>,
     /// Optional: tool profiles (profile_name -> list of tool names). If default_profile is set, only tools in that profile are allowed.
@@ -229,13 +230,25 @@ impl ToolsPolicy {
         self.allowed_commands.len() < prev_len
     }
 
+    /// True when `path` is under [`Self::workspace_root`] (Akasha data_dir).
+    fn path_under_workspace_root(&self, path_n: &Path) -> bool {
+        self.workspace_root.as_ref().is_some_and(|root| {
+            let root_n = path_normalize(root);
+            path_n.starts_with(&root_n)
+        })
+    }
+
     /// Check if a path is allowed for read (path must be under one of allowed_read_paths).
+    /// Paths under [`Self::workspace_root`] (data_dir) are always allowed.
     /// When prefix is "." or "", any relative path (not absolute) is allowed (current directory).
     pub fn can_read(&self, path: &Path) -> bool {
         let path_n = path_normalize(path);
         // Reject any path that contains ".." components (path traversal) before checking prefixes
         if path_n.components().any(|c| c == Component::ParentDir) {
             return false;
+        }
+        if self.path_under_workspace_root(&path_n) {
+            return true;
         }
         let path_str = path_n.to_string_lossy();
         self.allowed_read_paths.iter().any(|prefix| {
@@ -270,12 +283,16 @@ impl ToolsPolicy {
     }
 
     /// Check if a path is allowed for write.
+    /// Paths under [`Self::workspace_root`] (data_dir) are always allowed.
     /// When prefix is "." or "", any relative path is allowed (same as can_read).
     pub fn can_write(&self, path: &Path) -> bool {
         let path_n = path_normalize(path);
         // Reject any path that contains ".." components (path traversal) before checking prefixes
         if path_n.components().any(|c| c == Component::ParentDir) {
             return false;
+        }
+        if self.path_under_workspace_root(&path_n) {
+            return true;
         }
         let path_str = path_n.to_string_lossy();
         self.allowed_write_paths.iter().any(|prefix| {
@@ -1003,6 +1020,30 @@ mod tests {
             "path inside allowed directory must be allowed");
         assert!(p.can_write(Path::new("/home/app/data/output.txt")),
             "path inside allowed directory must be allowed for write");
+    }
+
+    #[test]
+    fn data_dir_allowed_without_tools_policy_paths() {
+        let root = PathBuf::from("/home/user/akasha");
+        let p = ToolsPolicy {
+            workspace_root: Some(root),
+            ..Default::default()
+        };
+        assert!(p.can_read(Path::new("/home/user/akasha/notes/draft.md")));
+        assert!(p.can_write(Path::new("/home/user/akasha/games/save.json")));
+        assert!(!p.can_read(Path::new("/home/user/other/file.txt")));
+        assert!(!p.can_write(Path::new("/home/user/other/file.txt")));
+    }
+
+    #[test]
+    fn data_dir_path_traversal_still_blocked() {
+        let root = PathBuf::from("/home/user/akasha");
+        let p = ToolsPolicy {
+            workspace_root: Some(root),
+            ..Default::default()
+        };
+        assert!(!p.can_read(Path::new("/home/user/akasha/../secret")));
+        assert!(!p.can_write(Path::new("notes/../secret")));
     }
 
     #[test]
