@@ -110,3 +110,21 @@ jobs:
       - name: Playwright E2E (build --mode e2e + tests)
         working-directory: apps/akasha-ui
         run: npm run test:e2e
+
+  embedded-llama-cpp-linux:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build deps (llama.cpp)
+        run: sudo apt-get update && sudo apt-get install -y clang cmake pkg-config libssl-dev
+
+      - name: Build embedded-llm with llama-cpp
+        run: cargo build -p akasha-embedded-llm --features llama-cpp
+
+      - name: Unit tests (no GGUF e2e)
+        run: cargo test -p akasha-embedded-llm --features llama-cpp

@@ -290,6 +290,12 @@ impl LLMRouter {
         Ok(())
     }
 
+    /// Status snapshot for `/api/router/embedded-status`.
+    #[cfg(feature = "embedded")]
+    pub fn embedded_status(&self) -> akasha_embedded_llm::EmbeddedStatus {
+        akasha_embedded_llm::EmbeddedLlm::status_snapshot()
+    }
+
     /// Replace in-memory routing config (task_types, providers metadata, global) from disk or API reload.
     /// Registered provider clients (Ollama, OpenRouter, etc.) are unchanged — route/model switches take effect immediately.
     pub fn reload_routing_config(&self, config: RoutingConfig) {

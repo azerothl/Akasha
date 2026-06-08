@@ -15166,20 +15166,28 @@ pub async fn handle_api(
             }
         }));
 
-        let embedded_available = llm_router.embedded_available();
-        let embedded_loaded = llm_router.embedded_loaded();
-        let embedded_desc = if !embedded_available {
-            "Embedded model not available (compile with embedded feature, run on Linux/WSL2)"
-        } else if embedded_loaded {
-            "Embedded model loaded and ready"
-        } else {
-            "Embedded model available; loads on first use (first request may take 5–15 min)"
-        };
-        checks.push(serde_json::json!({
-            "id": "embedded_llm",
-            "ok": embedded_available,
-            "description": embedded_desc
-        }));
+        #[cfg(feature = "embedded")]
+        {
+            let snap = llm_router.embedded_status();
+            checks.push(serde_json::json!({
+                "id": "embedded_llm",
+                "ok": snap.embedded_available,
+                "description": format!(
+                    "{} (backend {}, device {})",
+                    snap.hint,
+                    snap.backend.as_deref().unwrap_or("?"),
+                    snap.device.as_deref().unwrap_or("?")
+                )
+            }));
+        }
+        #[cfg(not(feature = "embedded"))]
+        {
+            checks.push(serde_json::json!({
+                "id": "embedded_llm",
+                "ok": false,
+                "description": "Embedded model not available (compile with embedded feature)"
+            }));
+        }
 
         // Playwright managed browser (optional): runner path, npm package, node/npm on PATH
         let runner_path = crate::browser::find_playwright_runner_path();
@@ -18012,22 +18020,23 @@ pub async fn handle_api(
 
     // GET /api/router/embedded-status — whether embedded LLM is compiled, and if already loaded (for diagnostics)
     if method == "GET" && path == "/api/router/embedded-status" {
-        let available = llm_router.embedded_available();
-        let loaded = llm_router.embedded_loaded();
-        let hint = if !available {
-            "Recompile daemon with feature 'embedded', run on Linux/WSL2; or use Ollama/cloud"
-        } else if loaded {
-            "Embedded model loaded and ready for /advice and conversation"
-        } else {
-            "Embedded model will load on first use (first request may take 5–15 min: download + load). Wait or increase AKASHA_LLM_TIMEOUT_SECS."
-        };
-        let body = serde_json::json!({
-            "embedded_registered": true,
-            "embedded_available": available,
-            "embedded_loaded": loaded,
-            "hint": hint
-        });
-        return json_response("200 OK", &body.to_string());
+        #[cfg(feature = "embedded")]
+        {
+            let snap = llm_router.embedded_status();
+            let body = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string());
+            return json_response("200 OK", &body);
+        }
+        #[cfg(not(feature = "embedded"))]
+        {
+            let body = serde_json::json!({
+                "embedded_available": false,
+                "embedded_loaded": false,
+                "compiled_backends": [],
+                "hint": "Recompile daemon with feature embedded"
+            })
+            .to_string();
+            return json_response("200 OK", &body);
+        }
     }
 
     // POST /api/router/reload — hot-reload llm_router.yaml (routes/models per task type)

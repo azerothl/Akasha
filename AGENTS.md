@@ -55,7 +55,7 @@ The daemon listens on port **3876** (env `AKASHA_PORT`). Key API endpoints:
 ### Important gotchas
 
 1. **`CXX=g++` is required** for `cargo build/test/clippy`. The default `c++` (clang 18) cannot find `<cstdint>` from `libstdc++-13-dev` in this environment.
-2. **Embedded LLM is CPU-only** and very slow without GPU. Tasks using the embedded model (Qwen3 0.6B) may take minutes. For faster responses, configure an external LLM provider (Ollama, OpenAI, OpenRouter) via `llm_router.yaml`.
+2. **Embedded LLM backends**: default release builds use **Candle (Qwen3 0.6B, CPU)** and are slow without GPU. For fast local inference on NVIDIA GPUs, use the **`akasha-windows-x86_64-cuda`** release artifact (llama-cpp-4 + GGUF) or build with `--features embedded-llama-cpp,embedded-llama-cpp-cuda`, then run `akasha config models embedded-download`. Candle remains the CPU fallback when no GGUF is present (`AKASHA_EMBEDDED_BACKEND=auto`). For cloud/external speed, configure Ollama, OpenAI, or OpenRouter via `llm_router.yaml`.
 3. **No external services required** for core functionality. SQLite is bundled (`rusqlite` with `bundled` feature), embeddings model is pre-bundled at `embedding_model/`, and the embedded LLM eliminates the hard dependency on Ollama.
 4. **Data directory** defaults to `~/akasha`. Config files (`llm_router.yaml`, `tools_policy.yaml`, `akasha.env`, `connectors.env`) are stored there.
 5. The Tauri desktop UI (`apps/akasha-ui`) requires the daemon to be running on port 3876. Run `npm install` then `npm run tauri dev` from that directory.

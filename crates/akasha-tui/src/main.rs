@@ -1686,14 +1686,21 @@ impl App {
                             let available = json.get("embedded_available").and_then(|v| v.as_bool()).unwrap_or(false);
                             let loaded = json.get("embedded_loaded").and_then(|v| v.as_bool()).unwrap_or(false);
                             let hint = json.get("hint").and_then(|v| v.as_str()).unwrap_or("");
+                            let backend = json.get("backend").and_then(|v| v.as_str()).unwrap_or("");
+                            let device = json.get("device").and_then(|v| v.as_str()).unwrap_or("");
                             let status = if !available {
                                 "non disponible"
                             } else if loaded {
                                 "disponible et chargé (prêt)"
                             } else {
-                                "disponible (chargement au 1ᵉʳ appel, 5–15 min possibles)"
+                                "disponible (chargement au 1ᵉʳ appel)"
                             };
-                            return format!("Modèle embarqué : {}\n{}", status, hint);
+                            let extra = if !backend.is_empty() {
+                                format!("\nbackend: {backend}, device: {device}")
+                            } else {
+                                String::new()
+                            };
+                            return format!("Modèle embarqué : {}\n{}{}", status, extra, if hint.is_empty() { String::new() } else { format!("\n{hint}") });
                         }
                     }
                     _ => {}

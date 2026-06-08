@@ -5107,12 +5107,15 @@ function App() {
         }
       }
       try {
-        const json = await invoke<{ embedded_available?: boolean; embedded_loaded?: boolean; hint?: string }>("get_embedded_status", { port });
+        const json = await invoke<{ embedded_available?: boolean; embedded_loaded?: boolean; backend?: string; device?: string; hint?: string }>("get_embedded_status", { port });
         const available = json?.embedded_available ?? false;
         const loaded = json?.embedded_loaded ?? false;
         const hint = json?.hint ?? "";
-        const status = !available ? "non disponible" : loaded ? "disponible et chargé (prêt)" : "disponible (chargement au 1ᵉʳ appel, 5–15 min possibles)";
-        return `Modèle embarqué : ${status}\n${hint}`;
+        const backend = json?.backend ?? "";
+        const device = json?.device ?? "";
+        const status = !available ? "non disponible" : loaded ? "disponible et chargé (prêt)" : "disponible (chargement au 1ᵉʳ appel)";
+        const extra = backend ? `\nbackend: ${backend}, device: ${device}` : "";
+        return `Modèle embarqué : ${status}${extra}\n${hint}`;
       } catch {
         return "Impossible de joindre le daemon ou routeur.";
       }

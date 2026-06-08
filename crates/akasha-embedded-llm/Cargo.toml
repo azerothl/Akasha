@@ -2,24 +2,35 @@
 name = "akasha-embedded-llm"
 version.workspace = true
 edition = "2021"
-description = "POC: small embedded LLM via Candle for onboarding, diagnostics, simple replies (Linux/WSL2)"
+description = "Embedded LLM via llama-cpp-4 (GGUF), Candle (Qwen3), or Baguettotron"
 
 [features]
 default = ["candle"]
-# Candle-based inference (Qwen3 0.6B). Recommended: build and run on Linux or WSL2; Windows native may fail to build.
+# Candle-based inference (Qwen3 0.6B). Fallback CPU backend.
 candle = ["dep:candle-pipelines", "dep:candle-core", "dep:candle-nn"]
-# Baguettotron (321M, PleIAs/Baguettotron) for low-resource or conversation; uses candle-transformers + hf-hub.
-baguettotron = ["dep:hf-hub", "dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:rand", "dep:serde", "dep:serde_json"]
-# Use GPU (CUDA) when available. Requires CUDA toolkit; compile with --features cuda. Falls back to CPU at runtime if no GPU.
+# Baguettotron 321M for low-resource configs.
+baguettotron = ["dep:hf-hub", "dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:rand", "dep:serde_json"]
+# Candle CUDA (legacy; prefer llama-cpp-cuda for GPU).
 cuda = ["candle-pipelines/cuda", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
-# Intel MKL: faster CPU matrix ops on Intel (Linux/WSL2). No CUDA needed. Use when CUDA does not build or for Intel CPUs.
 mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers?/mkl"]
+# llama-cpp-4 GGUF inference (CPU, native AVX).
+llama-cpp = ["dep:llama-cpp-4"]
+# NVIDIA GPU via llama.cpp (mutually exclusive with embedded-cuda Candle in release profiles).
+llama-cpp-cuda = ["llama-cpp", "llama-cpp-4/cuda"]
+# Apple Metal via llama.cpp.
+llama-cpp-metal = ["llama-cpp", "llama-cpp-4/metal"]
+# HF GGUF download helper (CLI).
+download = ["dep:reqwest", "dep:serde_json"]
 
 [dependencies]
 thiserror = "1.0"
 anyhow = "1.0"
 once_cell = "1.19"
-# CPU-only by default; add feature "cuda" for GPU. Model downloaded from HuggingFace on first use.
+dirs = "5.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+llama-cpp-4 = { version = "0.3", optional = true, default-features = false, features = ["openmp", "native"] }
 candle-pipelines = { version = "0.0.7", optional = true, default-features = false }
 hf-hub = { version = "0.4", optional = true }
 candle-core = { version = "0.9", optional = true }
@@ -27,5 +38,3 @@ candle-nn = { version = "0.9", optional = true }
 candle-transformers = { version = "0.9", optional = true }
 tokenizers = { version = "0.19", optional = true }
 rand = { version = "0.9", optional = true }
-serde = { version = "1", optional = true, features = ["derive"] }
-serde_json = { version = "1", optional = true }

@@ -105,7 +105,35 @@ L’idée est de ne **pas dépendre** d’Ollama ou d’un service cloud pour ce
 3. **Daemon** : `run_message_via_llm` utilise le chemin stream. **`AKASHA_LLM_STREAM_IDLE_SECS`** (défaut 60) : timeout entre deux chunks. **`AKASHA_LLM_FIRST_CHUNK_SECS`** (défaut min(300, AKASHA_LLM_TIMEOUT_SECS)) : délai max pour le **premier** chunk (chargement + premier token souvent lent en CPU).
 4. **TUI** : affiche la dernière entrée `progress` ; le texte streamé s’affiche au fur et à mesure.
 
-**Ollama vs modèle embarqué (même nom de modèle)** : ce n’est pas le même runtime. Ollama = processus dédié, backend optimisé (souvent llama.cpp / CUDA), modèle préchargé → réponses rapides. Embarqué = même architecture (ex. Qwen3 0.6B) mais exécution **dans le processus** via Candle (Rust, CPU par défaut) : premier appel = téléchargement + chargement possible ; inférence CPU bien plus lente. Pour des réponses rapides avec Qwen3 0.6B, utiliser Ollama (`ollama run qwen3:0.6b`) et router vers `ollama` / `qwen3:0.6b` dans `llm_router.yaml`. Le modèle embarqué reste utile hors ligne, sans dépendance Ollama, ou avec Baguettotron pour configs très légères.
+**Ollama vs modèle embarqué (même nom de modèle)** : ce n’est pas le même runtime. Ollama = processus dédié, backend optimisé (souvent llama.cpp / CUDA), modèle préchargé → réponses rapides. Embarqué Candle = Qwen3 0.6B **dans le processus** (CPU par défaut) : premier appel = téléchargement + chargement ; inférence CPU lente. Pour des réponses rapides avec Qwen3 0.6B, utiliser Ollama (`ollama run qwen3:0.6b`) et router vers `ollama` / `qwen3:0.6b` dans `llm_router.yaml`. Le modèle embarqué reste utile hors ligne, sans dépendance Ollama, ou avec Baguettotron pour configs très légères.
+
+---
+
+## Backend llama-cpp-4 (GGUF, GPU NVIDIA)
+
+**Implémenté** (v1) dans `akasha-embedded-llm` via [`llama-cpp-4`](https://github.com/eugenehp/llama-cpp-rs). Candle et Baguettotron restent des fallbacks CPU.
+
+| Backend | Format | Sélection |
+|---------|--------|-----------|
+| `llama_cpp` | GGUF | `AKASHA_EMBEDDED_BACKEND=auto` si `{data_dir}/models/embedded/default.gguf` existe |
+| `candle` | SafeTensors (HF) | fallback `auto` |
+| `baguettotron` | HF | `AKASHA_EMBEDDED_MODEL=baguettotron` + feature compile |
+
+**Téléchargement du modèle par défaut** (Qwen2.5-1.5B-Instruct Q4_K_M, ~1 Go) :
+
+```bash
+akasha config models embedded-download
+```
+
+**Build CUDA (Windows release : artifact `akasha-windows-x86_64-cuda`)** :
+
+```powershell
+cargo build -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron,embedded-llama-cpp,embedded-llama-cpp-cuda
+```
+
+Variables : `AKASHA_EMBEDDED_BACKEND`, `AKASHA_EMBEDDED_GGUF_PATH`, `AKASHA_EMBEDDED_N_GPU_LAYERS` — voir [35_configuration_reference.md](35_configuration_reference.md). RFC : [embedded-llama-cpp-rfc.md](dev/roadmap/embedded-llama-cpp-rfc.md). Bench manuel : `spec/dev/quality/bench_embedded_llama_cpp.ps1` (cible v1 : >20 tok/s sur GTX 3080+ avec modèle chargé).
+
+**Streaming** : llama-cpp émet des tokens au fil de l’eau via `complete_stream` ; Candle Qwen3 peut encore bufferiser en un seul chunk.
 
 ---
 
