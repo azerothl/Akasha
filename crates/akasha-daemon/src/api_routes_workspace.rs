@@ -14,6 +14,7 @@ fn parse_json_body(body: Option<&[u8]>) -> Option<serde_json::Value> {
 pub async fn handle_workspace_routes(
     method: &str,
     path_only: &str,
+    query_str: Option<&str>,
     body: Option<&[u8]>,
     llm_router: &Arc<akasha_llm::LLMRouter>,
 ) -> Option<String> {
@@ -117,6 +118,115 @@ pub async fn handle_workspace_routes(
             "502 Bad Gateway"
         };
         return Some(json_response(status, &result.to_string()));
+    }
+
+    if method == "GET" && path_only == "/api/cookbook/recipes" {
+        let q = query_str.unwrap_or("");
+        let locale = crate::api_security::parse_query_param(q, "locale")
+            .unwrap_or_else(|| "en".to_string());
+        let category = crate::api_security::parse_query_param(q, "category");
+        let tag = crate::api_security::parse_query_param(q, "tag");
+        let search = crate::api_security::parse_query_param(q, "search");
+        let loc = if locale.starts_with("fr") { "fr" } else { "en" };
+        let recipes = crate::cookbook_recipes::filter_recipes(
+            category.as_deref(),
+            tag.as_deref(),
+            search.as_deref(),
+            loc,
+        );
+        return Some(json_response(
+            "200 OK",
+            &serde_json::json!({ "recipes": recipes, "locale": loc }).to_string(),
+        ));
+    }
+
+    if method == "GET" && path_only.starts_with("/api/cookbook/recipes/") {
+        let q = query_str.unwrap_or("");
+        let suffix = path_only.trim_start_matches("/api/cookbook/recipes/");
+        let locale = crate::api_security::parse_query_param(q, "locale")
+            .unwrap_or_else(|| "en".to_string());
+        let loc = if locale.starts_with("fr") { "fr" } else { "en" };
+        let is_context = suffix.ends_with("/context");
+        let id = if is_context {
+            suffix.trim_end_matches("/context").trim_end_matches('/')
+        } else {
+            suffix.trim_end_matches('/')
+        };
+        if id.is_empty() || id.contains('/') {
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid_recipe_id"}"#,
+            ));
+        }
+        let Some(recipe) = crate::cookbook_recipes::get_recipe(id) else {
+            return Some(json_response("404 Not Found", r#"{"error":"recipe_not_found"}"#));
+        };
+        if !is_context {
+            return Some(json_response(
+                "200 OK",
+                &serde_json::json!({ "recipe": recipe, "locale": loc }).to_string(),
+            ));
+        }
+        let snap = hardware_snapshot_json();
+        let ram = snap
+            .get("total_ram_gb")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(16);
+        let gpu = snap
+            .get("gpu_hint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let client = crate::cookbook_models::http_client();
+        let local_runtimes =
+            crate::cookbook_models::local_runtime_status(&client, llm_router).await;
+        let ollama_models: Vec<String> = local_runtimes
+            .get("ollama")
+            .and_then(|o| o.get("models"))
+            .and_then(|m| serde_json::from_value(m.clone()).ok())
+            .unwrap_or_default();
+        let rbitnet_models: Vec<String> = local_runtimes
+            .get("rbitnet")
+            .and_then(|o| o.get("models"))
+            .and_then(|m| serde_json::from_value(m.clone()).ok())
+            .unwrap_or_default();
+        let catalog = crate::cookbook_models::build_cookbook_catalog(llm_router).await;
+        let providers_map = catalog.providers;
+        let mut huggingface_local =
+            crate::cookbook_models::fetch_huggingface_local_models(&client, ram, gpu).await;
+        huggingface_local = huggingface_local
+            .into_iter()
+            .map(|e| {
+                crate::cookbook_models::apply_local_install(e, &ollama_models, &rbitnet_models)
+            })
+            .collect();
+        let routes = llm_router.routes_by_category();
+        let (configured, suggestions) = cookbook_recommendations(
+            &snap,
+            &providers_map,
+            &catalog.model_meta,
+            &routes,
+            &ollama_models,
+            &rbitnet_models,
+        );
+        let mut all_items = configured;
+        all_items.extend(suggestions);
+        all_items.extend(huggingface_local);
+        let recommended = crate::cookbook_recipes::recommend_models_for_recipe(
+            &recipe,
+            &all_items,
+            ram,
+            8,
+        );
+        return Some(json_response(
+            "200 OK",
+            &serde_json::json!({
+                "recipe": recipe,
+                "locale": loc,
+                "hardware": snap,
+                "recommended_models": recommended,
+            })
+            .to_string(),
+        ));
     }
 
     if method == "POST" && path_only == "/api/compare" {

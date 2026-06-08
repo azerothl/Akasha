@@ -22,6 +22,7 @@ pub mod api_routes_terminal;
 pub mod api_routes_mcp;
 pub mod api_routes_workspace;
 pub mod cookbook_models;
+pub mod cookbook_recipes;
 pub mod deep_research;
 pub mod api_routes_mission;
 pub mod api_routes_kinbot;

@@ -9532,7 +9532,7 @@ pub(crate) async fn run_message_via_llm(
         let data_dir_goal = store_path.parent().unwrap_or_else(|| store_path.as_ref()).to_path_buf();
         let goal_text = clean_message.chars().take(240).collect::<String>();
         let session_id_goal = session_id.clone();
-        let merge_outcome = tokio::time::timeout(
+        let _ = tokio::time::timeout(
             std::time::Duration::from_secs(8),
             tokio::task::spawn_blocking(move || {
                 crate::session_state::merge(&data_dir_goal, &session_id_goal, |s| {
@@ -14005,6 +14005,7 @@ pub async fn handle_api(
     if let Some(resp) = crate::api_routes_workspace::handle_workspace_routes(
         method,
         path_only,
+        Some(query_str),
         body.as_deref(),
         &llm_router,
     )
