@@ -1778,7 +1778,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("cancel_scheduled_task", "cancel_scheduled_task <schedule_id> — supprimer un schedule par UUID."),
     ("wake_in", "wake_in <minutes> <message> — programmer un rappel agent unique dans la session courante (plus léger que schedule_task)."),
     ("calendar_query", "calendar_query <from_iso> <to_iso> [account_id] — lister les événements calendrier externes (CalDAV/ICS) sur une plage ISO8601."),
-    ("calendar_create", "calendar_create <summary> <from_iso> <to_iso> [description] — créer un événement calendrier externe (file d'attente sync CalDAV)."),
+    ("calendar_create", "calendar_create <summary> <from_iso> <to_iso> [account_id] [description] — créer un événement calendrier externe (file d'attente sync CalDAV)."),
     ("calendar_update", "calendar_update <event_id> <json_fields> — mettre à jour un événement (summary, dtstart, dtend, description, location)."),
     ("calendar_delete", "calendar_delete <event_id> — supprimer (soft-delete) un événement externe."),
     ("budget_status", "budget_status [session_id] — état budget (usage tokens/coût, seuil, auto-concise)."),
@@ -5362,15 +5362,25 @@ pub(crate) async fn execute_tool_call_impl(
             if args.len() < 3 {
                 return (
                     false,
-                    "[calendar_create] usage: calendar_create <summary> <from_iso> <to_iso> [description]".to_string(),
+                    "[calendar_create] usage: calendar_create <summary> <from_iso> <to_iso> [account_id] [description]".to_string(),
                     None,
                 );
             }
             let summary = args[0].clone();
             let from_s = &args[1];
             let to_s = &args[2];
+            let mut account_id = akasha_store::default_ics_account_id();
             let description = if args.len() > 3 {
-                Some(args[3..].join(" "))
+                if let Ok(parsed) = Uuid::parse_str(args[3].trim()) {
+                    account_id = parsed;
+                    if args.len() > 4 {
+                        Some(args[4..].join(" "))
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(args[3..].join(" "))
+                }
             } else {
                 None
             };
@@ -5383,12 +5393,11 @@ pub(crate) async fn execute_tool_call_impl(
             match store_path {
                 Some(path) => match akasha_store::ExternalCalendarStore::open(path) {
                     Ok(store) => {
-                        let _ = akasha_store::default_ics_account_id();
                         let id = Uuid::new_v4();
                         let uid = format!("akasha-{}", id);
                         let row = akasha_store::ExternalCalendarEvent {
                             id,
-                            account_id: akasha_store::default_ics_account_id(),
+                            account_id,
                             uid,
                             href: None,
                             etag: None,

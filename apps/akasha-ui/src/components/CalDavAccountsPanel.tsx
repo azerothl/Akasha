@@ -717,13 +717,13 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
                 </li>
               ))}
             </ul>
-            <p className="caldav-hint caldav-advanced-cli muted">
+            <div className="caldav-hint caldav-advanced-cli muted">
               <ol className="caldav-steps">
                 {txt.advancedSyncSteps.map((step) => (
                   <li key={step}>{step}</li>
                 ))}
               </ol>
-            </p>
+            </div>
           </details>
         )}
       </div>

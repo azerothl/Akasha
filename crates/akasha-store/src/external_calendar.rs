@@ -248,7 +248,7 @@ impl ExternalCalendarStore {
                description=excluded.description, location=excluded.location,
                dtstart=excluded.dtstart, dtend=excluded.dtend, timezone=excluded.timezone,
                rrule=excluded.rrule, exdates_json=excluded.exdates_json, source=excluded.source,
-               synced_at=excluded.synced_at, deleted=excluded.deleted, id=excluded.id",
+               synced_at=excluded.synced_at, deleted=excluded.deleted",
             params![
                 e.id.to_string(),
                 e.account_id.to_string(),
@@ -325,7 +325,10 @@ impl ExternalCalendarStore {
 
     pub fn mark_outbox_applied(&self, id: Uuid, error: Option<&str>) -> anyhow::Result<()> {
         self.conn.execute(
-            "UPDATE caldav_outbox SET applied_at = ?1, error = ?2 WHERE id = ?3",
+            "UPDATE caldav_outbox
+             SET applied_at = CASE WHEN ?2 IS NULL THEN ?1 ELSE applied_at END,
+                 error = ?2
+             WHERE id = ?3",
             params![Utc::now().to_rfc3339(), error, id.to_string()],
         )?;
         Ok(())
@@ -459,10 +462,12 @@ mod tests {
 
         // Upsert same uid updates summary
         let mut updated = event.clone();
+        updated.id = Uuid::new_v4();
         updated.summary = "Updated".into();
         store.upsert_event(&updated).expect("upsert again");
         let listed2 = store.list_events_between(from, to, None).expect("list");
         assert_eq!(listed2.len(), 1);
+        assert_eq!(listed2[0].id, event.id);
         assert_eq!(listed2[0].summary, "Updated");
     }
 
@@ -495,5 +500,37 @@ mod tests {
         let from = start - chrono::Duration::days(1);
         let to = start + chrono::Duration::days(1);
         assert!(store.list_events_between(from, to, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn outbox_error_keeps_row_pending() {
+        let (_dir, store) = temp_store();
+        let row = CalDavOutboxRow {
+            id: Uuid::new_v4(),
+            account_id: default_ics_account_id(),
+            event_id: None,
+            operation: "create".to_string(),
+            payload_json: "{}".to_string(),
+            created_at: Utc::now(),
+            applied_at: None,
+            error: None,
+        };
+        store.enqueue_outbox(&row).expect("enqueue");
+
+        store
+            .mark_outbox_applied(row.id, Some("temporary_error"))
+            .expect("ack error");
+        let pending = store.list_pending_outbox(None).expect("pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, row.id);
+        assert_eq!(pending[0].error.as_deref(), Some("temporary_error"));
+        assert!(pending[0].applied_at.is_none());
+
+        store.mark_outbox_applied(row.id, None).expect("ack ok");
+        assert!(store.list_pending_outbox(None).expect("pending").is_empty());
+        let all = store.list_outbox_all(10).expect("all");
+        let saved = all.iter().find(|r| r.id == row.id).expect("row");
+        assert!(saved.applied_at.is_some());
+        assert!(saved.error.is_none());
     }
 }

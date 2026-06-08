@@ -354,7 +354,13 @@ pub fn oauth_success_html(locale: &str) -> String {
 }
 
 pub fn oauth_error_html(msg: &str) -> String {
+    let safe = msg
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;");
     format!(
-        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Erreur</title></head><body style="font-family:sans-serif;padding:2rem"><h1>Connexion échouée</h1><p>{msg}</p></body></html>"#
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Erreur</title></head><body style="font-family:sans-serif;padding:2rem"><h1>Connexion échouée</h1><p>{safe}</p></body></html>"#
     )
 }

@@ -300,7 +300,9 @@ pub async fn try_handle(
     }
 
     if method == "POST" && path == "/api/calendar/accounts" {
-        let j = parse_json(body)?;
+        let Some(j) = parse_json(body) else {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#));
+        };
         let now = Utc::now();
         let id = j
             .get("id")
@@ -445,23 +447,24 @@ pub async fn try_handle(
     }
 
     if method == "POST" && path == "/api/calendar/ics" {
-        let text = body
-            .and_then(|b| std::str::from_utf8(b).ok().map(String::from))
-            .or_else(|| {
-                parse_json(body).and_then(|j| {
-                    j.get("ics")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                })
-            })
-            .unwrap_or_default();
+        let parsed_json = parse_json(body);
+        let text = if let Some(j) = parsed_json.as_ref() {
+            j.get("ics")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_default()
+        } else {
+            body.and_then(|b| std::str::from_utf8(b).ok().map(String::from))
+                .unwrap_or_default()
+        };
         if text.trim().is_empty() {
             return Some(json_response(
                 "400 Bad Request",
                 r#"{"error":"ics_body_required"}"#,
             ));
         }
-        let account_id = parse_json(body)
+        let account_id = parsed_json
+            .as_ref()
             .and_then(|j| j.get("account_id").and_then(|v| v.as_str()).map(String::from))
             .and_then(|s| Uuid::parse_str(&s).ok())
             .unwrap_or_else(default_ics_account_id);
@@ -516,7 +519,9 @@ pub async fn try_handle(
         if !calendar_sync_token_ok(headers) {
             return Some(json_response("401 Unauthorized", r#"{"error":"invalid_sync_token"}"#));
         }
-        let j = parse_json(body)?;
+        let Some(j) = parse_json(body) else {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#));
+        };
         let account_id = j
             .get("account_id")
             .and_then(|v| v.as_str())
@@ -649,11 +654,16 @@ pub async fn try_handle(
         if !calendar_sync_token_ok(headers) {
             return Some(json_response("401 Unauthorized", r#"{"error":"invalid_sync_token"}"#));
         }
-        let j = parse_json(body)?;
-        let id = j
+        let Some(j) = parse_json(body) else {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#));
+        };
+        let Some(id) = j
             .get("id")
             .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok())?;
+            .and_then(|s| Uuid::parse_str(s).ok())
+        else {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid_id"}"#));
+        };
         let error = j.get("error").and_then(|v| v.as_str());
         let Some(store) = open_cal_store(ctx.store_path) else {
             return Some(json_response(
@@ -666,7 +676,9 @@ pub async fn try_handle(
     }
 
     if method == "POST" && path == "/api/calendar/events" {
-        let j = parse_json(body)?;
+        let Some(j) = parse_json(body) else {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#));
+        };
         let Some(store) = open_cal_store(ctx.store_path) else {
             return Some(json_response(
                 "500 Internal Server Error",
@@ -747,7 +759,9 @@ pub async fn try_handle(
         let Ok(id) = Uuid::parse_str(id_str) else {
             return Some(json_response("400 Bad Request", r#"{"error":"invalid_id"}"#));
         };
-        let j = parse_json(body)?;
+        let Some(j) = parse_json(body) else {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#));
+        };
         let Some(store) = open_cal_store(ctx.store_path) else {
             return Some(json_response(
                 "500 Internal Server Error",
