@@ -49,6 +49,7 @@ Tous les stubs sont en statut terminal **Production**, **Reporter** ou **Degrade
 | S-MEM-05 | SQLCipher / doctor | Reporter | 2B | Spike `--encrypt-memory` reporté | — |
 | S-MEM-06 | `akasha init` memory | Production | 4 | Pointer wizard + doctor | — |
 | S-LLM-01 | `provider.rs` placeholder | Production | 1 | Erreur explicite sans embedded | — |
+| M-LLM-02 | `akasha-embedded-llm` llama-cpp-4 | Production | 1 | Artifact Windows CUDA ; fallback Candle | [embedded-llama-cpp-rfc.md](embedded-llama-cpp-rfc.md) |
 | S-TOOL-01 | `api.rs` image local path | Production | 2C | data URL vision | — |
 | S-TOOL-02 | `device_discover` (network/usb) | Reporter | 5 | Refus explicite ; `local_media`/`system`/`synthetic_input` livrés | — |
 | S-TOOL-03 | `device_invoke` (print OS) | Reporter | 5 | Impression OS hors scope ; autres interfaces selon policy | — |

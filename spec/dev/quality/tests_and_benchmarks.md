@@ -85,14 +85,22 @@ cargo test -p akasha-llm -F embedded
 
 ### 2.3 akasha-embedded-llm
 
-**Emplacement** : `crates/akasha-embedded-llm/src/lib.rs`.
+**Emplacement** : `crates/akasha-embedded-llm/` (`lib.rs`, `config.rs`, `llama_cpp_backend.rs`, `candle_backend.rs`).
 
 | Test | Ce qui est testé | Commande |
 |------|-------------------|----------|
-| `embedded_llm_construct_and_available` | `EmbeddedLlm::new()` et, avec feature `candle`, `is_available()` true | `cargo test -p akasha-embedded-llm --lib` |
-| `embedded_llm_complete_e2e` | **Ignoré par défaut.** Une vraie complétion (téléchargement + inférence). À lancer manuellement. | `cargo test -p akasha-embedded-llm --lib -- --ignored` |
-| `embedded_llm_unload_sets_loaded_false` | Après `unload()`, `is_loaded()` est false | idem |
-| `embedded_llm_default_constructs` | `EmbeddedLlm::default()` construit une instance | idem |
+| `embedded_llm_default_constructs` / `compiled_backends_lists_features` | Façade + backends compilés selon features | `cargo test -p akasha-embedded-llm --lib` |
+| `backend_choice_parses_aliases` | `AKASHA_EMBEDDED_BACKEND=llama-cpp` | idem |
+| `embedded_llm_unload_clears_state` | Après `unload()`, `is_loaded()` false | idem |
+| Build llama-cpp (CI optionnel) | Compile `llama-cpp-sys` sans GGUF e2e | `cargo test -p akasha-embedded-llm --features llama-cpp` |
+
+**Bench manuel v1** (throughput GPU, cible >20 tok/s sur GTX 3080+ avec Q4 chargé) :
+
+```powershell
+./spec/dev/quality/bench_embedded_llama_cpp.ps1
+```
+
+Prérequis : daemon `--features embedded-llama-cpp-cuda`, `akasha config models embedded-download`, daemon démarré.
 
 ---
 
