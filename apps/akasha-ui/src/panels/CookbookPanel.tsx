@@ -21,10 +21,14 @@ import {
   providerColor,
   sortByFitDesc,
 } from "../cookbookMatrix";
+import { CookbookRecipesView, type CookbookRecipeHandlers } from "./CookbookRecipesView";
 
 type Props = {
   fetchEndpoint: (path: string, init?: RequestInit) => Promise<{ ok: boolean; status: number; text: string }>;
   locale: "fr" | "en";
+  subView?: "models" | "recipes";
+  onSubViewChange?: (view: "models" | "recipes") => void;
+  recipeHandlers?: CookbookRecipeHandlers;
 };
 
 type LocalRuntimes = {
@@ -250,7 +254,13 @@ function AddRouteForm({
   );
 }
 
-export function CookbookPanel({ fetchEndpoint, locale }: Props) {
+export function CookbookPanel({
+  fetchEndpoint,
+  locale,
+  subView = "models",
+  onSubViewChange,
+  recipeHandlers,
+}: Props) {
   const { t } = useI18n();
   const en = locale === "en";
   const [hardware, setHardware] = useState<Record<string, unknown> | null>(null);
@@ -314,6 +324,45 @@ export function CookbookPanel({ fetchEndpoint, locale }: Props) {
     return j.message ?? "";
   };
 
+  const addRouteDirect = async (opts: {
+    category: string;
+    provider: string;
+    model: string;
+    role: "primary" | "fallback";
+  }) => {
+    const res = await fetchEndpoint("/api/router/route", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    const j = JSON.parse(res.text) as { ok?: boolean; error?: string; message?: string };
+    if (!res.ok || !j.ok) throw new Error(j.error ?? `HTTP ${res.status}`);
+    await loadData();
+    return j.message ?? (en ? "Route saved." : "Route enregistrée.");
+  };
+
+  const installSkillDirect = async (url: string) => {
+    const res = await fetchEndpoint("/api/skills/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const j = JSON.parse(res.text) as { installed?: boolean; message?: string; error?: string; detail?: string };
+    if (!res.ok || !j.installed) throw new Error(j.detail ?? j.error ?? `HTTP ${res.status}`);
+    return j.message ?? (en ? "Skill installed." : "Skill installé.");
+  };
+
+  const defaultRecipeHandlers: CookbookRecipeHandlers = {
+    onTryInChat: () => {},
+    onOpenCompare: () => {},
+    onOpenModelsTab: () => onSubViewChange?.("models"),
+    onPullModel: pullLocalModel,
+    onAddRoute: addRouteDirect,
+    onInstallSkill: installSkillDirect,
+  };
+
+  const handlers = recipeHandlers ?? defaultRecipeHandlers;
+
   const addToRouter = async (item: CookbookItem, opts: AddRouteOptions) => {
     setRouteBusy(true);
     setRouteMsg(null);
@@ -370,6 +419,31 @@ export function CookbookPanel({ fetchEndpoint, locale }: Props) {
 
   return (
     <section className="workspace-panel cookbook-panel">
+      <nav className="settings-tabs cookbook-panel-tabs" role="tablist" aria-label={t("cookbook.subnav")}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={subView === "models"}
+          className={subView === "models" ? "active" : ""}
+          onClick={() => onSubViewChange?.("models")}
+        >
+          {t("cookbook.tab_models")}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={subView === "recipes"}
+          className={subView === "recipes" ? "active" : ""}
+          onClick={() => onSubViewChange?.("recipes")}
+        >
+          {t("cookbook.tab_recipes")}
+        </button>
+      </nav>
+
+      {subView === "recipes" ? (
+        <CookbookRecipesView fetchEndpoint={fetchEndpoint} locale={locale} handlers={handlers} />
+      ) : (
+        <>
       <h3 className="cookbook-panel-heading">
         {t("cookbook.matrix_title")}
         <InfoTip
@@ -583,6 +657,8 @@ export function CookbookPanel({ fetchEndpoint, locale }: Props) {
           </div>
         )}
       </div>
+        </>
+      )}
     </section>
   );
 }
