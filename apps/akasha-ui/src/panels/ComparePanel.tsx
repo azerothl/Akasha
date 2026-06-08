@@ -8,6 +8,7 @@ import {
   type ModelPriceRates,
   type ModelUsageStats,
 } from "../modelUsage";
+import type { ComparePrefill } from "../cookbookRecipes";
 
 const LazyMarkdownContent = lazy(() => import("../MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -59,6 +60,8 @@ type Props = {
   fetchEndpoint: (path: string, init?: RequestInit) => Promise<{ ok: boolean; status: number; text: string }>;
   locale: "fr" | "en";
   defaultModels?: ModelEntry[];
+  prefill?: ComparePrefill | null;
+  onPrefillConsumed?: () => void;
 };
 
 function nextRowId(): string {
@@ -111,7 +114,7 @@ function pickUnusedPair(
   return all[0] ?? null;
 }
 
-export function ComparePanel({ fetchEndpoint, locale, defaultModels }: Props) {
+export function ComparePanel({ fetchEndpoint, locale, defaultModels, prefill, onPrefillConsumed }: Props) {
   const en = locale === "en";
   const [prompt, setPrompt] = useState("");
   const [blind, setBlind] = useState(true);
@@ -214,6 +217,20 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels }: Props) {
     if (!routerModels || selectedRows.length > 0) return;
     setSelectedRows(pickInitialRows(routerModels, defaultModels));
   }, [routerModels, defaultModels, selectedRows.length]);
+
+  useEffect(() => {
+    if (!prefill || !routerModels) return;
+    if (prefill.prompt) setPrompt(prefill.prompt);
+    if (prefill.blind !== undefined) setBlind(prefill.blind);
+    if (prefill.models?.length) {
+      const rows = prefill.models
+        .filter((m) => routerModels[m.provider]?.includes(m.model))
+        .slice(0, MAX_MODELS)
+        .map((m) => ({ id: nextRowId(), provider: m.provider, model: m.model }));
+      if (rows.length > 0) setSelectedRows(rows);
+    }
+    onPrefillConsumed?.();
+  }, [prefill, routerModels, onPrefillConsumed]);
 
   const updateRow = useCallback(
     (id: string, patch: Partial<Pick<SelectedRow, "provider" | "model">>) => {

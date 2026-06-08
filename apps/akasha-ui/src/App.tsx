@@ -52,6 +52,9 @@ import {
   type ModelPriceRates,
   type ModelUsageStats,
 } from "./modelUsage";
+import type { ComparePrefill } from "./cookbookRecipes";
+import { recipeLocale, type CookbookRecipeActionContext } from "./cookbookRecipes";
+import type { CookbookRecipeHandlers } from "./panels/CookbookRecipesView";
 import { ModelUsageBadge } from "./components/ModelUsageBadge";
 import { TaskExecutionSteps } from "./components/TaskExecutionSteps";
 import { CreateTaskDialog } from "./components/CreateTaskDialog";
@@ -1715,6 +1718,8 @@ function App() {
   const [memoryAdvancedMessage, setMemoryAdvancedMessage] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
   const [modelPricingLookup, setModelPricingLookup] = useState<Map<string, ModelPriceRates>>(new Map());
+  const [cookbookSubView, setCookbookSubView] = useState<"models" | "recipes">("models");
+  const [comparePrefill, setComparePrefill] = useState<ComparePrefill | null>(null);
 
   const enrichUsageWithPricing = useCallback(
     (usage: ModelUsageStats | null | undefined): ModelUsageStats | undefined => {
@@ -1746,6 +1751,92 @@ function App() {
       setTab("chat");
     },
     [setTab],
+  );
+
+  const tryCookbookRecipeInChat = useCallback(
+    (ctx: CookbookRecipeActionContext) => {
+      const title = recipeLocale(ctx.recipe, locale).title;
+      const prefix =
+        locale === "en"
+          ? `[Cookbook recipe: ${title}]\n`
+          : `[Recette cookbook : ${title}]\n`;
+      setChatResearchContext(null);
+      setChatNoteContext(null);
+      setMessage(`${prefix}${ctx.prompt ?? ""}`);
+      setTab("chat");
+    },
+    [locale, setTab],
+  );
+
+  const openCompareFromCookbook = useCallback(
+    (prefill: ComparePrefill) => {
+      setComparePrefill(prefill);
+      setTab("compare");
+    },
+    [setTab],
+  );
+
+  const fetchSystemEndpoint = useCallback(async (path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; text: string }> => {
+    if (E2E_WEB) {
+      const res = await fetch(e2eDaemonHttpUrl(path), init);
+      return { ok: res.ok, status: res.status, text: await res.text() };
+    }
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "GET") {
+      return invoke<{ ok: boolean; status: number; text: string }>("daemon_get_text", {
+        path,
+        port: DAEMON_PORT,
+      });
+    }
+    const body = typeof init?.body === "string" ? init.body : undefined;
+    return invoke<{ ok: boolean; status: number; text: string }>("daemon_request", {
+      method,
+      path,
+      body,
+      port: DAEMON_PORT,
+    });
+  }, []);
+
+  const cookbookRecipeHandlers = useMemo<CookbookRecipeHandlers>(
+    () => ({
+      onTryInChat: tryCookbookRecipeInChat,
+      onOpenCompare: openCompareFromCookbook,
+      onOpenModelsTab: () => {
+        setCookbookSubView("models");
+        setTab("cookbook");
+      },
+      onPullModel: async (runtime, model) => {
+        const res = await fetchSystemEndpoint("/api/cookbook/local/pull", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ runtime, model }),
+        });
+        const j = JSON.parse(res.text) as { ok?: boolean; error?: string; message?: string };
+        if (!res.ok || !j.ok) throw new Error(j.error ?? `HTTP ${res.status}`);
+        return j.message ?? "";
+      },
+      onAddRoute: async (opts) => {
+        const res = await fetchSystemEndpoint("/api/router/route", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(opts),
+        });
+        const j = JSON.parse(res.text) as { ok?: boolean; error?: string; message?: string };
+        if (!res.ok || !j.ok) throw new Error(j.error ?? `HTTP ${res.status}`);
+        return j.message ?? (locale === "en" ? "Route saved." : "Route enregistrée.");
+      },
+      onInstallSkill: async (url) => {
+        const res = await fetchSystemEndpoint("/api/skills/install", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url }),
+        });
+        const j = JSON.parse(res.text) as { installed?: boolean; message?: string; error?: string; detail?: string };
+        if (!res.ok || !j.installed) throw new Error(j.detail ?? j.error ?? `HTTP ${res.status}`);
+        return j.message ?? (locale === "en" ? "Skill installed." : "Skill installé.");
+      },
+    }),
+    [fetchSystemEndpoint, locale, openCompareFromCookbook, setTab, tryCookbookRecipeInChat],
   );
 
   const openNotePicker = useCallback(async () => {
@@ -4384,27 +4475,6 @@ function App() {
     [fetchPluginStatus, t],
   );
 
-  const fetchSystemEndpoint = useCallback(async (path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; text: string }> => {
-    if (E2E_WEB) {
-      const res = await fetch(e2eDaemonHttpUrl(path), init);
-      return { ok: res.ok, status: res.status, text: await res.text() };
-    }
-    const method = (init?.method ?? "GET").toUpperCase();
-    if (method === "GET") {
-      return invoke<{ ok: boolean; status: number; text: string }>("daemon_get_text", {
-        path,
-        port: DAEMON_PORT,
-      });
-    }
-    const body = typeof init?.body === "string" ? init.body : undefined;
-    return invoke<{ ok: boolean; status: number; text: string }>("daemon_request", {
-      method,
-      path,
-      body,
-      port: DAEMON_PORT,
-    });
-  }, []);
-
   const requestSystemEndpoint = useCallback(
     async (method: string, path: string, body?: string) => fetchSystemEndpoint(path, { method, body }),
     [fetchSystemEndpoint],
@@ -6913,7 +6983,12 @@ function App() {
 
         {tab === "compare" && (
           <section id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" className="panel compare-panel-wrap">
-            <ComparePanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+            <ComparePanel
+              fetchEndpoint={fetchSystemEndpoint}
+              locale={locale}
+              prefill={comparePrefill}
+              onPrefillConsumed={() => setComparePrefill(null)}
+            />
           </section>
         )}
 
@@ -6934,7 +7009,13 @@ function App() {
 
         {tab === "cookbook" && (
           <section id="panel-cookbook" role="tabpanel" aria-labelledby="tab-cookbook" className="panel cookbook-panel-wrap">
-            <CookbookPanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+            <CookbookPanel
+              fetchEndpoint={fetchSystemEndpoint}
+              locale={locale}
+              subView={cookbookSubView}
+              onSubViewChange={setCookbookSubView}
+              recipeHandlers={cookbookRecipeHandlers}
+            />
           </section>
         )}
 

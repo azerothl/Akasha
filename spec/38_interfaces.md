@@ -95,6 +95,7 @@ Raccourcis clavier (hors champ de saisie / modale) :
 
 - **Permissions** : cloche dans l’en-tête (file d’approbation outils), en plus de Paramètres → Système → Santé.
 - **Densité UI** : Paramètres → Affichage (compact / confortable / spacieuse).
+- **Cookbook** (Workspace) : sous-onglets **Modèles** (matrice, fit matériel, ajout `llm_router`) et **Recettes** (catalogue `spec/cookbook/`, prompts, RAG, fine-tuning, actions semi-auto : Chat, Comparer, pull Ollama, install skill). API : `GET /api/cookbook/recipes`, `GET /api/cookbook/recipes/:id`, `GET /api/cookbook/recipes/:id/context`.
 - Le focus est maintenu sur le champ de saisie du chat après envoi d’un message lorsque l’onglet Chat est actif.
 
 Voir aussi [`odysseus-inspiration-matrix.md`](dev/roadmap/odysseus-inspiration-matrix.md).
