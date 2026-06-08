@@ -468,6 +468,12 @@ enum ConfigModelsSub {
         /// Model name (e.g. llama3.2, gpt-4o-mini, core)
         model: String,
     },
+    /// Download default embedded GGUF model (llama-cpp backend)
+    EmbeddedDownload {
+        /// Model id from spec/embedded_models.json (default catalog entry)
+        #[arg(long)]
+        id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2731,6 +2737,22 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                         "{}: primary set to {} / {} (previous primary moved to fallback if any).",
                         category, provider, model
                     );
+                }
+                ConfigModelsSub::EmbeddedDownload { id } => {
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(3600))
+                        .build()
+                        .map_err(|e| anyhow::anyhow!("HTTP client: {e}"))?;
+                    let dest = akasha_embedded_llm::download::download_model(
+                        &client,
+                        id.as_deref(),
+                    )
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                    println!(
+                        "Embedded GGUF downloaded to {} (set AKASHA_EMBEDDED_BACKEND=llama_cpp or auto).",
+                        dest.display()
+                    );
+                    return Ok(());
                 }
             }
             config.save_to_path(&path)?;

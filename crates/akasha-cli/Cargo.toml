@@ -12,6 +12,7 @@ path = "src/main.rs"
 akasha-core = { path = "../akasha-core" }
 akasha-plugin-api = { path = "../akasha-plugin-api" }
 akasha-llm = { path = "../akasha-llm" }
+akasha-embedded-llm = { path = "../akasha-embedded-llm", features = ["download"] }
 akasha-tools = { path = "../akasha-tools" }
 akasha-vault = { path = "../akasha-vault" }
 clap = { version = "4.4", features = ["derive"] }
