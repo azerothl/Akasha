@@ -329,3 +329,26 @@ pub async fn http_probe(
         },
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_skills_catalog_finds_research() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let (out, res) = search_skills_catalog("research", 5)
+                .await
+                .expect("search_skills_catalog");
+            assert!(res.success, "{:?}", res);
+            assert!(
+                out.contains("web-researcher") || out.contains("research"),
+                "expected research-related skill: {out}"
+            );
+        });
+    }
+}

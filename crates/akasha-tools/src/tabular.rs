@@ -135,3 +135,34 @@ pub async fn analyze_table(
         },
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn analyze_table_inspect_csv() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let dir = std::env::temp_dir().join("akasha_tabular_test");
+            let _ = fs::create_dir_all(&dir);
+            let path = dir.join("sample.csv");
+            fs::write(&path, "name,score\nalice,10\nbob,20\n").unwrap();
+            let policy = ToolsPolicy {
+                allowed_read_paths: vec![dir.to_string_lossy().into_owned()],
+                ..Default::default()
+            };
+            let (out, res) = analyze_table("inspect", &path, &policy)
+                .await
+                .expect("analyze_table");
+            assert!(res.success, "{:?}", res);
+            assert!(out.contains("Row count: 2"));
+            assert!(out.contains("name"));
+            let _ = fs::remove_file(&path);
+        });
+    }
+}
