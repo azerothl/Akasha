@@ -296,7 +296,7 @@ impl LLMRouter {
         akasha_embedded_llm::EmbeddedLlm::status_snapshot()
     }
 
-    /// Replace in-memory routing config (task_types, providers metadata, global) from disk or API reload. (task_types, providers metadata, global) from disk or API reload.
+    /// Replace in-memory routing config (task_types, providers metadata, global) from disk or API reload.
     /// Registered provider clients (Ollama, OpenRouter, etc.) are unchanged — route/model switches take effect immediately.
     pub fn reload_routing_config(&self, config: RoutingConfig) {
         match self.config.write() {

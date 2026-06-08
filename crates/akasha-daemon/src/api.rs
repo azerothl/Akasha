@@ -15173,10 +15173,10 @@ pub async fn handle_api(
                 "id": "embedded_llm",
                 "ok": snap.embedded_available,
                 "description": format!(
-                    "{} (backend {:?}, device {:?})",
+                    "{} (backend {}, device {})",
                     snap.hint,
-                    snap.backend,
-                    snap.device
+                    snap.backend.as_deref().unwrap_or("?"),
+                    snap.device.as_deref().unwrap_or("?")
                 )
             }));
         }

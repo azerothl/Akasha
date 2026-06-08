@@ -167,9 +167,9 @@ impl EmbeddedLlm {
         let device = Self::device_hint();
         let model_path = Self::model_path();
         let hint = if !available {
-            "Compile daemon with embedded feature; for llama_cpp run: akasha config models embedded download".into()
+            "Compile daemon with embedded feature; for llama_cpp run: akasha config models embedded-download".into()
         } else if backend.as_deref() == Some("llama_cpp") && model_path.is_none() {
-            "llama_cpp compiled but GGUF missing — run: akasha config models embedded download".into()
+            "llama_cpp compiled but GGUF missing — run: akasha config models embedded-download".into()
         } else if loaded {
             format!(
                 "Embedded model loaded ({}, device {})",

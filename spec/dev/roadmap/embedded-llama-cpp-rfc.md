@@ -45,7 +45,7 @@ Prérequis : `clang`, `cmake`, C++17 ; CUDA 11.8+ pour feature CUDA.
 
 - **Défaut** : Qwen2.5-1.5B-Instruct Q4_K_M (~1 Go)
 - Manifeste : [`spec/embedded_models.json`](../embedded_models.json)
-- CLI : `akasha config models embedded download`
+- CLI : `akasha config models embedded-download`
 
 ## Non-objectifs v1
 

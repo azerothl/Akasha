@@ -163,7 +163,7 @@ where
         return Ok(String::new());
     }
 
-    let mut batch = LlamaBatch::new(512, 1);
+    let mut batch = LlamaBatch::new(prompt_tokens.len(), 1);
     for (i, &tok) in prompt_tokens.iter().enumerate() {
         batch
             .add(tok, i as i32, &[0], i == prompt_tokens.len() - 1)

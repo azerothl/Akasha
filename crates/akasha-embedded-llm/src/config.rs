@@ -105,7 +105,7 @@ pub fn resolve_backend_choice() -> Result<ResolvedBackend, String> {
             {
                 resolve_gguf_path()
                     .ok_or_else(|| {
-                        "llama_cpp backend selected but no GGUF found (set AKASHA_EMBEDDED_GGUF_PATH or run akasha config models embedded download)".into()
+                        "llama_cpp backend selected but no GGUF found (set AKASHA_EMBEDDED_GGUF_PATH or run akasha config models embedded-download)".into()
                     })
                     .map(|p| ResolvedBackend::LlamaCpp(p))
             }
@@ -195,7 +195,19 @@ pub fn embedded_models_manifest_path() -> PathBuf {
             return p;
         }
     }
-    // Relative to workspace when developing; release bundles spec/
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let p = exe_dir.join("spec").join("embedded_models.json");
+            if p.is_file() {
+                return p;
+            }
+            let p = exe_dir.join("..").join("spec").join("embedded_models.json");
+            if p.is_file() {
+                return p;
+            }
+        }
+    }
+    // Relative to workspace when developing; release bundles spec/.
     let candidates = [
         PathBuf::from("spec/embedded_models.json"),
         PathBuf::from("../spec/embedded_models.json"),
