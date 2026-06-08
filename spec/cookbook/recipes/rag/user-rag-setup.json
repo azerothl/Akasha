@@ -1,0 +1,38 @@
+{
+  "id": "user-rag-setup",
+  "category": "rag",
+  "tags": ["rag", "documents"],
+  "difficulty": "beginner",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "User RAG — index your documents",
+      "summary": "Add PDFs and text files to Akasha user RAG so the agent can cite your docs in chat.",
+      "steps_md": "## Goal\n\nGround answers in your own files without fine-tuning.\n\n## Steps\n\n1. Go to **Settings → Data → User RAG**.\n2. Upload documents (PDF, TXT, MD) or point to allowed folders.\n3. Wait for indexing (embeddings use the bundled local model).\n4. In chat, ask questions that reference your docs — the agent retrieves relevant chunks.\n\n## Best practices\n\n- Split large manuals into logical files.\n- Prefer factual Q&A over style transfer — RAG excels at retrieval, not tone."
+    },
+    "fr": {
+      "title": "RAG utilisateur — indexer vos documents",
+      "summary": "Ajouter PDF et fichiers texte au RAG utilisateur pour que l'agent cite vos docs dans le chat.",
+      "steps_md": "## Objectif\n\nAncrer les réponses dans vos fichiers sans fine-tuning.\n\n## Étapes\n\n1. Aller dans **Paramètres → Data → RAG utilisateur**.\n2. Téléverser des documents (PDF, TXT, MD) ou dossiers autorisés.\n3. Attendre l'indexation (embeddings via modèle local bundlé).\n4. Dans le chat, poser des questions sur vos docs — l'agent récupère les passages pertinents.\n\n## Bonnes pratiques\n\n- Découper les gros manuels en fichiers logiques.\n- Privilégier Q/R factuelles — le RAG excelle en retrieval, pas en style."
+    }
+  },
+  "prerequisites": {
+    "task_types": ["conversation"],
+    "models_hint": ["embedding"]
+  },
+  "prompt_template": "Using my indexed user documents, answer: {question}\n\nIf the answer is not in the documents, say so explicitly and suggest what to add to the index.",
+  "variables": [
+    {
+      "key": "question",
+      "label_en": "Question",
+      "label_fr": "Question",
+      "default": "What are the main steps to configure llm_router.yaml?",
+      "placeholder_en": "Question about your indexed docs",
+      "placeholder_fr": "Question sur vos documents indexés"
+    }
+  ],
+  "actions": [
+    { "type": "try_in_chat", "label_en": "Try in Chat", "label_fr": "Essayer dans le Chat" }
+  ],
+  "related_recipe_ids": ["memory-ltm-rag", "finetune-vs-rag-decision"]
+}

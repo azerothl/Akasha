@@ -1,0 +1,69 @@
+{
+  "id": "synthetic-dataset-hf",
+  "category": "ml",
+  "tags": ["huggingface", "dataset"],
+  "difficulty": "intermediate",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "Hugging Face dataset sample & export",
+      "summary": "Use the synthetic-dataset skill to pull rows from HF Hub and export CSV/JSON/JSONL for ML pipelines.",
+      "steps_md": "## Goal\n\nBootstrap ML or fine-tuning data from public HF datasets.\n\n## Steps\n\n1. Install **synthetic-dataset** skill.\n2. Identify dataset id (e.g. `imdb`, `databricks/databricks-dolly-15k`).\n3. Run with `--from-hf`, `--rows`, `--format jsonl`.\n4. Inspect columns; map to your training schema.\n\n## Limits\n\n- Max 50k rows per run (skill policy).\n- First download needs network; later runs use cache."
+    },
+    "fr": {
+      "title": "Échantillon et export dataset Hugging Face",
+      "summary": "Utiliser le skill synthetic-dataset pour extraire des lignes du Hub HF en CSV/JSON/JSONL.",
+      "steps_md": "## Objectif\n\nAmorcer des données ML ou fine-tuning depuis des datasets HF publics.\n\n## Étapes\n\n1. Installer le skill **synthetic-dataset**.\n2. Identifier l'id dataset (ex. `imdb`, `databricks/databricks-dolly-15k`).\n3. Exécuter avec `--from-hf`, `--rows`, `--format jsonl`.\n4. Inspecter les colonnes ; mapper au schéma d'entraînement.\n\n## Limites\n\n- Max 50k lignes par run (policy du skill).\n- Premier téléchargement : réseau requis ; ensuite cache local."
+    }
+  },
+  "prerequisites": {
+    "skills": ["synthetic-dataset"]
+  },
+  "prompt_template": "Using the synthetic-dataset skill, export {rows} rows from Hugging Face dataset `{dataset_id}` as {format} to an allowed write path. Summarize columns and row count.",
+  "variables": [
+    {
+      "key": "dataset_id",
+      "label_en": "Dataset ID",
+      "label_fr": "ID dataset",
+      "default": "databricks/databricks-dolly-15k"
+    },
+    {
+      "key": "rows",
+      "label_en": "Row count",
+      "label_fr": "Nombre de lignes",
+      "default": "500"
+    },
+    {
+      "key": "format",
+      "label_en": "Format",
+      "label_fr": "Format",
+      "default": "jsonl"
+    }
+  ],
+  "commands": [
+    {
+      "label_en": "Export 500 Dolly rows",
+      "label_fr": "Exporter 500 lignes Dolly",
+      "command": "python skills/synthetic-dataset/scripts/generate_dataset.py --from-hf databricks/databricks-dolly-15k --rows 500 --format jsonl --output dolly-sample.jsonl"
+    }
+  ],
+  "actions": [
+    {
+      "type": "install_skill",
+      "label_en": "Install synthetic-dataset",
+      "label_fr": "Installer synthetic-dataset",
+      "payload": {
+        "url": "https://github.com/azerothl/Akasha_skills/tree/main/skills/synthetic-dataset"
+      }
+    },
+    { "type": "try_in_chat", "label_en": "Run via agent", "label_fr": "Lancer via l'agent" }
+  ],
+  "related_recipe_ids": ["lora-dataset-prep"],
+  "external_links": [
+    {
+      "label_en": "HF Open-Source AI Cookbook",
+      "label_fr": "HF Open-Source AI Cookbook",
+      "url": "https://huggingface.co/learn/cookbook/index"
+    }
+  ]
+}

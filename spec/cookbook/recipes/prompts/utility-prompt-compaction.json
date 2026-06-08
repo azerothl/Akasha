@@ -1,0 +1,41 @@
+{
+  "id": "utility-prompt-compaction",
+  "category": "prompts",
+  "tags": ["utility", "llm_router"],
+  "difficulty": "beginner",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "Utility model — titles & compaction",
+      "summary": "Route lightweight tasks (session titles, compare synthesis, memory compaction) to a small/cheap utility model via task_type: utility.",
+      "steps_md": "## Goal\n\nOffload background LLM work from your main conversation model.\n\n## Steps\n\n1. Open **Cookbook → Models** and pick a small local model or economical API model.\n2. Add it as **primary** for task type `utility` in `llm_router.yaml`.\n3. Akasha uses this route for titles, compare synthesis, and similar internal tasks.\n\n## When to use\n\n- Host RAM ≥ 16 GB: small Ollama model or embedded default.\n- Limited RAM: cloud API mini model as utility fallback."
+    },
+    "fr": {
+      "title": "Modèle utilitaire — titres et compaction",
+      "summary": "Router les tâches légères (titres de session, synthèse compare, compaction mémoire) vers un petit modèle via task_type: utility.",
+      "steps_md": "## Objectif\n\nDécharger le modèle de conversation principal pour les tâches LLM en arrière-plan.\n\n## Étapes\n\n1. Ouvrir **Cookbook → Modèles** et choisir un petit modèle local ou API économique.\n2. L'ajouter en **primaire** pour le type `utility` dans `llm_router.yaml`.\n3. Akasha utilise cette route pour les titres, synthèse compare, etc.\n\n## Quand l'utiliser\n\n- RAM ≥ 16 Go : petit modèle Ollama ou embarqué par défaut.\n- RAM limitée : API cloud mini en fallback utility."
+    }
+  },
+  "prerequisites": {
+    "task_types": ["utility"]
+  },
+  "config_snippet": {
+    "language": "yaml",
+    "content": "task_types:\n  utility:\n    primary:\n      provider: akasha_embedded\n      model: default\n      config:\n        temperature: 0.3\n        max_tokens: 512"
+  },
+  "actions": [
+    {
+      "type": "add_route",
+      "label_en": "Add utility route (embedded)",
+      "label_fr": "Ajouter route utility (embedded)",
+      "payload": {
+        "category": "utility",
+        "provider": "akasha_embedded",
+        "model": "default",
+        "role": "primary"
+      }
+    },
+    { "type": "open_models_tab", "label_en": "Browse models", "label_fr": "Parcourir les modèles" }
+  ],
+  "related_recipe_ids": ["compare-blind-test"]
+}

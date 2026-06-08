@@ -1,0 +1,37 @@
+{
+  "id": "memory-ltm-rag",
+  "category": "rag",
+  "tags": ["memory", "ltm"],
+  "difficulty": "intermediate",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "Long-term memory + RAG-first",
+      "summary": "Combine Akasha LTM (SQLite + graph) with user RAG before considering fine-tuning for domain knowledge.",
+      "steps_md": "## Goal\n\nFollow the Akasha Core Model strategy: RAG-first for facts, memory for continuity.\n\n## Steps\n\n1. Let the agent store durable facts with memory tools (`memory_store`) when appropriate.\n2. Index stable reference docs in **User RAG**.\n3. Use **Deep Research** for one-off external investigations.\n4. Reserve fine-tuning for style, format, or narrow reasoning patterns.\n\n## Architecture note\n\nSee `spec/30_architecture_d_entrainement.md` — knowledge packs (Spec, Ops, Security) belong in retrieval, not weights."
+    },
+    "fr": {
+      "title": "Mémoire LTM + RAG-first",
+      "summary": "Combiner la LTM Akasha (SQLite + graphe) et le RAG utilisateur avant d'envisager le fine-tuning pour la connaissance métier.",
+      "steps_md": "## Objectif\n\nSuivre la stratégie Akasha Core Model : RAG-first pour les faits, mémoire pour la continuité.\n\n## Étapes\n\n1. Laisser l'agent stocker des faits durables via les outils mémoire (`memory_store`).\n2. Indexer les docs de référence stables dans le **RAG utilisateur**.\n3. Utiliser **Deep Research** pour les enquêtes externes ponctuelles.\n4. Réserver le fine-tuning au style, format ou raisonnement étroit.\n\n## Note architecture\n\nVoir `spec/30_architecture_d_entrainement.md` — les knowledge packs appartiennent au retrieval, pas aux poids."
+    }
+  },
+  "prerequisites": {
+    "task_types": ["conversation", "system"]
+  },
+  "prompt_template": "Remember for future sessions: {fact}\n\nConfirm what you stored and how I can retrieve it later.",
+  "variables": [
+    {
+      "key": "fact",
+      "label_en": "Fact to remember",
+      "label_fr": "Fait à mémoriser",
+      "default": "Our production Akasha daemon runs on port 3876 with Ollama as fallback for code_generation.",
+      "placeholder_en": "Durable fact or preference",
+      "placeholder_fr": "Fait ou préférence durable"
+    }
+  ],
+  "actions": [
+    { "type": "try_in_chat", "label_en": "Try in Chat", "label_fr": "Essayer dans le Chat" }
+  ],
+  "related_recipe_ids": ["user-rag-setup", "finetune-vs-rag-decision"]
+}

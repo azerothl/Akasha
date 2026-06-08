@@ -1,0 +1,42 @@
+{
+  "id": "compare-blind-test",
+  "category": "evaluation",
+  "tags": ["compare", "eval"],
+  "difficulty": "beginner",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "Blind model comparison",
+      "summary": "Compare 2–4 models on the same prompt with blind labels, then review latency, cost, and quality.",
+      "steps_md": "## Goal\n\nPick the best model for a recurring task with minimal bias.\n\n## Steps\n\n1. Write a **representative prompt** (production-like, not trivial).\n2. Open **Compare**, enable **Blind mode**.\n3. Select 2–4 models from your router or cookbook suggestions.\n4. Run compare; read synthesis from the utility model.\n5. Score: accuracy, completeness, latency, cost (Cookbook pricing columns help).\n\n## Criteria grid\n\n- **Quality**: meets requirements?\n- **Latency**: acceptable for UX?\n- **Cost**: $/M tokens from cookbook rates?"
+    },
+    "fr": {
+      "title": "Comparaison aveugle de modèles",
+      "summary": "Comparer 2–4 modèles sur le même prompt en mode aveugle, puis latence, coût et qualité.",
+      "steps_md": "## Objectif\n\nChoisir le meilleur modèle pour une tâche récurrente avec minimal de biais.\n\n## Étapes\n\n1. Rédiger un **prompt représentatif** (type production).\n2. Ouvrir **Comparer**, activer le **mode aveugle**.\n3. Sélectionner 2–4 modèles du routeur ou suggestions cookbook.\n4. Lancer la comparaison ; lire la synthèse du modèle utility.\n5. Noter : exactitude, complétude, latence, coût (colonnes prix cookbook).\n\n## Grille\n\n- **Qualité** : répond au besoin ?\n- **Latence** : acceptable UX ?\n- **Coût** : $/M tokens via le cookbook ?"
+    }
+  },
+  "prerequisites": {
+    "task_types": ["conversation", "compare_slot"]
+  },
+  "prompt_template": "{eval_prompt}",
+  "variables": [
+    {
+      "key": "eval_prompt",
+      "label_en": "Evaluation prompt",
+      "label_fr": "Prompt d'évaluation",
+      "default": "Explain the trade-offs between LoRA fine-tuning and RAG for a customer-support bot. Use bullet points. Max 200 words.",
+      "placeholder_en": "Prompt to compare models on",
+      "placeholder_fr": "Prompt pour comparer les modèles"
+    }
+  ],
+  "actions": [
+    {
+      "type": "open_compare",
+      "label_en": "Open Compare with this prompt",
+      "label_fr": "Ouvrir Comparer avec ce prompt",
+      "payload": { "blind": true }
+    }
+  ],
+  "related_recipe_ids": ["utility-prompt-compaction", "structured-json-output"]
+}

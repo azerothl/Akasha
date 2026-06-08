@@ -1,0 +1,49 @@
+{
+  "id": "agent-tool-loop",
+  "category": "agents",
+  "tags": ["tools", "agentic"],
+  "difficulty": "intermediate",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "Agent tool loop (plan → act → summarize)",
+      "summary": "Pattern for multi-step tasks: plan with tools enabled, execute one tool at a time, then synthesize.",
+      "steps_md": "## Goal\n\nRun reliable agentic workflows inside Akasha with `tools_policy.yaml` controls.\n\n## Steps\n\n1. Enable the tools you need in **Settings → Tools** or `tools_policy.yaml`.\n2. Give a clear goal and constraints (paths, read-only vs write).\n3. Ask the agent to **plan** then **execute** step by step.\n4. Review tool outputs in the Task Center timeline.\n\n## Safety\n\n- Use `cannot_do` in the agent profile for destructive actions without confirmation.\n- Restrict `run_command` bins and write paths in policy."
+    },
+    "fr": {
+      "title": "Boucle agent/outils (plan → agir → synthétiser)",
+      "summary": "Modèle pour tâches multi-étapes : planifier avec outils activés, exécuter un outil à la fois, puis synthétiser.",
+      "steps_md": "## Objectif\n\nExécuter des workflows agentiques fiables dans Akasha avec les contrôles `tools_policy.yaml`.\n\n## Étapes\n\n1. Activer les outils nécessaires dans **Paramètres → Outils** ou `tools_policy.yaml`.\n2. Donner un objectif clair et des contraintes (chemins, lecture seule vs écriture).\n3. Demander à l'agent de **planifier** puis **exécuter** étape par étape.\n4. Vérifier les sorties d'outils dans la timeline du Task Center.\n\n## Sécurité\n\n- Utiliser `cannot_do` dans le profil agent pour les actions destructives sans confirmation.\n- Restreindre les bins `run_command` et chemins d'écriture dans la policy."
+    }
+  },
+  "prerequisites": {
+    "task_types": ["conversation", "code_generation"],
+    "models_hint": ["agentic"]
+  },
+  "prompt_template": "Goal: {goal}\n\nConstraints:\n- Work step by step: list a short plan, then use tools one at a time.\n- After each tool result, say what you learned and what is next.\n- End with a concise summary of what was done.\n\nStart by outlining the plan (max 5 steps) before calling any tool.",
+  "variables": [
+    {
+      "key": "goal",
+      "label_en": "Goal",
+      "label_fr": "Objectif",
+      "default": "List all .rs files under crates/akasha-daemon/src and summarize module purposes.",
+      "placeholder_en": "What should the agent accomplish?",
+      "placeholder_fr": "Que l'agent doit-il accomplir ?"
+    }
+  ],
+  "config_snippet": {
+    "language": "yaml",
+    "content": "# tools_policy.example.yaml — excerpt\nallowed_tools:\n  - read_file\n  - grep_content\n  - list_dir\n  - run_command  # restrict bins in policy"
+  },
+  "actions": [
+    { "type": "try_in_chat", "label_en": "Try in Chat", "label_fr": "Essayer dans le Chat" }
+  ],
+  "related_recipe_ids": ["structured-json-output"],
+  "external_links": [
+    {
+      "label_en": "Anthropic — Tool use cookbook",
+      "label_fr": "Anthropic — Tool use cookbook",
+      "url": "https://github.com/anthropics/claude-cookbooks/tree/main/tool_use"
+    }
+  ]
+}

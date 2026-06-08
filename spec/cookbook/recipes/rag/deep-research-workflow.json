@@ -1,0 +1,24 @@
+{
+  "id": "deep-research-workflow",
+  "category": "rag",
+  "tags": ["research", "web"],
+  "difficulty": "intermediate",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "Deep Research workflow",
+      "summary": "Use the Research tab for multi-source web reports, then discuss findings in Chat.",
+      "steps_md": "## Goal\n\nProduce evidence-backed reports on open questions using IterResearch-style loops.\n\n## Steps\n\n1. Open **Research** tab and enter a focused question.\n2. Set max rounds (3–8 for most topics).\n3. Watch branch/sub-agent progress; read the evolving report.\n4. When complete, click **Discuss in Chat** to continue with full report context.\n5. Export HTML/PDF if you need to share offline.\n\n## Tips\n\n- Narrow questions outperform vague prompts.\n- Enable web search connectors if search is degraded."
+    },
+    "fr": {
+      "title": "Workflow Deep Research",
+      "summary": "Utiliser l'onglet Recherche pour des rapports multi-sources, puis discuter dans le Chat.",
+      "steps_md": "## Objectif\n\nProduire des rapports fondés sur des sources pour des questions ouvertes.\n\n## Étapes\n\n1. Ouvrir l'onglet **Recherche** et saisir une question ciblée.\n2. Régler le nombre de rounds (3–8 pour la plupart des sujets).\n3. Suivre branches/sous-agents ; lire le rapport évolutif.\n4. Une fois terminé, cliquer **Discuter dans le Chat** avec le rapport en contexte.\n5. Exporter HTML/PDF si besoin de partage.\n\n## Conseils\n\n- Les questions précises surpassent les prompts vagues.\n- Activer les connecteurs web si la recherche est dégradée."
+    }
+  },
+  "prerequisites": {
+    "task_types": ["conversation", "orchestrator"]
+  },
+  "actions": [],
+  "related_recipe_ids": ["user-rag-setup"]
+}

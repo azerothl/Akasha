@@ -1,0 +1,21 @@
+{
+  "id": "finetune-vs-rag-decision",
+  "category": "fine_tuning",
+  "tags": ["strategy"],
+  "difficulty": "beginner",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "Fine-tune vs RAG vs prompt",
+      "summary": "Decision tree: when to use prompts, retrieval, or LoRA — aligned with Akasha training architecture.",
+      "steps_md": "## Decision tree\n\n| Need | Prefer |\n|------|--------|\n| Changing facts / docs | **User RAG** or web research |\n| Session continuity | **LTM memory** |\n| Output format / tone / tool style | **Prompt** then **LoRA** if prompts fail |\n| Domain reasoning pattern | **LoRA** (500–2k examples) |\n| Secret / policy compliance | **Policy + RAG**, not weights |\n\n## Rule of thumb\n\nRAG-first (spec 30). Fine-tune only when retrieval and prompting cannot reliably enforce behavior.\n\n## Anti-patterns\n\n- Fine-tuning to memorize API docs that change every release.\n- Huge epochs on tiny datasets → catastrophic forgetting."
+    },
+    "fr": {
+      "title": "Fine-tune vs RAG vs prompt",
+      "summary": "Arbre de décision : quand utiliser prompts, retrieval ou LoRA — aligné architecture entraînement Akasha.",
+      "steps_md": "## Arbre de décision\n\n| Besoin | Privilégier |\n|--------|-------------|\n| Faits / docs changeants | **RAG utilisateur** ou recherche web |\n| Continuité de session | **Mémoire LTM** |\n| Format / ton / style outils | **Prompt** puis **LoRA** si échec |\n| Pattern de raisonnement métier | **LoRA** (500–2k exemples) |\n| Conformité / secrets | **Policy + RAG**, pas les poids |\n\n## Règle empirique\n\nRAG-first (spec 30). Fine-tuner seulement si retrieval et prompts n'imposent pas le comportement.\n\n## Anti-patterns\n\n- Fine-tuner pour mémoriser des docs API qui changent à chaque release.\n- Beaucoup d'epochs sur petit dataset → oubli catastrophique."
+    }
+  },
+  "actions": [],
+  "related_recipe_ids": ["user-rag-setup", "lora-dataset-prep", "memory-ltm-rag"]
+}

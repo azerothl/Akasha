@@ -1,0 +1,55 @@
+{
+  "id": "structured-json-output",
+  "category": "prompts",
+  "tags": ["json", "structured-output"],
+  "difficulty": "beginner",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "Structured JSON output",
+      "summary": "Ask the model to return valid JSON matching a schema, with a few-shot example to reduce format errors.",
+      "steps_md": "## Goal\n\nGet reliable machine-readable JSON from any chat model.\n\n## Steps\n\n1. Define the JSON schema in the prompt **before** the task.\n2. Add one minimal valid example (few-shot).\n3. Set `temperature` low (0–0.3) on the route if the provider supports it.\n4. Validate the response with `JSON.parse` or a schema validator in your pipeline.\n\n## Tips\n\n- Prefer instruct/chat models with tool-calling or JSON modes when available.\n- If the model wraps JSON in markdown fences, strip ```json blocks in post-processing."
+    },
+    "fr": {
+      "title": "Sortie JSON structurée",
+      "summary": "Demander au modèle un JSON valide selon un schéma, avec un exemple few-shot pour limiter les erreurs de format.",
+      "steps_md": "## Objectif\n\nObtenir du JSON fiable et exploitable depuis un modèle de chat.\n\n## Étapes\n\n1. Définir le schéma JSON dans le prompt **avant** la tâche.\n2. Ajouter un exemple valide minimal (few-shot).\n3. Régler `temperature` bas (0–0,3) sur la route si le provider le permet.\n4. Valider la réponse avec `JSON.parse` ou un validateur de schéma.\n\n## Conseils\n\n- Privilégier les modèles instruct avec mode JSON ou function calling.\n- Si le modèle entoure le JSON de fences markdown, retirer les blocs ```json en post-traitement."
+    }
+  },
+  "prerequisites": {
+    "task_types": ["conversation"],
+    "models_hint": ["instruct", "agentic"]
+  },
+  "prompt_template": "You must respond with a single JSON object only — no markdown, no commentary.\n\nSchema:\n{\n  \"title\": \"string\",\n  \"items\": [{\"name\": \"string\", \"priority\": \"low|medium|high\"}],\n  \"summary\": \"string\"\n}\n\nExample valid output:\n{\"title\":\"Weekly plan\",\"items\":[{\"name\":\"Review PRs\",\"priority\":\"high\"}],\"summary\":\"Focus on code review.\"}\n\nTask: {task_description}",
+  "variables": [
+    {
+      "key": "task_description",
+      "label_en": "Task description",
+      "label_fr": "Description de la tâche",
+      "default": "Extract action items from: 'Ship the dashboard by Friday; schedule a design review.'",
+      "placeholder_en": "What should the model structure as JSON?",
+      "placeholder_fr": "Que le modèle doit-il structurer en JSON ?"
+    }
+  ],
+  "actions": [
+    {
+      "type": "try_in_chat",
+      "label_en": "Try in Chat",
+      "label_fr": "Essayer dans le Chat"
+    },
+    {
+      "type": "open_compare",
+      "label_en": "Compare models on this prompt",
+      "label_fr": "Comparer les modèles sur ce prompt",
+      "payload": { "blind": true }
+    }
+  ],
+  "related_recipe_ids": ["agent-tool-loop"],
+  "external_links": [
+    {
+      "label_en": "OpenAI — Structured outputs",
+      "label_fr": "OpenAI — Structured outputs",
+      "url": "https://platform.openai.com/docs/guides/structured-outputs"
+    }
+  ]
+}

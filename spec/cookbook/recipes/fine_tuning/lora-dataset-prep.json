@@ -1,0 +1,66 @@
+{
+  "id": "lora-dataset-prep",
+  "category": "fine_tuning",
+  "tags": ["lora", "dataset"],
+  "difficulty": "intermediate",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "LoRA dataset preparation",
+      "summary": "Build 500–2000 high-quality instruction pairs in ChatML/ShareGPT format before QLoRA training.",
+      "steps_md": "## Goal\n\nPrepare training data that beats larger noisy datasets.\n\n## Steps\n\n1. Install the **synthetic-dataset** skill (or export from Hugging Face).\n2. Format as `{messages: [{role, content}, ...]}` or ShareGPT conversations.\n3. Cover edge cases and consistent output format.\n4. Hold out 10% for evaluation.\n\n## Quality bar\n\n- 500–2000 curated examples often enough for LoRA.\n- Use the same chat template at train and inference time (`apply_chat_template`)."
+    },
+    "fr": {
+      "title": "Préparation dataset LoRA",
+      "summary": "Construire 500–2000 paires instruction de qualité en format ChatML/ShareGPT avant entraînement QLoRA.",
+      "steps_md": "## Objectif\n\nPréparer des données qui surpassent de gros jeux bruités.\n\n## Étapes\n\n1. Installer le skill **synthetic-dataset** (ou exporter depuis Hugging Face).\n2. Formater en `{messages: [{role, content}, ...]}` ou conversations ShareGPT.\n3. Couvrir les cas limites et un format de sortie cohérent.\n4. Réserver 10 % pour l'évaluation.\n\n## Qualité\n\n- 500–2000 exemples curatés suffisent souvent pour LoRA.\n- Même chat template à l'entraînement et l'inférence (`apply_chat_template`)."
+    }
+  },
+  "prerequisites": {
+    "skills": ["synthetic-dataset"],
+    "min_ram_gb": 8
+  },
+  "commands": [
+    {
+      "label_en": "Sample HF dataset to JSONL",
+      "label_fr": "Échantillonner un dataset HF en JSONL",
+      "command": "python <SKILL_DIR>/scripts/generate_dataset.py --from-hf databricks/databricks-dolly-15k --rows 1000 --format jsonl --output train.jsonl"
+    }
+  ],
+  "actions": [
+    {
+      "type": "install_skill",
+      "label_en": "Install synthetic-dataset skill",
+      "label_fr": "Installer le skill synthetic-dataset",
+      "payload": {
+        "url": "https://github.com/azerothl/Akasha_skills/tree/main/skills/synthetic-dataset"
+      }
+    },
+    {
+      "type": "try_in_chat",
+      "label_en": "Ask agent to prepare dataset",
+      "label_fr": "Demander à l'agent de préparer le dataset",
+      "payload": {
+        "override_prompt": "Install the synthetic-dataset skill if missing, then create 500 rows of instruction-tuning JSONL in ChatML format for domain: {domain}. Save under my data directory."
+      }
+    }
+  ],
+  "variables": [
+    {
+      "key": "domain",
+      "label_en": "Domain",
+      "label_fr": "Domaine",
+      "default": "Akasha daemon support and llm_router configuration",
+      "placeholder_en": "Fine-tuning domain",
+      "placeholder_fr": "Domaine du fine-tuning"
+    }
+  ],
+  "related_recipe_ids": ["qlora-unsloth-local", "synthetic-dataset-hf"],
+  "external_links": [
+    {
+      "label_en": "HF — LoRA fine-tuning guide",
+      "label_fr": "HF — Guide fine-tuning LoRA",
+      "url": "https://huggingface.co/docs/peft/main/en/conceptual_guides/lora"
+    }
+  ]
+}

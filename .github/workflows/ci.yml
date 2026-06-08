@@ -48,6 +48,11 @@ jobs:
       - name: Cargo test (workspace)
         run: cargo test --workspace
 
+      - name: Validate cookbook recipes
+        run: |
+          pip install jsonschema
+          python scripts/validate-cookbook-recipes.py
+
       - name: E2E tests (daemon + CLI binaries)
         env:
           RUN_E2E: "1"

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "recipes": [
+    { "id": "structured-json-output", "path": "recipes/prompts/structured-json-output.json", "category": "prompts", "tags": ["json", "structured-output"], "difficulty": "beginner" },
+    { "id": "agent-tool-loop", "path": "recipes/agents/agent-tool-loop.json", "category": "agents", "tags": ["tools", "agentic"], "difficulty": "intermediate" },
+    { "id": "utility-prompt-compaction", "path": "recipes/prompts/utility-prompt-compaction.json", "category": "prompts", "tags": ["utility", "llm_router"], "difficulty": "beginner" },
+    { "id": "user-rag-setup", "path": "recipes/rag/user-rag-setup.json", "category": "rag", "tags": ["rag", "documents"], "difficulty": "beginner" },
+    { "id": "deep-research-workflow", "path": "recipes/rag/deep-research-workflow.json", "category": "rag", "tags": ["research", "web"], "difficulty": "intermediate" },
+    { "id": "memory-ltm-rag", "path": "recipes/rag/memory-ltm-rag.json", "category": "rag", "tags": ["memory", "ltm"], "difficulty": "intermediate" },
+    { "id": "lora-dataset-prep", "path": "recipes/fine_tuning/lora-dataset-prep.json", "category": "fine_tuning", "tags": ["lora", "dataset"], "difficulty": "intermediate" },
+    { "id": "qlora-unsloth-local", "path": "recipes/fine_tuning/qlora-unsloth-local.json", "category": "fine_tuning", "tags": ["qlora", "unsloth"], "difficulty": "advanced" },
+    { "id": "finetune-vs-rag-decision", "path": "recipes/fine_tuning/finetune-vs-rag-decision.json", "category": "fine_tuning", "tags": ["strategy"], "difficulty": "beginner" },
+    { "id": "compare-blind-test", "path": "recipes/evaluation/compare-blind-test.json", "category": "evaluation", "tags": ["compare", "eval"], "difficulty": "beginner" },
+    { "id": "synthetic-dataset-hf", "path": "recipes/ml/synthetic-dataset-hf.json", "category": "ml", "tags": ["huggingface", "dataset"], "difficulty": "intermediate" },
+    { "id": "export-ollama-gguf", "path": "recipes/deployment/export-ollama-gguf.json", "category": "deployment", "tags": ["ollama", "gguf"], "difficulty": "intermediate" }
+  ]
+}

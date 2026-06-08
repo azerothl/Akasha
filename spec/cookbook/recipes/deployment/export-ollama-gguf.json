@@ -1,0 +1,57 @@
+{
+  "id": "export-ollama-gguf",
+  "category": "deployment",
+  "tags": ["ollama", "gguf"],
+  "difficulty": "intermediate",
+  "last_reviewed": "2026-06-08",
+  "locales": {
+    "en": {
+      "title": "Deploy fine-tuned model to Ollama",
+      "summary": "Convert merged LoRA or GGUF to Ollama, pull via Cookbook, and add an llm_router route.",
+      "steps_md": "## Goal\n\nServe a custom or fine-tuned model locally through Akasha's Ollama provider.\n\n## Steps\n\n1. Merge LoRA adapter into base weights (or obtain GGUF).\n2. Create Ollama Modelfile or `ollama create` from GGUF.\n3. In **Cookbook → Models**, find the tag and **Pull to Ollama** if needed.\n4. **Add to llm_router** for the right `task_type` (e.g. `conversation`).\n5. Test in Chat or **Compare** against the base model.\n\n## Akasha embedded path\n\nFor bundled GGUF: `akasha config models embedded-download` — see AGENTS.md."
+    },
+    "fr": {
+      "title": "Déployer un modèle fine-tuné sur Ollama",
+      "summary": "Convertir LoRA fusionné ou GGUF vers Ollama, pull via Cookbook, ajouter une route llm_router.",
+      "steps_md": "## Objectif\n\nServir un modèle custom ou fine-tuné localement via le provider Ollama d'Akasha.\n\n## Étapes\n\n1. Fusionner l'adapter LoRA dans les poids de base (ou obtenir un GGUF).\n2. Créer un Modelfile Ollama ou `ollama create` depuis GGUF.\n3. Dans **Cookbook → Modèles**, trouver le tag et **Pull Ollama** si besoin.\n4. **Ajouter à llm_router** pour le bon `task_type` (ex. `conversation`).\n5. Tester dans le Chat ou **Comparer** vs modèle de base.\n\n## Chemin embarqué Akasha\n\nPour GGUF bundlé : `akasha config models embedded-download` — voir AGENTS.md."
+    }
+  },
+  "prerequisites": {
+    "task_types": ["conversation"],
+    "models_hint": ["local", "gguf"],
+    "min_ram_gb": 8
+  },
+  "commands": [
+    {
+      "label_en": "Create Ollama model from Modelfile",
+      "label_fr": "Créer modèle Ollama depuis Modelfile",
+      "command": "ollama create my-finetune -f Modelfile"
+    },
+    {
+      "label_en": "Import GGUF",
+      "label_fr": "Importer GGUF",
+      "command": "ollama create my-model -f ./Modelfile  # FROM ./model.gguf"
+    }
+  ],
+  "actions": [
+    {
+      "type": "pull_model",
+      "label_en": "Pull example model (llama3.2)",
+      "label_fr": "Télécharger modèle exemple (llama3.2)",
+      "payload": { "runtime": "ollama", "model": "llama3.2" }
+    },
+    {
+      "type": "add_route",
+      "label_en": "Route conversation → Ollama llama3.2",
+      "label_fr": "Router conversation → Ollama llama3.2",
+      "payload": {
+        "category": "conversation",
+        "provider": "ollama",
+        "model": "llama3.2",
+        "role": "primary"
+      }
+    },
+    { "type": "open_models_tab", "label_en": "Open model matrix", "label_fr": "Ouvrir matrice modèles" }
+  ],
+  "related_recipe_ids": ["qlora-unsloth-local", "compare-blind-test"]
+}

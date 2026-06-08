@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://akasha.local/spec/cookbook/recipe.schema.json",
+  "title": "Akasha Cookbook Recipe",
+  "type": "object",
+  "required": ["id", "category", "difficulty", "locales", "last_reviewed"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "category": {
+      "type": "string",
+      "enum": ["prompts", "rag", "agents", "fine_tuning", "evaluation", "ml", "deployment"]
+    },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "difficulty": { "type": "string", "enum": ["beginner", "intermediate", "advanced"] },
+    "last_reviewed": { "type": "string", "format": "date" },
+    "locales": {
+      "type": "object",
+      "required": ["en", "fr"],
+      "additionalProperties": false,
+      "properties": {
+        "en": { "$ref": "#/$defs/localeBlock" },
+        "fr": { "$ref": "#/$defs/localeBlock" }
+      }
+    },
+    "prerequisites": { "$ref": "#/$defs/prerequisites" },
+    "prompt_template": { "type": "string" },
+    "variables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "label_en", "label_fr"],
+        "properties": {
+          "key": { "type": "string" },
+          "label_en": { "type": "string" },
+          "label_fr": { "type": "string" },
+          "default": { "type": "string" },
+          "placeholder_en": { "type": "string" },
+          "placeholder_fr": { "type": "string" }
+        }
+      }
+    },
+    "config_snippet": {
+      "type": "object",
+      "properties": {
+        "language": { "type": "string" },
+        "content": { "type": "string" }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label_en", "label_fr", "command"],
+        "properties": {
+          "label_en": { "type": "string" },
+          "label_fr": { "type": "string" },
+          "command": { "type": "string" }
+        }
+      }
+    },
+    "actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/action" }
+    },
+    "related_recipe_ids": { "type": "array", "items": { "type": "string" } },
+    "external_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label_en", "label_fr", "url"],
+        "properties": {
+          "label_en": { "type": "string" },
+          "label_fr": { "type": "string" },
+          "url": { "type": "string", "format": "uri" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "localeBlock": {
+      "type": "object",
+      "required": ["title", "summary", "steps_md"],
+      "properties": {
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "steps_md": { "type": "string" }
+      }
+    },
+    "prerequisites": {
+      "type": "object",
+      "properties": {
+        "task_types": { "type": "array", "items": { "type": "string" } },
+        "models_hint": { "type": "array", "items": { "type": "string" } },
+        "skills": { "type": "array", "items": { "type": "string" } },
+        "min_ram_gb": { "type": "number", "minimum": 0 },
+        "gpu_hint": { "type": "string" }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["type", "label_en", "label_fr"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "try_in_chat",
+            "open_compare",
+            "pull_model",
+            "add_route",
+            "install_skill",
+            "open_external",
+            "open_models_tab"
+          ]
+        },
+        "label_en": { "type": "string" },
+        "label_fr": { "type": "string" },
+        "payload": { "type": "object" }
+      }
+    }
+  }
+}
