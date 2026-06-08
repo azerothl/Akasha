@@ -5378,6 +5378,16 @@ a.settings-link-btn.refresh-btn {
   padding: 0.5rem;
 }
 
+.calendar-external-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 0.25rem;
+  padding-bottom: 1rem;
+  -webkit-overflow-scrolling: touch;
+}
+
 .calendar-grid-wrap > .calendar-grid-table.calendar-grid-day,
 .calendar-grid-wrap > .calendar-grid-table.calendar-grid-week {
   height: auto;
@@ -5627,6 +5637,9 @@ a.settings-link-btn.refresh-btn {
 .caldav-auth-mode-tabs button.active { border-color: var(--akasha-accent); background: color-mix(in srgb, var(--akasha-accent) 10%, var(--akasha-bg-surface)); }
 .caldav-auth-mode-tabs button:disabled { opacity: 0.45; cursor: not-allowed; }
 .caldav-oauth-panel { display: flex; flex-direction: column; gap: 0.65rem; }
+.caldav-oauth-setup { margin: 0.5rem 0 0.75rem; font-size: 0.8125rem; }
+.caldav-oauth-setup summary { cursor: pointer; color: var(--akasha-accent); font-weight: 500; margin-bottom: 0.35rem; }
+.caldav-cli-line { display: block; font-family: var(--akasha-font-mono, monospace); font-size: 0.75rem; padding: 0.25rem 0.4rem; margin-top: 0.15rem; background: var(--akasha-bg); border-radius: 4px; word-break: break-all; }
 .caldav-account-meta { color: var(--akasha-text-dim); font-size: 0.8125rem; flex: 1 1 100%; }
 .caldav-error { color: var(--akasha-error); }
 .caldav-provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }

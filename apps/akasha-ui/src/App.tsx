@@ -8174,7 +8174,9 @@ function App() {
               </div>
             )}
             {!calendarLoading && calendarSubTab === "external" && (
-              <CalDavAccountsPanel locale={locale} fetchEndpoint={fetchSystemEndpoint} />
+              <div className="calendar-external-scroll">
+                <CalDavAccountsPanel locale={locale} fetchEndpoint={fetchSystemEndpoint} />
+              </div>
             )}
             {calendarSelectedTaskId && (
                   <div

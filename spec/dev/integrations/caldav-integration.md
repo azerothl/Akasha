@@ -22,7 +22,7 @@ Comptes : table `caldav_accounts`. Outbox push : `caldav_outbox`.
 
 ## OAuth (Google, Microsoft)
 
-En plus du mot de passe d'application (CalDAV), **Google Calendar** et **Outlook / Microsoft 365** supportent une connexion **OAuth** lorsque l'administrateur a enregistré des identifiants client dans le vault :
+En plus du mot de passe d'application (CalDAV), **Google Calendar** et **Outlook / Microsoft 365** supportent une connexion **OAuth** lorsque vous avez enregistré une fois les identifiants client dans le vault (via `akasha vault set`, voir l'assistant dans l'onglet CalDAV / ICS) :
 
 | Clé vault | Usage |
 |-----------|--------|

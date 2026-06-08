@@ -187,8 +187,8 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
       if (!res.ok) {
         setMessage(
           locale === "en"
-            ? "Could not start sign-in. Ask your administrator to configure OAuth client credentials."
-            : "Impossible de lancer la connexion. Demandez à l'administrateur de configurer les identifiants OAuth.",
+            ? "Could not start OAuth sign-in. Check that Google/Microsoft credentials are saved (see « Set up OAuth » below), or use an app password instead."
+            : "Impossible de lancer la connexion OAuth. Vérifiez que les identifiants Google/Microsoft sont enregistrés (voir « Configurer OAuth » ci-dessous), ou utilisez un mot de passe d'application.",
         );
         setOauthPolling(false);
         return;
@@ -208,8 +208,8 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
         if (status.status === "completed") {
           setMessage(
             locale === "en"
-              ? "Calendar connected with OAuth. Events will sync when the sync module is running."
-              : "Calendrier connecté via OAuth. Les événements se synchroniseront lorsque le module de sync est actif.",
+              ? "Calendar connected with OAuth. Import a .ics file for instant display, or enable automatic sync (see below)."
+              : "Calendrier connecté via OAuth. Importez un fichier .ics pour un affichage immédiat, ou activez la sync automatique (voir ci-dessous).",
           );
           setLabel("");
           await load();
@@ -266,8 +266,8 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
         if (!vaultRes.ok) {
           setMessage(
             locale === "en"
-              ? "Calendar saved, but the password could not be stored securely. Try again or contact your administrator."
-              : "Calendrier enregistré, mais le mot de passe n'a pas pu être stocké de façon sécurisée. Réessayez ou contactez l'administrateur.",
+              ? "Calendar saved, but the password could not be stored securely. Try again; if it keeps failing, run akasha doctor in a terminal."
+              : "Calendrier enregistré, mais le mot de passe n'a pas pu être stocké de façon sécurisée. Réessayez ; si le problème persiste, lancez akasha doctor dans un terminal.",
           );
           await load();
           return;
@@ -276,11 +276,11 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
       setMessage(
         password.trim()
           ? locale === "en"
-            ? "Calendar connected. If automatic sync is enabled on this machine, events will appear shortly. Otherwise, see the steps below or import a .ics file."
-            : "Calendrier connecté. Si la synchronisation automatique est activée sur cette machine, les événements apparaîtront bientôt. Sinon, suivez les étapes ci-dessous ou importez un fichier .ics."
+            ? "Calendar connected. Import a .ics file for instant display, or enable automatic sync (see section 3 below)."
+            : "Calendrier connecté. Importez un fichier .ics pour un affichage immédiat, ou activez la sync automatique (voir section 3 ci-dessous)."
           : locale === "en"
-            ? "Calendar saved. Add an app password to enable synchronization."
-            : "Calendrier enregistré. Ajoutez un mot de passe d'application pour activer la synchronisation.",
+            ? "Calendar saved. Add an app password above to enable synchronization."
+            : "Calendrier enregistré. Ajoutez un mot de passe d'application ci-dessus pour activer la synchronisation.",
       );
       setLabel("");
       setUsername("");
@@ -329,12 +329,60 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
     }
   };
 
+  const redirectUri = oauthConfig?.redirect_uri ?? "http://127.0.0.1:3876/api/calendar/oauth/callback";
+
+  const oauthSetupSteps = useMemo(() => {
+    if (selectedProviderId === "google_calendar") {
+      return locale === "en"
+        ? [
+            "Open Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID (Web application).",
+            `Add this redirect URI: ${redirectUri}`,
+            "Copy the Client ID and Client secret.",
+            "In a terminal on this computer, run:",
+            "akasha vault set google_calendar_oauth_client_id YOUR_CLIENT_ID",
+            "akasha vault set google_calendar_oauth_client_secret YOUR_CLIENT_SECRET",
+            "Reload this page — the OAuth tab will unlock.",
+          ]
+        : [
+            "Ouvrez Google Cloud Console → APIs et services → Identifiants → Créer un identifiant OAuth (application Web).",
+            `Ajoutez cette URI de redirection : ${redirectUri}`,
+            "Copiez l'identifiant client et le secret client.",
+            "Dans un terminal sur cet ordinateur, exécutez :",
+            "akasha vault set google_calendar_oauth_client_id VOTRE_ID",
+            "akasha vault set google_calendar_oauth_client_secret VOTRE_SECRET",
+            "Rechargez cette page — l'onglet OAuth sera disponible.",
+          ];
+    }
+    if (selectedProviderId === "outlook") {
+      return locale === "en"
+        ? [
+            "Open Azure Portal → App registrations → New registration.",
+            `Under Authentication, add redirect URI (Web): ${redirectUri}`,
+            "Create a client secret under Certificates & secrets.",
+            "In a terminal on this computer, run:",
+            "akasha vault set microsoft_calendar_oauth_client_id YOUR_APP_ID",
+            "akasha vault set microsoft_calendar_oauth_client_secret YOUR_SECRET",
+            "Reload this page — the OAuth tab will unlock.",
+          ]
+        : [
+            "Ouvrez le portail Azure → Inscriptions d'applications → Nouvelle inscription.",
+            `Sous Authentification, ajoutez l'URI de redirection (Web) : ${redirectUri}`,
+            "Créez un secret client dans Certificats et secrets.",
+            "Dans un terminal sur cet ordinateur, exécutez :",
+            "akasha vault set microsoft_calendar_oauth_client_id VOTRE_ID",
+            "akasha vault set microsoft_calendar_oauth_client_secret VOTRE_SECRET",
+            "Rechargez cette page — l'onglet OAuth sera disponible.",
+          ];
+    }
+    return [];
+  }, [selectedProviderId, locale, redirectUri]);
+
   const txt = {
     title: locale === "en" ? "External calendars" : "Calendriers externes",
     intro:
       locale === "en"
-        ? "Link Google Calendar, Outlook, iCloud or another service. Events show up in the Akasha calendar with an « external » badge. For Google and Microsoft you can sign in with OAuth when configured; otherwise use an app password."
-        : "Reliez Google Calendar, Outlook, iCloud ou un autre service. Les rendez-vous apparaissent dans le calendrier Akasha avec le badge « externe ». Pour Google et Microsoft, vous pouvez vous connecter via OAuth si c'est configuré ; sinon utilisez un mot de passe d'application.",
+        ? "Connect Google Calendar, Outlook, iCloud or another service. Events appear in Akasha with an « external » badge. The easiest way is an app password (link below for each service). OAuth sign-in is optional and requires a one-time setup."
+        : "Connectez Google Calendar, Outlook, iCloud ou un autre service. Les rendez-vous apparaissent dans Akasha avec le badge « externe ». Le plus simple est le mot de passe d'application (lien ci-dessous pour chaque service). La connexion OAuth est optionnelle et demande une configuration unique.",
     addTitle: locale === "en" ? "Add a calendar" : "Ajouter un calendrier",
     pickProvider: locale === "en" ? "1. Choose your service" : "1. Choisissez votre service",
     label: locale === "en" ? "Display name (optional)" : "Nom affiché (optionnel)",
@@ -351,32 +399,34 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
       locale === "en"
         ? "Enter the CalDAV address and credentials provided by your host."
         : "Saisissez l'adresse CalDAV et les identifiants fournis par votre hébergeur.",
-    syncTitle: locale === "en" ? "2. Automatic synchronization" : "2. Synchronisation automatique",
+    syncTitle: locale === "en" ? "3. See your events in Akasha" : "3. Voir vos événements dans Akasha",
     syncIntro:
       locale === "en"
-        ? "After connecting, events are fetched periodically by a small sync helper on this computer (set up once by whoever manages Akasha)."
-        : "Après la connexion, les événements sont récupérés régulièrement par un petit programme de synchronisation sur cet ordinateur (à configurer une fois par la personne qui administre Akasha).",
+        ? "Choose the option that suits you — no technical background required for the first one."
+        : "Choisissez l'option qui vous convient — la première ne demande aucune compétence technique.",
     syncSteps:
       locale === "en"
         ? [
-            "Save the calendar above with your app password.",
-            "Ask your Akasha administrator to enable calendar sync (caldav-channel plugin), or follow the advanced guide below.",
-            "Within a few minutes, events should appear in the calendar grid.",
+            "Connect your calendar above (app password or OAuth).",
+            "Quick option: export your calendar as a .ics file from Google or Outlook, then import it in the section below — events show up immediately.",
+            "Automatic option: install the caldav-channel sync module once so events update on their own (technical steps in the collapsible section).",
+            "Open the « Calendar view » tab to see events with the « external » badge.",
           ]
         : [
-            "Enregistrez le calendrier ci-dessus avec votre mot de passe d'application.",
-            "Demandez à l'administrateur Akasha d'activer la synchronisation calendrier (plugin caldav-channel), ou suivez le guide avancé ci-dessous.",
-            "Après quelques minutes, les événements devraient apparaître dans la grille du calendrier.",
+            "Connectez votre calendrier ci-dessus (mot de passe d'application ou OAuth).",
+            "Option rapide : exportez votre calendrier en fichier .ics depuis Google ou Outlook, puis importez-le dans la section ci-dessous — les événements s'affichent tout de suite.",
+            "Option automatique : installez une fois le module caldav-channel pour que les événements se mettent à jour seuls (étapes techniques dans la section repliable).",
+            "Ouvrez l'onglet « Vue calendrier » pour voir les événements avec le badge « externe ».",
           ],
     syncStatusLabel: locale === "en" ? "Sync status" : "État de la sync",
-    syncOk: locale === "en" ? "Synchronization active" : "Synchronisation active",
-    syncIdle: locale === "en" ? "Waiting — sync helper not running yet" : "En attente — le module de sync n'est pas encore lancé",
-    advancedTitle: locale === "en" ? "Advanced setup (administrators)" : "Configuration avancée (administrateurs)",
+    syncOk: locale === "en" ? "Automatic sync is running" : "Synchronisation automatique active",
+    syncIdle: locale === "en" ? "Automatic sync not started yet — import a .ics file or follow the steps below" : "Sync automatique pas encore lancée — importez un .ics ou suivez les étapes ci-dessous",
+    advancedTitle: locale === "en" ? "Automatic sync — technical steps (optional)" : "Sync automatique — étapes techniques (optionnel)",
     advancedHint:
       locale === "en"
-        ? "Technical details for installing and running the caldav-channel sync helper."
-        : "Détails techniques pour installer et lancer le module de synchronisation caldav-channel.",
-    accountIdLabel: locale === "en" ? "Account identifier (copy for sync config)" : "Identifiant du compte (à copier pour la config sync)",
+        ? "Only if you want events to update in the background without manual .ics imports. Requires comfort with the command line."
+        : "Uniquement si vous voulez que les événements se mettent à jour en arrière-plan sans import .ics manuel. Nécessite d'être à l'aise avec un terminal.",
+    accountIdLabel: locale === "en" ? "Account id (needed for sync config)" : "Identifiant du compte (nécessaire pour la config sync)",
     copyId: locale === "en" ? "Copy" : "Copier",
     copied: locale === "en" ? "Copied" : "Copié",
     docs: locale === "en" ? "How to create an app password" : "Créer un mot de passe d'application",
@@ -389,8 +439,27 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
     oauthWaiting: locale === "en" ? "Waiting for sign-in in your browser…" : "En attente de la connexion dans votre navigateur…",
     oauthNotConfigured:
       locale === "en"
-        ? "OAuth is not configured on this Akasha instance. Use an app password, or ask your administrator to add OAuth client credentials to the vault."
-        : "OAuth n'est pas configuré sur cette instance. Utilisez un mot de passe d'application, ou demandez à l'administrateur d'ajouter les identifiants OAuth dans le coffre-fort.",
+        ? "OAuth is not set up yet on this computer. The easiest path is an app password (tab on the right). To enable one-click sign-in, follow the steps below — it's a one-time setup."
+        : "OAuth n'est pas encore configuré sur cet ordinateur. Le plus simple est le mot de passe d'application (onglet à droite). Pour activer la connexion en un clic, suivez les étapes ci-dessous — c'est une configuration unique.",
+    oauthSetupTitle: locale === "en" ? "Set up OAuth (one time)" : "Configurer OAuth (une fois)",
+    oauthSetupNote:
+      locale === "en"
+        ? "Skip this if you prefer an app password — it works without any of the steps below."
+        : "Ignorez cette section si vous préférez un mot de passe d'application — cela fonctionne sans aucune des étapes ci-dessous.",
+    advancedSyncSteps:
+      locale === "en"
+        ? [
+            "Install the caldav-channel plugin from the Akasha_plugins repository.",
+            "Copy the account id below for the calendar you want to sync.",
+            "Set environment variable CALDAV_ACCOUNT_ID to that id, then start the sync module.",
+            "Full instructions: Akasha_plugins/caldav-channel/README.md",
+          ]
+        : [
+            "Installez le plugin caldav-channel depuis le dépôt Akasha_plugins.",
+            "Copiez l'identifiant du compte ci-dessous pour le calendrier à synchroniser.",
+            "Définissez la variable CALDAV_ACCOUNT_ID avec cet identifiant, puis lancez le module de sync.",
+            "Instructions complètes : Akasha_plugins/caldav-channel/README.md",
+          ],
     oauthBadge: "OAuth",
   };
 
@@ -510,7 +579,26 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
                   </button>
                 </div>
                 {selectedProvider.oauth_available && !canUseOAuth && (
-                  <p className="caldav-hint">{txt.oauthNotConfigured}</p>
+                  <>
+                    <p className="caldav-hint">{txt.oauthNotConfigured}</p>
+                    {oauthSetupSteps.length > 0 && (
+                      <details className="caldav-oauth-setup">
+                        <summary>{txt.oauthSetupTitle}</summary>
+                        <p className="caldav-hint">{txt.oauthSetupNote}</p>
+                        <ol className="caldav-steps">
+                          {oauthSetupSteps.map((step) => (
+                            <li key={step}>
+                              {step.startsWith("akasha vault") ? (
+                                <code className="caldav-cli-line">{step}</code>
+                              ) : (
+                                step
+                              )}
+                            </li>
+                          ))}
+                        </ol>
+                      </details>
+                    )}
+                  </>
                 )}
               </div>
             )}
@@ -630,9 +718,11 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
               ))}
             </ul>
             <p className="caldav-hint caldav-advanced-cli muted">
-              {locale === "en"
-                ? "Admin: install the caldav-channel plugin, set CALDAV_ACCOUNT_ID to the id above, and run the sync helper. See Akasha_plugins/caldav-channel/README.md."
-                : "Admin : installez le plugin caldav-channel, indiquez CALDAV_ACCOUNT_ID avec l'identifiant ci-dessus, puis lancez le module de sync. Voir Akasha_plugins/caldav-channel/README.md."}
+              <ol className="caldav-steps">
+                {txt.advancedSyncSteps.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
             </p>
           </details>
         )}
