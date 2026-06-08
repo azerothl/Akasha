@@ -80,6 +80,14 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact_name: akasha-windows-x86_64
             ext: .exe
+            cuda: false
+            daemon_features: embedded,embeddings-tract,embedded-baguettotron
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: akasha-windows-x86_64-cuda
+            ext: .exe
+            cuda: true
+            daemon_features: embedded,embeddings-tract,embedded-baguettotron,embedded-llama-cpp,embedded-llama-cpp-cuda
 
     runs-on: ${{ matrix.os }}
 
@@ -98,9 +106,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-
 
       - name: Build CLI and TUI
         run: |
@@ -117,10 +125,23 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
 
+      - name: Install CUDA toolkit (Windows CUDA artifact)
+        if: matrix.os == 'windows-latest' && matrix.cuda == true
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: '12.6.0'
+
+      - name: Install LLVM and CMake (Windows CUDA artifact)
+        if: matrix.os == 'windows-latest' && matrix.cuda == true
+        run: choco install llvm cmake -y
+
       - name: Build daemon (Windows)
         if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: |
-          cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
+          cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features ${{ matrix.daemon_features }}
 
       - name: Prepare artifact (Linux / macOS)
         if: matrix.os != 'windows-latest'
@@ -130,7 +151,7 @@ jobs:
           cp target/${{ matrix.target }}/release/akasha-daemon${{ matrix.ext }} staging/
           cp target/${{ matrix.target }}/release/akasha-tui${{ matrix.ext }} staging/
           cp docs/user_guide_final.md staging/docs/user_guide.md
-          cp spec/tools_policy.example.yaml spec/voice_router.example.yaml spec/llm_router.example.yaml staging/spec/
+          cp spec/tools_policy.example.yaml spec/voice_router.example.yaml spec/llm_router.example.yaml spec/embedded_models.json staging/spec/
           cp scripts/install.sh scripts/setup.sh staging/scripts/
           mkdir -p staging/playwright-runner
           cp -R scripts/playwright-runner/. staging/playwright-runner/
@@ -150,7 +171,7 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/akasha-daemon.exe" -Destination staging/
           Copy-Item "target/${{ matrix.target }}/release/akasha-tui.exe" -Destination staging/
           Copy-Item docs/user_guide_final.md -Destination staging/docs/user_guide.md
-          Copy-Item spec\tools_policy.example.yaml, spec\voice_router.example.yaml, spec\llm_router.example.yaml -Destination staging\spec\
+          Copy-Item spec\tools_policy.example.yaml, spec\voice_router.example.yaml, spec\llm_router.example.yaml, spec\embedded_models.json -Destination staging\spec\
           Copy-Item scripts/install.ps1 -Destination staging/scripts/
           Copy-Item scripts/setup.ps1 -Destination staging/scripts/
           New-Item -ItemType Directory -Force -Path staging\playwright-runner | Out-Null
