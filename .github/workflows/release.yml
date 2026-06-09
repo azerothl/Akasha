@@ -106,9 +106,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-mt-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-
+            ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-mt-
 
       - name: Build CLI and TUI
         run: |
@@ -157,9 +157,9 @@ jobs:
               throw "CUDA_PATH is not set for CUDA build."
             }
             # llama-cpp-sys builds llama-common only with feature mtmd (LLAMA_BUILD_COMMON=ON).
-            # Use dynamic MSVC CRT to match Rust deps (esaxx-rs) and llama.cpp.
-            $env:LLAMA_STATIC_CRT = "0"
-            $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreadedDLL"
+            # esaxx-rs (tokenizers/baguettotron) links /MT — llama and Rust must use static CRT too.
+            $env:LLAMA_STATIC_CRT = "1"
+            $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreaded"
 
             $cudaLibCandidates = @(
               (Join-Path $env:CUDA_PATH "lib\x64"),
@@ -173,7 +173,7 @@ jobs:
             # ggml-cuda needs driver + runtime + cuBLAS at final link (static libs do not propagate them).
             $sep = [char]0x1f
             $encodedParts = @(
-              "-C", "target-feature=-crt-static",
+              "-C", "target-feature=+crt-static",
               "-L", "native=$cudaLib",
               "-l", "cuda",
               "-l", "cudart",
