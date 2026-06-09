@@ -62,13 +62,29 @@ async fn e2e_api_smoke_endpoints() {
         .expect("GET /api/docs");
     assert!(docs.status().is_success());
     let j: serde_json::Value = docs.json().await.expect("json docs");
+    let pages = j
+        .get("pages")
+        .and_then(|v| v.as_array())
+        .expect("docs.pages");
+    assert!(!pages.is_empty(), "docs index should list pages");
+    let default = j
+        .get("default")
+        .and_then(|v| v.as_str())
+        .unwrap_or("accueil");
+    let page = client
+        .get(format!("{}/api/docs/{}", base, default))
+        .send()
+        .await
+        .expect("GET /api/docs/page");
+    assert!(page.status().is_success());
+    let j: serde_json::Value = page.json().await.expect("json docs page");
     let content = j
         .get("content")
         .and_then(|v| v.as_str())
-        .expect("docs.content");
+        .expect("docs page content");
     assert!(
         !content.trim().is_empty(),
-        "docs content should not be empty"
+        "docs page content should not be empty"
     );
 
     let upd = client

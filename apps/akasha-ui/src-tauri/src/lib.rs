@@ -1109,11 +1109,47 @@ async fn restart_daemon(port: Option<u16>) -> Result<(), String> {
     Ok(())
 }
 
-/// User documentation: GET /api/docs returns { "content": "..." } (markdown).
+/// User documentation index: GET /api/docs returns { pages, default }.
+#[tauri::command]
+async fn get_docs_index(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/docs", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Daemon returned {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// User documentation page: GET /api/docs/:page_id returns { content, ... }.
+#[tauri::command]
+async fn get_docs_page(port: Option<u16>, page_id: String) -> Result<String, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!(
+        "{}/api/docs/{}",
+        daemon_base_url(port),
+        urlencoding::encode(&page_id)
+    );
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Daemon returned {}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let content = json
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("Documentation non disponible.")
+        .to_string();
+    Ok(content)
+}
+
+/// User documentation (legacy single-page): GET /api/docs?legacy=1
 #[tauri::command]
 async fn get_docs(port: Option<u16>) -> Result<String, String> {
     let port = port.unwrap_or(DAEMON_PORT);
-    let url = format!("{}/api/docs", daemon_base_url(port));
+    let url = format!("{}/api/docs?legacy=1", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -2412,6 +2448,8 @@ pub fn run() {
             get_first_message,
             execute_synthetic_input,
             get_docs,
+            get_docs_index,
+            get_docs_page,
             get_autonomous_mission,
             get_autonomous_mission_events,
             put_autonomous_mission,

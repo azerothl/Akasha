@@ -15712,26 +15712,13 @@ pub async fn handle_api(
         );
     }
 
-    // GET /api/docs — user documentation (markdown), for TUI and web UI
-    if method == "GET" && path == "/api/docs" {
-        let content = std::fs::read_to_string(spec_dir.join("user_guide.md"))
-            .ok()
-            .or_else(|| {
-                spec_dir
-                    .parent()
-                    .and_then(|p| std::fs::read_to_string(p.join("docs").join("user_guide.md")).ok())
-            })
-            .or_else(|| std::fs::read_to_string(data_dir.join("docs").join("user_guide.md")).ok())
-            .unwrap_or_else(|| {
-                "# Documentation\n\nDocumentation non disponible. Placez docs/user_guide.md dans le dossier d'extraction ou dans le data_dir (voir akasha paths).\n"
-                    .to_string()
-            });
-        let body_json = serde_json::json!({ "content": content }).to_string();
-        return format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body_json.len(),
-            body_json
-        );
+    // GET /api/docs — multi-page user documentation (JSON index or page markdown)
+    if method == "GET" && path_only.starts_with("/api/docs") {
+        if let Some(body_json) =
+            crate::user_docs::handle_docs_get(path_only, query_str, spec_dir, data_dir)
+        {
+            return json_response("200 OK", &body_json);
+        }
     }
 
     // Phase 4: Slack slash command

@@ -150,6 +150,7 @@ jobs:
           cp target/${{ matrix.target }}/release/akasha${{ matrix.ext }} staging/
           cp target/${{ matrix.target }}/release/akasha-daemon${{ matrix.ext }} staging/
           cp target/${{ matrix.target }}/release/akasha-tui${{ matrix.ext }} staging/
+          cp -r docs/user staging/docs/user
           cp docs/user_guide_final.md staging/docs/user_guide.md
           cp spec/tools_policy.example.yaml spec/voice_router.example.yaml spec/llm_router.example.yaml spec/embedded_models.json staging/spec/
           cp scripts/install.sh scripts/setup.sh staging/scripts/
@@ -170,6 +171,7 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/akasha.exe" -Destination staging/
           Copy-Item "target/${{ matrix.target }}/release/akasha-daemon.exe" -Destination staging/
           Copy-Item "target/${{ matrix.target }}/release/akasha-tui.exe" -Destination staging/
+          Copy-Item -Recurse docs\user -Destination staging\docs\user -Force
           Copy-Item docs/user_guide_final.md -Destination staging/docs/user_guide.md
           Copy-Item spec\tools_policy.example.yaml, spec\voice_router.example.yaml, spec\llm_router.example.yaml, spec\embedded_models.json -Destination staging\spec\
           Copy-Item scripts/install.ps1 -Destination staging/scripts/

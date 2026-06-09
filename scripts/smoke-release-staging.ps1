@@ -18,7 +18,7 @@ if (-not (Test-Path $Daemon)) {
     exit 1
 }
 
-foreach ($rel in @("docs\user_guide.md", "scripts", "spec\tools_policy.example.yaml")) {
+foreach ($rel in @("docs\user\index.json", "docs\user_guide.md", "scripts", "spec\tools_policy.example.yaml")) {
     if (-not (Test-Path (Join-Path $Staging $rel))) {
         Write-Host "::error::Expected $Staging\$rel missing"
         exit 1
@@ -58,8 +58,13 @@ try {
     (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing).Content | Out-Null
     (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/status" -UseBasicParsing).Content | Out-Null
     $docs = (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/docs" -UseBasicParsing).Content
-    if ($docs -notmatch "content") {
-        Write-Host "::error::GET /api/docs unexpected body"
+    if ($docs -notmatch "pages") {
+        Write-Host "::error::GET /api/docs index unexpected body"
+        exit 1
+    }
+    $page = (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/docs/accueil" -UseBasicParsing).Content
+    if ($page -notmatch "content") {
+        Write-Host "::error::GET /api/docs/accueil unexpected body"
         exit 1
     }
 

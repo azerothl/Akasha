@@ -1,0 +1,60 @@
+{
+  "default": "accueil",
+  "pages": [
+    {
+      "id": "accueil",
+      "title": "Accueil",
+      "file": "accueil.md"
+    },
+    {
+      "id": "installation",
+      "title": "Installation",
+      "file": "installation.md"
+    },
+    {
+      "id": "configuration",
+      "title": "Configuration",
+      "file": "configuration.md"
+    },
+    {
+      "id": "commandes",
+      "title": "Commandes",
+      "file": "commandes.md"
+    },
+    {
+      "id": "interfaces",
+      "title": "Interfaces",
+      "file": "interfaces.md"
+    },
+    {
+      "id": "mission",
+      "title": "Mission autonome",
+      "file": "mission.md"
+    },
+    {
+      "id": "donnees",
+      "title": "Données et mémoire",
+      "file": "donnees.md"
+    },
+    {
+      "id": "workspace",
+      "title": "Workspace",
+      "file": "workspace.md"
+    },
+    {
+      "id": "extensions",
+      "title": "Skills, plugins et canaux",
+      "file": "extensions.md"
+    },
+    {
+      "id": "depannage",
+      "title": "Dépannage",
+      "file": "depannage.md"
+    },
+    {
+      "id": "nouveautes",
+      "title": "Nouveautés",
+      "file": "nouveautes.md"
+    }
+  ]
+}

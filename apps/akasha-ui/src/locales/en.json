@@ -219,6 +219,8 @@
   "common.no": "No",
   "chat.empty": "No requests recorded. Send a message in Chat",
   "docs.title": "User documentation",
+  "docs.nav_label": "Documentation pages",
+  "docs.refresh": "Refresh",
   "tasks.title": "Tasks (Task Center)",
   "tasks.empty": "No tasks. Send a message in Chat.",
   "tasks.no_events": "No events for this task.",

@@ -1887,6 +1887,8 @@ function App() {
   const [routerLoading, setRouterLoading] = useState(false);
   const [routerError, setRouterError] = useState<string | null>(null);
   const [docContent, setDocContent] = useState<string | null>(null);
+  const [docPages, setDocPages] = useState<Array<{ id: string; title: string }>>([]);
+  const [docPageId, setDocPageId] = useState<string>("accueil");
   const [docLoading, setDocLoading] = useState(false);
   const [docError, setDocError] = useState<string | null>(null);
   type TaskListItem = { id: string; status: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string };
@@ -3253,22 +3255,22 @@ function App() {
     fetchRouterMetrics();
   }, [tab, fetchRouterMetrics]);
 
-  const fetchDocs = useCallback(async () => {
+  const fetchDocPage = useCallback(async (pageId: string) => {
     setDocLoading(true);
     setDocError(null);
     try {
+      let content: string;
       if (E2E_WEB) {
-        const r = await fetch(e2eDaemonHttpUrl("/api/docs"));
+        const r = await fetch(e2eDaemonHttpUrl(`/api/docs/${encodeURIComponent(pageId)}`));
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = (await r.json()) as { content?: string };
-        const content = j.content ?? "";
-        setDocContent(content);
-        setCached("docs", content);
+        content = j.content ?? "";
       } else {
-        const content = await invoke<string>("get_docs", { port: DAEMON_PORT });
-        setDocContent(content);
-        setCached("docs", content);
+        content = await invoke<string>("get_docs_page", { port: DAEMON_PORT, pageId });
       }
+      setDocContent(content);
+      setDocPageId(pageId);
+      setCached(`docs:${pageId}`, content);
     } catch (e) {
       setDocError(String(e));
       setDocContent(null);
@@ -3277,17 +3279,54 @@ function App() {
     }
   }, []);
 
+  const fetchDocs = useCallback(async () => {
+    setDocLoading(true);
+    setDocError(null);
+    try {
+      type DocIndex = { pages?: Array<{ id: string; title: string }>; default?: string; content?: string };
+      let index: DocIndex;
+      if (E2E_WEB) {
+        const r = await fetch(e2eDaemonHttpUrl("/api/docs"));
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        index = (await r.json()) as DocIndex;
+      } else {
+        index = await invoke<DocIndex>("get_docs_index", { port: DAEMON_PORT });
+      }
+      if (index.pages?.length) {
+        setDocPages(index.pages);
+        const defaultId = index.default ?? index.pages[0]?.id ?? "accueil";
+        const cached = getCached<string>(`docs:${defaultId}`);
+        if (cached != null) {
+          setDocContent(cached);
+          setDocPageId(defaultId);
+          setDocLoading(false);
+          return;
+        }
+        await fetchDocPage(defaultId);
+        return;
+      }
+      const legacy = index.content ?? "";
+      setDocPages([{ id: "accueil", title: "Accueil" }]);
+      setDocContent(legacy);
+      setDocPageId("accueil");
+      setCached("docs:accueil", legacy);
+    } catch (e) {
+      setDocError(String(e));
+      setDocContent(null);
+    } finally {
+      setDocLoading(false);
+    }
+  }, [fetchDocPage]);
+
   useEffect(() => {
     if (tab !== "docs") return;
-    const cached = getCached<string>("docs");
-    if (cached != null) {
-      setDocContent(cached);
+    if (docPages.length > 0 && docContent != null) {
       setDocLoading(false);
       setDocError(null);
       return;
     }
     fetchDocs();
-  }, [tab, fetchDocs]);
+  }, [tab, docPages.length, docContent, fetchDocs]);
 
   const fetchTasksList = useCallback(async (options?: { silent?: boolean; selectTaskId?: string }) => {
     const silent = options?.silent === true;
@@ -7170,22 +7209,49 @@ function App() {
                 {t("common.loading")}
               </p>
             )}
+            {!docLoading && docError && (
+              <p className="panel-error" role="alert">
+                {docError}
+              </p>
+            )}
             {!docLoading && docContent && (
-              <>
-                <button
-                  type="button"
-                  className="refresh-btn"
-                  onClick={fetchDocs}
-                  aria-label="Rafraîchir la documentation"
-                >
-                  Rafraîchir
-                </button>
-                <div className="doc-content doc-markdown">
-                  <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
-                    {docContent}
-                  </LazyMarkdownContent></Suspense>
+              <div className="docs-layout">
+                {docPages.length > 1 && (
+                  <nav className="doc-nav" aria-label={t("docs.nav_label")}>
+                    <ul className="doc-nav-list">
+                      {docPages.map((p) => (
+                        <li key={p.id}>
+                          <button
+                            type="button"
+                            className={`doc-nav-item${docPageId === p.id ? " active" : ""}`}
+                            aria-current={docPageId === p.id ? "page" : undefined}
+                            onClick={() => {
+                              if (p.id !== docPageId) void fetchDocPage(p.id);
+                            }}
+                          >
+                            {p.title}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </nav>
+                )}
+                <div className="doc-main">
+                  <button
+                    type="button"
+                    className="refresh-btn"
+                    onClick={fetchDocs}
+                    aria-label={t("docs.refresh")}
+                  >
+                    {t("docs.refresh")}
+                  </button>
+                  <div className="doc-content doc-markdown">
+                    <Suspense fallback={<span className="markdown-rendered">…</span>}>
+                      <LazyMarkdownContent>{docContent}</LazyMarkdownContent>
+                    </Suspense>
+                  </div>
                 </div>
-              </>
+              </div>
             )}
           </section>
         )}

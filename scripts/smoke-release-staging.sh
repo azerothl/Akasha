@@ -21,12 +21,16 @@ else
   exit 1
 fi
 
-for f in docs/user_guide.md scripts spec/tools_policy.example.yaml; do
+for f in docs/user/index.json scripts spec/tools_policy.example.yaml; do
   if [[ ! -e "$STAGING/$f" ]]; then
     echo "::error::Expected $STAGING/$f missing"
     exit 1
   fi
 done
+if [[ ! -f "$STAGING/docs/user_guide.md" ]]; then
+  echo "::error::Expected $STAGING/docs/user_guide.md missing (legacy fallback)"
+  exit 1
+fi
 
 DATA_DIR="$(mktemp -d)"
 PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")"
@@ -53,6 +57,7 @@ fi
 
 curl -sf "http://127.0.0.1:${PORT}/" | grep -q '"status":"ok"' || { echo "::error::GET / body"; exit 1; }
 curl -sf "http://127.0.0.1:${PORT}/api/status" | grep -q '"status":"ok"' || { echo "::error::GET /api/status"; exit 1; }
-curl -sf "http://127.0.0.1:${PORT}/api/docs" | grep -q '"content"' || { echo "::error::GET /api/docs"; exit 1; }
+curl -sf "http://127.0.0.1:${PORT}/api/docs" | grep -q '"pages"' || { echo "::error::GET /api/docs index"; exit 1; }
+curl -sf "http://127.0.0.1:${PORT}/api/docs/accueil" | grep -q '"content"' || { echo "::error::GET /api/docs/accueil"; exit 1; }
 
 echo "Smoke OK: $STAGING (port $PORT)"

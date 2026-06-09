@@ -94,6 +94,7 @@ pub mod user_rag;
 pub mod user_rag_indexer;
 pub mod notes;
 pub mod api_routes_notes;
+pub mod user_docs;
 
 pub use daemon::{Daemon, RunOutcome};
 pub use health::{HealthState, HealthStatus};

@@ -163,6 +163,10 @@ struct App {
     last_content_rendered_rows: usize,
     /// User guide markdown (fetched from GET /api/docs when opening Doc tab).
     doc_content: String,
+    /// Multi-page doc catalog from GET /api/docs index.
+    doc_pages: Vec<(String, String)>,
+    /// Selected page index in doc_pages.
+    doc_page_index: usize,
     /// Activity tab: list of tasks (id, status, created_at, agent); selected index; events + detail for selected.
     activity_tasks: Vec<ActivityTaskRow>,
     activity_selected: usize,
@@ -369,6 +373,8 @@ impl App {
             last_content_area_height: 0,
             last_content_rendered_rows: 0,
             doc_content: String::new(),
+            doc_pages: Vec::new(),
+            doc_page_index: 0,
             activity_tasks: Vec::new(),
             activity_selected: 0,
             activity_events: Vec::new(),
@@ -1063,12 +1069,53 @@ impl App {
     }
 
     fn fetch_doc(&mut self) {
-        let url = format!("{}/api/docs", daemon_base_url(self.port));
+        let base = daemon_base_url(self.port);
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap_or_default();
-        if let Ok(resp) = client.get(&url).send() {
+
+        let index_url = format!("{}/api/docs", base);
+        if let Ok(resp) = client.get(&index_url).send() {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    if let Some(pages) = json.get("pages").and_then(|p| p.as_array()) {
+                        self.doc_pages = pages
+                            .iter()
+                            .filter_map(|item| {
+                                let id = item.get("id")?.as_str()?.to_string();
+                                let title = item
+                                    .get("title")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or(&id)
+                                    .to_string();
+                                Some((id, title))
+                            })
+                            .collect();
+                        let default = json
+                            .get("default")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("accueil");
+                        self.doc_page_index = self
+                            .doc_pages
+                            .iter()
+                            .position(|(id, _)| id == default)
+                            .unwrap_or(0);
+                        if !self.doc_pages.is_empty() {
+                            self.fetch_doc_page_at(self.doc_page_index);
+                            return;
+                        }
+                    }
+                    if let Some(s) = json.get("content").and_then(|c| c.as_str()) {
+                        self.doc_content = s.to_string();
+                        return;
+                    }
+                }
+            }
+        }
+
+        let legacy_url = format!("{}/api/docs?legacy=1", base);
+        if let Ok(resp) = client.get(&legacy_url).send() {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<serde_json::Value>() {
                     if let Some(s) = json.get("content").and_then(|c| c.as_str()) {
@@ -1079,6 +1126,56 @@ impl App {
             }
         }
         self.doc_content = self.i18n.t("tui.doc_unavailable").to_string();
+    }
+
+    fn fetch_doc_page_at(&mut self, index: usize) {
+        if self.doc_pages.is_empty() {
+            return;
+        }
+        let idx = index.min(self.doc_pages.len().saturating_sub(1));
+        self.doc_page_index = idx;
+        let page_id = self.doc_pages[idx].0.clone();
+        let url = format!(
+            "{}/api/docs/{}",
+            daemon_base_url(self.port),
+            page_id
+        );
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+        if let Ok(resp) = client.get(&url).send() {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    if let Some(s) = json.get("content").and_then(|c| c.as_str()) {
+                        self.doc_content = s.to_string();
+                        self.scroll = 0;
+                        return;
+                    }
+                }
+            }
+        }
+        self.doc_content = self.i18n.t("tui.doc_unavailable").to_string();
+    }
+
+    fn doc_page_prev(&mut self) {
+        if self.doc_pages.len() <= 1 {
+            return;
+        }
+        let next = if self.doc_page_index == 0 {
+            self.doc_pages.len() - 1
+        } else {
+            self.doc_page_index - 1
+        };
+        self.fetch_doc_page_at(next);
+    }
+
+    fn doc_page_next(&mut self) {
+        if self.doc_pages.len() <= 1 {
+            return;
+        }
+        let next = (self.doc_page_index + 1) % self.doc_pages.len();
+        self.fetch_doc_page_at(next);
     }
 
     /// Max scroll offset (0 if content fits in area). Uses rendered rows when wrap-aware (Chat).
@@ -2467,11 +2564,23 @@ fn ui(f: &mut Frame, app: &mut App) {
             if app.scroll > max_scroll {
                 app.scroll = max_scroll;
             }
+            let doc_title = if app.doc_pages.len() > 1 {
+                let (_, title) = &app.doc_pages[app.doc_page_index];
+                format!(
+                    "{} — {} ({}/{})",
+                    app.i18n.t("tui.doc_block_title"),
+                    title,
+                    app.doc_page_index + 1,
+                    app.doc_pages.len()
+                )
+            } else {
+                app.i18n.t("tui.doc_block_title").to_string()
+            };
             let doc_para = Paragraph::new(lines)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(app.i18n.t("tui.doc_block_title"))
+                        .title(doc_title)
                         .border_style(theme.block_border()),
                 )
                 .wrap(Wrap { trim: true })
@@ -3565,10 +3674,13 @@ fn run_app(
                     }
                     (Mode::Doc, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.doc_content.clear();
+                        app.doc_pages.clear();
                         if app.daemon_ok {
                             app.fetch_doc();
                         }
                     }
+                    (Mode::Doc, KeyCode::Char('['), _) => app.doc_page_prev(),
+                    (Mode::Doc, KeyCode::Char(']'), _) => app.doc_page_next(),
                     (_, KeyCode::F(2), _) => {
                         app.theme = app.theme.next();
                         save_theme_to_disk(app.theme);
