@@ -155,13 +155,12 @@ jobs:
             }
             # RUSTFLAGS accepts rustc-style native library flags.
             $cudaLinkFlags = "-L native=$cudaLib -l cudart"
-            $currentRustFlags = "$env:RUSTFLAGS"
+            $currentRustFlags = $env:RUSTFLAGS
+            if ($null -eq $currentRustFlags) {
+              $currentRustFlags = ""
+            }
             if ($currentRustFlags -notlike "*-l cudart*") {
-              $env:RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($currentRustFlags)) {
-                $cudaLinkFlags
-              } else {
-                "$currentRustFlags $cudaLinkFlags"
-              }
+              $env:RUSTFLAGS = "$currentRustFlags $cudaLinkFlags".Trim()
             }
           }
           cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features ${{ matrix.daemon_features }}
