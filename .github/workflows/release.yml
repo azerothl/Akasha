@@ -150,10 +150,13 @@ jobs:
               throw "CUDA library directory not found: $cudaLib"
             }
             $cudaLinkFlags = "-L native=$cudaLib -l cudart"
-            $env:RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
-              $cudaLinkFlags
-            } else {
-              "$env:RUSTFLAGS $cudaLinkFlags"
+            $currentRustFlags = "$env:RUSTFLAGS"
+            if ($currentRustFlags -notlike "*-l cudart*") {
+              $env:RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($currentRustFlags)) {
+                $cudaLinkFlags
+              } else {
+                "$currentRustFlags $cudaLinkFlags"
+              }
             }
           }
           cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features ${{ matrix.daemon_features }}
