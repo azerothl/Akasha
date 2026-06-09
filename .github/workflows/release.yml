@@ -141,6 +141,21 @@ jobs:
         env:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: |
+          if ("${{ matrix.cuda }}" -eq "true") {
+            if (-not $env:CUDA_PATH) {
+              throw "CUDA_PATH is not set for CUDA build."
+            }
+            $cudaLib = Join-Path $env:CUDA_PATH "lib\x64"
+            if (-not (Test-Path $cudaLib)) {
+              throw "CUDA library directory not found: $cudaLib"
+            }
+            $cudaLinkFlags = "-L native=$cudaLib -l cudart"
+            $env:RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
+              $cudaLinkFlags
+            } else {
+              "$env:RUSTFLAGS $cudaLinkFlags"
+            }
+          }
           cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features ${{ matrix.daemon_features }}
 
       - name: Prepare artifact (Linux / macOS)
