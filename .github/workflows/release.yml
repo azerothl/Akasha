@@ -145,10 +145,15 @@ jobs:
             if (-not $env:CUDA_PATH) {
               throw "CUDA_PATH is not set for CUDA build."
             }
-            $cudaLib = Join-Path $env:CUDA_PATH "lib\x64"
-            if (-not (Test-Path $cudaLib)) {
-              throw "CUDA library directory not found: $cudaLib"
+            $cudaLibCandidates = @(
+              (Join-Path $env:CUDA_PATH "lib\x64"),
+              (Join-Path $env:CUDA_PATH "lib64")
+            )
+            $cudaLib = $cudaLibCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $cudaLib) {
+              throw "CUDA library directory not found under $env:CUDA_PATH (tried: $($cudaLibCandidates -join ', '))."
             }
+            # RUSTFLAGS accepts rustc-style native library flags.
             $cudaLinkFlags = "-L native=$cudaLib -l cudart"
             $currentRustFlags = "$env:RUSTFLAGS"
             if ($currentRustFlags -notlike "*-l cudart*") {
