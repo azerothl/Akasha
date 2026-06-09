@@ -153,14 +153,19 @@ jobs:
             if (-not $cudaLib) {
               throw "CUDA library directory not found under $env:CUDA_PATH (tried: $($cudaLibCandidates -join ', '))."
             }
-            # RUSTFLAGS accepts rustc-style native library flags.
-            $cudaLinkFlags = "-L native=$cudaLib -l cudart"
-            $currentRustFlags = $env:RUSTFLAGS
-            if ($null -eq $currentRustFlags) {
-              $currentRustFlags = ""
+            # CARGO_ENCODED_RUSTFLAGS avoids rustc splitting paths with spaces (Program Files).
+            $sep = [char]0x1f
+            $cudaEncoded = "-L${sep}native=${cudaLib}${sep}-l${sep}cudart"
+            $currentEncoded = $env:CARGO_ENCODED_RUSTFLAGS
+            if ($null -eq $currentEncoded) {
+              $currentEncoded = ""
             }
-            if ($currentRustFlags -notlike "*-l cudart*") {
-              $env:RUSTFLAGS = "$currentRustFlags $cudaLinkFlags".Trim()
+            if ($currentEncoded -notlike "*cudart*") {
+              if ($currentEncoded -eq "") {
+                $env:CARGO_ENCODED_RUSTFLAGS = $cudaEncoded
+              } else {
+                $env:CARGO_ENCODED_RUSTFLAGS = "$currentEncoded$sep$cudaEncoded"
+              }
             }
           }
           cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features ${{ matrix.daemon_features }}
