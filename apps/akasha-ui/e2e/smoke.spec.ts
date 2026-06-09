@@ -20,6 +20,7 @@ test.describe("Akasha UI (E2E build)", () => {
     await page.addInitScript(() => {
       try {
         localStorage.setItem("akasha_onboarding_dismissed", "1");
+        localStorage.setItem("akasha_setup_wizard_done", "1");
       } catch {
         /* ignore */
       }
@@ -65,7 +66,7 @@ test.describe("Akasha UI (E2E build)", () => {
     await page.goto("/#/cookbook");
     await expect(page.locator(".daemon-status-ok")).toBeVisible({ timeout: 120_000 });
     await expect(page.locator("#panel-cookbook")).toBeVisible({ timeout: 60_000 });
-    await page.locator(".cookbook-panel-tabs button").first().click();
+    await expect(page.locator(".cookbook-panel-tabs button").first()).toHaveClass(/active/);
     await expect(page.locator(".cookbook-panel")).toBeVisible();
     await page.screenshot({
       path: path.join(screenshotsDir(), "ui-cookbook-models.png"),
@@ -77,7 +78,7 @@ test.describe("Akasha UI (E2E build)", () => {
     await page.goto("/#/cookbook");
     await expect(page.locator(".daemon-status-ok")).toBeVisible({ timeout: 120_000 });
     await expect(page.locator("#panel-cookbook")).toBeVisible({ timeout: 60_000 });
-    await page.locator(".cookbook-panel-tabs button").nth(1).click();
+    await page.locator(".cookbook-panel-tabs button").nth(1).click({ force: true });
     await expect(page.locator(".cookbook-panel")).toBeVisible();
     await page.screenshot({
       path: path.join(screenshotsDir(), "ui-cookbook-recipes.png"),
