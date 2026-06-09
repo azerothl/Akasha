@@ -30,7 +30,7 @@ dirs = "5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
-llama-cpp-4 = { version = "0.3", optional = true, default-features = false, features = ["openmp", "native"] }
+llama-cpp-4 = { version = "0.3", optional = true, default-features = false, features = ["openmp", "native", "mtmd"] }
 candle-pipelines = { version = "0.0.7", optional = true, default-features = false }
 hf-hub = { version = "0.4", optional = true }
 candle-core = { version = "0.9", optional = true }

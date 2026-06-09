@@ -106,9 +106,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-
+            ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-
 
       - name: Build CLI and TUI
         run: |
@@ -135,6 +135,17 @@ jobs:
         if: matrix.os == 'windows-latest' && matrix.cuda == true
         run: choco install llvm cmake -y
 
+      - name: Ensure patch.exe is on PATH (Windows CUDA artifact)
+        if: matrix.os == 'windows-latest' && matrix.cuda == true
+        shell: pwsh
+        run: |
+          $gitUsrBin = Join-Path $env:ProgramFiles 'Git\usr\bin'
+          if (Test-Path $gitUsrBin) {
+            if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $gitUsrBin })) {
+              $gitUsrBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
+
       - name: Build daemon (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -145,6 +156,11 @@ jobs:
             if (-not $env:CUDA_PATH) {
               throw "CUDA_PATH is not set for CUDA build."
             }
+            # llama-cpp-sys builds llama-common only with feature mtmd (LLAMA_BUILD_COMMON=ON).
+            # Use dynamic MSVC CRT to match Rust deps (esaxx-rs) and llama.cpp.
+            $env:LLAMA_STATIC_CRT = "0"
+            $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreadedDLL"
+
             $cudaLibCandidates = @(
               (Join-Path $env:CUDA_PATH "lib\x64"),
               (Join-Path $env:CUDA_PATH "lib64")
@@ -153,20 +169,18 @@ jobs:
             if (-not $cudaLib) {
               throw "CUDA library directory not found under $env:CUDA_PATH (tried: $($cudaLibCandidates -join ', '))."
             }
-            # CARGO_ENCODED_RUSTFLAGS avoids rustc splitting paths with spaces (Program Files).
+
+            # ggml-cuda needs driver + runtime + cuBLAS at final link (static libs do not propagate them).
             $sep = [char]0x1f
-            $cudaEncoded = "-L${sep}native=${cudaLib}${sep}-l${sep}cudart"
-            $currentEncoded = $env:CARGO_ENCODED_RUSTFLAGS
-            if ($null -eq $currentEncoded) {
-              $currentEncoded = ""
-            }
-            if ($currentEncoded -notlike "*cudart*") {
-              if ($currentEncoded -eq "") {
-                $env:CARGO_ENCODED_RUSTFLAGS = $cudaEncoded
-              } else {
-                $env:CARGO_ENCODED_RUSTFLAGS = "$currentEncoded$sep$cudaEncoded"
-              }
-            }
+            $encodedParts = @(
+              "-C", "target-feature=-crt-static",
+              "-L", "native=$cudaLib",
+              "-l", "cuda",
+              "-l", "cudart",
+              "-l", "cublas",
+              "-l", "cublasLt"
+            )
+            $env:CARGO_ENCODED_RUSTFLAGS = ($encodedParts -join $sep)
           }
           cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features ${{ matrix.daemon_features }}
 
