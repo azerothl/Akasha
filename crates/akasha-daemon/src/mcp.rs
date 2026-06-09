@@ -63,8 +63,18 @@ pub fn load_mcp_config(data_dir: &Path) -> Result<Value, String> {
 
 /// Persist validated MCP config to `mcp.json`.
 pub fn save_mcp_config(data_dir: &Path, root: &Value) -> Result<(), String> {
-    validate_mcp_config_json(root)?;
     let path = mcp_config_path(data_dir);
+    let empty = root
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .is_none_or(|o| o.is_empty());
+    if empty {
+        if path.is_file() {
+            std::fs::remove_file(&path).map_err(|e| format!("remove mcp.json: {}", e))?;
+        }
+        return Ok(());
+    }
+    validate_mcp_config_json(root)?;
     let pretty = serde_json::to_string_pretty(root)
         .map_err(|e| format!("serialize mcp.json: {}", e))?;
     std::fs::write(&path, pretty).map_err(|e| format!("write mcp.json: {}", e))?;

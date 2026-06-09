@@ -214,6 +214,14 @@ pub(crate) fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> 
     while rest.starts_with('*') || rest.starts_with('`') {
         rest = &rest[1..];
     }
+    // Reject nested `TOOL: TOOL: …` (malformed; first token would be another keyword).
+    if rest
+        .split_whitespace()
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case("tool:") || w.eq_ignore_ascii_case("tool"))
+    {
+        return None;
+    }
     // Drop trailing table pipe from first cell
     let rest = rest.trim_end();
     let rest = rest.strip_suffix('|').map(|x| x.trim_end()).unwrap_or(rest);
@@ -575,6 +583,28 @@ fn longcat_inner_to_tool_line(
     ))
 }
 
+/// Whether a prose prefix before inline ` TOOL:` may be split onto its own line (Kimi-style).
+/// Rejects headings (`### Step — TOOL:`), long prose, and nested `TOOL: TOOL:`.
+fn inline_tool_split_allowed(head: &str) -> bool {
+    let head = head.trim_end();
+    if head.is_empty() {
+        return true;
+    }
+    let ht = head.trim();
+    if ht.eq_ignore_ascii_case("tool:") || ht.eq_ignore_ascii_case("tool") {
+        return false;
+    }
+    // Kimi-style chained tools on one line: `TOOL: a … TOOL: b …`.
+    if ht.starts_with("TOOL:") || ht.starts_with("tool:") {
+        return true;
+    }
+    if tool_line_prefix_is_markdown_junk_only(head) {
+        return true;
+    }
+    let h = head.trim();
+    h.len() <= 120 && h.ends_with(['.', '!', '?'])
+}
+
 /// Découpe une ligne `… prose … TOOL: … TOOL: …` en segments (sans regex look-around : non supporté par le moteur `regex`).
 fn split_inline_tool_segments(line: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -591,6 +621,13 @@ fn split_inline_tool_segments(line: &str) -> Vec<String> {
         match pos {
             Some(p) => {
                 let head = s[..p].trim_end();
+                if !inline_tool_split_allowed(head) {
+                    let t = s.trim();
+                    if !t.is_empty() {
+                        out.push(t.to_string());
+                    }
+                    break;
+                }
                 if !head.is_empty() {
                     out.push(head.to_string());
                 }

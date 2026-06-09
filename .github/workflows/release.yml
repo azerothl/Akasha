@@ -127,9 +127,9 @@ jobs:
 
       - name: Install CUDA toolkit (Windows CUDA artifact)
         if: matrix.os == 'windows-latest' && matrix.cuda == true
-        uses: Jimver/cuda-toolkit@v0.2.16
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
-          cuda: '12.6.0'
+          cuda: '12.9.1'
 
       - name: Install LLVM and CMake (Windows CUDA artifact)
         if: matrix.os == 'windows-latest' && matrix.cuda == true
