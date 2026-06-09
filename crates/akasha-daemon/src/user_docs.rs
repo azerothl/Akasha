@@ -30,14 +30,20 @@ pub struct DocLegacyResponse {
 
 /// Resolve the directory containing `index.json` and page markdown files.
 pub fn resolve_user_docs_dir(spec_dir: &Path, data_dir: &Path) -> Option<PathBuf> {
-    let candidates: Vec<PathBuf> = vec![
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("docs").join("user"));
+        }
+    }
+    candidates.push(
         spec_dir
             .parent()
             .map(|p| p.join("docs").join("user"))
             .unwrap_or_else(|| PathBuf::from("docs/user")),
-        data_dir.join("docs").join("user"),
-        PathBuf::from("docs/user"),
-    ];
+    );
+    candidates.push(data_dir.join("docs").join("user"));
+    candidates.push(PathBuf::from("docs/user"));
     for dir in candidates {
         if dir.join("index.json").is_file() {
             return Some(dir);

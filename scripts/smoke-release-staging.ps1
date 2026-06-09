@@ -39,7 +39,8 @@ try {
     $env:AKASHA_DATA_DIR = $DataDir
     $env:AKASHA_PORT = "$Port"
 
-    $proc = Start-Process -FilePath $Daemon -WorkingDirectory $Root -PassThru -WindowStyle Hidden `
+    $stagingAbs = (Resolve-Path (Join-Path $Root $Staging)).Path
+    $proc = Start-Process -FilePath $Daemon -WorkingDirectory $stagingAbs -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput "$env:TEMP\akasha-smoke-out.txt" -RedirectStandardError "$env:TEMP\akasha-smoke-err.txt"
 
     $ok = $false

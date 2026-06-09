@@ -12,23 +12,25 @@ if [[ ! -d "$STAGING" ]]; then
   exit 1
 fi
 
-if [[ -f "$STAGING/akasha-daemon" ]]; then
-  DAEMON="$STAGING/akasha-daemon"
-elif [[ -f "$STAGING/akasha-daemon.exe" ]]; then
-  DAEMON="$STAGING/akasha-daemon.exe"
+STAGING_ABS="$(cd "$STAGING" && pwd)"
+
+if [[ -f "$STAGING_ABS/akasha-daemon" ]]; then
+  DAEMON="$STAGING_ABS/akasha-daemon"
+elif [[ -f "$STAGING_ABS/akasha-daemon.exe" ]]; then
+  DAEMON="$STAGING_ABS/akasha-daemon.exe"
 else
-  echo "::error::No akasha-daemon binary in $STAGING"
+  echo "::error::No akasha-daemon binary in $STAGING_ABS"
   exit 1
 fi
 
 for f in docs/user/index.json scripts spec/tools_policy.example.yaml; do
-  if [[ ! -e "$STAGING/$f" ]]; then
-    echo "::error::Expected $STAGING/$f missing"
+  if [[ ! -e "$STAGING_ABS/$f" ]]; then
+    echo "::error::Expected $STAGING_ABS/$f missing"
     exit 1
   fi
 done
-if [[ ! -f "$STAGING/docs/user_guide.md" ]]; then
-  echo "::error::Expected $STAGING/docs/user_guide.md missing (legacy fallback)"
+if [[ ! -f "$STAGING_ABS/docs/user_guide.md" ]]; then
+  echo "::error::Expected $STAGING_ABS/docs/user_guide.md missing (legacy fallback)"
   exit 1
 fi
 
@@ -38,8 +40,11 @@ PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); p
 export AKASHA_DATA_DIR="$DATA_DIR"
 export AKASHA_PORT="$PORT"
 
-"$DAEMON" >/dev/null 2>&1 &
+# Run from the staging folder (same layout as end-user zip extract).
+cd "$STAGING_ABS"
+./"$(basename "$DAEMON")" >/dev/null 2>&1 &
 DPID=$!
+cd "$ROOT"
 trap 'kill "$DPID" 2>/dev/null || true; rm -rf "$DATA_DIR"' EXIT
 
 ok=0
@@ -60,4 +65,4 @@ curl -sf "http://127.0.0.1:${PORT}/api/status" | grep -q '"status":"ok"' || { ec
 curl -sf "http://127.0.0.1:${PORT}/api/docs" | grep -q '"pages"' || { echo "::error::GET /api/docs index"; exit 1; }
 curl -sf "http://127.0.0.1:${PORT}/api/docs/accueil" | grep -q '"content"' || { echo "::error::GET /api/docs/accueil"; exit 1; }
 
-echo "Smoke OK: $STAGING (port $PORT)"
+echo "Smoke OK: $STAGING_ABS (port $PORT)"

@@ -117,7 +117,7 @@ jobs:
       - name: Build daemon (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo build --release --target ${{ matrix.target }} -p akasha-daemon
+          cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
 
       # macOS: ort-sys has no prebuilt binaries for x86_64-apple-darwin (and can be fragile on aarch64). Use tract backend like Windows.
       - name: Build daemon (macOS)
