@@ -106,9 +106,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-mt-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-md-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-mt-
+            ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-md-
 
       - name: Build CLI and TUI
         run: |
@@ -156,10 +156,12 @@ jobs:
             if (-not $env:CUDA_PATH) {
               throw "CUDA_PATH is not set for CUDA build."
             }
-            # llama-cpp-sys builds llama-common only with feature mtmd (LLAMA_BUILD_COMMON=ON).
-            # esaxx-rs (tokenizers/baguettotron) links /MT — llama and Rust must use static CRT too.
-            $env:LLAMA_STATIC_CRT = "1"
-            $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreaded"
+            # Use dynamic CRT (/MD) throughout: NVCC always compiles device code and host
+            # stubs with /MD, and llama-cpp C++ code (including llama-common via mtmd) also
+            # defaults to /MD.  Forcing +crt-static (/MT) on the Rust side causes dozens of
+            # unresolved __imp__* DLL-import symbols at final link.  The cc crate (esaxx-rs /
+            # baguettotron) also inherits /MD when +crt-static is absent, so the whole binary
+            # is consistently /MD and links cleanly.
 
             $cudaLibCandidates = @(
               (Join-Path $env:CUDA_PATH "lib\x64"),
@@ -173,7 +175,6 @@ jobs:
             # ggml-cuda needs driver + runtime + cuBLAS at final link (static libs do not propagate them).
             $sep = [char]0x1f
             $encodedParts = @(
-              "-C", "target-feature=+crt-static",
               "-L", "native=$cudaLib",
               "-l", "cuda",
               "-l", "cudart",
