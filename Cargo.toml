@@ -26,7 +26,7 @@ exclude = [
 # Single release version for all workspace crates (CLI, daemon, TUI, libs).
 # Keep apps/akasha-ui/package.json + src-tauri/Cargo.toml + tauri.conf.json in sync (crate is excluded from workspace).
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 
 # esaxx-rs defaults to /MT on MSVC; llama-cpp-sys uses /MD. Patched build uses /MD unless ESAXX_STATIC_CRT=1.
 [patch.crates-io]
