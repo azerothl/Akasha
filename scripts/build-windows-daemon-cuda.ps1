@@ -1,5 +1,6 @@
-# Build akasha-daemon with embedded-llama-cpp-cuda on Windows (MSVC).
+# Build akasha-daemon with embedded-llama-cpp-cuda on Windows (MSVC + VS 2022).
 # Used locally and by .github/workflows/release.yml (akasha-windows-x86_64-cuda).
+# CI must use runs-on: windows-2022 — CUDA 12.9 does not support VS 2026 (windows-latest).
 #
 # llama-cpp-sys builds with /MD (dynamic CRT) on Windows; nvcc host code must match
 # (/MD via NVCC_PREPEND_FLAGS). Do not use +crt-static here — linking /MT Rust with
@@ -33,11 +34,6 @@ if (-not $env:LIBCLANG_PATH) {
 Remove-Item Env:LLAMA_STATIC_CRT -ErrorAction SilentlyContinue
 $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreadedDLL"
 $env:NVCC_PREPEND_FLAGS = "-Xcompiler /MD"
-
-# CUDA 12.9 rejects newer MSVC on windows-latest during CMakeCUDACompilerId.cu (C1189).
-# Override until toolkit and runner toolsets are aligned.
-$env:CMAKE_CUDA_FLAGS = "-allow-unsupported-compiler"
-$env:CUDAFLAGS = "-allow-unsupported-compiler"
 
 $cudaLibCandidates = @(
     (Join-Path $env:CUDA_PATH "lib\x64"),

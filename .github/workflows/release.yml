@@ -82,7 +82,8 @@ jobs:
             ext: .exe
             cuda: false
             daemon_features: embedded,embeddings-tract,embedded-baguettotron
-          - os: windows-latest
+          # CUDA 12.9 supports MSVC/VS 2022 only; windows-latest (VS 2026) breaks nvcc/cudafe++.
+          - os: windows-2022
             target: x86_64-pc-windows-msvc
             artifact_name: akasha-windows-x86_64-cuda
             ext: .exe
@@ -126,17 +127,17 @@ jobs:
           cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
 
       - name: Install CUDA toolkit (Windows CUDA artifact)
-        if: matrix.os == 'windows-latest' && matrix.cuda == true
+        if: matrix.cuda == true
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: '12.9.1'
 
       - name: Install LLVM and CMake (Windows CUDA artifact)
-        if: matrix.os == 'windows-latest' && matrix.cuda == true
+        if: matrix.cuda == true
         run: choco install llvm cmake -y
 
       - name: Ensure patch.exe is on PATH (Windows CUDA artifact)
-        if: matrix.os == 'windows-latest' && matrix.cuda == true
+        if: matrix.cuda == true
         shell: pwsh
         run: |
           $gitUsrBin = Join-Path $env:ProgramFiles 'Git\usr\bin'
@@ -147,23 +148,20 @@ jobs:
           }
 
       - name: Build daemon (Windows CUDA)
-        if: matrix.os == 'windows-latest' && matrix.cuda == true
+        if: matrix.cuda == true
         shell: pwsh
         env:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
-          # CUDA 12.9 vs hosted MSVC: nvcc C1189 during llama-cpp-sys CMake configure
-          CMAKE_CUDA_FLAGS: "-allow-unsupported-compiler"
-          CUDAFLAGS: "-allow-unsupported-compiler"
         run: |
           ./scripts/build-windows-daemon-cuda.ps1 -Target ${{ matrix.target }} -Features "${{ matrix.daemon_features }}"
 
       - name: Build daemon (Windows)
-        if: matrix.os == 'windows-latest' && matrix.cuda != true
+        if: runner.os == 'Windows' && matrix.cuda != true
         run: |
           cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features ${{ matrix.daemon_features }}
 
       - name: Prepare artifact (Linux / macOS)
-        if: matrix.os != 'windows-latest'
+        if: runner.os != 'Windows'
         run: |
           mkdir -p staging/docs staging/scripts staging/spec
           cp target/${{ matrix.target }}/release/akasha${{ matrix.ext }} staging/
@@ -179,11 +177,11 @@ jobs:
           chmod +x staging/* staging/scripts/install.sh staging/scripts/setup.sh
 
       - name: Smoke test staging layout
-        if: matrix.os != 'windows-latest'
+        if: runner.os != 'Windows'
         run: bash scripts/smoke-release-staging.sh staging
 
       - name: Prepare artifact (Windows)
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path staging, staging\docs, staging\scripts, staging\spec | Out-Null
@@ -200,7 +198,7 @@ jobs:
           Remove-Item -Recurse -Force staging\playwright-runner\node_modules -ErrorAction SilentlyContinue
 
       - name: Smoke test staging layout
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/smoke-release-staging.ps1 staging
 
