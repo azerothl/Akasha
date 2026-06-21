@@ -196,6 +196,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path staging\playwright-runner | Out-Null
           Copy-Item -Path scripts\playwright-runner\* -Destination staging\playwright-runner\ -Recurse -Force
           Remove-Item -Recurse -Force staging\playwright-runner\node_modules -ErrorAction SilentlyContinue
+          if ('${{ matrix.cuda }}' -eq 'true') {
+            $cudaBin = Join-Path $env:CUDA_PATH 'bin'
+            foreach ($pat in @('cudart64_*.dll', 'cublas64_*.dll', 'cublasLt64_*.dll')) {
+              Get-ChildItem -Path $cudaBin -Filter $pat | Copy-Item -Destination staging/ -Force
+            }
+            Write-Host "Bundled CUDA runtime DLLs from $cudaBin into staging/"
+          }
 
       - name: Smoke test staging layout
         if: runner.os == 'Windows'
