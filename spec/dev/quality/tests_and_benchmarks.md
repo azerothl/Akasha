@@ -94,7 +94,21 @@ cargo test -p akasha-llm -F embedded
 | `embedded_llm_unload_clears_state` | Après `unload()`, `is_loaded()` false | idem |
 | Build llama-cpp (CI optionnel) | Compile `llama-cpp-sys` sans GGUF e2e | `cargo test -p akasha-embedded-llm --features llama-cpp` |
 
-**Bench manuel v1** (throughput GPU, cible >20 tok/s sur GTX 3080+ avec Q4 chargé) :
+**Bench embarqué v0.10** (CPU + CUDA, JSON, gate release) :
+
+```powershell
+./spec/dev/quality/bench_embedded.ps1 -Backend llama_cpp -Json
+./spec/dev/quality/bench_embedded.ps1 -Backend candle -Json
+./spec/dev/quality/bench_embedded.ps1 -Backend llama_cpp -Strict   # gate >20 tok/s CUDA
+```
+
+```bash
+BACKEND=candle ./spec/dev/quality/bench_embedded.sh
+```
+
+Baselines : [bench_embedded_results.md](bench_embedded_results.md). Criterion : `cargo bench -p akasha-embedded-llm --bench embedded_inference`.
+
+**Bench manuel v1** (legacy alias CUDA) :
 
 ```powershell
 ./spec/dev/quality/bench_embedded_llama_cpp.ps1
