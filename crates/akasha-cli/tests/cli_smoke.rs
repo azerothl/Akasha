@@ -75,6 +75,14 @@ fn e2e_cli_doctor_json_shape() {
         assert!(c.get("id").is_some());
         assert!(c.get("ok").is_some());
     }
+    // daemon_checks may include embedded_llm.action when GGUF missing (shape only)
+    if let Some(dc) = v.get("daemon_checks").and_then(|c| c.as_array()) {
+        for c in dc {
+            if c.get("id").and_then(|i| i.as_str()) == Some("embedded_llm") {
+                let _action = c.get("action");
+            }
+        }
+    }
     let data_dir = v
         .get("config_paths")
         .and_then(|p| p.get("data_dir"))

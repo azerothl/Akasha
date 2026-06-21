@@ -9,7 +9,9 @@ param(
     [switch]$InstallUi,
     [switch]$NoInstallUi,
     [switch]$AutoStart,
-    [switch]$NoAutoStart
+    [switch]$NoAutoStart,
+    [switch]$DownloadEmbedded,
+    [switch]$SkipEmbeddedDownload
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,6 +68,8 @@ if ($null -eq $doAutoStart) {
 # can set -InstallDir to the literal "-InstallDir" (PowerShell pairs array elements incorrectly).
 $installSplat = @{ InstallDir = $InstallDir }
 if (-not $doAutoStart) { $installSplat.NoAutoStart = $true }
+if ($DownloadEmbedded) { $installSplat.DownloadEmbedded = $true }
+if ($SkipEmbeddedDownload) { $installSplat.SkipEmbeddedDownload = $true }
 & $InstallScript @installSplat
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

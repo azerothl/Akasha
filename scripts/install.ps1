@@ -6,7 +6,9 @@
 
 param(
     [string]$InstallDir = "C:\Akasha",
-    [switch]$NoAutoStart
+    [switch]$NoAutoStart,
+    [switch]$DownloadEmbedded,
+    [switch]$SkipEmbeddedDownload
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,6 +56,30 @@ $akashaExe = Join-Path $InstallDir "akasha.exe"
 & $akashaExe init --defaults
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "init --defaults returned $LASTEXITCODE (non-fatal; you can run 'akasha init' manually)"
+}
+
+$isCudaBuild = @(Get-ChildItem -Path $InstallDir -Filter "cudart64_*.dll" -ErrorAction SilentlyContinue).Count -gt 0
+if ($isCudaBuild) {
+    Write-Host ""
+    Write-Host "Build NVIDIA CUDA detecte : telechargez le modele GGUF (~1 Go) avant le premier chat GPU." -ForegroundColor Cyan
+    Write-Host "  Commande : & '$akashaExe' config models embedded-download" -ForegroundColor Cyan
+} else {
+    Write-Host ""
+    Write-Host "Build CPU (Candle) : utilisable immediatement ; le premier appel peut etre lent (1-3 min)." -ForegroundColor Cyan
+}
+
+$doDownload = $false
+if ($DownloadEmbedded) { $doDownload = $true }
+elseif (-not $SkipEmbeddedDownload -and $isCudaBuild) {
+    $r = Read-Host "Telecharger le modele embarque maintenant (~1 Go) ? [Y/n]"
+    $doDownload = ($r -eq "" -or $r -match "^(y|yes)$")
+}
+if ($doDownload) {
+    Write-Host "Telechargement du modele embarque..."
+    & $akashaExe config models embedded-download
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "embedded-download returned $LASTEXITCODE — relancez manuellement ou via l'assistant UI."
+    }
 }
 
 # Optional: add to user PATH

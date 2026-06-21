@@ -4172,6 +4172,37 @@ OLLAMA_HOST=http://localhost:11434
         });
     }
 
+    // Recommend embedded GGUF download when llama_cpp is compiled but GGUF missing (do not auto-download ~1 Go).
+    if let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        let port: u16 = std::env::var("AKASHA_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_PORT);
+        if let Ok(resp) = client.get(format!("http://127.0.0.1:{}/api/doctor", port)).send() {
+            if resp.status().is_success() {
+                if let Ok(j) = resp.json::<serde_json::Value>() {
+                    if let Some(checks) = j.get("checks").and_then(|c| c.as_array()) {
+                        for c in checks {
+                            if c.get("id").and_then(|v| v.as_str()) == Some("embedded_llm") {
+                                if c.get("action").and_then(|v| v.as_str())
+                                    == Some("embedded-download")
+                                {
+                                    fixes.push(
+                                        "Modèle embarqué : exécutez `akasha config models embedded-download` (~1 Go) ou utilisez l'assistant UI.".to_string(),
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(fixes)
 }
 
@@ -4553,7 +4584,16 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
 
     // Phase 8: diagnostic advice from daemon (RAG + Core Model)
     if advice {
-        let body = serde_json::json!({ "health": health_payload });
+        let mut advice_health = health_payload.clone();
+        if !daemon_checks.is_empty() {
+            if let Some(obj) = advice_health.as_object_mut() {
+                obj.insert(
+                    "daemon_checks".to_string(),
+                    serde_json::json!(daemon_checks),
+                );
+            }
+        }
+        let body = serde_json::json!({ "health": advice_health });
         match reqwest::blocking::Client::new()
             .post(format!("http://127.0.0.1:{}/api/diagnostic/advice", port))
             .json(&body)
