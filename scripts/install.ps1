@@ -34,6 +34,12 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item (Join-Path $BinDir "akasha.exe") $InstallDir -Force
 Copy-Item (Join-Path $BinDir "akasha-daemon.exe") $InstallDir -Force
 Copy-Item (Join-Path $BinDir "akasha-tui.exe") $InstallDir -Force
+# CUDA release zips ship cudart/cuBLAS next to the exes; keep them beside the install target.
+foreach ($pat in @("cudart64_*.dll", "cublas64_*.dll", "cublasLt64_*.dll")) {
+    Get-ChildItem -Path $BinDir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-Item $_.FullName $InstallDir -Force
+    }
+}
 # Full docs/ and playwright-runner/ beside the binaries (daemon resolves Playwright next to the exe)
 foreach ($folder in @("docs", "playwright-runner", "spec")) {
     $src = Join-Path $BinDir $folder
