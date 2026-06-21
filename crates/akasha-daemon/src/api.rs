@@ -15309,16 +15309,24 @@ pub async fn handle_api(
         #[cfg(feature = "embedded")]
         {
             let snap = llm_router.embedded_status();
-            checks.push(serde_json::json!({
+            let ok = snap.ready_for_chat && snap.action.is_none();
+            let mut check = serde_json::json!({
                 "id": "embedded_llm",
-                "ok": snap.embedded_available,
+                "ok": ok,
                 "description": format!(
                     "{} (backend {}, device {})",
                     snap.hint,
                     snap.backend.as_deref().unwrap_or("?"),
                     snap.device.as_deref().unwrap_or("?")
-                )
-            }));
+                ),
+                "gguf_present": snap.gguf_present,
+                "llama_cpp_compiled": snap.llama_cpp_compiled,
+                "ready_for_chat": snap.ready_for_chat
+            });
+            if let Some(action) = snap.action {
+                check["action"] = serde_json::json!(action);
+            }
+            checks.push(check);
         }
         #[cfg(not(feature = "embedded"))]
         {
@@ -18283,6 +18291,69 @@ pub async fn handle_api(
             "message": "Embedded model unloaded. Next request will load it again."
         });
         return json_response("200 OK", &body.to_string());
+    }
+
+    // GET /api/router/embedded/models — manifest entries for wizard multi-model picker
+    if method == "GET" && path == "/api/router/embedded/models" {
+        #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+        {
+            match llm_router.embedded_models_manifest() {
+                Ok(manifest) => {
+                    let body = serde_json::to_string(&manifest).unwrap_or_else(|_| "{}".to_string());
+                    return json_response("200 OK", &body);
+                }
+                Err(e) => {
+                    let body = serde_json::json!({ "error": e }).to_string();
+                    return json_response("500 Internal Server Error", &body);
+                }
+            }
+        }
+        #[cfg(not(all(feature = "embedded", feature = "embedded-download")))]
+        {
+            let body = serde_json::json!({ "error": "embedded download not compiled" }).to_string();
+            return json_response("501 Not Implemented", &body);
+        }
+    }
+
+    // POST /api/router/embedded/download — start GGUF download (body: { "id": "..." } optional)
+    if method == "POST" && path == "/api/router/embedded/download" {
+        #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+        {
+            let model_id = body
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                .and_then(|j| j.get("id").and_then(|v| v.as_str()).map(String::from));
+            match llm_router.embedded_start_download(model_id) {
+                Ok(()) => {
+                    let body = serde_json::json!({ "started": true }).to_string();
+                    return json_response("202 Accepted", &body);
+                }
+                Err(e) => {
+                    let body = serde_json::json!({ "error": e }).to_string();
+                    return json_response("409 Conflict", &body);
+                }
+            }
+        }
+        #[cfg(not(all(feature = "embedded", feature = "embedded-download")))]
+        {
+            let body = serde_json::json!({ "error": "embedded download not compiled" }).to_string();
+            return json_response("501 Not Implemented", &body);
+        }
+    }
+
+    // GET /api/router/embedded/download/status — poll download progress
+    if method == "GET" && path == "/api/router/embedded/download/status" {
+        #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+        {
+            let snap = llm_router.embedded_download_status();
+            let body = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string());
+            return json_response("200 OK", &body);
+        }
+        #[cfg(not(all(feature = "embedded", feature = "embedded-download")))]
+        {
+            let body = serde_json::json!({ "state": "idle", "error": "not compiled" }).to_string();
+            return json_response("501 Not Implemented", &body);
+        }
     }
 
     // POST /api/router/route — set primary provider/model for a task type (body: { "category", "provider", "model" })

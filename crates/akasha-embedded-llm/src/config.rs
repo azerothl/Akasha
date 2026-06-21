@@ -51,10 +51,18 @@ pub fn akasha_data_dir() -> PathBuf {
 
 /// Default on-disk path for the embedded GGUF model.
 pub fn default_gguf_path() -> PathBuf {
-    akasha_data_dir().join("models").join("embedded").join("default.gguf")
+    gguf_path_for_filename("default.gguf")
 }
 
-/// Resolved GGUF path if the file exists (env override, then default location).
+/// Path for a manifest `filename` under `{data_dir}/models/embedded/`.
+pub fn gguf_path_for_filename(filename: &str) -> PathBuf {
+    akasha_data_dir()
+        .join("models")
+        .join("embedded")
+        .join(filename)
+}
+
+/// Resolved GGUF path if the file exists (env override, then manifest entries, then default location).
 pub fn resolve_gguf_path() -> Option<PathBuf> {
     if let Ok(v) = std::env::var("AKASHA_EMBEDDED_GGUF_PATH") {
         let t = v.trim();
@@ -69,10 +77,29 @@ pub fn resolve_gguf_path() -> Option<PathBuf> {
     if default.is_file() {
         return Some(default);
     }
+    #[cfg(feature = "download")]
+    if let Ok(manifest) = super::download::load_manifest() {
+        for m in &manifest.models {
+            let p = gguf_path_for_filename(&m.filename);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
     None
 }
 
-/// Whether llama-cpp backend can run (feature + GGUF file).
+#[cfg(feature = "llama-cpp")]
+pub fn llama_cpp_compiled() -> bool {
+    true
+}
+
+#[cfg(not(feature = "llama-cpp"))]
+pub fn llama_cpp_compiled() -> bool {
+    false
+}
+
+/// Whether llama-cpp backend can run (GGUF on disk).
 #[cfg(feature = "llama-cpp")]
 pub fn llama_cpp_ready() -> bool {
     resolve_gguf_path().is_some()

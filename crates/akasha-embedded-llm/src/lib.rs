@@ -43,6 +43,15 @@ pub struct EmbeddedStatus {
     pub model_path: Option<String>,
     pub compiled_backends: Vec<String>,
     pub hint: String,
+    /// llama-cpp feature compiled into this binary.
+    pub llama_cpp_compiled: bool,
+    /// A GGUF file exists at the resolved path.
+    pub gguf_present: bool,
+    /// Chat can proceed (backend resolves, possibly Candle fallback).
+    pub ready_for_chat: bool,
+    /// Recommended CLI/API action when GGUF missing on CUDA builds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
 }
 
 #[derive(Clone)]
@@ -161,32 +170,46 @@ impl EmbeddedLlm {
 
     pub fn status_snapshot() -> EmbeddedStatus {
         let compiled = compiled_backends();
-        let available = !compiled.is_empty();
+        let llama_cpp_compiled = config::llama_cpp_compiled();
+        let gguf_present = config::resolve_gguf_path().is_some();
+        let ready_for_chat = config::resolve_backend_choice().is_ok();
+        let needs_gguf = llama_cpp_compiled && !gguf_present;
         let loaded = Self::is_loaded();
         let backend = Self::active_backend();
         let device = Self::device_hint();
         let model_path = Self::model_path();
-        let hint = if !available {
+        let action = if needs_gguf {
+            Some("embedded-download".to_string())
+        } else {
+            None
+        };
+        let hint = if compiled.is_empty() {
             "Compile daemon with embedded feature; for llama_cpp run: akasha config models embedded-download".into()
-        } else if backend.as_deref() == Some("llama_cpp") && model_path.is_none() {
-            "llama_cpp compiled but GGUF missing — run: akasha config models embedded-download".into()
+        } else if needs_gguf {
+            "llama_cpp compiled but GGUF missing — run: akasha config models embedded-download (or use wizard)".into()
         } else if loaded {
             format!(
                 "Embedded model loaded ({}, device {})",
                 backend.as_deref().unwrap_or("?"),
                 device.as_deref().unwrap_or("?")
             )
+        } else if llama_cpp_compiled && gguf_present {
+            "GGUF present — model will load on first message (may take 1–3 min)".into()
         } else {
-            "Embedded model will load on first use (download + load may take several minutes on first run)".into()
+            "Embedded model will load on first use (Candle CPU: first call may take 1–3 min)".into()
         };
         EmbeddedStatus {
-            embedded_available: available && config::resolve_backend_choice().is_ok(),
+            embedded_available: !compiled.is_empty() && ready_for_chat,
             embedded_loaded: loaded,
             backend,
             device,
             model_path,
             compiled_backends: compiled,
             hint,
+            llama_cpp_compiled,
+            gguf_present,
+            ready_for_chat,
+            action,
         }
     }
 }

@@ -296,6 +296,30 @@ impl LLMRouter {
         akasha_embedded_llm::EmbeddedLlm::status_snapshot()
     }
 
+    /// List models from embedded_models.json manifest.
+    #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+    pub fn embedded_models_manifest(
+        &self,
+    ) -> Result<akasha_embedded_llm::download::Manifest, String> {
+        akasha_embedded_llm::download::load_manifest()
+    }
+
+    /// Start GGUF download on a background thread.
+    #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+    pub fn embedded_start_download(&self, model_id: Option<String>) -> Result<(), String> {
+        let _ = self;
+        akasha_embedded_llm::download::start_download_background(model_id)
+    }
+
+    /// Poll download progress.
+    #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+    pub fn embedded_download_status(
+        &self,
+    ) -> akasha_embedded_llm::download::DownloadProgress {
+        let _ = self;
+        akasha_embedded_llm::download::download_progress_snapshot()
+    }
+
     /// Replace in-memory routing config (task_types, providers metadata, global) from disk or API reload.
     /// Registered provider clients (Ollama, OpenRouter, etc.) are unchanged — route/model switches take effect immediately.
     pub fn reload_routing_config(&self, config: RoutingConfig) {

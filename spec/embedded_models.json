@@ -4,9 +4,20 @@
     {
       "id": "qwen2.5-1.5b-instruct-q4",
       "label": "Qwen2.5 1.5B Instruct Q4_K_M",
+      "label_en": "Qwen2.5 1.5B Instruct Q4_K_M (recommended, GPU)",
+      "label_fr": "Qwen2.5 1.5B Instruct Q4_K_M (recommandé, GPU)",
       "filename": "default.gguf",
       "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
       "size_bytes_hint": 986000000
+    },
+    {
+      "id": "smollm2-360m-instruct-q4",
+      "label": "SmolLM2 360M Instruct Q4_K_M",
+      "label_en": "SmolLM2 360M Instruct Q4_K_M (lighter download)",
+      "label_fr": "SmolLM2 360M Instruct Q4_K_M (téléchargement léger)",
+      "filename": "smollm2-360m-q4.gguf",
+      "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf",
+      "size_bytes_hint": 250000000
     }
   ]
 }
