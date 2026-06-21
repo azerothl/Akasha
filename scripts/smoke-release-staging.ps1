@@ -1,11 +1,16 @@
 # Smoke-test a release staging folder (Windows). Usage: ./scripts/smoke-release-staging.ps1 staging
 param(
-    [string]$Staging = "staging"
+    [string]$Staging = "staging",
+    [switch]$SkipDaemon
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
+
+if (-not $SkipDaemon -and $env:AKASHA_SMOKE_SKIP_DAEMON -eq "1") {
+    $SkipDaemon = $true
+}
 
 function Show-SmokeDaemonLogs {
     param(
@@ -19,6 +24,16 @@ function Show-SmokeDaemonLogs {
         if (Test-Path $entry.Path) {
             Write-Host "=== akasha-daemon $($entry.Label) (tail) ==="
             Get-Content $entry.Path -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+        }
+    }
+}
+
+function Test-CudaRuntimeDllsPresent {
+    param([string]$Dir)
+    foreach ($pat in @("cudart64_*.dll", "cublas64_*.dll", "cublasLt64_*.dll")) {
+        if (-not (Get-ChildItem -Path $Dir -Filter $pat -ErrorAction SilentlyContinue)) {
+            Write-Host "::error::Expected CUDA runtime $pat in $Dir"
+            exit 1
         }
     }
 }
@@ -39,6 +54,12 @@ foreach ($rel in @("docs\user\index.json", "docs\user_guide.md", "scripts", "spe
         Write-Host "::error::Expected $Staging\$rel missing"
         exit 1
     }
+}
+
+if ($SkipDaemon) {
+    Test-CudaRuntimeDllsPresent -Dir (Resolve-Path $Staging).Path
+    Write-Host "Smoke OK (layout + CUDA runtime DLLs; daemon HTTP skipped — CI runners have no NVIDIA driver/nvcuda.dll)"
+    exit 0
 }
 
 $DataDir = Join-Path ([System.IO.Path]::GetTempPath()) ("akasha-smoke-" + [guid]::NewGuid().ToString())
@@ -78,7 +99,11 @@ try {
     $ok = $false
     for ($i = 0; $i -lt 120; $i++) {
         if ($proc.HasExited) {
-            Write-Host "::error::Daemon exited before listening (code $($proc.ExitCode))"
+            $code = $proc.ExitCode
+            Write-Host "::error::Daemon exited before listening (code $code)"
+            if ($code -eq -1073741515) {
+                Write-Host "::notice::0xC0000135 (STATUS_DLL_NOT_FOUND): CUDA builds need nvcuda.dll from an installed NVIDIA GPU driver."
+            }
             Show-SmokeDaemonLogs -OutFile $outFile -ErrFile $errFile
             exit 1
         }

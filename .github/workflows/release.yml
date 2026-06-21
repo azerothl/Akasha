@@ -207,6 +207,9 @@ jobs:
       - name: Smoke test staging layout
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          # CUDA daemon links nvcuda.dll (GPU driver); GitHub-hosted runners have no NVIDIA GPU.
+          AKASHA_SMOKE_SKIP_DAEMON: ${{ matrix.cuda == true && '1' || '' }}
         run: ./scripts/smoke-release-staging.ps1 staging
 
       - name: Upload artifact
