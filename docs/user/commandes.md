@@ -54,7 +54,8 @@
 | Commande | Description |
 |----------|-------------|
 | `akasha router metrics` | Affiche les métriques du routeur (requêtes, latence, fallbacks). |
-| `akasha router discover` | Découvre les instances Ollama (local et réseau local). |
+| `akasha discover [service]` | Découvre services locaux (ollama, homeassistant). Sans argument : liste des profils. |
+| `akasha router discover` | Alias → découverte Ollama (local et réseau local). |
 | `akasha router show MODEL` | Affiche les infos d'un modèle Ollama. |
 | `akasha plugin list` | Liste les plugins installés. |
 | `akasha plugin reload` | Recharge les plugins sans redémarrer le daemon. |

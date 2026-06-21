@@ -32,4 +32,5 @@ anyhow = "1.0"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
+akasha-core = { path = "../akasha-core" }
 akasha-embedded-llm = { path = "../akasha-embedded-llm", optional = true }

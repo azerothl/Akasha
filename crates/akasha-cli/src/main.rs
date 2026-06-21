@@ -130,6 +130,11 @@ enum Commands {
         #[command(subcommand)]
         sub: TelegramSub,
     },
+    /// Discover local services (Ollama, Home Assistant, …)
+    Discover {
+        /// Service profile id (ollama, homeassistant). Omit to list profiles.
+        service: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -663,7 +668,45 @@ fn main() -> anyhow::Result<()> {
         Commands::Terminal { sub } => cmd_terminal(sub),
         Commands::Task { sub } => cmd_task(sub),
         Commands::Telegram { sub } => cmd_telegram(sub),
+        Commands::Discover { service } => cmd_discover(service.as_deref()),
     }
+}
+
+fn cmd_discover(service: Option<&str>) -> anyhow::Result<()> {
+    use akasha_core::service_discovery::{
+        discover, list_profiles, profile, DiscoveryOptions, DiscoveryScope,
+    };
+    let Some(service_id) = service else {
+        println!("Profils de discovery disponibles :");
+        for p in list_profiles() {
+            println!("  {}  {}  (port {})", p.id, p.display_name, p.port);
+        }
+        println!("\nUsage : akasha discover <service>   ex. akasha discover homeassistant");
+        return Ok(());
+    };
+    let Some(prof) = profile(service_id) else {
+        anyhow::bail!("Profil inconnu : {service_id}. Utilisez `akasha discover` sans argument pour la liste.");
+    };
+    println!("Découverte {} (local puis réseau local)…", prof.display_name);
+    let rt = tokio::runtime::Runtime::new()?;
+    let opts = DiscoveryOptions::from_env();
+    let list = rt.block_on(discover(prof, &opts));
+    if list.is_empty() {
+        println!("Aucune instance {} trouvée.", prof.display_name);
+        if let Some(url) = prof.install_url {
+            println!("  Installation : {url}");
+        }
+        return Ok(());
+    }
+    println!("{} trouvé ({} instance(s)) :", prof.display_name, list.len());
+    for (i, entry) in list.iter().enumerate() {
+        let kind = match entry.scope {
+            DiscoveryScope::Local => "local",
+            DiscoveryScope::Network => "réseau",
+        };
+        println!("  {}  {}  [{}]", i + 1, entry.base_url, kind);
+    }
+    Ok(())
 }
 
 fn cmd_terminal(sub: TerminalSub) -> anyhow::Result<()> {
