@@ -1,5 +1,6 @@
 # Rust
 /target/
+staging/
 Cargo.lock
 
 # Node / npm
