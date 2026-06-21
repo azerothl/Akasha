@@ -34,6 +34,11 @@ Remove-Item Env:LLAMA_STATIC_CRT -ErrorAction SilentlyContinue
 $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreadedDLL"
 $env:NVCC_PREPEND_FLAGS = "-Xcompiler /MD"
 
+# CUDA 12.9 rejects newer MSVC on windows-latest during CMakeCUDACompilerId.cu (C1189).
+# Override until toolkit and runner toolsets are aligned.
+$env:CMAKE_CUDA_FLAGS = "-allow-unsupported-compiler"
+$env:CUDAFLAGS = "-allow-unsupported-compiler"
+
 $cudaLibCandidates = @(
     (Join-Path $env:CUDA_PATH "lib\x64"),
     (Join-Path $env:CUDA_PATH "lib64")
@@ -59,14 +64,15 @@ if (Test-Path $gitUsrBin) {
     $env:PATH = "$gitUsrBin;$env:PATH"
 }
 
-if ($CleanLlamaCache) {
+# CI may restore a partial cache from older /MT builds (restore-keys); force a clean link graph.
+if ($CleanLlamaCache -or $env:CI -eq "true") {
     $llcb = Join-Path $env:LOCALAPPDATA "llcb"
     if (Test-Path $llcb) {
         Write-Host "Removing llama-cpp CMake cache: $llcb"
         Remove-Item -Recurse -Force $llcb
     }
-    Write-Host "cargo clean -p llama-cpp-sys-4 -p akasha-daemon"
-    cargo clean -p llama-cpp-sys-4 -p akasha-daemon
+    Write-Host "cargo clean -p esaxx-rs -p llama-cpp-sys-4 -p akasha-daemon"
+    cargo clean -p esaxx-rs -p llama-cpp-sys-4 -p akasha-daemon
 }
 
 Write-Host "Building akasha-daemon (CUDA) for $Target ..."

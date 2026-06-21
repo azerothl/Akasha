@@ -106,9 +106,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-mt-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-md-${{ hashFiles('**/Cargo.lock', 'vendor/esaxx-rs/build.rs', 'scripts/build-windows-daemon-cuda.ps1') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-mtmd-mt-
+            ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-md-
 
       - name: Build CLI and TUI
         run: |
@@ -146,17 +146,21 @@ jobs:
             }
           }
 
-      - name: Build daemon (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Build daemon (Windows CUDA)
+        if: matrix.os == 'windows-latest' && matrix.cuda == true
         shell: pwsh
         env:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
+          # CUDA 12.9 vs hosted MSVC: nvcc C1189 during llama-cpp-sys CMake configure
+          CMAKE_CUDA_FLAGS: "-allow-unsupported-compiler"
+          CUDAFLAGS: "-allow-unsupported-compiler"
         run: |
-          if ("${{ matrix.cuda }}" -eq "true") {
-            ./scripts/build-windows-daemon-cuda.ps1 -Target ${{ matrix.target }} -Features "${{ matrix.daemon_features }}"
-          } else {
-            cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features ${{ matrix.daemon_features }}
-          }
+          ./scripts/build-windows-daemon-cuda.ps1 -Target ${{ matrix.target }} -Features "${{ matrix.daemon_features }}"
+
+      - name: Build daemon (Windows)
+        if: matrix.os == 'windows-latest' && matrix.cuda != true
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features ${{ matrix.daemon_features }}
 
       - name: Prepare artifact (Linux / macOS)
         if: matrix.os != 'windows-latest'
