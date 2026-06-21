@@ -1,4 +1,4 @@
-//! Read/write `connectors.env` (Telegram, Slack, Discord activation + non-secret config).
+//! Read/write `connectors.env` (Telegram, Slack, Discord, Home Assistant + non-secret config).
 
 use akasha_vault::Vault;
 use std::collections::HashMap;
@@ -9,16 +9,21 @@ pub const CONNECTOR_KEYS: &[(&str, &str)] = &[
     ("telegram", "AKASHA_TELEGRAM_ENABLED"),
     ("slack", "AKASHA_SLACK_ENABLED"),
     ("discord", "AKASHA_DISCORD_ENABLED"),
+    ("homeassistant", "AKASHA_HOMEASSISTANT_ENABLED"),
 ];
 
 /// Non-secret env keys stored in connectors.env.
-pub const CONNECTOR_ENV_CONFIG_KEYS: &[&str] = &["AKASHA_TELEGRAM_NOTIFY_CHAT_ID"];
+pub const CONNECTOR_ENV_CONFIG_KEYS: &[&str] = &[
+    "AKASHA_TELEGRAM_NOTIFY_CHAT_ID",
+    "HA_BASE_URL",
+];
 
 /// Vault keys for connector secrets (never returned in API responses).
 pub const CONNECTOR_VAULT_KEYS: &[&str] = &[
     "telegram_bot_token",
     "slack_signing_secret",
     "discord_bot_token",
+    "ha_access_token",
 ];
 
 fn env_enabled(value: Option<&str>) -> bool {
@@ -103,6 +108,8 @@ pub struct ConnectorsConfigView {
     pub telegram_token_configured: bool,
     pub slack_signing_secret_configured: bool,
     pub discord_token_configured: bool,
+    pub ha_base_url: Option<String>,
+    pub ha_token_configured: bool,
 }
 
 /// Payload for POST /api/connectors (optional fields = leave unchanged).
@@ -115,7 +122,11 @@ pub struct ConnectorsUpdate {
     #[serde(default)]
     pub discord: Option<bool>,
     #[serde(default)]
+    pub homeassistant: Option<bool>,
+    #[serde(default)]
     pub telegram_notify_chat_id: Option<String>,
+    #[serde(default)]
+    pub ha_base_url: Option<String>,
     /// Set vault secret; empty string ignored (keep existing).
     #[serde(default)]
     pub telegram_bot_token: Option<String>,
@@ -123,6 +134,29 @@ pub struct ConnectorsUpdate {
     pub slack_signing_secret: Option<String>,
     #[serde(default)]
     pub discord_bot_token: Option<String>,
+    #[serde(default)]
+    pub ha_access_token: Option<String>,
+}
+
+pub fn ha_base_url(data_dir: &Path) -> Option<String> {
+    read_env_file(data_dir)
+        .get("HA_BASE_URL")
+        .cloned()
+        .filter(|s| !s.trim().is_empty())
+}
+
+pub fn homeassistant_enabled_in_file(data_dir: &Path) -> bool {
+    env_enabled(
+        read_env_file(data_dir)
+            .get("AKASHA_HOMEASSISTANT_ENABLED")
+            .map(String::as_str),
+    )
+}
+
+pub fn set_ha_base_url(data_dir: &Path, url: &str) -> anyhow::Result<()> {
+    let mut lines = load_or_init_lines(data_dir);
+    upsert_env_line(&mut lines, "HA_BASE_URL", url.trim());
+    write_env_file(data_dir, &lines)
 }
 
 pub fn connectors_config_view(data_dir: &Path) -> ConnectorsConfigView {
@@ -142,6 +176,11 @@ pub fn connectors_config_view(data_dir: &Path) -> ConnectorsConfigView {
         telegram_token_configured: vault_keys.contains("telegram_bot_token"),
         slack_signing_secret_configured: vault_keys.contains("slack_signing_secret"),
         discord_token_configured: vault_keys.contains("discord_bot_token"),
+        ha_base_url: file_map
+            .get("HA_BASE_URL")
+            .cloned()
+            .filter(|s| !s.trim().is_empty()),
+        ha_token_configured: vault_keys.contains("ha_access_token"),
     }
 }
 
@@ -171,12 +210,14 @@ pub fn write_connectors_enabled(
     telegram: bool,
     slack: bool,
     discord: bool,
+    homeassistant: bool,
 ) -> anyhow::Result<()> {
     let mut lines = load_or_init_lines(data_dir);
     for (key, enabled) in [
         ("AKASHA_TELEGRAM_ENABLED", telegram),
         ("AKASHA_SLACK_ENABLED", slack),
         ("AKASHA_DISCORD_ENABLED", discord),
+        ("AKASHA_HOMEASSISTANT_ENABLED", homeassistant),
     ] {
         upsert_env_line(&mut lines, key, if enabled { "1" } else { "0" });
     }
@@ -221,12 +262,20 @@ pub fn apply_connectors_update(data_dir: &Path, update: &ConnectorsUpdate) -> an
             .map(|c| c.enabled_in_file)
             .unwrap_or(false)
     });
+    let homeassistant = update.homeassistant.unwrap_or_else(|| {
+        current
+            .iter()
+            .find(|c| c.id == "homeassistant")
+            .map(|c| c.enabled_in_file)
+            .unwrap_or(false)
+    });
 
     let mut lines = load_or_init_lines(data_dir);
     for (key, enabled) in [
         ("AKASHA_TELEGRAM_ENABLED", telegram),
         ("AKASHA_SLACK_ENABLED", slack),
         ("AKASHA_DISCORD_ENABLED", discord),
+        ("AKASHA_HOMEASSISTANT_ENABLED", homeassistant),
     ] {
         upsert_env_line(&mut lines, key, if enabled { "1" } else { "0" });
     }
@@ -237,6 +286,15 @@ pub fn apply_connectors_update(data_dir: &Path, update: &ConnectorsUpdate) -> an
             remove_env_line(&mut lines, "AKASHA_TELEGRAM_NOTIFY_CHAT_ID");
         } else {
             upsert_env_line(&mut lines, "AKASHA_TELEGRAM_NOTIFY_CHAT_ID", t);
+        }
+    }
+
+    if let Some(ref url) = update.ha_base_url {
+        let t = url.trim();
+        if t.is_empty() {
+            remove_env_line(&mut lines, "HA_BASE_URL");
+        } else {
+            upsert_env_line(&mut lines, "HA_BASE_URL", t);
         }
     }
 
@@ -257,6 +315,11 @@ pub fn apply_connectors_update(data_dir: &Path, update: &ConnectorsUpdate) -> an
         "discord_bot_token",
         update.discord_bot_token.as_deref(),
     )?;
+    set_vault_if_non_empty(
+        data_dir,
+        "ha_access_token",
+        update.ha_access_token.as_deref(),
+    )?;
 
     Ok(())
 }
@@ -269,7 +332,7 @@ mod tests {
     #[test]
     fn write_connectors_creates_and_updates_file() {
         let dir = tempfile::tempdir().unwrap();
-        write_connectors_enabled(dir.path(), true, false, true).unwrap();
+        write_connectors_enabled(dir.path(), true, false, true, false).unwrap();
         let content = fs::read_to_string(dir.path().join("connectors.env")).unwrap();
         assert!(content.contains("AKASHA_TELEGRAM_ENABLED=1"));
         assert!(content.contains("AKASHA_SLACK_ENABLED=0"));
@@ -303,5 +366,23 @@ mod tests {
         .unwrap();
         let map = read_env_file(dir.path());
         assert_eq!(map.get("AKASHA_TELEGRAM_NOTIFY_CHAT_ID").map(String::as_str), Some("12345"));
+    }
+
+    #[test]
+    fn apply_update_sets_ha_base_url() {
+        let dir = tempfile::tempdir().unwrap();
+        apply_connectors_update(
+            dir.path(),
+            &ConnectorsUpdate {
+                homeassistant: Some(true),
+                ha_base_url: Some("http://127.0.0.1:8123".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ha_base_url(dir.path()).as_deref(),
+            Some("http://127.0.0.1:8123")
+        );
     }
 }

@@ -16,6 +16,13 @@ type ConnectorsConfigView = {
   telegram_token_configured?: boolean;
   slack_signing_secret_configured?: boolean;
   discord_token_configured?: boolean;
+  ha_base_url?: string | null;
+  ha_token_configured?: boolean;
+};
+
+type DiscoveryInstance = {
+  base_url: string;
+  scope: string;
 };
 
 type Props = {
@@ -67,10 +74,15 @@ export function ConnectorsPanel({ t }: Props) {
   const [telegram, setTelegram] = useState(false);
   const [slack, setSlack] = useState(false);
   const [discord, setDiscord] = useState(false);
+  const [homeassistant, setHomeassistant] = useState(false);
   const [telegramNotifyChatId, setTelegramNotifyChatId] = useState("");
   const [telegramToken, setTelegramToken] = useState("");
   const [slackSecret, setSlackSecret] = useState("");
   const [discordToken, setDiscordToken] = useState("");
+  const [haBaseUrl, setHaBaseUrl] = useState("");
+  const [haToken, setHaToken] = useState("");
+  const [haDiscovering, setHaDiscovering] = useState(false);
+  const [haDiscovered, setHaDiscovered] = useState<DiscoveryInstance[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [restarting, setRestarting] = useState(false);
@@ -94,10 +106,13 @@ export function ConnectorsPanel({ t }: Props) {
       setTelegram(rows.find((c) => c.id === "telegram")?.enabled_in_file ?? false);
       setSlack(rows.find((c) => c.id === "slack")?.enabled_in_file ?? false);
       setDiscord(rows.find((c) => c.id === "discord")?.enabled_in_file ?? false);
+      setHomeassistant(rows.find((c) => c.id === "homeassistant")?.enabled_in_file ?? false);
       setTelegramNotifyChatId(cfg.telegram_notify_chat_id ?? "");
+      setHaBaseUrl(cfg.ha_base_url ?? "");
       setTelegramToken("");
       setSlackSecret("");
       setDiscordToken("");
+      setHaToken("");
     } catch (e) {
       setMsg(String(e));
     } finally {
@@ -109,6 +124,29 @@ export function ConnectorsPanel({ t }: Props) {
     void load();
   }, [load]);
 
+  const discoverHa = async () => {
+    setHaDiscovering(true);
+    setMsg(null);
+    try {
+      const json = await invoke<{ instances?: DiscoveryInstance[]; install_url?: string }>(
+        "get_discovery",
+        { service: "homeassistant", port: DAEMON_PORT },
+      );
+      const list = Array.isArray(json?.instances) ? json.instances : [];
+      setHaDiscovered(list);
+      if (list.length > 0) {
+        setHaBaseUrl(list[0].base_url);
+        setMsg(t("connectors.ha_discover_found").replace("{n}", String(list.length)));
+      } else {
+        setMsg(t("connectors.ha_discover_empty"));
+      }
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setHaDiscovering(false);
+    }
+  };
+
   const save = async () => {
     setSaving(true);
     setMsg(null);
@@ -117,11 +155,14 @@ export function ConnectorsPanel({ t }: Props) {
         telegram,
         slack,
         discord,
+        homeassistant,
         telegram_notify_chat_id: telegramNotifyChatId.trim(),
+        ha_base_url: haBaseUrl.trim(),
       };
       if (telegramToken.trim()) body.telegram_bot_token = telegramToken.trim();
       if (slackSecret.trim()) body.slack_signing_secret = slackSecret.trim();
       if (discordToken.trim()) body.discord_bot_token = discordToken.trim();
+      if (haToken.trim()) body.ha_access_token = haToken.trim();
       await invoke("post_connectors", { body, port: DAEMON_PORT });
       setMsg(t("connectors.saved"));
       setRestartRequired(true);
@@ -245,6 +286,75 @@ export function ConnectorsPanel({ t }: Props) {
             onChange={setDiscordToken}
             placeholder={t("connectors.secret_keep_placeholder")}
           />
+        </div>
+      </details>
+
+      <details className="connectors-section" open={homeassistant}>
+        <summary className="connectors-summary">
+          Home Assistant
+          <InfoTip label="Home Assistant" content={t("connectors.ha_section_help")} />
+        </summary>
+        <p className="settings-doc muted connectors-section-help">{t("connectors.ha_section_help")}</p>
+        <div className="connectors-section-body">
+          <label className="settings-checkbox-label">
+            <input type="checkbox" checked={homeassistant} onChange={(e) => setHomeassistant(e.target.checked)} />
+            {t("connectors.enable")}
+          </label>
+          <span className="settings-doc muted">{statusLabel(connectors.find((c) => c.id === "homeassistant"), homeassistant)}</span>
+          <label className="connectors-field" htmlFor="ha-base-url">
+            <span className="connectors-field-label">
+              {t("connectors.ha_base_url")}
+              <InfoTip label={t("connectors.ha_base_url")} content={t("connectors.ha_base_url_hint")} />
+            </span>
+            <div className="settings-row-actions">
+              <input
+                id="ha-base-url"
+                type="url"
+                className="settings-input"
+                value={haBaseUrl}
+                placeholder="http://127.0.0.1:8123"
+                onChange={(e) => setHaBaseUrl(e.target.value)}
+              />
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={haDiscovering}
+                onClick={() => void discoverHa()}
+              >
+                {haDiscovering ? t("common.loading") : t("connectors.ha_discover")}
+              </button>
+            </div>
+          </label>
+          {haDiscovered.length > 1 ? (
+            <label className="connectors-field" htmlFor="ha-instance-pick">
+              <span className="connectors-field-label">{t("connectors.ha_pick_instance")}</span>
+              <select
+                id="ha-instance-pick"
+                className="settings-input"
+                value={haBaseUrl}
+                onChange={(e) => setHaBaseUrl(e.target.value)}
+              >
+                {haDiscovered.map((inst) => (
+                  <option key={inst.base_url} value={inst.base_url}>
+                    {inst.base_url} ({inst.scope})
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <SecretInput
+            id="ha-access-token"
+            label={t("connectors.ha_token")}
+            hint={t("connectors.ha_token_hint")}
+            configured={Boolean(config.ha_token_configured)}
+            value={haToken}
+            onChange={setHaToken}
+            placeholder={t("connectors.secret_keep_placeholder")}
+          />
+          <p className="settings-doc muted">
+            {config.ha_token_configured ? t("connectors.ha_token_ok") : t("connectors.ha_token_missing")}
+            {haBaseUrl.trim() ? ` · ${t("connectors.ha_url_set")}` : ` · ${t("connectors.ha_url_missing")}`}
+          </p>
         </div>
       </details>
 

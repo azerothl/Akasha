@@ -1817,6 +1817,10 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("graph_stats", "graph_stats <json_or_args...> — via plugin graph, calcule min/max/moyenne/compte par série et retourne une vue table."),
     ("sim_run", "sim_run <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, exécute une simulation déterministe et retourne une vue timeseries + métriques."),
     ("sim_compare", "sim_compare <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, compare scénario de base et alternatif, retourne delta + tableau de résultats."),
+    ("ha_get_state", "ha_get_state <entity_id> — via plugin homeassistant, lit l'état d'une entité HA (ex. light.salon). Connecteur HA activé + token vault requis."),
+    ("ha_list_entities", "ha_list_entities [domain] — via plugin homeassistant, liste les entités (filtre domain optionnel : light, sensor, …)."),
+    ("ha_call_service", "ha_call_service <domain> <service> <entity_id> [json_data] — via plugin homeassistant, appelle un service (ex. light turn_on light.salon). Domaines lock/alarm exigent confirm:true ou HITL."),
+    ("ha_run_script", "ha_run_script <script_id> — via plugin homeassistant, lance script.turn_on (script_id avec ou sans préfixe script.)."),
     ("mcp_server_add", "mcp_server_add <name> <command> [args...] — ajouter ou remplacer une entrée dans data_dir/mcp.json (stdio MCP). Exemple: mcp_server_add demo npx -y @modelcontextprotocol/server-filesystem /tmp"),
     ("mcp_server_remove", "mcp_server_remove <name> — supprimer un serveur MCP de mcp.json."),
 ];
@@ -3705,6 +3709,15 @@ fn parse_plugin_tool_invocation(
         (plugin_id, None, forwarded)
     } else if let Some(id) = tool_name.strip_prefix("plugin.") {
         (id.trim().to_string(), None, args.to_vec())
+    } else if available_ids.contains("homeassistant")
+        && (tool_name.starts_with("ha_") || tool_name.eq_ignore_ascii_case("homeassistant"))
+    {
+        let action = if tool_name.starts_with("ha_") {
+            Some(tool_name.strip_prefix("ha_").unwrap_or("").to_string())
+        } else {
+            None
+        };
+        ("homeassistant".to_string(), action, args.to_vec())
     } else if available_ids.contains(tool_name) {
         (tool_name.to_string(), None, args.to_vec())
     } else if let Some((prefix, suffix)) = tool_name.split_once('_') {
@@ -7375,11 +7388,24 @@ pub(crate) async fn execute_tool_call_impl(
             if let Some((plugin_id, plugin_payload)) = plugin_invocation {
                 match plugin_registry {
                     Some(r) => {
-                        // WASM + host imports (e.g. http_fetch) must not run on the Tokio async worker:
-                        // blocking HTTP and Wasmtime host callbacks can abort the process if nested on a worker thread.
                         let reg = Arc::clone(r);
                         let pid = plugin_id.clone();
-                        let pl = plugin_payload.clone();
+                        let data_dir_for_plugin = store_path
+                            .and_then(|p| p.parent())
+                            .map(|p| p.to_path_buf());
+                        let pl = if pid == "homeassistant" {
+                            data_dir_for_plugin
+                                .as_ref()
+                                .map(|d| {
+                                    crate::homeassistant_config::enrich_homeassistant_plugin_payload(
+                                        d,
+                                        &plugin_payload,
+                                    )
+                                })
+                                .unwrap_or(plugin_payload)
+                        } else {
+                            plugin_payload
+                        };
                         // #region agent log
                         debug_log(
                             "H3",
@@ -15224,6 +15250,42 @@ pub async fn handle_api(
             "description": if ollama_ok { "Ollama reachable" } else { "Ollama unreachable" }
         }));
 
+        if crate::connectors_config::homeassistant_enabled_in_file(data_dir) {
+            let ha_url = crate::connectors_config::ha_base_url(data_dir);
+            let ha_ok = if let Some(ref u) = ha_url {
+                let test_url = format!("{}/api/", u.trim_end_matches('/'));
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(3))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+                client
+                    .get(&test_url)
+                    .send()
+                    .await
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            let token_ok = akasha_vault::open_vault(data_dir)
+                .ok()
+                .and_then(|v| v.get("ha_access_token").ok())
+                .map(|t| !t.trim().is_empty())
+                .unwrap_or(false);
+            checks.push(serde_json::json!({
+                "id": "homeassistant",
+                "ok": ha_ok,
+                "description": if ha_ok {
+                    format!("Home Assistant reachable{}",
+                        if token_ok { ", token configured" } else { ", token missing" })
+                } else if ha_url.is_some() {
+                    "Home Assistant unreachable at configured URL".to_string()
+                } else {
+                    "Home Assistant enabled but HA_BASE_URL not set (try akasha discover homeassistant)".to_string()
+                }
+            }));
+        }
+
         let vault_ok = akasha_vault::open_vault(data_dir).is_ok();
         checks.push(serde_json::json!({
             "id": "vault",
@@ -16998,6 +17060,39 @@ pub async fn handle_api(
             }
         }
     }
+    if method == "GET" && path == "/api/discovery" {
+        let profiles: Vec<serde_json::Value> = akasha_core::service_discovery::list_profiles()
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "display_name": p.display_name,
+                    "port": p.port,
+                    "install_url": p.install_url,
+                })
+            })
+            .collect();
+        let body = serde_json::json!({ "profiles": profiles });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "GET" && path.starts_with("/api/discovery/") {
+        let service_id = path.trim_start_matches("/api/discovery/").trim();
+        if service_id.is_empty() || service_id.contains('/') {
+            return json_response("400 Bad Request", r#"{"error":"invalid_service_id"}"#);
+        }
+        let Some(profile) = akasha_core::service_discovery::profile(service_id) else {
+            let body = serde_json::json!({ "error": "unknown_service", "service_id": service_id });
+            return json_response("404 Not Found", &body.to_string());
+        };
+        let opts = akasha_core::service_discovery::DiscoveryOptions::from_env();
+        let instances = akasha_core::service_discovery::discover(profile, &opts).await;
+        let body = serde_json::json!({
+            "service_id": service_id,
+            "instances": instances,
+            "install_url": profile.install_url,
+        });
+        return json_response("200 OK", &body.to_string());
+    }
     if method == "GET" && path == "/api/connectors" {
         let connectors = crate::connectors_config::connectors_status(data_dir);
         let config = crate::connectors_config::connectors_config_view(data_dir);
@@ -17008,7 +17103,8 @@ pub async fn handle_api(
             "connectors": connectors,
             "config": config,
             "restart_required": restart_required,
-            "matrix_note": "Matrix uses plugin matrix-channel sidecar and MATRIX_* env vars (manual setup)."
+            "matrix_note": "Matrix uses plugin matrix-channel sidecar and MATRIX_* env vars (manual setup).",
+            "homeassistant_note": "Enable AKASHA_HOMEASSISTANT_ENABLED=1, set HA_BASE_URL (or akasha discover homeassistant), vault ha_access_token; install plugin homeassistant."
         });
         return json_response("200 OK", &body.to_string());
     }

@@ -108,7 +108,8 @@ Les services du projet **akasha-models** (Docker Compose) peuvent être install�
 | Commande | Description |
 |----------|-------------|
 | `akasha router metrics` | Affiche les métriques du routeur (requêtes, latence, fallbacks) |
-| `akasha router discover` | Découvre les instances Ollama (local + réseau local) |
+| `akasha discover [service]` | Découvre services locaux (profils : ollama, homeassistant). Sans argument : liste des profils |
+| `akasha router discover` | Alias → découverte Ollama (local + réseau local) |
 | `akasha router show MODEL` | Affiche les infos d'un modèle Ollama (contexte max, num_ctx) |
 
 ### Plugins
@@ -338,6 +339,7 @@ cargo run -p akasha-evals
 ## 7. Canaux (Telegram, Slack, Discord)
 
 - **Telegram** : vault `telegram_bot_token`, puis `AKASHA_TELEGRAM_ENABLED=1`. Commande `/akasha <message>` (ou `/start` pour l'aide). Optionnel : `AKASHA_TELEGRAM_NOTIFY_CHAT_ID` pour recevoir « bot connecté » au démarrage.
+- **Home Assistant** : connecteur `AKASHA_HOMEASSISTANT_ENABLED=1`, `HA_BASE_URL` dans connectors.env, vault `ha_access_token`, plugin `homeassistant`. Découverte : `akasha discover homeassistant`. Sidecar événements : voir `Akasha_plugins/plugins/homeassistant/README.md`.
 - **Slack** : vault `slack_signing_secret`, `AKASHA_SLACK_ENABLED=1`. Slash command configurée vers `POST /channels/slack/command`.
 - **Discord** : vault `discord_bot_token`, `AKASHA_DISCORD_ENABLED=1`. Bot avec préfixe `!akasha <message>`.
 

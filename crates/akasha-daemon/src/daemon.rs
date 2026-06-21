@@ -236,6 +236,8 @@ impl Daemon {
             Err(e) => warn!(error = %e, "Vault init failed, secrets will use file fallback only"),
         }
 
+        crate::homeassistant_config::autofill_ha_base_url_if_needed(&self.data_dir).await;
+
         // Phase 4: Channel adapter config (Slack/Discord secrets from vault)
         let port = std::env::var("AKASHA_PORT")
             .ok()

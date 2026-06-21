@@ -145,7 +145,17 @@ command_timeout_secs: 60
 # et n'exécute qu'après approbation explicite (bouton Approuver / Refuser dans l'UI).
 # Recommandé pour install_playwright (téléchargement lourd) : require_approval: [..., install_playwright]
 # Éviter d'ajouter « browser » ici : chaque navigate/snapshot demanderait une approbation.
-# require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file, device_invoke, install_playwright]
+# require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file, device_invoke, install_playwright, ha_call_service, ha_run_script]
+
+# Profil domotique (exemple) :
+# tool_profiles:
+#   home:
+#     allowed_tools:
+#       - plugin.call
+#       - ha_get_state
+#       - ha_list_entities
+#       - ha_call_service
+#       - ha_run_script
 
 # Optionnel : politique MCP (outils `mcp_<server>_<tool>`). Si la section est présente, seuls les serveurs listés sont autorisés.
 # mcp_max_calls_per_task: 20

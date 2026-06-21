@@ -957,6 +957,21 @@ async fn post_connectors(body: serde_json::Value, port: Option<u16>) -> Result<s
     resp.json().await.map_err(|e| e.to_string())
 }
 
+/// GET /api/discovery/:service — discover local/network instances.
+#[tauri::command]
+async fn get_discovery(service: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/discovery/{}", daemon_base_url(port), service.trim());
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 /// POST /api/vault — store a secret key in vault.
 #[tauri::command]
 async fn set_vault_key(key: String, value: String, port: Option<u16>) -> Result<(), String> {
@@ -2483,6 +2498,7 @@ pub fn run() {
             post_tools_policy,
             get_device_interfaces,
             get_connectors,
+            get_discovery,
             post_connectors,
             set_vault_key,
             set_plugin_enabled,

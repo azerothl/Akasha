@@ -20,6 +20,9 @@ actions:
   - id: plugin_install
     tools: []
     description: Installation de plugin WASM
+  - id: ha_call_service
+    tools: [ha_call_service, ha_run_script]
+    description: Action domotique (lumières, serrures, chauffage)
 
 limits:
   max_pending_per_session: 5

@@ -32,7 +32,31 @@ Installez depuis un dossier cloné : `akasha plugin install CHEMIN`.
 
 Catalogue public : page **Plugins** sur https://azerothl.github.io/Akasha_app/plugins.html
 
-Plugins **sidecar** (canaux Matrix, CalDAV) : processus compagnon ; voir le README de chaque plugin.
+Plugins **sidecar** (canaux Matrix, CalDAV, **Home Assistant événements**) : processus compagnon ; voir le README de chaque plugin.
+
+### Home Assistant (domotique)
+
+Akasha pilote **Home Assistant** (Zigbee, Z-Wave, Matter via HA) — pas un hub radio natif.
+
+**Prérequis HA**
+
+1. Installer [Home Assistant](https://www.home-assistant.io/installation/).
+2. Créer un jeton d'accès long-lived (Profil → Sécurité).
+3. Détecter l'URL : `akasha discover homeassistant` ou Réglages → Connecteurs → **Détecter**.
+
+**Configuration Akasha**
+
+- `connectors.env` : `AKASHA_HOMEASSISTANT_ENABLED=1`, `HA_BASE_URL=http://…`
+- Vault : `akasha vault set ha_access_token VOTRE_TOKEN`
+- Plugin : `akasha plugin install CHEMIN/vers/Akasha_plugins/plugins/homeassistant`
+- Sidecar (événements → webhooks) : voir `plugins/homeassistant/README.md`
+- Webhooks : `AKASHA_AUTOMATION_WEBHOOK_SECRET` pour le sidecar ou automatisations HA
+
+**Outils agent** : `ha_get_state`, `ha_list_entities`, `ha_call_service`, `ha_run_script` (plugin `homeassistant`).
+
+Skill recommandé : installer `home-assistant` depuis [Akasha_skills](https://github.com/azerothl/Akasha_skills/tree/main/skills/home-assistant).
+
+Voir aussi : `spec/dev/integrations/service-discovery.md` dans le dépôt Akasha (moteur mutualisé).
 
 ## Code Studio
 
