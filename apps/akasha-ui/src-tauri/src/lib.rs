@@ -564,6 +564,59 @@ async fn embedded_download_status(port: Option<u16>) -> Result<serde_json::Value
     Ok(json)
 }
 
+/// GET /api/router/embedded/hardware — tier + static candidates.
+#[tauri::command]
+async fn get_embedded_hardware(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/hardware", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/router/embedded/calibrate — start micro-bench.
+#[tauri::command]
+async fn embedded_calibrate_start(port: Option<u16>, maxConfigs: Option<u64>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/calibrate", daemon_base_url(port));
+    let client = http_client();
+    let body = serde_json::json!({ "max_configs": maxConfigs.unwrap_or(3) });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+    if !status.is_success() && status.as_u16() != 202 {
+        return Err(json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("calibration failed")
+            .to_string());
+    }
+    Ok(json)
+}
+
+/// GET /api/router/embedded/calibrate/status — poll calibration.
+#[tauri::command]
+async fn embedded_calibrate_status(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/calibrate/status", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// POST /api/message with akasha_embedded for onboarding wizard first-message test.
 #[tauri::command]
 async fn wizard_test_embedded_message(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -2638,6 +2691,9 @@ pub fn run() {
             get_embedded_models,
             embedded_download_start,
             embedded_download_status,
+            get_embedded_hardware,
+            embedded_calibrate_start,
+            embedded_calibrate_status,
             wizard_test_embedded_message,
             get_device_pending,
             post_device_result,

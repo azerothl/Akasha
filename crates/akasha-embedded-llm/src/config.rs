@@ -62,8 +62,32 @@ pub fn gguf_path_for_filename(filename: &str) -> PathBuf {
         .join(filename)
 }
 
-/// Resolved GGUF path if the file exists (env override, then manifest entries, then default location).
+/// Resolve GGUF path for a manifest `model_id`.
+#[cfg(feature = "download")]
+pub fn resolve_gguf_path_for_model(model_id: &str) -> Option<PathBuf> {
+    if let Ok(manifest) = super::download::load_manifest() {
+        if let Some(entry) = manifest.models.iter().find(|m| m.id == model_id) {
+            let p = gguf_path_for_filename(&entry.filename);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(feature = "download"))]
+pub fn resolve_gguf_path_for_model(_model_id: &str) -> Option<PathBuf> {
+    None
+}
+
+/// Resolved GGUF path if the file exists (runtime, env override, then manifest entries, then default location).
 pub fn resolve_gguf_path() -> Option<PathBuf> {
+    if let Some(rt) = super::runtime::load_runtime() {
+        if let Some(p) = resolve_gguf_path_for_model(&rt.model_id) {
+            return Some(p);
+        }
+    }
     if let Ok(v) = std::env::var("AKASHA_EMBEDDED_GGUF_PATH") {
         let t = v.trim();
         if !t.is_empty() {
@@ -209,10 +233,71 @@ impl ResolvedBackend {
 }
 
 pub fn n_gpu_layers() -> u32 {
-    std::env::var("AKASHA_EMBEDDED_N_GPU_LAYERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(99)
+    if let Some(rt) = super::runtime::load_runtime() {
+        return rt.n_gpu_layers;
+    }
+    if let Ok(v) = std::env::var("AKASHA_EMBEDDED_N_GPU_LAYERS") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            return n;
+        }
+    }
+    static_n_gpu_layers_for_tier()
+}
+
+/// Static tier rules before calibration (e.g. force CPU on 4 GB VRAM for small models).
+fn static_n_gpu_layers_for_tier() -> u32 {
+    let profile = super::hardware::detect_hardware();
+    if profile.tier_id == "gpu_low_4gb" {
+        if let Some(path) = resolve_gguf_path() {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if meta.len() <= 1_100_000_000 {
+                    return 0;
+                }
+            }
+        }
+        return 0;
+    }
+    if profile.tier_id == "cpu_only" || profile.tier_id == "cpu_capable_32gb" {
+        return 0;
+    }
+    99
+}
+
+/// Recommended model id from static profile tier (before calibration).
+pub fn recommended_model_id() -> Option<String> {
+    if let Some(rt) = super::runtime::load_runtime() {
+        return Some(rt.model_id);
+    }
+    let profile = super::hardware::detect_hardware();
+    if let Ok(doc) = super::profiles::load_profiles() {
+        if let Some(tier) = super::profiles::tier_for_id(&doc, &profile.tier_id) {
+            return tier.model_priority.first().cloned();
+        }
+    }
+    None
+}
+
+pub fn active_engine_policy() -> String {
+    if let Some(rt) = super::runtime::load_runtime() {
+        if rt.n_gpu_layers > 0 {
+            return "llama_cpp_cuda".to_string();
+        }
+        return "llama_cpp_cpu".to_string();
+    }
+    let ngl = n_gpu_layers();
+    if ngl > 0 {
+        "llama_cpp_cuda".to_string()
+    } else {
+        "llama_cpp_cpu".to_string()
+    }
+}
+
+/// Apply persisted runtime env on daemon startup.
+pub fn apply_persisted_runtime() {
+    #[cfg(all(feature = "llama-cpp", feature = "download"))]
+    if let Some(rt) = super::runtime::load_runtime() {
+        super::calibrate::apply_runtime_env(&rt);
+    }
 }
 
 pub fn embedded_models_manifest_path() -> PathBuf {

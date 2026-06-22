@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "description": "Static hardware tiers and engine/model defaults derived from bench_embedded_results.md (XPS i7-12700H / 32 GB DDR5 / RTX 3050 Ti 4 GB).",
+  "tiers": [
+    {
+      "id": "cpu_only",
+      "label": "CPU only",
+      "criteria": {
+        "cuda_compiled": false,
+        "nvidia_gpu": false
+      },
+      "default_engine": "llama_cpp_cpu",
+      "default_n_gpu_layers": 0,
+      "model_priority": [
+        "smollm2-360m-instruct-q4",
+        "qwen3.5-0.8b-q4",
+        "qwen3-0.6b-q4"
+      ],
+      "calibration_ngl_options": [0]
+    },
+    {
+      "id": "cpu_capable_32gb",
+      "label": "CPU capable (32+ GB RAM, weak GPU)",
+      "criteria": {
+        "min_ram_gb": 32,
+        "max_vram_mb": 2048
+      },
+      "default_engine": "llama_cpp_cpu",
+      "default_n_gpu_layers": 0,
+      "model_priority": [
+        "qwen3.5-0.8b-q4",
+        "smollm2-360m-instruct-q4",
+        "qwen3-0.6b-q4"
+      ],
+      "calibration_ngl_options": [0]
+    },
+    {
+      "id": "gpu_low_4gb",
+      "label": "Low VRAM GPU (≤6 GB)",
+      "criteria": {
+        "max_vram_mb": 6144
+      },
+      "default_engine": "llama_cpp_cpu",
+      "default_n_gpu_layers": 0,
+      "model_priority": [
+        "qwen3.5-0.8b-q4",
+        "smollm2-360m-instruct-q4",
+        "qwen2.5-1.5b-instruct-q4"
+      ],
+      "calibration_ngl_options": [0, 99],
+      "notes": "Prefer CPU llama-cpp for models ≤ ~1 GB on 4 GB VRAM laptops."
+    },
+    {
+      "id": "gpu_mid_8gb",
+      "label": "Mid VRAM GPU (6–10 GB)",
+      "criteria": {
+        "min_vram_mb": 6145,
+        "max_vram_mb": 10240
+      },
+      "default_engine": "llama_cpp_cuda",
+      "default_n_gpu_layers": 99,
+      "model_priority": [
+        "qwen2.5-1.5b-instruct-q4",
+        "qwen3.5-0.8b-q4"
+      ],
+      "calibration_ngl_options": [99, 0]
+    },
+    {
+      "id": "gpu_high_12gb",
+      "label": "High VRAM GPU (>10 GB)",
+      "criteria": {
+        "min_vram_mb": 10241
+      },
+      "default_engine": "llama_cpp_cuda",
+      "default_n_gpu_layers": 99,
+      "model_priority": [
+        "qwen2.5-1.5b-instruct-q4",
+        "qwen3.5-0.8b-q4"
+      ],
+      "calibration_ngl_options": [99]
+    }
+  ]
+}

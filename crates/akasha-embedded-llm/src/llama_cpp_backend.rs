@@ -6,9 +6,12 @@ use once_cell::sync::{Lazy, OnceCell};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
+const DEFAULT_N_BATCH: u32 = 2048;
+
 static BACKEND: OnceCell<llama_cpp_4::llama_backend::LlamaBackend> = OnceCell::new();
 static PIPELINE: Lazy<RwLock<Option<LlamaCppPipeline>>> = Lazy::new(|| RwLock::new(None));
 static MODEL_PATH: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
+static LOADED_N_GPU_LAYERS: Lazy<RwLock<Option<u32>>> = Lazy::new(|| RwLock::new(None));
 static LLAMA_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 struct LlamaCppPipeline {
@@ -44,6 +47,9 @@ pub fn unload() {
     }
     if let Ok(mut p) = MODEL_PATH.write() {
         *p = None;
+    }
+    if let Ok(mut n) = LOADED_N_GPU_LAYERS.write() {
+        *n = None;
     }
 }
 
@@ -90,13 +96,18 @@ fn llama_backend() -> Result<&'static llama_cpp_4::llama_backend::LlamaBackend> 
 }
 
 fn get_or_load(gguf_path: &Path) -> Result<()> {
+    let ngl = n_gpu_layers();
     {
         let g = PIPELINE
             .read()
             .map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
-        if g.is_some() {
+        let loaded_ngl = LOADED_N_GPU_LAYERS.read().ok().and_then(|n| *n);
+        if g.is_some() && loaded_ngl == Some(ngl) {
             return Ok(());
         }
+    }
+    if let Ok(mut g) = PIPELINE.write() {
+        *g = None;
     }
     let mut g = PIPELINE
         .write()
@@ -108,7 +119,7 @@ fn get_or_load(gguf_path: &Path) -> Result<()> {
     let mut model_params = llama_cpp_4::model::params::LlamaModelParams::default();
     #[cfg(feature = "llama-cpp-cuda")]
     {
-        model_params = model_params.with_n_gpu_layers(n_gpu_layers());
+        model_params = model_params.with_n_gpu_layers(ngl);
     }
     let model = llama_cpp_4::model::LlamaModel::load_from_file(backend, gguf_path, &model_params)
         .map_err(|e| EmbeddedLlmError::Load(format!("load GGUF {}: {e}", gguf_path.display())))?;
@@ -118,6 +129,9 @@ fn get_or_load(gguf_path: &Path) -> Result<()> {
     });
     if let Ok(mut p) = MODEL_PATH.write() {
         *p = Some(gguf_path.to_path_buf());
+    }
+    if let Ok(mut n) = LOADED_N_GPU_LAYERS.write() {
+        *n = Some(ngl);
     }
     Ok(())
 }
@@ -148,7 +162,9 @@ where
         .ok_or_else(|| EmbeddedLlmError::Load("llama pipeline not loaded".into()))?;
 
     let backend = llama_backend()?;
-    let ctx_params = LlamaContextParams::default();
+    let ctx_params = LlamaContextParams::default()
+        .with_n_batch(DEFAULT_N_BATCH)
+        .with_n_ubatch(512);
     let mut ctx = pipeline
         .model
         .new_context(backend, ctx_params)
@@ -163,14 +179,8 @@ where
         return Ok(String::new());
     }
 
-    let mut batch = LlamaBatch::new(prompt_tokens.len(), 1);
-    for (i, &tok) in prompt_tokens.iter().enumerate() {
-        batch
-            .add(tok, i as i32, &[0], i == prompt_tokens.len() - 1)
-            .map_err(|e| EmbeddedLlmError::Inference(format!("batch add: {e}")))?;
-    }
-    ctx.decode(&mut batch)
-        .map_err(|e| EmbeddedLlmError::Inference(format!("decode prompt: {e}")))?;
+    let mut batch = LlamaBatch::new(DEFAULT_N_BATCH as usize, 1);
+    decode_prompt_tokens(&mut ctx, &mut batch, &prompt_tokens, DEFAULT_N_BATCH)?;
 
     let temp = temperature.unwrap_or(0.3) as f32;
     let max_new = max_tokens.unwrap_or(256).min(2048);
@@ -182,6 +192,7 @@ where
 
     let mut out = String::new();
     let mut n_cur = prompt_tokens.len() as i32;
+    batch = LlamaBatch::new(1, 1);
 
     for _ in 0..max_new {
         let token = sampler.sample(&ctx, -1);
@@ -208,4 +219,29 @@ where
     }
 
     Ok(out.trim().to_string())
+}
+
+fn decode_prompt_tokens(
+    ctx: &mut llama_cpp_4::context::LlamaContext,
+    batch: &mut llama_cpp_4::llama_batch::LlamaBatch,
+    prompt_tokens: &[i32],
+    n_batch: u32,
+) -> Result<()> {
+    let chunk_size = n_batch.max(1) as usize;
+    let mut offset = 0usize;
+    while offset < prompt_tokens.len() {
+        let end = (offset + chunk_size).min(prompt_tokens.len());
+        batch.clear();
+        for (i, &tok) in prompt_tokens[offset..end].iter().enumerate() {
+            let pos = (offset + i) as i32;
+            let is_last = offset + i + 1 == prompt_tokens.len();
+            batch
+                .add(tok, pos, &[0], is_last)
+                .map_err(|e| EmbeddedLlmError::Inference(format!("batch add: {e}")))?;
+        }
+        ctx.decode(batch)
+            .map_err(|e| EmbeddedLlmError::Inference(format!("decode prompt: {e}")))?;
+        offset = end;
+    }
+    Ok(())
 }

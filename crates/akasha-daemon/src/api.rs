@@ -15314,14 +15314,18 @@ pub async fn handle_api(
                 "id": "embedded_llm",
                 "ok": ok,
                 "description": format!(
-                    "{} (backend {}, device {})",
+                    "{} (backend {}, device {}, tier {})",
                     snap.hint,
                     snap.backend.as_deref().unwrap_or("?"),
-                    snap.device.as_deref().unwrap_or("?")
+                    snap.device.as_deref().unwrap_or("?"),
+                    snap.hardware_tier.as_deref().unwrap_or("?")
                 ),
                 "gguf_present": snap.gguf_present,
                 "llama_cpp_compiled": snap.llama_cpp_compiled,
-                "ready_for_chat": snap.ready_for_chat
+                "ready_for_chat": snap.ready_for_chat,
+                "calibration_done": snap.calibration_done,
+                "hardware_tier": snap.hardware_tier,
+                "active_engine_policy": snap.active_engine_policy
             });
             if let Some(action) = snap.action {
                 check["action"] = serde_json::json!(action);
@@ -18350,6 +18354,71 @@ pub async fn handle_api(
             return json_response("200 OK", &body);
         }
         #[cfg(not(all(feature = "embedded", feature = "embedded-download")))]
+        {
+            let body = serde_json::json!({ "state": "idle", "error": "not compiled" }).to_string();
+            return json_response("501 Not Implemented", &body);
+        }
+    }
+
+    // GET /api/router/embedded/hardware — RAM/VRAM tier + static candidates
+    if method == "GET" && path == "/api/router/embedded/hardware" {
+        #[cfg(feature = "embedded")]
+        {
+            match llm_router.embedded_hardware() {
+                Ok(json) => {
+                    let body = serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string());
+                    return json_response("200 OK", &body);
+                }
+                Err(e) => {
+                    let body = serde_json::json!({ "error": e }).to_string();
+                    return json_response("500 Internal Server Error", &body);
+                }
+            }
+        }
+        #[cfg(not(feature = "embedded"))]
+        {
+            let body = serde_json::json!({ "error": "embedded not compiled" }).to_string();
+            return json_response("501 Not Implemented", &body);
+        }
+    }
+
+    // POST /api/router/embedded/calibrate — start micro-bench (body: { "max_configs": 3 } optional)
+    if method == "POST" && path == "/api/router/embedded/calibrate" {
+        #[cfg(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp"))]
+        {
+            let max_configs = body
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                .and_then(|j| j.get("max_configs").and_then(|v| v.as_u64()))
+                .unwrap_or(3) as usize;
+            match llm_router.embedded_start_calibrate(max_configs.max(1).min(3)) {
+                Ok(()) => {
+                    let body = serde_json::json!({ "started": true }).to_string();
+                    return json_response("202 Accepted", &body);
+                }
+                Err(e) => {
+                    let body = serde_json::json!({ "error": e }).to_string();
+                    return json_response("409 Conflict", &body);
+                }
+            }
+        }
+        #[cfg(not(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp")))]
+        {
+            let body = serde_json::json!({ "error": "embedded calibration requires llama-cpp" })
+                .to_string();
+            return json_response("501 Not Implemented", &body);
+        }
+    }
+
+    // GET /api/router/embedded/calibrate/status — poll calibration progress
+    if method == "GET" && path == "/api/router/embedded/calibrate/status" {
+        #[cfg(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp"))]
+        {
+            let snap = llm_router.embedded_calibrate_status();
+            let body = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string());
+            return json_response("200 OK", &body);
+        }
+        #[cfg(not(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp")))]
         {
             let body = serde_json::json!({ "state": "idle", "error": "not compiled" }).to_string();
             return json_response("501 Not Implemented", &body);

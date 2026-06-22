@@ -23,6 +23,11 @@ type EmbeddedStatus = {
   gguf_present?: boolean;
   ready_for_chat?: boolean;
   action?: string | null;
+  hardware_tier?: string | null;
+  recommended_model_id?: string | null;
+  active_engine_policy?: string | null;
+  calibration_done?: boolean;
+  last_bench_tok_per_s?: number | null;
 };
 
 type ManifestModel = {
@@ -37,6 +42,27 @@ type DownloadProgress = {
   state: string;
   percent?: number;
   error?: string | null;
+};
+
+type CalibrateProgress = {
+  state: string;
+  percent?: number;
+  current?: number;
+  total?: number;
+  current_config?: string | null;
+  error?: string | null;
+  winner?: {
+    model_id: string;
+    n_gpu_layers: number;
+    backend: string;
+    tok_per_s: number;
+    device: string;
+  } | null;
+};
+
+type HardwareInfo = {
+  profile?: { tier_id?: string; ram_gb?: number; vram_mb?: number | null; gpu_name?: string | null };
+  models_for_tier?: string[];
 };
 
 export function readSetupWizardPending(): boolean {
@@ -62,9 +88,11 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
   const [doctorMsg, setDoctorMsg] = useState<string | null>(null);
   const [howToCall, setHowToCall] = useState("");
   const [embeddedStatus, setEmbeddedStatus] = useState<EmbeddedStatus | null>(null);
+  const [hardwareInfo, setHardwareInfo] = useState<HardwareInfo | null>(null);
   const [models, setModels] = useState<ManifestModel[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+  const [calibrateProgress, setCalibrateProgress] = useState<CalibrateProgress | null>(null);
   const [firstMessageResult, setFirstMessageResult] = useState<string | null>(null);
   const [firstMessageError, setFirstMessageError] = useState<string | null>(null);
 
@@ -72,6 +100,7 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
     t("onboarding.step.welcome"),
     t("onboarding.step.health"),
     t("onboarding.step.llm"),
+    t("onboarding.step.calibrate"),
     t("onboarding.step.firstMessage"),
     t("onboarding.step.channels"),
     t("onboarding.step.profile"),
@@ -83,13 +112,19 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
     try {
       const status = await invoke<EmbeddedStatus>("get_embedded_status", { port: DAEMON_PORT });
       setEmbeddedStatus(status);
+      const hw = await invoke<HardwareInfo>("get_embedded_hardware", { port: DAEMON_PORT });
+      setHardwareInfo(hw);
       const manifest = await invoke<{ models?: ManifestModel[]; default_id?: string }>(
         "get_embedded_models",
         { port: DAEMON_PORT },
       );
-      const list = manifest.models ?? [];
-      setModels(list);
-      setSelectedModelId(manifest.default_id ?? list[0]?.id ?? "");
+      const tierIds = new Set(hw.models_for_tier ?? []);
+      const list = (manifest.models ?? []).filter(
+        (m) => tierIds.size === 0 || tierIds.has(m.id),
+      );
+      setModels(list.length > 0 ? list : (manifest.models ?? []));
+      const recommended = status.recommended_model_id ?? manifest.default_id ?? list[0]?.id ?? "";
+      setSelectedModelId(recommended);
     } catch (e) {
       setDoctorMsg(e instanceof Error ? e.message : String(e));
     }
@@ -97,6 +132,9 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
 
   useEffect(() => {
     if (step === 2 && daemonOk) {
+      void loadEmbedded();
+    }
+    if (step === 3 && daemonOk) {
       void loadEmbedded();
     }
   }, [step, daemonOk, loadEmbedded]);
@@ -141,6 +179,31 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
       setBusy(false);
     }
   }, [loadEmbedded, selectedModelId]);
+
+  const startCalibration = useCallback(async () => {
+    setBusy(true);
+    setCalibrateProgress({ state: "running", percent: 0, current: 0, total: 3 });
+    try {
+      await invoke("embedded_calibrate_start", { port: DAEMON_PORT, maxConfigs: 3 });
+      const poll = window.setInterval(async () => {
+        try {
+          const prog = await invoke<CalibrateProgress>("embedded_calibrate_status", { port: DAEMON_PORT });
+          setCalibrateProgress(prog);
+          if (prog.state === "done" || prog.state === "error") {
+            window.clearInterval(poll);
+            setBusy(false);
+            if (prog.state === "done") void loadEmbedded();
+          }
+        } catch {
+          window.clearInterval(poll);
+          setBusy(false);
+        }
+      }, 800);
+    } catch (e) {
+      setCalibrateProgress({ state: "error", error: e instanceof Error ? e.message : String(e) });
+      setBusy(false);
+    }
+  }, [loadEmbedded]);
 
   const runFirstMessageTest = useCallback(async () => {
     setBusy(true);
@@ -191,8 +254,17 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
     !embeddedStatus?.gguf_present &&
     embeddedStatus?.action === "embedded-download";
 
+  const needsCalibrate =
+    embeddedStatus?.gguf_present &&
+    embeddedStatus?.llama_cpp_compiled &&
+    !embeddedStatus?.calibration_done;
+
   const showLoadingHint =
     embeddedStatus && !embeddedStatus.embedded_loaded && embeddedStatus.ready_for_chat;
+
+  const canAdvanceFromCalibrate = embeddedStatus?.calibration_done === true;
+
+  const calibrateBlocked = step === 3 && needsCalibrate && !canAdvanceFromCalibrate;
 
   return (
     <div className="human-input-overlay onboarding-overlay" role="dialog" aria-modal="true">
@@ -226,6 +298,12 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
                   <strong>{t("onboarding.embedded.backend")}:</strong>{" "}
                   {embeddedStatus.backend ?? "—"} ({embeddedStatus.device ?? "—"})
                 </p>
+                {hardwareInfo?.profile?.tier_id ? (
+                  <p className="muted">
+                    {t("onboarding.embedded.tier")}: {hardwareInfo.profile.tier_id}
+                    {hardwareInfo.profile.gpu_name ? ` — ${hardwareInfo.profile.gpu_name}` : ""}
+                  </p>
+                ) : null}
                 <p className="muted">{embeddedStatus.hint}</p>
                 {embeddedStatus.compiled_backends?.length ? (
                   <p className="muted">
@@ -235,7 +313,7 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
                 {showLoadingHint ? (
                   <p className="onboarding-loading-hint">{t("onboarding.embedded.loadingHint")}</p>
                 ) : null}
-                {models.length > 1 ? (
+                {models.length > 0 ? (
                   <label htmlFor="wizard-model-pick">
                     {t("onboarding.embedded.pickModel")}
                     <select
@@ -280,6 +358,45 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
         )}
         {step === 3 && (
           <>
+            <p>{t("onboarding.calibrate.hint")}</p>
+            <p className="onboarding-loading-hint">{t("onboarding.calibrate.duration")}</p>
+            {embeddedStatus?.calibration_done && embeddedStatus.last_bench_tok_per_s != null ? (
+              <p>
+                {t("onboarding.calibrate.done")}: {embeddedStatus.recommended_model_id ?? "—"},{" "}
+                {embeddedStatus.active_engine_policy ?? "—"}, ~{embeddedStatus.last_bench_tok_per_s.toFixed(1)}{" "}
+                tok/s
+              </p>
+            ) : needsCalibrate ? (
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy || !daemonOk}
+                onClick={() => void startCalibration()}
+              >
+                {busy ? t("onboarding.calibrate.running") : t("onboarding.calibrate.run")}
+              </button>
+            ) : (
+              <p className="muted">{t("onboarding.calibrate.skipHint")}</p>
+            )}
+            {calibrateProgress ? (
+              <p className="muted">
+                {calibrateProgress.state === "running"
+                  ? `${t("onboarding.calibrate.progress")} ${calibrateProgress.current ?? 0}/${calibrateProgress.total ?? 3}${
+                      calibrateProgress.current_config ? ` — ${calibrateProgress.current_config}` : ""
+                    } (${Math.round(calibrateProgress.percent ?? 0)}%)`
+                  : calibrateProgress.state === "error"
+                    ? calibrateProgress.error
+                    : calibrateProgress.state === "done" && calibrateProgress.winner
+                      ? `${t("onboarding.calibrate.winner")}: ${calibrateProgress.winner.model_id}, ${
+                          calibrateProgress.winner.backend
+                        }, ~${calibrateProgress.winner.tok_per_s.toFixed(1)} tok/s`
+                      : null}
+              </p>
+            ) : null}
+          </>
+        )}
+        {step === 4 && (
+          <>
             <p>{t("onboarding.firstMessage.hint")}</p>
             <p className="onboarding-loading-hint">{t("onboarding.embedded.loadingHint")}</p>
             <button type="button" className="btn-primary" disabled={busy || !daemonOk} onClick={() => void runFirstMessageTest()}>
@@ -291,13 +408,13 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
             {firstMessageError ? <p className="onboarding-error">{firstMessageError}</p> : null}
           </>
         )}
-        {step === 4 && (
+        {step === 5 && (
           <>
             <p>{t("onboarding.channels.hint")}</p>
             <p className="muted">{t("onboarding.channels.detail")}</p>
           </>
         )}
-        {step === 5 && (
+        {step === 6 && (
           <>
             <label htmlFor="wizard-how-to-call">{t("onboarding.profile.label")}</label>
             <input
@@ -309,7 +426,7 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
             />
           </>
         )}
-        {step === 6 && <p>{t("onboarding.ready")}</p>}
+        {step === 7 && <p>{t("onboarding.ready")}</p>}
         <div className="onboarding-actions onboarding-wizard-actions">
           {step > 0 ? (
             <button type="button" className="btn-secondary" onClick={() => setStep((s) => s - 1)}>
@@ -320,7 +437,7 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
             <button
               type="button"
               className="btn-primary"
-              disabled={step === 1 && !daemonOk}
+              disabled={(step === 1 && !daemonOk) || calibrateBlocked}
               onClick={() => setStep((s) => s + 1)}
             >
               {t("onboarding.next")}

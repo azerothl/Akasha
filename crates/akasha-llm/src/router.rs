@@ -320,6 +320,45 @@ impl LLMRouter {
         akasha_embedded_llm::download::download_progress_snapshot()
     }
 
+    /// Hardware profile + static calibration candidates.
+    #[cfg(feature = "embedded")]
+    pub fn embedded_hardware(&self) -> Result<serde_json::Value, String> {
+        let _ = self;
+        let profile = akasha_embedded_llm::hardware::detect_hardware();
+        let candidates =
+            akasha_embedded_llm::profiles::calibration_candidates(&profile, 3).unwrap_or_default();
+        let models_for_tier = akasha_embedded_llm::profiles::models_for_tier(&profile.tier_id)
+            .unwrap_or_default();
+        Ok(serde_json::json!({
+            "profile": profile,
+            "static_candidates": candidates,
+            "models_for_tier": models_for_tier,
+        }))
+    }
+
+    /// Start embedded micro-bench calibration (background thread).
+    #[cfg(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp"))]
+    pub fn embedded_start_calibrate(&self, max_configs: usize) -> Result<(), String> {
+        let _ = self;
+        akasha_embedded_llm::calibrate::start_calibration_background(max_configs)
+    }
+
+    /// Poll calibration progress.
+    #[cfg(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp"))]
+    pub fn embedded_calibrate_status(
+        &self,
+    ) -> akasha_embedded_llm::calibrate::CalibrateProgress {
+        let _ = self;
+        akasha_embedded_llm::calibrate::calibrate_progress_snapshot()
+    }
+
+    /// Apply persisted runtime config (call at daemon startup).
+    #[cfg(feature = "embedded")]
+    pub fn embedded_apply_runtime(&self) {
+        let _ = self;
+        akasha_embedded_llm::config::apply_persisted_runtime();
+    }
+
     /// Replace in-memory routing config (task_types, providers metadata, global) from disk or API reload.
     /// Registered provider clients (Ollama, OpenRouter, etc.) are unchanged — route/model switches take effect immediately.
     pub fn reload_routing_config(&self, config: RoutingConfig) {

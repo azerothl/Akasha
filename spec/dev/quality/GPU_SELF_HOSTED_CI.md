@@ -28,12 +28,22 @@ gpu-smoke:
     - name: Bench tok/s
       run: |
         pwsh ./spec/dev/quality/bench_embedded.ps1 -Backend llama_cpp -Strict -Json
+    - name: Profile matrix baselines
+      run: |
+        pwsh ./spec/dev/quality/bench_embedded_models.ps1 -Matrix -SimulatedTier gpu_low_4gb -NglValues 0,99
 ```
 
-5. Documenter l'URL du runner et la fréquence (release tags uniquement recommandé).
+6. Après bench : copier `embedded_profile_baselines.json` dans le dépôt et noter la date dans `bench_embedded_results.md`.
+
+## Mise à jour des baselines par tier
+
+1. Sur le runner GPU, exécuter la matrice pour chaque tier simulé pertinent (`gpu_low_4gb`, `gpu_mid_8gb`, `gpu_high_12gb`) en variant `-SimulatedTier` (étiquette documentaire ; le tier réel est déduit de la machine).
+2. Fusionner les JSON ou conserver un fichier par campagne sous `spec/dev/quality/embedded_profile_baselines.json`.
+3. Documenter la procédure complète dans [tests_and_benchmarks.md](tests_and_benchmarks.md) § akasha-embedded-llm.
 
 ## Statut v0.10
 
 - [ ] Runner provisionné
 - [ ] Job CI activé dans `.github/workflows/release.yml` ou `ci.yml`
 - [ ] Dernière exécution bench collée dans `bench_embedded_results.md`
+- [ ] `embedded_profile_baselines.json` mis à jour depuis le runner GPU

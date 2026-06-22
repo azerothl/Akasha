@@ -491,6 +491,7 @@ impl Daemon {
             info!("LLM Router: degraded mode (local providers only)");
         }
         let llm_router = Arc::new(llm_router);
+        llm_router.embedded_apply_runtime();
 
         // Preload embedded model only when explicitly opted in via AKASHA_EMBEDDED_PRELOAD=1.
         // Default is OFF: loading the model at startup (~1-2 GB) wastes RAM when an external

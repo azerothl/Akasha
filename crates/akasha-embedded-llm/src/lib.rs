@@ -4,13 +4,18 @@
 
 #[cfg(feature = "baguettotron")]
 mod baguettotron;
+#[cfg(all(feature = "llama-cpp", feature = "download"))]
+pub mod calibrate;
 #[cfg(feature = "candle")]
 mod candle_backend;
 pub mod config;
 #[cfg(feature = "download")]
 pub mod download;
+pub mod hardware;
 #[cfg(feature = "llama-cpp")]
 mod llama_cpp_backend;
+pub mod profiles;
+pub mod runtime;
 
 use once_cell::sync::Lazy;
 use std::sync::{Mutex, RwLock};
@@ -52,6 +57,20 @@ pub struct EmbeddedStatus {
     /// Recommended CLI/API action when GGUF missing on CUDA builds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
+    /// Static hardware tier (`cpu_only`, `gpu_low_4gb`, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardware_tier: Option<String>,
+    /// Model id recommended by static profile or calibration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_model_id: Option<String>,
+    /// Active engine policy (`llama_cpp_cpu` / `llama_cpp_cuda`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_engine_policy: Option<String>,
+    /// Whether micro-bench calibration completed (`embedded_runtime.json`).
+    pub calibration_done: bool,
+    /// Last calibration winner tok/s.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_bench_tok_per_s: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -172,14 +191,19 @@ impl EmbeddedLlm {
         let compiled = compiled_backends();
         let llama_cpp_compiled = config::llama_cpp_compiled();
         let gguf_present = config::resolve_gguf_path().is_some();
+        let calibration_done = runtime::calibration_done();
+        let profile = hardware::detect_hardware();
         let ready_for_chat = config::resolve_backend_choice().is_ok();
         let needs_gguf = llama_cpp_compiled && !gguf_present;
+        let needs_calibrate = gguf_present && llama_cpp_compiled && !calibration_done;
         let loaded = Self::is_loaded();
         let backend = Self::active_backend();
         let device = Self::device_hint();
         let model_path = Self::model_path();
         let action = if needs_gguf {
             Some("embedded-download".to_string())
+        } else if needs_calibrate {
+            Some("embedded-calibrate".to_string())
         } else {
             None
         };
@@ -187,6 +211,8 @@ impl EmbeddedLlm {
             "Compile daemon with embedded feature; for llama_cpp run: akasha config models embedded-download".into()
         } else if needs_gguf {
             "llama_cpp compiled but GGUF missing — run: akasha config models embedded-download (or use wizard)".into()
+        } else if needs_calibrate {
+            "GGUF present — run embedded calibration (wizard) to pick the best engine and model for this machine".into()
         } else if loaded {
             format!(
                 "Embedded model loaded ({}, device {})",
@@ -198,6 +224,7 @@ impl EmbeddedLlm {
         } else {
             "Embedded model will load on first use (Candle CPU: first call may take 1–3 min)".into()
         };
+        let last_bench_tok_per_s = runtime::load_runtime().and_then(|r| r.winner_tok_per_s);
         EmbeddedStatus {
             embedded_available: !compiled.is_empty() && ready_for_chat,
             embedded_loaded: loaded,
@@ -210,6 +237,11 @@ impl EmbeddedLlm {
             gguf_present,
             ready_for_chat,
             action,
+            hardware_tier: Some(profile.tier_id),
+            recommended_model_id: config::recommended_model_id(),
+            active_engine_policy: Some(config::active_engine_policy()),
+            calibration_done,
+            last_bench_tok_per_s,
         }
     }
 }

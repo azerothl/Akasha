@@ -35,6 +35,16 @@ pub struct ManifestModel {
     pub url: String,
     #[serde(default)]
     pub size_bytes_hint: u64,
+    #[serde(default)]
+    pub min_vram_mb: u32,
+    #[serde(default)]
+    pub min_ram_mb: u32,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub engine_candidates: Vec<String>,
+    #[serde(default)]
+    pub profile_tiers: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

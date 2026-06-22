@@ -8,7 +8,12 @@
       "label_fr": "Qwen2.5 1.5B Instruct Q4_K_M (recommandé, GPU)",
       "filename": "default.gguf",
       "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-      "size_bytes_hint": 986000000
+      "size_bytes_hint": 986000000,
+      "min_vram_mb": 4096,
+      "min_ram_mb": 8192,
+      "arch": "qwen2",
+      "engine_candidates": ["llama_cpp_cpu", "llama_cpp_cuda"],
+      "profile_tiers": ["gpu_mid_8gb", "gpu_high_12gb", "gpu_low_4gb"]
     },
     {
       "id": "smollm2-360m-instruct-q4",
@@ -17,7 +22,40 @@
       "label_fr": "SmolLM2 360M Instruct Q4_K_M (téléchargement léger)",
       "filename": "smollm2-360m-q4.gguf",
       "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf",
-      "size_bytes_hint": 250000000
+      "size_bytes_hint": 250000000,
+      "min_vram_mb": 0,
+      "min_ram_mb": 4096,
+      "arch": "llama",
+      "engine_candidates": ["llama_cpp_cpu", "llama_cpp_cuda"],
+      "profile_tiers": ["cpu_only", "cpu_capable_32gb", "gpu_low_4gb"]
+    },
+    {
+      "id": "qwen3.5-0.8b-q4",
+      "label": "Qwen3.5 0.8B Q4_K_M",
+      "label_en": "Qwen3.5 0.8B Q4_K_M (best bench on 4 GB GPU)",
+      "label_fr": "Qwen3.5 0.8B Q4_K_M (meilleur bench GPU 4 Go)",
+      "filename": "qwen3.5-0.8b-q4.gguf",
+      "url": "https://huggingface.co/diodel/Qwen3.5-0.8B-Q4_K_M-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+      "size_bytes_hint": 529000000,
+      "min_vram_mb": 3072,
+      "min_ram_mb": 8192,
+      "arch": "qwen35",
+      "engine_candidates": ["llama_cpp_cpu", "llama_cpp_cuda"],
+      "profile_tiers": ["cpu_only", "cpu_capable_32gb", "gpu_low_4gb", "gpu_mid_8gb", "gpu_high_12gb"]
+    },
+    {
+      "id": "qwen3-0.6b-q4",
+      "label": "Qwen3 0.6B Q4_K_M",
+      "label_en": "Qwen3 0.6B Q4_K_M (compact GGUF)",
+      "label_fr": "Qwen3 0.6B Q4_K_M (GGUF compact)",
+      "filename": "qwen3-0.6b-q4.gguf",
+      "url": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf",
+      "size_bytes_hint": 400000000,
+      "min_vram_mb": 0,
+      "min_ram_mb": 4096,
+      "arch": "qwen3",
+      "engine_candidates": ["llama_cpp_cpu", "llama_cpp_cuda"],
+      "profile_tiers": ["cpu_only", "cpu_capable_32gb", "gpu_low_4gb"]
     }
   ]
 }
