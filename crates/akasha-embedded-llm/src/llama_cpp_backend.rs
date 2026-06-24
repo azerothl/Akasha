@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
 const DEFAULT_N_BATCH: u32 = 2048;
+const DEFAULT_N_CTX: u32 = 4096;
 
 static BACKEND: OnceCell<llama_cpp_4::llama_backend::LlamaBackend> = OnceCell::new();
 static PIPELINE: Lazy<RwLock<Option<LlamaCppPipeline>>> = Lazy::new(|| RwLock::new(None));
@@ -16,7 +17,6 @@ static LLAMA_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 struct LlamaCppPipeline {
     model: llama_cpp_4::model::LlamaModel,
-    gguf_path: PathBuf,
 }
 
 pub fn is_available() -> bool {
@@ -116,17 +116,14 @@ fn get_or_load(gguf_path: &Path) -> Result<()> {
         return Ok(());
     }
     let backend = llama_backend()?;
-    let mut model_params = llama_cpp_4::model::params::LlamaModelParams::default();
     #[cfg(feature = "llama-cpp-cuda")]
-    {
-        model_params = model_params.with_n_gpu_layers(ngl);
-    }
+    let model_params =
+        llama_cpp_4::model::params::LlamaModelParams::default().with_n_gpu_layers(ngl);
+    #[cfg(not(feature = "llama-cpp-cuda"))]
+    let model_params = llama_cpp_4::model::params::LlamaModelParams::default();
     let model = llama_cpp_4::model::LlamaModel::load_from_file(backend, gguf_path, &model_params)
         .map_err(|e| EmbeddedLlmError::Load(format!("load GGUF {}: {e}", gguf_path.display())))?;
-    *g = Some(LlamaCppPipeline {
-        model,
-        gguf_path: gguf_path.to_path_buf(),
-    });
+    *g = Some(LlamaCppPipeline { model });
     if let Ok(mut p) = MODEL_PATH.write() {
         *p = Some(gguf_path.to_path_buf());
     }
@@ -162,18 +159,30 @@ where
         .ok_or_else(|| EmbeddedLlmError::Load("llama pipeline not loaded".into()))?;
 
     let backend = llama_backend()?;
+    let n_ctx = std::num::NonZeroU32::new(DEFAULT_N_CTX)
+        .expect("DEFAULT_N_CTX must be non-zero");
     let ctx_params = LlamaContextParams::default()
         .with_n_batch(DEFAULT_N_BATCH)
-        .with_n_ubatch(512);
+        .with_n_ubatch(512)
+        .with_n_ctx(Some(n_ctx));
     let mut ctx = pipeline
         .model
         .new_context(backend, ctx_params)
         .map_err(|e| EmbeddedLlmError::Load(format!("llama context: {e}")))?;
 
-    let prompt_tokens = pipeline
+    let mut prompt_tokens = pipeline
         .model
         .str_to_token(prompt, AddBos::Always)
         .map_err(|e| EmbeddedLlmError::Inference(format!("tokenize: {e}")))?;
+
+    let max_prompt_tokens = std::env::var("AKASHA_EMBEDDED_MAX_PROMPT_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 256)
+        .unwrap_or(DEFAULT_N_CTX as usize - 512);
+    if prompt_tokens.len() > max_prompt_tokens {
+        prompt_tokens = prompt_tokens[prompt_tokens.len() - max_prompt_tokens..].to_vec();
+    }
 
     if prompt_tokens.is_empty() {
         return Ok(String::new());
@@ -224,7 +233,7 @@ where
 fn decode_prompt_tokens(
     ctx: &mut llama_cpp_4::context::LlamaContext,
     batch: &mut llama_cpp_4::llama_batch::LlamaBatch,
-    prompt_tokens: &[i32],
+    prompt_tokens: &[llama_cpp_4::token::LlamaToken],
     n_batch: u32,
 ) -> Result<()> {
     let chunk_size = n_batch.max(1) as usize;

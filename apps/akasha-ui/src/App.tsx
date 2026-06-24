@@ -23,6 +23,7 @@ import { OpenClawMigrationPanel } from "./components/OpenClawMigrationPanel";
 import { CalDavAccountsPanel } from "./components/CalDavAccountsPanel";
 import { ToolsPolicyPanel } from "./components/ToolsPolicyPanel";
 import { ConnectorsPanel } from "./components/ConnectorsPanel";
+import { EmbeddedLocalModelSettings } from "./components/EmbeddedLocalModelSettings";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { AppNotificationsSync } from "./components/AppNotificationsSync";
 import { useNotify } from "./notifications/useNotifyOnMessage";
@@ -2488,7 +2489,7 @@ function App() {
   const [userProfileSaving, setUserProfileSaving] = useState(false);
   const [userProfileError, setUserProfileError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
-  const [systemSubTab, setSystemSubTab] = useState<"general" | "plugins" | "policy" | "connectors" | "health">("general");
+  const [systemSubTab, setSystemSubTab] = useState<"general" | "embedded" | "plugins" | "policy" | "connectors" | "health">("general");
   const [pluginTableBusyId, setPluginTableBusyId] = useState<string | null>(null);
   const [skillsCatalogText, setSkillsCatalogText] = useState<string | null>(null);
   const [skillsCatalogLoading, setSkillsCatalogLoading] = useState(false);
@@ -9725,6 +9726,15 @@ function App() {
                   <button
                     type="button"
                     role="tab"
+                    aria-selected={systemSubTab === "embedded"}
+                    className={systemSubTab === "embedded" ? "active" : ""}
+                    onClick={() => setSystemSubTab("embedded")}
+                  >
+                    {t("settings.system_subtab_embedded")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
                     aria-selected={systemSubTab === "plugins"}
                     className={systemSubTab === "plugins" ? "active" : ""}
                     onClick={() => setSystemSubTab("plugins")}
@@ -9781,6 +9791,10 @@ function App() {
                     </dl>
                     <OpenClawMigrationPanel locale={locale} fetchEndpoint={fetchSystemEndpoint} />
                   </>
+                )}
+
+                {systemSubTab === "embedded" && (
+                  <EmbeddedLocalModelSettings t={t} locale={locale} />
                 )}
 
                 {systemSubTab === "policy" && <ToolsPolicyPanel t={t} />}

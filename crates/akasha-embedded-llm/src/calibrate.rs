@@ -166,9 +166,10 @@ fn bench_candidate(cand: &StaticCandidate) -> Result<(f64, f64, String), String>
             cand.n_gpu_layers.to_string(),
         );
 
-        let llm = crate::EmbeddedLlm::new();
-        llm.preload()
+        crate::EmbeddedLlm::preload()
             .map_err(|e| format!("preload {}: {e}", cand.model_id))?;
+
+        let llm = crate::EmbeddedLlm::new();
 
         let mut first_token: Option<f64> = None;
         let gen_start = Instant::now();

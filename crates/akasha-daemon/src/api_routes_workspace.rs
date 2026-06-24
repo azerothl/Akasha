@@ -10,6 +10,41 @@ fn parse_json_body(body: Option<&[u8]>) -> Option<serde_json::Value> {
     body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
 }
 
+fn compare_timeout_for_provider(provider: &str) -> std::time::Duration {
+    let embedded_secs = std::env::var("AKASHA_COMPARE_TIMEOUT_SECS_EMBEDDED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s >= 30)
+        .unwrap_or(600);
+    let default_secs = std::env::var("AKASHA_COMPARE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s >= 30)
+        .unwrap_or(120);
+    match provider {
+        "akasha_embedded" | "akasha_core" => std::time::Duration::from_secs(embedded_secs),
+        _ => std::time::Duration::from_secs(default_secs),
+    }
+}
+
+fn compare_max_tokens_for_provider(provider: &str) -> u32 {
+    match provider {
+        "akasha_embedded" | "akasha_core" => std::env::var("AKASHA_EMBEDDED_MAX_TOKENS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&n| n >= 16)
+            .unwrap_or(512)
+            .min(1024),
+        _ => 1024,
+    }
+}
+
+fn compare_uses_embedded(models: &[(String, String, String)]) -> bool {
+    models
+        .iter()
+        .any(|(_, p, _)| p == "akasha_embedded" || p == "akasha_core")
+}
+
 /// Returns `Some(response)` when this module handled the route.
 pub async fn handle_workspace_routes(
     method: &str,
@@ -523,21 +558,27 @@ async fn run_compare(
         entries.push((label, provider.to_string(), model.to_string()));
     }
 
+    if compare_uses_embedded(&entries) {
+        #[cfg(feature = "embedded")]
+        {
+            if let Err(e) = llm_router.embedded_preload() {
+                tracing::warn!(error = %e, "compare: embedded preload failed");
+            }
+        }
+    }
+
     let mut results = Vec::new();
     for (label, provider, model) in &entries {
-        llm_router.set_primary_route(
-            "compare_slot",
-            akasha_llm::config::RouteEntry {
-                provider: provider.clone(),
-                model: model.clone(),
-                config: None,
-            },
-        );
+        let route = akasha_llm::config::RouteEntry {
+            provider: provider.clone(),
+            model: model.clone(),
+            config: None,
+        };
         let req = CompletionRequest {
             prompt: prompt.to_string(),
-            max_tokens: Some(1024),
+            max_tokens: Some(compare_max_tokens_for_provider(provider)),
             temperature: Some(0.7),
-            preferred_task_type: Some("compare_slot".to_string()),
+            preferred_task_type: None,
             system_prompt: Some(
                 "Answer the user prompt directly. Be concise unless the question requires detail."
                     .to_string(),
@@ -552,9 +593,9 @@ async fn run_compare(
             num_gpu: None,
             thinking_level: None,
         };
-        let timeout = std::time::Duration::from_secs(120);
+        let timeout = compare_timeout_for_provider(provider);
         let started = std::time::Instant::now();
-        let outcome = match tokio::time::timeout(timeout, llm_router.complete(&req)).await {
+        let outcome = match tokio::time::timeout(timeout, llm_router.complete_for_entry(&req, &route)).await {
             Ok(Ok(resp)) => {
                 let latency_ms = resp
                     .total_duration_ns
@@ -585,7 +626,7 @@ async fn run_compare(
             }),
             Err(_) => serde_json::json!({
                 "label": label,
-                "error": "timeout",
+                "error": format!("timeout after {}s", timeout.as_secs()),
                 "ok": false
             }),
         };

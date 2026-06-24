@@ -399,36 +399,16 @@ impl Daemon {
             "LLM Router global config loaded"
         );
 
-        // All API keys / secrets: vault first, then env. (vault://key_name or key_name in vault, else env var.)
-        let resolve_api_key = |api_key_ref: Option<&String>, default_env: &str| -> Option<String> {
-            let ref_str = api_key_ref
-                .as_ref()
-                .map(|s| s.as_str().trim())
-                .filter(|s| !s.is_empty());
-            if let Some(r) = ref_str {
-                if let Some(name) = r.strip_prefix("vault://") {
-                    if let Ok(v) = &vault {
-                        if let Ok(k) = v.get(name) {
-                            return Some(k);
-                        }
-                    }
-                }
-                // No vault:// prefix: try vault key = api_key_ref (e.g. "openrouter_api_key"), then env var with that name
-                if let Ok(v) = &vault {
-                    if let Ok(k) = v.get(r) {
-                        return Some(k);
-                    }
-                }
-                if let Ok(k) = std::env::var(r) {
-                    return Some(k);
-                }
-            }
-            std::env::var(default_env).ok()
-        };
+        let vault_ref: Option<&dyn akasha_vault::Vault> =
+            vault.as_ref().ok().map(|v| v as &dyn akasha_vault::Vault);
         // Phase 6 rattrapage: cloud providers (API key from config vault ref or env).
-        let openai_key = openai_cfg
-            .as_ref()
-            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "OPENAI_API_KEY"));
+        let openai_key = openai_cfg.as_ref().and_then(|c| {
+            crate::image_generation::resolve_api_key(
+                vault_ref,
+                c.api_key_ref.as_ref(),
+                "OPENAI_API_KEY",
+            )
+        });
         if let Some(k) = openai_key {
             let base_url = openai_cfg.as_ref().and_then(|c| c.base_url.clone());
             llm_router.register_provider(Arc::new(akasha_llm::OpenAIProvider::new(
@@ -438,10 +418,18 @@ impl Daemon {
             info!("OpenAI provider registered");
         }
         // Register OpenRouter if we have an API key (vault or env).
-        let openrouter_key = openrouter_cfg
-            .as_ref()
-            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "OPENROUTER_API_KEY"))
-            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+        let openrouter_key = openrouter_cfg.as_ref().and_then(|c| {
+            crate::image_generation::resolve_api_key(
+                vault_ref,
+                c.api_key_ref.as_ref(),
+                "OPENROUTER_API_KEY",
+            )
+        });
+        if openrouter_cfg.is_some() && openrouter_key.is_none() {
+            warn!(
+                "providers.openrouter in llm_router.yaml but API key not resolved — OpenRouter will not be registered; routes will fall back (often to embedded). Check vault ref (use vault://openrouter_api_key) or OPENROUTER_API_KEY env, then restart daemon."
+            );
+        }
         if let Some(k) = openrouter_key {
             let base_url = openrouter_cfg.as_ref().and_then(|c| c.base_url.clone());
             let site_url = openrouter_cfg.as_ref().and_then(|c| c.site_url.clone());
@@ -455,27 +443,39 @@ impl Daemon {
             info!("OpenRouter provider registered");
         }
         // Anthropic (cloud)
-        let anthropic_key = anthropic_cfg
-            .as_ref()
-            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "ANTHROPIC_API_KEY"));
+        let anthropic_key = anthropic_cfg.as_ref().and_then(|c| {
+            crate::image_generation::resolve_api_key(
+                vault_ref,
+                c.api_key_ref.as_ref(),
+                "ANTHROPIC_API_KEY",
+            )
+        });
         if let Some(k) = anthropic_key {
             let base_url = anthropic_cfg.as_ref().and_then(|c| c.base_url.clone());
             llm_router.register_provider(Arc::new(akasha_llm::AnthropicProvider::new(Some(k), base_url)));
             info!("Anthropic provider registered");
         }
         // Azure OpenAI (cloud)
-        let azure_key = azure_openai_cfg
-            .as_ref()
-            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "AZURE_OPENAI_API_KEY"));
+        let azure_key = azure_openai_cfg.as_ref().and_then(|c| {
+            crate::image_generation::resolve_api_key(
+                vault_ref,
+                c.api_key_ref.as_ref(),
+                "AZURE_OPENAI_API_KEY",
+            )
+        });
         if let Some(k) = azure_key {
             let base_url = azure_openai_cfg.as_ref().and_then(|c| c.base_url.clone());
             llm_router.register_provider(Arc::new(akasha_llm::AzureOpenAIProvider::new(Some(k), base_url)));
             info!("Azure OpenAI provider registered");
         }
         // Google AI (Gemini)
-        let google_key = google_cfg
-            .as_ref()
-            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "GOOGLE_AI_API_KEY"));
+        let google_key = google_cfg.as_ref().and_then(|c| {
+            crate::image_generation::resolve_api_key(
+                vault_ref,
+                c.api_key_ref.as_ref(),
+                "GOOGLE_AI_API_KEY",
+            )
+        });
         if let Some(k) = google_key {
             let base_url = google_cfg.as_ref().and_then(|c| c.base_url.clone());
             llm_router.register_provider(Arc::new(akasha_llm::GoogleAIProvider::new(Some(k), base_url)));
@@ -485,6 +485,18 @@ impl Daemon {
         llm_router.register_provider(Arc::new(akasha_llm::BitNetProvider::new(bitnet_url.clone())));
         if bitnet_url.is_some() {
             info!("BitNet provider registered (base_url from config)");
+        }
+        for (task_type, route) in llm_router.routes_by_category() {
+            if let Some(primary) = &route.primary {
+                if !llm_router.is_provider_registered(&primary.provider) {
+                    warn!(
+                        task_type = %task_type,
+                        provider = %primary.provider,
+                        model = %primary.model,
+                        "Route primary provider not registered at startup — requests will skip to fallback chain"
+                    );
+                }
+            }
         }
         if std::env::var("AKASHA_DEGRADED_MODE").as_deref() == Ok("1") {
             llm_router.set_degraded_mode(true);

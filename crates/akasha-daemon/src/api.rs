@@ -3597,6 +3597,25 @@ const APP_CONTEXT: &str = concat!(
     "Do not invent commands (e.g. /status repo:... does not exist); commands are in /help.\n\n",
 );
 
+/// Compact system context for the local embedded model (small context window, CPU inference).
+const EMBEDDED_APP_CONTEXT: &str = concat!(
+    "[Akasha — modèle local] Assistant intégré à Akasha. ",
+    "Réponds dans la langue du dernier message utilisateur. Sois concis et factuel. ",
+    "Pour agir (fichier, web, commande), une ligne TOOL: <outil> <arguments>. ",
+    "Ne invente pas de données ; dis si tu ne sais pas.\n\n",
+);
+
+fn embedded_tools_instruction_hint(allowed_tools: Option<&[String]>) -> String {
+    let names = match allowed_tools {
+        Some(list) if !list.is_empty() => list.join(", "),
+        _ => "read_file, web_search, run_command, write_file, ask_user, …".to_string(),
+    };
+    format!(
+        "[Outils — modèle local] Outils disponibles (tools_policy) : {names}. \
+         Pour utiliser un outil : une seule ligne TOOL: <nom> <arguments>.\n\n"
+    )
+}
+
 /// Returns an English [Role] system prompt for the given agent type, or None for conversation/unknown.
 /// Plan: Architecture agents et pipeline — Phase 2 (new roles).
 pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
@@ -9503,6 +9522,10 @@ pub(crate) async fn run_message_via_llm(
             }),
         );
     }
+    let embedded_primary_route = llm_router
+        .primary_route_for_task_type(&router_task_type_early)
+        .map(|(p, _)| p == "akasha_embedded" || p == "akasha_core")
+        .unwrap_or(false);
     if let Some(ref sq) = steering_queue {
         sq.register_active(task_id, session_id.clone(), !is_subagent)
             .await;
@@ -9578,6 +9601,9 @@ pub(crate) async fn run_message_via_llm(
     // breaks fast-lane matching or memory profile selection.
     let structured = interpret_message(clean_message);
     let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
+    let embedded_compact = embedded_primary_route
+        && !code_studio_disk_task
+        && !is_subagent;
     // Code Studio tasks run on studio-projects/* disk roots: do not treat user prompts as
     // "small talk" or suppress tool-heavy LLM replies — that blocked write_file / TOOL lines.
     let small_talk_intent = if code_studio_disk_task {
@@ -9673,6 +9699,17 @@ pub(crate) async fn run_message_via_llm(
         memory_profile.allow_project_recall = false;
         memory_profile.recent_context_max_chars = memory_profile.recent_context_max_chars.min(12_000);
     }
+    if embedded_compact {
+        memory_profile.recent_turns_limit = memory_profile.recent_turns_limit.min(4);
+        memory_profile.recent_context_max_chars = memory_profile.recent_context_max_chars.min(4_000);
+        memory_profile.semantic_top_k = memory_profile.semantic_top_k.min(2);
+        memory_profile.episodic_limit = memory_profile.episodic_limit.min(2);
+        memory_profile.facts_limit = memory_profile.facts_limit.min(2);
+        memory_profile.user_rag_top_k = memory_profile.user_rag_top_k.min(1);
+        memory_profile.workspace_graph_top_k = 0;
+        memory_profile.expand_by_graph = false;
+        memory_profile.compact_before_prompt = true;
+    }
 
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
@@ -9694,15 +9731,28 @@ pub(crate) async fn run_message_via_llm(
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4096);
-    let completion_max_tokens = if is_small_talk_fast_lane {
+    let mut completion_max_tokens = if is_small_talk_fast_lane {
         max_tokens.min(256).max(64)
     } else {
         max_tokens
     };
+    if embedded_compact {
+        let embedded_cap = std::env::var("AKASHA_EMBEDDED_MAX_TOKENS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&n| n >= 16)
+            .unwrap_or(512);
+        completion_max_tokens = completion_max_tokens.min(embedded_cap);
+    }
 
     let mut code_studio_system_tools_block = String::new();
     let tool_instruction = if is_small_talk_fast_lane {
         String::new()
+    } else if embedded_compact && tools_executor_snapshot.is_some() {
+        let allowed_tools = tools_executor_snapshot
+            .as_ref()
+            .and_then(|e| e.policy.allowed_tool_list());
+        embedded_tools_instruction_hint(allowed_tools.as_deref())
     } else if tools_executor_snapshot.is_some() {
         let mut allowed_tools = tools_executor_snapshot
             .as_ref()
@@ -9903,13 +9953,25 @@ pub(crate) async fn run_message_via_llm(
     let mut system_prompt = String::with_capacity(8192);
     if code_studio_disk_task {
         system_prompt.push_str(CODE_STUDIO_APP_CONTEXT);
+    } else if embedded_compact {
+        system_prompt.push_str(EMBEDDED_APP_CONTEXT);
     } else {
         system_prompt.push_str(APP_CONTEXT);
     }
-    system_prompt.push_str(os_env_block);
+    if !embedded_compact {
+        system_prompt.push_str(os_env_block);
+    }
     if let Some(role_prompt) = agent_role_system_prompt(role_agent_for_system_prompt) {
         system_prompt.push_str("[Role]\n");
-        system_prompt.push_str(role_prompt);
+        if embedded_compact {
+            let short: String = role_prompt.chars().take(800).collect();
+            system_prompt.push_str(&short);
+            if role_prompt.len() > 800 {
+                system_prompt.push_str("…");
+            }
+        } else {
+            system_prompt.push_str(role_prompt);
+        }
         let studio_impl_writes_expected = code_studio_disk_task
             && matches!(
                 role_agent_for_system_prompt,
@@ -10627,12 +10689,18 @@ pub(crate) async fn run_message_via_llm(
         let idle_timeout_secs = std::env::var("AKASHA_LLM_STREAM_IDLE_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(60);
+            .unwrap_or(if embedded_compact { 180 } else { 60 });
         // First chunk can take long (model load, first token on CPU). Use longer wait so we don't hit idle before any data.
         let first_chunk_timeout_secs = std::env::var("AKASHA_LLM_FIRST_CHUNK_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or_else(|| llm_timeout_secs.min(300));
+            .unwrap_or_else(|| {
+                if embedded_compact {
+                    llm_timeout_secs.max(600)
+                } else {
+                    llm_timeout_secs.min(300)
+                }
+            });
 
         'tool_rounds: loop {
             match store.get(task_id).ok().flatten().map(|t| t.status) {
@@ -10748,6 +10816,21 @@ pub(crate) async fn run_message_via_llm(
                         "model": model,
                     }),
                 );
+                // Embedded load + first token can exceed the default stall watchdog (180s) without stream chunks.
+                if provider == "akasha_embedded" || provider == "akasha_core" {
+                    meaningful_progress_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "progress_pct": 15,
+                                "message": "Modèle embarqué — chargement / premier token (peut prendre 1–3 min)…"
+                            })),
+                        )
+                        .with_correlation(task_id),
+                    );
+                }
             }
             let request = CompletionRequest {
                 prompt: format!("{}{}", current_prompt, tool_instruction),
@@ -18421,6 +18504,67 @@ pub async fn handle_api(
         #[cfg(not(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp")))]
         {
             let body = serde_json::json!({ "state": "idle", "error": "not compiled" }).to_string();
+            return json_response("501 Not Implemented", &body);
+        }
+    }
+
+    // GET /api/router/embedded/runtime — active model + engine mode for settings UI
+    if method == "GET" && path == "/api/router/embedded/runtime" {
+        #[cfg(feature = "embedded")]
+        {
+            match llm_router.embedded_settings_view() {
+                Ok(view) => {
+                    let body = serde_json::to_string(&view).unwrap_or_else(|_| "{}".to_string());
+                    return json_response("200 OK", &body);
+                }
+                Err(e) => {
+                    let body = serde_json::json!({ "error": e }).to_string();
+                    return json_response("500 Internal Server Error", &body);
+                }
+            }
+        }
+        #[cfg(not(feature = "embedded"))]
+        {
+            let body = serde_json::json!({ "error": "embedded not compiled" }).to_string();
+            return json_response("501 Not Implemented", &body);
+        }
+    }
+
+    // POST /api/router/embedded/runtime — set model + engine mode (body: { "model_id", "engine_mode" })
+    if method == "POST" && path == "/api/router/embedded/runtime" {
+        #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+        {
+            let parsed: serde_json::Value = body
+                .as_deref()
+                .and_then(|b| serde_json::from_slice(b).ok())
+                .unwrap_or_default();
+            let model_id = parsed
+                .get("model_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let engine_mode = parsed
+                .get("engine_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("auto");
+            if model_id.is_empty() {
+                let body = serde_json::json!({ "error": "model_id required" }).to_string();
+                return json_response("400 Bad Request", &body);
+            }
+            match llm_router.embedded_set_runtime(model_id, engine_mode) {
+                Ok(rt) => {
+                    let body = serde_json::to_string(&rt).unwrap_or_else(|_| "{}".to_string());
+                    return json_response("200 OK", &body);
+                }
+                Err(e) => {
+                    let body = serde_json::json!({ "error": e }).to_string();
+                    return json_response("400 Bad Request", &body);
+                }
+            }
+        }
+        #[cfg(not(all(feature = "embedded", feature = "embedded-download")))]
+        {
+            let body = serde_json::json!({ "error": "embedded runtime API requires download feature" })
+                .to_string();
             return json_response("501 Not Implemented", &body);
         }
     }

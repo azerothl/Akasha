@@ -272,6 +272,13 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels, prefill, on
     [selectedRows],
   );
 
+  const hasLocalCompare = modelsForRun.some(
+    (m) => m.provider === "akasha_embedded" || m.provider === "akasha_core",
+  );
+  const localOnlyCompare =
+    modelsForRun.length >= 2 &&
+    modelsForRun.every((m) => m.provider === "akasha_embedded" || m.provider === "akasha_core");
+
   const canRun = prompt.trim().length > 0 && modelsForRun.length > 0 && !loading && routerModels != null;
 
   const run = async () => {
@@ -299,8 +306,8 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels, prefill, on
       setSynthesis(
         timedOut
           ? en
-            ? "Request timed out — comparing multiple models with the embedded LLM can take several minutes. Try fewer models or configure a faster provider."
-            : "Délai dépassé — la comparaison de plusieurs modèles avec le LLM embarqué peut prendre plusieurs minutes. Essayez moins de modèles ou un provider plus rapide."
+            ? "Request timed out — embedded/core models can take several minutes on first load. Rebuild the daemon, try CPU mode in Settings → Local model, or set AKASHA_COMPARE_TIMEOUT_SECS_EMBEDDED=900 in akasha.env."
+            : "Délai dépassé — les modèles embarqués/core peuvent prendre plusieurs minutes au premier chargement. Recompilez le daemon, essayez le mode CPU (Paramètres → Modèle local), ou AKASHA_COMPARE_TIMEOUT_SECS_EMBEDDED=900 dans akasha.env."
           : raw,
       );
     } finally {
@@ -404,6 +411,20 @@ export function ComparePanel({ fetchEndpoint, locale, defaultModels, prefill, on
             </span>
           </div>
         </fieldset>
+
+        {localOnlyCompare ? (
+          <p className="compare-models-hint muted">
+            {en
+              ? "akasha_embedded and akasha_core use the same local GGUF — answers will be similar."
+              : "akasha_embedded et akasha_core utilisent le même GGUF local — les réponses seront similaires."}
+          </p>
+        ) : hasLocalCompare ? (
+          <p className="compare-models-hint muted">
+            {en
+              ? "Local models no longer fall back to another slot if a cloud model fails — errors show per card."
+              : "Les modèles locaux ne remplacent plus un slot cloud en cas d'échec — l'erreur s'affiche sur la carte."}
+          </p>
+        ) : null}
 
         <div className="compare-form-actions">
           <label className="settings-field compare-blind-field">

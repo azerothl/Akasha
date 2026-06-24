@@ -294,10 +294,6 @@ fn sample_next_token<R: rand::Rng + ?Sized>(
 static BAGUETTOTRON_PIPELINE: Lazy<RwLock<Option<Arc<BaguettotronPipeline>>>> =
     Lazy::new(|| RwLock::new(None));
 
-pub fn is_available() -> bool {
-    true
-}
-
 /// True if the model has already been loaded (after first successful complete()).
 pub fn is_loaded() -> bool {
     BAGUETTOTRON_PIPELINE

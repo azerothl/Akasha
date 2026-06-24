@@ -71,6 +71,15 @@ pub struct EmbeddedStatus {
     /// Last calibration winner tok/s.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_bench_tok_per_s: Option<f64>,
+    /// Active manifest model id (runtime or first GGUF on disk).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_model_id: Option<String>,
+    /// User-facing engine mode: `auto`, `cpu`, or `cuda`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_mode: Option<String>,
+    /// Effective GPU layer offload count for llama-cpp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n_gpu_layers: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -91,7 +100,27 @@ impl EmbeddedLlm {
         max_tokens: Option<usize>,
         temperature: Option<f64>,
     ) -> Result<String> {
+        self.complete_for_router_model(None, prompt, max_tokens, temperature)
+    }
+
+    /// Complete using an optional router model id (compare / explicit route model field).
+    pub fn complete_for_router_model(
+        &self,
+        router_model: Option<&str>,
+        prompt: &str,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+    ) -> Result<String> {
         let _guard = acquire_inference_lock()?;
+        #[cfg(feature = "llama-cpp")]
+        if config::llama_cpp_compiled() {
+            let path = router_model
+                .and_then(|m| config::resolve_gguf_path_for_router_model(m))
+                .or_else(config::resolve_gguf_path);
+            if let Some(path) = path {
+                return llama_cpp_backend::complete(&path, prompt, max_tokens, temperature);
+            }
+        }
         let backend = resolve_backend()?;
         dispatch_complete(&backend, prompt, max_tokens, temperature)
     }
@@ -112,7 +141,22 @@ impl EmbeddedLlm {
     }
 
     pub fn is_available() -> bool {
-        !compiled_backends().is_empty() && config::resolve_backend_choice().is_ok()
+        if compiled_backends().is_empty() {
+            return false;
+        }
+        match config::resolve_backend_choice() {
+            Ok(backend) => match backend {
+                #[cfg(feature = "llama-cpp")]
+                config::ResolvedBackend::LlamaCpp(_) => llama_cpp_backend::is_available(),
+                #[cfg(feature = "candle")]
+                config::ResolvedBackend::Candle => true,
+                #[cfg(feature = "baguettotron")]
+                config::ResolvedBackend::Baguettotron => true,
+                #[allow(unreachable_patterns)]
+                _ => false,
+            },
+            Err(_) => false,
+        }
     }
 
     pub fn is_loaded() -> bool {
@@ -242,6 +286,9 @@ impl EmbeddedLlm {
             active_engine_policy: Some(config::active_engine_policy()),
             calibration_done,
             last_bench_tok_per_s,
+            active_model_id: config::active_model_id(),
+            engine_mode: Some(config::active_engine_mode()),
+            n_gpu_layers: Some(config::n_gpu_layers()),
         }
     }
 }

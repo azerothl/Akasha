@@ -113,6 +113,19 @@ pub fn resolve_gguf_path() -> Option<PathBuf> {
     None
 }
 
+/// Map llm_router `model` field (e.g. `default`, manifest id) to a GGUF path.
+pub fn resolve_gguf_path_for_router_model(model: &str) -> Option<PathBuf> {
+    let model = model.trim();
+    if model.is_empty() || model == "default" || model == "core" || model == "embedded" {
+        return resolve_gguf_path();
+    }
+    #[cfg(feature = "download")]
+    if let Some(p) = resolve_gguf_path_for_model(model) {
+        return Some(p);
+    }
+    resolve_gguf_path()
+}
+
 #[cfg(feature = "llama-cpp")]
 pub fn llama_cpp_compiled() -> bool {
     true
@@ -245,7 +258,7 @@ pub fn n_gpu_layers() -> u32 {
 }
 
 /// Static tier rules before calibration (e.g. force CPU on 4 GB VRAM for small models).
-fn static_n_gpu_layers_for_tier() -> u32 {
+pub fn static_n_gpu_layers_for_tier() -> u32 {
     let profile = super::hardware::detect_hardware();
     if profile.tier_id == "gpu_low_4gb" {
         if let Some(path) = resolve_gguf_path() {
@@ -264,6 +277,45 @@ fn static_n_gpu_layers_for_tier() -> u32 {
 }
 
 /// Recommended model id from static profile tier (before calibration).
+/// Active manifest model id (runtime override, else first GGUF on disk).
+pub fn active_model_id() -> Option<String> {
+    if let Some(rt) = super::runtime::load_runtime() {
+        if !rt.model_id.is_empty() {
+            return Some(rt.model_id);
+        }
+    }
+    #[cfg(feature = "download")]
+    if let Ok(manifest) = super::download::load_manifest() {
+        for entry in &manifest.models {
+            let p = gguf_path_for_filename(&entry.filename);
+            if p.is_file() {
+                return Some(entry.id.clone());
+            }
+        }
+        return Some(manifest.default_id.clone());
+    }
+    None
+}
+
+/// User-facing engine mode: `auto`, `cpu`, or `cuda`.
+pub fn active_engine_mode() -> String {
+    if let Some(rt) = super::runtime::load_runtime() {
+        return super::runtime::engine_mode_from_ngl(rt.n_gpu_layers).to_string();
+    }
+    if std::env::var("AKASHA_EMBEDDED_N_GPU_LAYERS").is_ok() {
+        return engine_mode_from_ngl(n_gpu_layers()).to_string();
+    }
+    "auto".to_string()
+}
+
+pub fn engine_mode_from_ngl(ngl: u32) -> &'static str {
+    if ngl > 0 {
+        "cuda"
+    } else {
+        "cpu"
+    }
+}
+
 pub fn recommended_model_id() -> Option<String> {
     if let Some(rt) = super::runtime::load_runtime() {
         return Some(rt.model_id);
@@ -330,6 +382,37 @@ pub fn embedded_models_manifest_path() -> PathBuf {
         }
     }
     PathBuf::from("spec/embedded_models.json")
+}
+
+/// Max completion tokens for embedded route (agent path caps AKASHA_MAX_RESPONSE_TOKENS).
+pub fn embedded_max_response_tokens() -> u32 {
+    std::env::var("AKASHA_EMBEDDED_MAX_TOKENS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n >= 16)
+        .unwrap_or(512)
+}
+
+/// Char cap before tokenization (safety net in provider + llama backend).
+pub fn embedded_max_prompt_chars() -> usize {
+    std::env::var("AKASHA_EMBEDDED_MAX_PROMPT_CHARS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n >= 1024)
+        .unwrap_or(12_000)
+}
+
+pub fn truncate_prompt_for_embedded(prompt: &str) -> String {
+    let max = embedded_max_prompt_chars();
+    if prompt.len() <= max {
+        return prompt.to_string();
+    }
+    let keep = max.saturating_sub(64);
+    let tail: String = prompt.chars().rev().take(keep).collect();
+    format!(
+        "…[contexte tronqué pour modèle local embarqué]…\n\n{}",
+        tail.chars().rev().collect::<String>()
+    )
 }
 
 #[cfg(test)]

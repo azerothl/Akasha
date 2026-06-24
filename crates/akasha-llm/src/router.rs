@@ -95,6 +95,16 @@ fn resolve_preferred_task_type(preferred: &str, config: &RoutingConfig) -> Strin
     resolve_task_type_with_fallback_chain(preferred, fallbacks, config)
 }
 
+/// When `enable_fallback` is false, only the primary route is attempted.
+fn task_config_for_completion(task_config: &TaskTypeConfig, enable_fallback: bool) -> TaskTypeConfig {
+    if enable_fallback {
+        return task_config.clone();
+    }
+    let mut cfg = task_config.clone();
+    cfg.fallback.clear();
+    cfg
+}
+
 pub struct LLMRouter {
     config: Arc<RwLock<RoutingConfig>>,
     fallback: FallbackEngine,
@@ -359,6 +369,26 @@ impl LLMRouter {
         akasha_embedded_llm::config::apply_persisted_runtime();
     }
 
+    /// Runtime settings snapshot (model, engine mode, tier).
+    #[cfg(feature = "embedded")]
+    pub fn embedded_settings_view(
+        &self,
+    ) -> Result<akasha_embedded_llm::runtime::EmbeddedSettingsView, String> {
+        let _ = self;
+        akasha_embedded_llm::runtime::settings_view()
+    }
+
+    /// Persist manual model + engine mode and unload for reload.
+    #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+    pub fn embedded_set_runtime(
+        &self,
+        model_id: &str,
+        engine_mode: &str,
+    ) -> Result<akasha_embedded_llm::runtime::EmbeddedRuntime, String> {
+        let _ = self;
+        akasha_embedded_llm::runtime::apply_manual_runtime(model_id, engine_mode)
+    }
+
     /// Replace in-memory routing config (task_types, providers metadata, global) from disk or API reload.
     /// Registered provider clients (Ollama, OpenRouter, etc.) are unchanged — route/model switches take effect immediately.
     pub fn reload_routing_config(&self, config: RoutingConfig) {
@@ -366,6 +396,41 @@ impl LLMRouter {
             Ok(mut cfg) => *cfg = config,
             Err(poisoned) => *poisoned.into_inner() = config,
         }
+    }
+
+    /// Complete using a single route entry — no fallback chain (model compare slots).
+    pub async fn complete_for_entry(
+        &self,
+        request: &CompletionRequest,
+        entry: &crate::config::RouteEntry,
+    ) -> Result<CompletionResponse, String> {
+        let resolve = self.resolve();
+        let provider = resolve(entry.provider.as_str()).ok_or_else(|| {
+            format!(
+                "provider '{}' is not registered",
+                entry.provider
+            )
+        })?;
+        if self.degraded_mode && !provider.is_local() {
+            return Err(format!(
+                "degraded mode: provider '{}' unavailable",
+                entry.provider
+            ));
+        }
+        let timeout_secs = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .default_timeout_secs
+            .unwrap_or(300);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let mut req = request.clone();
+        entry.apply_config_to_request(&mut req);
+        provider
+            .complete(&req, timeout, Some(entry.model.as_str()))
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Set the primary provider/model for a task type (e.g. conversation, code_generation). Applied immediately.
@@ -439,6 +504,15 @@ impl LLMRouter {
                 }
             });
 
+        let enable_fallback = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .enable_fallback
+            .unwrap_or(true);
+        let task_config = task_config_for_completion(&task_config, enable_fallback);
+
         let resolve = self.resolve();
         self.fallback
             .complete(
@@ -490,6 +564,15 @@ impl LLMRouter {
                     constraints: None,
                 }
             });
+
+        let enable_fallback = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .enable_fallback
+            .unwrap_or(true);
+        let task_config = task_config_for_completion(&task_config, enable_fallback);
 
         let resolve = self.resolve();
         let primary_entry = task_config.primary.as_ref();

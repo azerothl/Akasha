@@ -1788,7 +1788,7 @@ impl LLMProvider for AkashaCoreProvider {
         &self,
         request: &CompletionRequest,
         _timeout: Duration,
-        _model_override: Option<&str>,
+        model_override: Option<&str>,
     ) -> Result<CompletionResponse, ProviderError> {
         #[cfg(feature = "embedded")]
         {
@@ -1797,11 +1797,18 @@ impl LLMProvider for AkashaCoreProvider {
                     Some(s) if !s.is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
                     _ => request.prompt.clone(),
                 };
+                let prompt = akasha_embedded_llm::config::truncate_prompt_for_embedded(&prompt);
                 let max_tokens = request.max_tokens.map(|u| u as usize);
                 let temperature = request.temperature.map(|f| f as f64);
+                let model_id = model_override.map(|s| s.to_string());
                 match tokio::task::spawn_blocking(move || {
                     let llm = akasha_embedded_llm::EmbeddedLlm::new();
-                    llm.complete(&prompt, max_tokens, temperature)
+                    llm.complete_for_router_model(
+                        model_id.as_deref(),
+                        &prompt,
+                        max_tokens,
+                        temperature,
+                    )
                 })
                 .await
                 {
@@ -1876,7 +1883,7 @@ impl LLMProvider for AkashaEmbeddedProvider {
         &self,
         request: &CompletionRequest,
         _timeout: Duration,
-        _model_override: Option<&str>,
+        model_override: Option<&str>,
     ) -> Result<CompletionResponse, ProviderError> {
         #[cfg(feature = "embedded")]
         {
@@ -1885,11 +1892,19 @@ impl LLMProvider for AkashaEmbeddedProvider {
                     Some(s) if !s.is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
                     _ => request.prompt.clone(),
                 };
+                let prompt = akasha_embedded_llm::config::truncate_prompt_for_embedded(&prompt);
                 let max_tokens = request.max_tokens.map(|u| u as usize);
                 let temperature = request.temperature.map(|f| f as f64);
+                let model_id = model_override.map(|s| s.to_string());
+                let model_used_label = model_id.clone().unwrap_or_else(|| "embedded".into());
                 match tokio::task::spawn_blocking(move || {
                     let llm = akasha_embedded_llm::EmbeddedLlm::new();
-                    llm.complete(&prompt, max_tokens, temperature)
+                    llm.complete_for_router_model(
+                        model_id.as_deref(),
+                        &prompt,
+                        max_tokens,
+                        temperature,
+                    )
                 })
                 .await
                 {
@@ -1901,7 +1916,7 @@ impl LLMProvider for AkashaEmbeddedProvider {
                                 prompt_tokens: 0,
                                 completion_tokens,
                             }),
-                            model_used: "embedded".into(),
+                            model_used: model_used_label,
                             cost_usd: None,
                             thinking: None,
                             done_reason: None,

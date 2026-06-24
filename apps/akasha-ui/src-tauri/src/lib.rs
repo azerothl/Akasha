@@ -7,6 +7,7 @@ const TASK_POLL_INTERVAL_MS: u64 = 1500;
 const TASK_POLL_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 const LONG_LLM_REQUEST_TIMEOUT_SECS: u64 = 600;
+const LONG_COMPARE_REQUEST_TIMEOUT_SECS: u64 = 1800;
 
 fn daemon_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{}", port)
@@ -18,13 +19,15 @@ fn request_timeout_for_path(path: &str, method: &str) -> std::time::Duration {
     let m = method.trim().to_uppercase();
     let long_post = m == "POST"
         && (p.starts_with("/api/research/deep")
-            || p == "/api/compare"
             || p == "/api/diagnostic/advice"
             || p == "/api/chat/suggest-thread-title"
             || p == "/api/memory/rebuild-relations"
             || p.starts_with("/api/voice/stt")
             || p.starts_with("/api/voice/tts"));
     let long_get = m == "GET" && p.starts_with("/api/first-message");
+    if m == "POST" && p == "/api/compare" {
+        return std::time::Duration::from_secs(LONG_COMPARE_REQUEST_TIMEOUT_SECS);
+    }
     if long_post || long_get {
         std::time::Duration::from_secs(LONG_LLM_REQUEST_TIMEOUT_SECS)
     } else {
@@ -614,6 +617,57 @@ async fn embedded_calibrate_status(port: Option<u16>) -> Result<serde_json::Valu
         return Err(format!("{}", resp.status()));
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// GET /api/router/embedded/runtime — model + engine mode settings.
+#[tauri::command]
+async fn get_embedded_runtime(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/runtime", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+        return Err(json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("embedded runtime unavailable")
+            .to_string());
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/router/embedded/runtime — persist model + engine mode.
+#[tauri::command]
+async fn set_embedded_runtime(
+    port: Option<u16>,
+    modelId: String,
+    engineMode: String,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/runtime", daemon_base_url(port));
+    let client = http_client();
+    let body = serde_json::json!({
+        "model_id": modelId,
+        "engine_mode": engineMode,
+    });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+    if !status.is_success() {
+        return Err(json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("set embedded runtime failed")
+            .to_string());
+    }
     Ok(json)
 }
 
@@ -2694,6 +2748,8 @@ pub fn run() {
             get_embedded_hardware,
             embedded_calibrate_start,
             embedded_calibrate_status,
+            get_embedded_runtime,
+            set_embedded_runtime,
             wizard_test_embedded_message,
             get_device_pending,
             post_device_result,
