@@ -95,6 +95,12 @@ pub mod user_rag;
 pub mod user_rag_indexer;
 pub mod notes;
 pub mod api_routes_notes;
+pub mod api_routes_docs;
+pub mod api_routes_config;
+pub mod api_routes_router;
+pub mod api_routes_plugins;
+pub mod api_routes_memory;
+pub mod api_routes_tasks;
 pub mod user_docs;
 
 pub use daemon::{Daemon, RunOutcome};

@@ -261,15 +261,17 @@ Objectif : mesurer et documenter les perfs pour valider la stabilisation, calibr
 
 ## Critères de clôture v0.10.0
 
-- [ ] Parcours **first-use** validé manuellement (avant tag)
+- [x] Refactor `api.rs` L3–L6 (`api_routes_*` × 6, ~16k lignes restantes)
+- [x] Workflow GPU CI (`.github/workflows/gpu-ci.yml`) — runner self-hosted à provisionner
+- [ ] Parcours **first-use** validé manuellement sur machine NVIDIA (avant tag)
 - [x] `akasha doctor` signale `embedded-download` (implémenté)
 - [x] Docs FR cohérentes
 - [x] **Bench embarqué** : scripts + template baselines
 - [x] **Veille R0** publiée
-- [ ] Tag **`v0.10.0`** + artefacts publiés
-- [ ] **Self-hosted GPU CI** ou checklist ✅ [GPU_SELF_HOSTED_CI.md](../quality/GPU_SELF_HOSTED_CI.md)
+- [ ] Tag **`v0.10.0`** + artefacts publiés (workflow Release)
+- [x] **GPU CI** workflow livré ; checklist [GPU_SELF_HOSTED_CI.md](../quality/GPU_SELF_HOSTED_CI.md) — runner opérateur en attente
 - [x] Aucune régression smoke CPU/CUDA GitHub-hosted (baseline v0.9)
-- [x] Site Akasha_app synchronisé (v0.10.0 prep)
+- [x] Site Akasha_app synchronisé (v0.10.0 — JSON + HTML pills, What's new)
 
 ---
 

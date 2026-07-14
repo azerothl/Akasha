@@ -113,3 +113,20 @@ Les deux convergent sur **~10 tok/s** comme plancher chat interactif. Akasha est
 | Desktop GPU 8–12 Go | Qwen2.5-1.5B Q4 | 20+ (gate v0.9) | Fluide |
 | CPU seul, llama-cpp | Qwen3.5-0.8B ou SmolLM2-360M GGUF | 10–50 (selon RAM/canaux) | Acceptable à fluide |
 | CPU seul, Candle actuel | Qwen3 0.6B | < 1 | Non chat |
+
+---
+
+## GPU CI self-hosted (v0.10.0)
+
+Workflow : [`.github/workflows/gpu-ci.yml`](../../../.github/workflows/gpu-ci.yml) — job `gpu-smoke` sur runner `self-hosted,gpu,nvidia`.
+
+**Statut 2026-07-14** : workflow livré ; runner physique **non provisionné** sur cette machine — les mesures ci-dessus (2026-06-22, RTX 3050 Ti locale) restent les baselines de référence jusqu'à la première exécution CI verte.
+
+Commandes exécutées par le job (à reproduire sur le runner) :
+
+```powershell
+.\spec\dev\quality\bench_embedded.ps1 -Backend llama_cpp -Strict -Json
+.\spec\dev\quality\bench_embedded_models.ps1 -Matrix -SimulatedTier gpu_low_4gb -NglValues 0,99
+```
+
+Après première run CI verte : coller la sortie JSON ici et mettre à jour `embedded_profile_baselines.json`.

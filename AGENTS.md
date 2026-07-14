@@ -4,7 +4,7 @@
 
 ### Project overview
 
-Akasha is a Rust workspace (15 crates) with a Tauri desktop UI (React/TypeScript/Vite in `apps/akasha-ui`). Documentation is in French. See `README.md` for the full structure.
+Akasha is a Rust workspace (17 crates) with a Tauri desktop UI (React/TypeScript/Vite in `apps/akasha-ui`). Documentation is in French. See `README.md` for the full structure.
 
 ### System dependencies (pre-installed)
 
