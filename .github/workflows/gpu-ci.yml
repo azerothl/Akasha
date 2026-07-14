@@ -36,25 +36,35 @@ jobs:
       - name: Build CUDA daemon
         shell: pwsh
         run: |
+          $Target = "x86_64-pc-windows-msvc"
           $env:CUDA_PATH = $env:CUDA_PATH ?? "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
-          .\scripts\build-windows-daemon-cuda.ps1
-          cargo build -p akasha-cli -p akasha-daemon --release
+          if (-not $env:LIBCLANG_PATH) {
+            $llvmBin = "C:\Program Files\LLVM\bin"
+            if (Test-Path (Join-Path $llvmBin "libclang.dll")) {
+              $env:LIBCLANG_PATH = $llvmBin
+            }
+          }
+          # CLI only (CPU); daemon must stay CUDA — do not rebuild akasha-daemon with default features.
+          cargo build --release --target $Target -p akasha-cli
+          .\scripts\build-windows-daemon-cuda.ps1 -Target $Target
 
       - name: Prepare data dir and GGUF
         shell: pwsh
         env:
           AKASHA_DATA_DIR: ${{ runner.temp }}\akasha-gpu-ci
         run: |
+          $ReleaseDir = "target\x86_64-pc-windows-msvc\release"
           New-Item -ItemType Directory -Force -Path $env:AKASHA_DATA_DIR | Out-Null
-          .\target\release\akasha.exe init --defaults
-          .\target\release\akasha.exe config models embedded-download
+          & "$ReleaseDir\akasha.exe" init --defaults
+          & "$ReleaseDir\akasha.exe" config models embedded-download
 
       - name: Smoke HTTP CUDA daemon
         shell: pwsh
         env:
           AKASHA_DATA_DIR: ${{ runner.temp }}\akasha-gpu-ci
         run: |
-          $daemon = Start-Process -FilePath ".\target\release\akasha-daemon.exe" -PassThru -WindowStyle Hidden
+          $ReleaseDir = "target\x86_64-pc-windows-msvc\release"
+          $daemon = Start-Process -FilePath "$ReleaseDir\akasha-daemon.exe" -PassThru -WindowStyle Hidden
           try {
             $ok = $false
             for ($i = 0; $i -lt 60; $i++) {
