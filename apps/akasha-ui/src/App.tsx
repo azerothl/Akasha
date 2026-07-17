@@ -23,13 +23,16 @@ import { OpenClawMigrationPanel } from "./components/OpenClawMigrationPanel";
 import { CalDavAccountsPanel } from "./components/CalDavAccountsPanel";
 import { ToolsPolicyPanel } from "./components/ToolsPolicyPanel";
 import { ConnectorsPanel } from "./components/ConnectorsPanel";
+import { LifeLayerPanel } from "./components/LifeLayerPanel";
 import { EmbeddedLocalModelSettings } from "./components/EmbeddedLocalModelSettings";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { AppNotificationsSync } from "./components/AppNotificationsSync";
 import { useNotify } from "./notifications/useNotifyOnMessage";
 import { InfoTip, Tooltip } from "./components/Tooltip";
 import { ChatRenderer } from "./components/ChatRenderer";
-import { ChatCompositionBar } from "./components/ChatCompositionBar";
+import { ChatCompositionBar, type ComposerMode } from "./components/ChatCompositionBar";
+import { ActiveWorkDrawer } from "./components/ActiveWorkDrawer";
+import { UsageDashboardPanel } from "./components/UsageDashboardPanel";
 import { MonoIcon } from "./components/MonoIcon";
 import { useHashRoute } from "./hooks/useHashRoute";
 import { NAV_ITEMS } from "./navigation/types";
@@ -89,10 +92,22 @@ const CHAT_BUDDY_STORAGE_KEY = "akasha_ui_buddy";
 const AKASHA_CHAT_THREADS_KEY = "akasha_chat_threads_v1";
 const DENSITY_STORAGE_KEY = "akasha_ui_density";
 const CHAT_AGENT_MODE_KEY = "akasha_chat_agent_mode";
+const CHAT_COMPOSER_MODE_KEY = "akasha_chat_composer_mode";
 const CHAT_WEB_SEARCH_KEY = "akasha_chat_web_search";
+const CHAT_DUAL_PANE_KEY = "akasha_chat_dual_pane";
 const CHAT_INCOGNITO_KEY = "akasha_chat_incognito";
 const CHAT_COMPANION_OPEN_KEY = "akasha_companion_open";
 const AKASHA_TASK_SESSIONS_KEY = "akasha_task_sessions_v1";
+
+function loadComposerModeInitial(): ComposerMode {
+  try {
+    const v = localStorage.getItem(CHAT_COMPOSER_MODE_KEY)?.trim().toLowerCase();
+    if (v === "architect" || v === "code" || v === "ask" || v === "agent") return v;
+  } catch {
+    /* ignore */
+  }
+  return "agent";
+}
 
 function loadTaskSessionMap(): Record<string, string> {
   try {
@@ -138,6 +153,8 @@ export type ChatThreadEntry = {
   lastSnippet?: string;
   /** Optional session folder label for sidebar grouping (localStorage only). */
   folder?: string;
+  /** Pin to top of session list. */
+  pinned?: boolean;
 };
 
 function loadChatThreadsInitial(): ChatThreadEntry[] {
@@ -1423,8 +1440,11 @@ function App() {
     return "comfortable";
   });
   const [chatAgentMode, setChatAgentMode] = useState(() => localStorage.getItem(CHAT_AGENT_MODE_KEY) !== "0");
+  const [composerMode, setComposerMode] = useState<ComposerMode>(loadComposerModeInitial);
   const [chatWebSearch, setChatWebSearch] = useState(() => localStorage.getItem(CHAT_WEB_SEARCH_KEY) === "1");
   const [chatIncognito, setChatIncognito] = useState(() => localStorage.getItem(CHAT_INCOGNITO_KEY) === "1");
+  const [chatDualPane, setChatDualPane] = useState(() => localStorage.getItem(CHAT_DUAL_PANE_KEY) === "1");
+  const [dualPaneSessionId, setDualPaneSessionId] = useState<string | null>(null);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(() => {
     try {
       const raw = localStorage.getItem(TASK_SIDEBAR_STORAGE_KEY);
@@ -1892,7 +1912,7 @@ function App() {
   const [docPageId, setDocPageId] = useState<string>("accueil");
   const [docLoading, setDocLoading] = useState(false);
   const [docError, setDocError] = useState<string | null>(null);
-  type TaskListItem = { id: string; status: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string };
+  type TaskListItem = { id: string; status: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string; session_id?: string };
   const [tasksList, setTasksList] = useState<Array<TaskListItem>>([]);
   const [taskListFilter, setTaskListFilter] = useState<"active" | "completed">("active");
   const [taskSearchQuery, setTaskSearchQuery] = useState("");
@@ -2489,7 +2509,7 @@ function App() {
   const [userProfileSaving, setUserProfileSaving] = useState(false);
   const [userProfileError, setUserProfileError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
-  const [systemSubTab, setSystemSubTab] = useState<"general" | "embedded" | "plugins" | "policy" | "connectors" | "health">("general");
+  const [systemSubTab, setSystemSubTab] = useState<"general" | "embedded" | "usage" | "plugins" | "policy" | "connectors" | "health">("general");
   const [pluginTableBusyId, setPluginTableBusyId] = useState<string | null>(null);
   const [skillsCatalogText, setSkillsCatalogText] = useState<string | null>(null);
   const [skillsCatalogLoading, setSkillsCatalogLoading] = useState(false);
@@ -2973,7 +2993,11 @@ function App() {
   const filteredChatThreads = useMemo(() => {
     const q = chatThreadSearch.trim().toLowerCase();
     const folderQ = chatThreadFolderFilter.trim().toLowerCase();
-    const base = [...chatThreads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const base = [...chatThreads].sort((a, b) => {
+      const pin = Number(!!b.pinned) - Number(!!a.pinned);
+      if (pin !== 0) return pin;
+      return b.updatedAt.localeCompare(a.updatedAt);
+    });
     return base.filter((th) => {
       if (folderQ && (th.folder ?? "").trim().toLowerCase() !== folderQ) return false;
       if (!q) return true;
@@ -2983,6 +3007,88 @@ function App() {
       return label.includes(q) || snippet.includes(q) || th.id.toLowerCase().includes(q) || folder.includes(q);
     });
   }, [chatThreads, chatThreadLabel, chatThreadSearch, chatThreadFolderFilter]);
+
+  const togglePinChatThread = useCallback((id: string) => {
+    setChatThreads((prev) =>
+      prev.map((th) =>
+        th.id === id ? { ...th, pinned: !th.pinned, updatedAt: new Date().toISOString() } : th,
+      ),
+    );
+  }, []);
+
+  const forkChatThread = useCallback(
+    async (sourceId: string) => {
+      const src = chatThreads.find((th) => th.id === sourceId);
+      if (!src) return;
+      const newId = crypto.randomUUID();
+      const now = new Date().toISOString();
+      let copied: Array<{ role: "user" | "assistant" | "system"; text: string }> = [];
+      if (sourceId === sessionIdRef.current) {
+        copied = messages.map((m) => ({
+          role: m.role === "user" || m.role === "assistant" || m.role === "system" ? m.role : "assistant",
+          text: m.text,
+        }));
+      } else {
+        try {
+          const data = await invoke<{ turns?: Array<{ role: string; content: string }> }>("get_memory_short_term", {
+            sessionId: sourceId,
+            port: DAEMON_PORT,
+          });
+          copied = (data?.turns ?? []).map((turn) => ({
+            role: (turn.role === "user" ? "user" : turn.role === "assistant" ? "assistant" : "system") as
+              | "user"
+              | "assistant"
+              | "system",
+            text: turn.content,
+          }));
+        } catch {
+          copied = [];
+        }
+      }
+      setChatThreads((prev) => [
+        {
+          id: newId,
+          title: src.title ? `${src.title} (fork)` : "",
+          createdAt: now,
+          updatedAt: now,
+          pendingTitle: !src.title,
+          lastSnippet: src.lastSnippet,
+          folder: src.folder,
+        },
+        ...prev,
+      ]);
+      setSessionId(newId);
+      sessionIdRef.current = newId;
+      try {
+        localStorage.setItem(AKASHA_SESSION_ID_KEY, newId);
+      } catch {
+        /* ignore */
+      }
+      setMessages(copied);
+    },
+    [chatThreads, messages],
+  );
+
+  const activeWorkTasks = useMemo(() => {
+    const map = loadTaskSessionMap();
+    return tasksList
+      .filter((t) => isTaskActiveStatus(t.status))
+      .map((t) => ({
+        id: t.id,
+        status: t.status,
+        label: t.label,
+        session_id: t.session_id ?? map[t.id] ?? null,
+        parent_task_id: t.parent_task_id ?? null,
+      }));
+  }, [tasksList]);
+
+  const sessionsWithActiveWork = useMemo(() => {
+    const set = new Set<string>();
+    for (const t of activeWorkTasks) {
+      if (t.session_id) set.add(t.session_id);
+    }
+    return set;
+  }, [activeWorkTasks]);
 
   const createChatThread = useCallback(() => {
     const id = crypto.randomUUID();
@@ -3334,7 +3440,7 @@ function App() {
     const selectTaskId = options?.selectTaskId;
     if (!silent) setTasksLoading(true);
     try {
-      const data = await invoke<{ tasks?: Array<{ id?: string; status?: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string }> }>("get_tasks", {
+      const data = await invoke<{ tasks?: Array<{ id?: string; status?: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string; session_id?: string }> }>("get_tasks", {
         port: DAEMON_PORT,
       });
       const list = data?.tasks ?? [];
@@ -3346,8 +3452,12 @@ function App() {
           created_at: t.created_at,
           parent_task_id: t.parent_task_id,
           assigned_agent: t.assigned_agent,
+          session_id: t.session_id,
         }))
         .filter((t) => t.id);
+      for (const t of tasks) {
+        if (t.session_id) persistTaskSession(t.id, t.session_id);
+      }
       setTasksList((prev) => (tasksListsEqual(prev, tasks) ? prev : tasks));
       setRunningTaskChips((prev) => {
         const activeIds = new Set(tasks.filter((t) => isTaskActiveStatus(t.status)).map((t) => t.id));
@@ -3983,6 +4093,13 @@ function App() {
     }
     void fetchEventTriggers();
   }, [tab, fetchTasksList, fetchEventTriggers]);
+
+  useEffect(() => {
+    if (tab !== "chat") return;
+    void fetchTasksList({ silent: true });
+    const id = window.setInterval(() => void fetchTasksList({ silent: true }), 5000);
+    return () => window.clearInterval(id);
+  }, [tab, fetchTasksList]);
 
   const applyChatStreamProgress = useCallback((taskId: string, msg: string) => {
     if (!taskId) return;
@@ -5704,6 +5821,7 @@ function App() {
         queueMode: steerTarget ? chatDeliveryMode : undefined,
         targetTaskId: steerTarget,
         incognito: chatIncognito ? true : undefined,
+        composerMode: composerMode !== "agent" ? composerMode : undefined,
         port: DAEMON_PORT,
       });
       if (ack?.queued) {
@@ -6307,6 +6425,77 @@ function App() {
                 {locale === "en" ? "Incognito — memory promotion disabled for this session (UI flag)." : "Incognito — promotion mémoire désactivée pour cette session (indicateur UI)."}
               </p>
             ) : null}
+            <ActiveWorkDrawer
+              locale={locale}
+              tasks={activeWorkTasks}
+              onOpenTask={(taskId) => openChatTaskDetail(taskId)}
+              onOpenSession={(sid) => void selectChatThread(sid)}
+              onCancel={async (taskId) => {
+                try {
+                  await invoke("cancel_task", { taskId, port: DAEMON_PORT });
+                  void fetchTasksList({ silent: true });
+                } catch (e) {
+                  console.error(e);
+                }
+              }}
+              onCancelChildren={async (parentTaskId) => {
+                const kids = activeWorkTasks.filter((t) => t.parent_task_id === parentTaskId);
+                for (const k of kids) {
+                  try {
+                    await invoke("cancel_task", { taskId: k.id, port: DAEMON_PORT });
+                  } catch (e) {
+                    console.error(e);
+                  }
+                }
+                void fetchTasksList({ silent: true });
+              }}
+              onPause={async (taskId) => {
+                try {
+                  await invoke("pause_task", { taskId, port: DAEMON_PORT });
+                  void fetchTasksList({ silent: true });
+                } catch (e) {
+                  console.error(e);
+                }
+              }}
+            />
+            <div className="chat-dual-pane-toolbar">
+              <button
+                type="button"
+                className={`btn-secondary btn-tiny ${chatDualPane ? "active" : ""}`}
+                onClick={() => {
+                  const next = !chatDualPane;
+                  setChatDualPane(next);
+                  try {
+                    localStorage.setItem(CHAT_DUAL_PANE_KEY, next ? "1" : "0");
+                  } catch {
+                    /* ignore */
+                  }
+                  if (next && !dualPaneSessionId) {
+                    const other = filteredChatThreads.find((th) => th.id !== sessionId);
+                    setDualPaneSessionId(other?.id ?? null);
+                  }
+                }}
+              >
+                {locale === "en" ? "Dual pane" : "Double panneau"}
+              </button>
+              {chatDualPane ? (
+                <select
+                  className="settings-theme-select"
+                  aria-label={locale === "en" ? "Second session" : "Seconde session"}
+                  value={dualPaneSessionId ?? ""}
+                  onChange={(e) => setDualPaneSessionId(e.target.value || null)}
+                >
+                  <option value="">{locale === "en" ? "Select session…" : "Choisir une session…"}</option>
+                  {filteredChatThreads
+                    .filter((th) => th.id !== sessionId)
+                    .map((th) => (
+                      <option key={th.id} value={th.id}>
+                        {chatThreadLabel(th)}
+                      </option>
+                    ))}
+                </select>
+              ) : null}
+            </div>
             {(companionBubbleText || messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
               <div className="chat-panel-top">
                 <div className="chat-panel-toolbar">
@@ -6892,6 +7081,15 @@ function App() {
                 setChatAgentMode(v);
                 try {
                   localStorage.setItem(CHAT_AGENT_MODE_KEY, v ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+              }}
+              composerMode={composerMode}
+              onComposerModeChange={(v) => {
+                setComposerMode(v);
+                try {
+                  localStorage.setItem(CHAT_COMPOSER_MODE_KEY, v);
                 } catch {
                   /* ignore */
                 }
@@ -7494,7 +7692,8 @@ function App() {
                       const sel = tasksList[tasksSelected];
                       const canCancel = isTaskActiveStatus(sel.status);
                       const canRetry = sel.status === "failed";
-                      return (canCancel || canRetry) ? (
+                      const canDraftSkill = sel.status === "completed" || sel.status === "done";
+                      return (canCancel || canRetry || canDraftSkill) ? (
                         <div className="task-actions-row" role="group" aria-label="Actions sur la tâche">
                           {canCancel && (
                             <button
@@ -7523,6 +7722,33 @@ function App() {
                               }}
                             >
                               Relancer
+                            </button>
+                          )}
+                          {canDraftSkill && (
+                            <button
+                              type="button"
+                              className="task-action-btn"
+                              onClick={async () => {
+                                if (!sel?.id) return;
+                                try {
+                                  const res = await fetchSystemEndpoint("/api/skills/draft-from-task", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ task_id: sel.id }),
+                                  });
+                                  if (!res.ok) throw new Error(res.text);
+                                  const j = JSON.parse(res.text) as { filename?: string; path?: string };
+                                  window.alert(
+                                    locale === "en"
+                                      ? `Skill draft saved: ${j.filename ?? j.path ?? "ok"}`
+                                      : `Brouillon skill enregistré : ${j.filename ?? j.path ?? "ok"}`,
+                                  );
+                                } catch (e) {
+                                  console.error(e);
+                                }
+                              }}
+                            >
+                              {locale === "en" ? "Draft skill" : "Brouillon skill"}
                             </button>
                           )}
                         </div>
@@ -8087,6 +8313,7 @@ function App() {
             )}
             {!calendarLoading && calendarSubTab === "schedules" && (
               <div className="calendar-schedules-panel">
+                <LifeLayerPanel locale={locale} t={t} fetchEndpoint={fetchSystemEndpoint} />
                 <h3>{t("calendar.recurring")}</h3>
                 {schedules.length === 0 ? (
                   <p className="empty-state">{t("calendar.no_schedules")}</p>
@@ -9735,6 +9962,15 @@ function App() {
                   <button
                     type="button"
                     role="tab"
+                    aria-selected={systemSubTab === "usage"}
+                    className={systemSubTab === "usage" ? "active" : ""}
+                    onClick={() => setSystemSubTab("usage")}
+                  >
+                    {t("settings.system_subtab_usage")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
                     aria-selected={systemSubTab === "plugins"}
                     className={systemSubTab === "plugins" ? "active" : ""}
                     onClick={() => setSystemSubTab("plugins")}
@@ -9797,9 +10033,15 @@ function App() {
                   <EmbeddedLocalModelSettings t={t} locale={locale} />
                 )}
 
+                {systemSubTab === "usage" && (
+                  <UsageDashboardPanel t={t} locale={locale} />
+                )}
+
                 {systemSubTab === "policy" && <ToolsPolicyPanel t={t} />}
 
-                {systemSubTab === "connectors" && <ConnectorsPanel t={t} />}
+                {systemSubTab === "connectors" && (
+                  <ConnectorsPanel t={t} locale={locale} fetchEndpoint={fetchSystemEndpoint} />
+                )}
 
                 {systemSubTab === "plugins" && (
                   <>
@@ -10850,7 +11092,7 @@ function App() {
                         .map((th) => {
                           const active = sessionId === th.id;
                           return (
-                            <li key={th.id} className={"sidebar-right-task-card" + (active ? " selected" : "")}>
+                            <li key={th.id} className={"sidebar-right-task-card" + (active ? " selected" : "") + (th.pinned ? " pinned" : "")}>
                               <div
                                 className="sidebar-right-task-card-inner"
                                 role="button"
@@ -10864,6 +11106,10 @@ function App() {
                                 }}
                               >
                                 <div className="sidebar-right-task-card-head">
+                                  {sessionsWithActiveWork.has(th.id) ? (
+                                    <span className="session-active-dot" title={locale === "en" ? "Active task" : "Tâche active"} aria-hidden />
+                                  ) : null}
+                                  {th.pinned ? <span className="session-pin-mark" aria-hidden>★</span> : null}
                                   <span className="sidebar-right-task-card-title" title={chatThreadLabel(th)}>
                                     {chatThreadLabel(th)}
                                   </span>
@@ -10875,16 +11121,60 @@ function App() {
                                   <span className="sidebar-right-task-relative">{formatRelativeTimeLabel(th.updatedAt, locale)}</span>
                                 </div>
                               </div>
-                              <button
-                                type="button"
-                                className="sidebar-right-task-view-btn"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void deleteChatThread(th.id);
-                                }}
-                              >
-                                {t("chat.delete_thread")}
-                              </button>
+                              <div className="sidebar-right-thread-actions">
+                                <button
+                                  type="button"
+                                  className="sidebar-right-task-view-btn"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    togglePinChatThread(th.id);
+                                  }}
+                                >
+                                  {th.pinned ? (locale === "en" ? "Unpin" : "Désépingler") : locale === "en" ? "Pin" : "Épingler"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="sidebar-right-task-view-btn"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const next = window.prompt(
+                                      locale === "en" ? "Rename session" : "Renommer la session",
+                                      th.title || chatThreadLabel(th),
+                                    );
+                                    if (next == null) return;
+                                    const title = next.trim();
+                                    setChatThreads((prev) =>
+                                      prev.map((x) =>
+                                        x.id === th.id
+                                          ? { ...x, title, pendingTitle: false, updatedAt: new Date().toISOString() }
+                                          : x,
+                                      ),
+                                    );
+                                  }}
+                                >
+                                  {locale === "en" ? "Rename" : "Renommer"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="sidebar-right-task-view-btn"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void forkChatThread(th.id);
+                                  }}
+                                >
+                                  {locale === "en" ? "Fork" : "Fork"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="sidebar-right-task-view-btn"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void deleteChatThread(th.id);
+                                  }}
+                                >
+                                  {t("chat.delete_thread")}
+                                </button>
+                              </div>
                             </li>
                           );
                         })}

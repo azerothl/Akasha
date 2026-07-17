@@ -5719,6 +5719,55 @@ a.settings-link-btn.refresh-btn {
 
 .calendar-recent-panel .calendar-runs-header { margin-top: 0; }
 .calendar-schedules-panel h3 { margin-top: 0; }
+
+.life-layer-panel {
+  margin-bottom: 1.25rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+}
+.life-layer-card {
+  margin: 0.75rem 0 1rem;
+}
+.life-layer-card h4 {
+  margin: 0 0 0.35rem;
+}
+.life-layer-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 0.5rem 0;
+}
+.life-layer-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+.life-layer-row .settings-input {
+  width: 5rem;
+}
+.life-layer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.life-layer-preview {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  font-size: 0.8rem;
+  overflow: auto;
+  max-height: 12rem;
+  background: var(--surface-muted, rgba(127, 127, 127, 0.08));
+  border-radius: 6px;
+}
+.connectors-oauth-calendar {
+  margin-top: 1.25rem;
+}
+.active-work-item-child {
+  opacity: 0.92;
+  padding-left: 0.75rem;
+}
 .calendar-schedules-toolbar {
   display: flex;
   align-items: center;
@@ -9326,4 +9375,106 @@ a.settings-link-btn.refresh-btn {
 .chat-subagents-panel .event-kind-pill[data-event-kind="progress"],
 .chat-subagents-panel .event-kind-pill[data-event-kind="orchestration"] {
   border-inline-start-color: var(--akasha-accent);
+}
+
+/* P6 Cockpit agentic */
+.active-work-drawer {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--akasha-border);
+  background: var(--akasha-bg-surface);
+}
+.active-work-drawer-header {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  margin-bottom: 0.35rem;
+}
+.active-work-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.active-work-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  justify-content: space-between;
+}
+.active-work-label {
+  background: none;
+  border: none;
+  color: var(--akasha-text);
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+.active-work-status {
+  font-size: 0.75rem;
+  color: var(--akasha-text-muted);
+  text-transform: uppercase;
+}
+.active-work-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.active-work-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+.btn-tiny {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.45rem;
+}
+.chat-composer-modes {
+  flex-wrap: wrap;
+}
+.session-active-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--akasha-status-success-accent, #22c55e);
+  flex-shrink: 0;
+}
+.session-pin-mark {
+  color: var(--akasha-text-muted);
+  font-size: 0.75rem;
+}
+.sidebar-right-thread-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+}
+.chat-dual-pane-toolbar {
+  margin-bottom: 0.35rem;
+}
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+.usage-table th,
+.usage-table td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--akasha-border);
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
 }
