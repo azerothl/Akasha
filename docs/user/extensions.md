@@ -17,7 +17,7 @@ Vous pouvez **demander à l'agent d'installer un skill** depuis une URL. Par exe
 ## ## 10. Canaux (Telegram, Slack, Discord)
 
 
-- **Telegram** : enregistrez le token du bot avec `akasha vault set telegram_bot_token VOTRE_TOKEN`, puis définissez la variable d'environnement `AKASHA_TELEGRAM_ENABLED=1`. Le bot répond aux commandes `/akasha <message>` ou `/start`.
+- **Telegram** : enregistrez le token du bot avec `akasha vault set telegram_bot_token VOTRE_TOKEN`, puis définissez la variable d'environnement `AKASHA_TELEGRAM_ENABLED=1`. Le bot répond aux commandes `/akasha <message>` ou `/start`. Pour les briefs / notifies (Life layer), renseignez aussi `AKASHA_TELEGRAM_NOTIFY_CHAT_ID` (UI Connecteurs) — le daemon peut alors appeler `POST /api/channels/notify` `{ "channel": "telegram", "text": "…" }`.
 - **Slack** : vault `slack_signing_secret`, puis `AKASHA_SLACK_ENABLED=1`. Configurez la slash command vers l'URL fournie par votre déploiement.
 - **Discord** : vault `discord_bot_token`, puis `AKASHA_DISCORD_ENABLED=1`. Le bot répond au préfixe `!akasha <message>`.
 

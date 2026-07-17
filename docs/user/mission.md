@@ -26,3 +26,15 @@ Onglet **Mission** (application desktop) ou fichier **`autonomous_mission.yaml`*
 - `GET /api/autonomous-mission/events` — journal (`limit`, `since`)
 
 Les rapports Markdown sont écrits sous le répertoire configuré après chaque heartbeat réussi.
+
+## Life layer (packs planifiés)
+
+En complément de la mission autonome, l’onglet **Calendrier → Récurrences** propose un panneau **Life layer** :
+
+| Pack | Rôle |
+|------|------|
+| **Brief matinal** | Schedule quotidien ; le résultat est poussé sur Telegram (`AKASHA_TELEGRAM_NOTIFY_CHAT_ID`) via `POST /api/channels/notify` |
+| **Pack nuit** | Passage nocturne avec rapport (skills / agenda / follow-ups) |
+| **Langage naturel** | Phrase du type « chaque matin à 7h30, brief Telegram » → aperçu puis création (`POST /api/schedules/from-nl`, CLI `akasha schedule from-nl`) |
+
+Prérequis brief canal : connecteur Telegram activé + chat id notify (Paramètres → Connecteurs).

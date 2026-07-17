@@ -4,7 +4,23 @@ Document contributeurs / équipe release. Complète [roadmap_v0.10.0.md](roadmap
 
 ## Périmètre
 
-Référence git : **v0.9.0** → **0.10.0**. Thèmes : **parcours first-use embarqué**, packaging CUDA complet, discovery + Home Assistant, refactor API daemon (L3–L6).
+Référence git : **v0.9.0** → **0.10.0**. Thèmes : **parcours first-use embarqué**, packaging CUDA complet, discovery + Home Assistant, refactor API daemon (L3–L6), **cockpit agentic (P6)**, **Life layer (P7)**.
+
+## Life layer (P7)
+
+- **Overnight pack** : schedule nocturne template + UI Calendrier / Mission (`LifeLayerPanel`).
+- **Morning brief** : `POST /api/channels/notify` (Telegram) + hook notify sur schedules tagués + UI heure/canal.
+- **OAuth Connectors** : CalDAV Google/Microsoft surface dans Settings → Connectors (même flux que Calendrier).
+- **NL schedule (Hermes)** : `POST /api/schedules/from-nl` + `akasha schedule from-nl "…"`.
+- Stretch livré : B3 process-watch → wakeup, B4 subagent threads UI (Active work), H5 `POST /api/skills/draft-from-task`.
+
+## Cockpit agentic (P6)
+
+- **Active work** : bandeau/drawer chat des tâches running/queued, deep-link session, cancel/pause, indicateur sidebar (`ActiveWorkDrawer.tsx`).
+- **Modes composer** : presets `architect` / `code` / `ask` / `agent` (`agent_profiles` + `composer_mode` sur `POST /api/message`).
+- **Usage 7/30j** : Paramètres → Système → Usage (`UsageDashboardPanel.tsx`, `get_router_metrics?period=`).
+- **Sessions** : pin, fork transcript, dual-pane MVP.
+- Stretch B3/B4 reportés post-tag ; hors tag : attach externe, recipes, PWA, Chrome ext.
 
 ## First-use / embarqué
 

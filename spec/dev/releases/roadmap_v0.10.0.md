@@ -238,6 +238,51 @@ Objectif : mesurer et documenter les perfs pour valider la stabilisation, calibr
 
 ---
 
+## P6 — Cockpit agentic (concurrence mid-2026)
+
+Thème produit : rapprocher l’UX d’un « agent OS » (OpenClaw / Codex / Goose / Roo) **sans** élargir le scope messaging/PWA. Analyse : canvas Cursor `agentic-competitors-akasha.canvas.tsx`.
+
+### Must-ship (bloque le tag 0.10.0)
+
+- [x] **A1 — Active work** : drawer / bandeau dans le chat (tâches running/queued), deep-link `session_id`, cancel/pause, indicateur sidebar
+- [x] **A2 — Modes composer** : presets `architect` / `code` / `ask` via `agent-profiles` + `tools_policy_overlay` ; sélecteur FR/EN
+- [x] **A3 — Usage 7/30j** : agrégats locaux tokens / coût estimé / provider ; page Settings
+- [x] **A4 — Session UX** : pin + rename + fork transcript ; MVP dual-pane chat
+
+### Stretch (avant tag si capacité)
+
+- [ ] **B4** — Subagent threads UI (inspect + cancel agrégé) — **report post-tag** (capacité : first-use/CUDA prioritaire)
+- [ ] **B3** — Cron watch exit/condition (wakeups) — **report post-tag**
+
+### Hors tag 0.10.0 (post-tag / prochaine release)
+
+Attach Claude Code/Codex, recipes YAML, companion PWA, Chrome tab pairing, session replay, Studio checkpoints avancés, WhatsApp/Signal, computer-use vision, ACP.
+
+---
+
+## P7 — Life layer (+ Hermes)
+
+Thème produit : « always-on » local (Vellum / Lindy / Joanium / [Hermes Agent](https://hermes-agent.nousresearch.com/)) sans devenir un SaaS EA. Analyse : canvas `agentic-competitors-akasha.canvas.tsx`.
+
+### Must-ship (bloque le tag 0.10.0)
+
+- [x] **L1 — Overnight skill pack** : schedule nocturne template + carte UI enable/heure + rapports
+- [x] **L2 — Morning brief → canal** : `POST /api/channels/notify` (Telegram) + schedule `morning_brief` + UI heure/canal
+- [x] **L3 — OAuth connectors UX** : surface OAuth CalDAV Google/Microsoft dans Settings → Connectors
+- [x] **L4 — NL schedule (Hermes)** : texte → preview/create schedule (`POST /api/schedules/from-nl`, CLI `akasha schedule from-nl`)
+
+### Stretch (avant tag si capacité)
+
+- [x] **B3** — Process watch subscriptions → wakeup (`POST /api/process/watch/subscriptions`)
+- [x] **B4** — Subagent threads UI (enfants groupés + cancel children dans Active work)
+- [x] **H5** — Auto skill draft après tâche réussie (`POST /api/skills/draft-from-task`)
+
+### Hors P7 (explicite)
+
+Email IMAP, iMessage/SMS, WhatsApp/Signal natifs, suite media Manus, sandboxes Modal/Singularity, session replay, Attach externe, PWA.
+
+---
+
 ## Fichiers et emplacements
 
 | Sujet | Emplacements |
@@ -256,6 +301,8 @@ Objectif : mesurer et documenter les perfs pour valider la stabilisation, calibr
 | Site | `Akasha_app/js/main.js`, `docs.html`, `compare.html`, `releases.html` |
 | Docs user | `docs/user/*.md`, `scripts/build-user-docs.py` |
 | Tests | `apps/akasha-ui/e2e/smoke.spec.ts`, `spec/dev/quality/tests_and_benchmarks.md` |
+| Cockpit agentic P6 | `App.tsx` (chat/tasks), `agent_profiles.rs`, `api_routes_tasks.rs`, Settings Usage |
+| Life layer P7 | `life_layer.rs`, `api_routes_life.rs`, `LifeLayerPanel.tsx`, Connectors OAuth, `akasha schedule from-nl` |
 
 ---
 
@@ -272,12 +319,16 @@ Objectif : mesurer et documenter les perfs pour valider la stabilisation, calibr
 - [x] **GPU CI** workflow livré ; checklist [GPU_SELF_HOSTED_CI.md](../quality/GPU_SELF_HOSTED_CI.md) — runner opérateur en attente
 - [x] Aucune régression smoke CPU/CUDA GitHub-hosted (baseline v0.9)
 - [x] Site Akasha_app synchronisé (v0.10.0 — JSON + HTML pills, What's new)
+- [ ] **P6 Cockpit agentic** A1–A4 livrés (Active work, modes, Usage, session fork/dual-pane) — code livré ; validation manuelle avant tag
+- [x] **P7 Life layer** L1–L4 livrés (overnight pack, morning brief Telegram, OAuth Connectors, NL schedule) — validation manuelle avant tag
 
 ---
 
 ## Hors scope v0.10 (report explicite post-arbitrage R0 uniquement)
 
 - Remplacement **complet** de llama.cpp par Rbitnet ou un **DLM** en backend par défaut **sans fallback** — sauf décision contraire documentée dans `embedded_models_research_v0.10.md`.
+- Attach externe, recipes Goose, PWA, Chrome extension, session replay, computer-use vision, ACP — voir P6 hors tag.
+- Email IMAP, WhatsApp/Signal natifs, sandboxes Modal/Singularity — voir P7 hors scope.
 
 ---
 
@@ -289,11 +340,13 @@ Objectif : mesurer et documenter les perfs pour valider la stabilisation, calibr
 4. P2 stabilisation + E2E.
 5. P5 spike Rbitnet (parallèle possible après R0).
 6. P3 docs + Akasha_app.
-7. P4 release + self-hosted GPU CI + gate bench.
+7. **P6 Cockpit agentic** (A2 modes → A1 Active work → A3 Usage → A4 sessions).
+8. **P7 Life layer** (L2 notify → L1 overnight → L4 NL schedule → L3 OAuth).
+9. P4 release + self-hosted GPU CI + gate bench.
 
 ---
 
 ## Historique
 
 - **v0.9.0** : premier artefact `akasha-windows-x86_64-cuda` ; fixes CI VS 2022, bundling DLL, smoke GPU-less — voir [internal_release_0.9.md](internal_release_0.9.md).
-- **v0.10.0** *(en cours)* : parcours first-use, wizard embarqué, full CUDA zip, API download, bench scripts, note R0 — tag release pending.
+- **v0.10.0** *(en cours)* : parcours first-use, wizard embarqué, full CUDA zip, API download, bench scripts, note R0, **cockpit agentic P6**, **Life layer P7** — tag release pending.
