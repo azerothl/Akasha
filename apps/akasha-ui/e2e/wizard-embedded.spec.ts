@@ -87,6 +87,9 @@ test.describe("Onboarding wizard (embedded)", () => {
         contentType: "application/json",
         body: JSON.stringify({
           embedded_available: true,
+          embedded_loaded: false,
+          backend: null,
+          device: null,
           gguf_present: true,
           llama_cpp_compiled: true,
           ready_for_chat: true,
@@ -94,6 +97,7 @@ test.describe("Onboarding wizard (embedded)", () => {
           action: "embedded-calibrate",
           compiled_backends: ["llama_cpp"],
           hint: "calibration required",
+          hardware_tier: "gpu_low_4gb",
         }),
       });
     });

@@ -20,7 +20,11 @@ on:
     paths:
       - "crates/akasha-embedded-llm/**"
       - "crates/akasha-daemon/**"
+      - "crates/akasha-llm/**"
+      - ".github/workflows/gpu-ci.yml"
+      - ".github/workflows/release.yml"
       - "scripts/install.ps1"
+      - "scripts/build-windows-daemon-cuda.ps1"
       - "spec/dev/quality/bench_embedded*.ps1"
   workflow_dispatch:
 

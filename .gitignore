@@ -40,3 +40,7 @@ docker/
 *.db
 # Local environment overrides (use .env.example as template)
 .env
+
+# Local toolchain caches
+.tools/
+
