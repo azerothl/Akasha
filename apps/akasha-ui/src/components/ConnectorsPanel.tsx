@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { InfoTip } from "./Tooltip";
+import { CalDavAccountsPanel } from "./CalDavAccountsPanel";
 
 const DAEMON_PORT = 3876;
 
@@ -27,6 +28,8 @@ type DiscoveryInstance = {
 
 type Props = {
   t: (key: string) => string;
+  locale?: "fr" | "en";
+  fetchEndpoint?: (path: string, init?: RequestInit) => Promise<{ ok: boolean; status: number; text: string }>;
 };
 
 function SecretInput({
@@ -68,7 +71,7 @@ function SecretInput({
   );
 }
 
-export function ConnectorsPanel({ t }: Props) {
+export function ConnectorsPanel({ t, locale = "fr", fetchEndpoint }: Props) {
   const [connectors, setConnectors] = useState<ConnectorRow[]>([]);
   const [config, setConfig] = useState<ConnectorsConfigView>({});
   const [telegram, setTelegram] = useState(false);
@@ -375,6 +378,34 @@ export function ConnectorsPanel({ t }: Props) {
           {restarting ? t("common.loading") : t("connectors.restart_daemon")}
         </button>
       </div>
+
+      <section className="settings-card connectors-oauth-calendar">
+        <h4>
+          {locale === "en" ? "Calendar OAuth (managed)" : "OAuth calendrier (managé)"}
+          <InfoTip
+            label="OAuth"
+            content={
+              locale === "en"
+                ? "Connect Google or Microsoft calendar with OAuth. Bot tokens above are not OAuth — they are vault secrets."
+                : "Connectez Google ou Microsoft Calendar via OAuth. Les tokens bot ci-dessus ne sont pas de l’OAuth — ce sont des secrets vault."
+            }
+          />
+        </h4>
+        <p className="settings-doc muted">
+          {locale === "en"
+            ? "Same flow as Calendar → External accounts. Secrets stay in the vault; no YAML required."
+            : "Même flux que Calendrier → Comptes externes. Secrets dans le vault ; pas de YAML requis."}
+        </p>
+        {fetchEndpoint ? (
+          <CalDavAccountsPanel locale={locale} fetchEndpoint={fetchEndpoint} />
+        ) : (
+          <p className="settings-doc muted">
+            {locale === "en"
+              ? "Open Calendar → External to connect OAuth calendars."
+              : "Ouvrez Calendrier → Externes pour connecter un calendrier OAuth."}
+          </p>
+        )}
+      </section>
 
       <section className="settings-card connectors-matrix-note">
         <h4>
