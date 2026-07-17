@@ -116,6 +116,7 @@ async fn send_message_ack(
     target_task_id: Option<String>,
     priority: Option<String>,
     incognito: Option<bool>,
+    composer_mode: Option<String>,
     port: Option<u16>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
@@ -173,6 +174,12 @@ async fn send_message_ack(
     }
     if incognito == Some(true) {
         body["incognito"] = serde_json::Value::Bool(true);
+    }
+    if let Some(ref mode) = composer_mode {
+        let m = mode.trim().to_lowercase();
+        if !m.is_empty() && m != "agent" {
+            body["composer_mode"] = serde_json::Value::String(m);
+        }
     }
     let resp = client
         .post(&url)
@@ -1545,6 +1552,25 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
     Ok(json)
 }
 
+/// Pause a running task: POST /api/tasks/:id/pause.
+#[tauri::command]
+async fn pause_task(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tasks/{}/pause", daemon_base_url(port), task_id);
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "error": "invalid_response" }));
+    if !status.is_success() {
+        let detail = json
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or(json.get("error").and_then(|v| v.as_str()).unwrap_or("Erreur inconnue"));
+        return Err(detail.to_string());
+    }
+    Ok(json)
+}
+
 /// Human in the loop: GET /api/pending-human-input — list all tasks waiting for user input (for notifications on load or when user was away).
 #[tauri::command]
 async fn get_pending_human_input(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -2644,6 +2670,7 @@ pub fn run() {
             get_tasks,
             get_task_events,
             cancel_task,
+            pause_task,
             get_pending_human_input,
             get_task_human_input,
             post_task_human_reply,

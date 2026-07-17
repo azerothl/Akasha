@@ -68,6 +68,18 @@ pub(crate) async fn get_task_list(store_path: &Path, status_filter: Option<Strin
         .take(50)
         .map(|t| {
             let label = task_label(t.initial_message.as_ref(), &t.id);
+            let session_id = store
+                .get_events(t.id)
+                .ok()
+                .and_then(|evs| {
+                    evs.into_iter().find_map(|e| {
+                        e.payload.as_ref().and_then(|p| {
+                            p.get("session_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                    })
+                });
             serde_json::json!({
                 "id": t.id.to_string(),
                 "parent_task_id": t.parent_task_id.map(|u| u.to_string()),
@@ -76,6 +88,7 @@ pub(crate) async fn get_task_list(store_path: &Path, status_filter: Option<Strin
                 "created_at": t.created_at.to_rfc3339(),
                 "updated_at": t.updated_at.to_rfc3339(),
                 "label": label,
+                "session_id": session_id,
             })
         })
         .collect();
@@ -1776,6 +1789,16 @@ if method == "POST" && path == "/api/message" {
         .and_then(|v| v.get("studio_code_mode").and_then(|x| x.as_str()))
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
+    // Composer mode / named agent profile id (architect | code | ask | …).
+    let composer_mode = body_json
+        .as_ref()
+        .and_then(|v| {
+            v.get("composer_mode")
+                .or_else(|| v.get("agent_profile_id"))
+                .and_then(|x| x.as_str())
+        })
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty() && s != "agent");
     let message_delivery_mode = body_json
         .as_ref()
         .and_then(|v| {
@@ -1972,8 +1995,16 @@ if method == "POST" && path == "/api/message" {
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
     // Code Studio : toujours router vers le chef de projet ; la valeur UI devient une préférence pour les sous-agents.
+    // Chat composer modes: architect/code force the matching specialist when not in Studio.
     let studio_forced_agent = if studio_disk_root.is_some() {
         Some("studio_project_manager".to_string())
+    } else if let Some(ref mode) = composer_mode {
+        match mode.as_str() {
+            "architect" | "code" => Some(mode.clone()),
+            "ask" => None,
+            other if crate::api::agent_role_system_prompt(other).is_some() => Some(other.to_string()),
+            _ => None,
+        }
     } else {
         studio_ui_agent_preference.clone()
     };
@@ -2082,6 +2113,24 @@ if method == "POST" && path == "/api/message" {
         if let Some(ref m) = studio_code_mode {
             if let Some(p) = crate::api_studio::studio_code_mode_message_prefix(m) {
                 message_for_llm = format!("{p}{message_for_llm}");
+            }
+        }
+        if let Some(ref mode) = composer_mode {
+            let prefix = crate::agent_profiles::AgentProfilesStore::new(data_dir)
+                .get(mode)
+                .ok()
+                .flatten()
+                .map(|p| p.system_prompt.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    crate::api::agent_role_system_prompt(mode).map(|s| s.to_string())
+                });
+            if let Some(p) = prefix {
+                message_for_llm = format!("[Composer mode: {mode}]\n{p}\n\n{message_for_llm}");
+            } else if mode == "ask" {
+                message_for_llm = format!(
+                    "[Composer mode: ask]\nAnswer questions only. Use read-only tools if needed. Do not write files or run mutating shell commands.\n\n{message_for_llm}"
+                );
             }
         }
         if let Some(ref h) = studio_policy_hint {
