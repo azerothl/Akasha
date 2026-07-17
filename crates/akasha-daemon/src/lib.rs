@@ -85,6 +85,8 @@ pub mod plugin_install;
 pub mod plugin_hook_bus;
 pub mod plugins;
 pub mod scheduler;
+pub mod life_layer;
+pub mod api_routes_life;
 pub mod skills;
 pub mod agent_profiles;
 pub mod dashboards;

@@ -13613,6 +13613,19 @@ pub async fn handle_api(
         return resp;
     }
 
+    if let Some(resp) = crate::api_routes_life::try_handle(
+        method,
+        path_only,
+        body.as_deref(),
+        &crate::api_routes_life::LifeRouteCtx {
+            store_path,
+            data_dir,
+        },
+    )
+    .await
+    {
+        return resp;
+    }
 
     if let Some(resp) = crate::api_routes_terminal::handle_terminal_routes(
         method,

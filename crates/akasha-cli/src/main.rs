@@ -125,6 +125,11 @@ enum Commands {
         #[command(subcommand)]
         sub: TaskSub,
     },
+    /// Schedules: create from natural language (Life layer / Hermes-inspired)
+    Schedule {
+        #[command(subcommand)]
+        sub: ScheduleSub,
+    },
     /// Telegram access lifecycle (pairing approvals, roles)
     Telegram {
         #[command(subcommand)]
@@ -134,6 +139,18 @@ enum Commands {
     Discover {
         /// Service profile id (ollama, homeassistant). Omit to list profiles.
         service: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleSub {
+    /// Parse natural language into a schedule preview (or commit with --commit)
+    FromNl {
+        /// Phrase, e.g. "chaque matin à 7h30, brief Telegram"
+        text: String,
+        /// Persist the schedule on the daemon
+        #[arg(long)]
+        commit: bool,
     },
 }
 
@@ -667,8 +684,35 @@ fn main() -> anyhow::Result<()> {
         Commands::Migrate { sub } => cmd_migrate(sub),
         Commands::Terminal { sub } => cmd_terminal(sub),
         Commands::Task { sub } => cmd_task(sub),
+        Commands::Schedule { sub } => cmd_schedule(sub),
         Commands::Telegram { sub } => cmd_telegram(sub),
         Commands::Discover { service } => cmd_discover(service.as_deref()),
+    }
+}
+
+fn cmd_schedule(sub: ScheduleSub) -> anyhow::Result<()> {
+    match sub {
+        ScheduleSub::FromNl { text, commit } => {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?;
+            let url = format!("{}/api/schedules/from-nl", daemon_base_url());
+            let body = serde_json::json!({ "text": text, "commit": commit });
+            let resp = client.post(&url).json(&body).send()?;
+            let status = resp.status();
+            let json: serde_json::Value = resp.json()?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "daemon error {}: {}",
+                    status,
+                    json.get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&json)?);
+            Ok(())
+        }
     }
 }
 
