@@ -2115,24 +2115,6 @@ if method == "POST" && path == "/api/message" {
                 message_for_llm = format!("{p}{message_for_llm}");
             }
         }
-        if let Some(ref mode) = composer_mode {
-            let prefix = crate::agent_profiles::AgentProfilesStore::new(data_dir)
-                .get(mode)
-                .ok()
-                .flatten()
-                .map(|p| p.system_prompt.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    crate::api::agent_role_system_prompt(mode).map(|s| s.to_string())
-                });
-            if let Some(p) = prefix {
-                message_for_llm = format!("[Composer mode: {mode}]\n{p}\n\n{message_for_llm}");
-            } else if mode == "ask" {
-                message_for_llm = format!(
-                    "[Composer mode: ask]\nAnswer questions only. Use read-only tools if needed. Do not write files or run mutating shell commands.\n\n{message_for_llm}"
-                );
-            }
-        }
         if let Some(ref h) = studio_policy_hint {
             if let Some(p) = crate::api_studio::studio_one_shot_policy_hint_prefix(h) {
                 message_for_llm = format!("{p}{message_for_llm}");
@@ -2227,6 +2209,23 @@ if method == "POST" && path == "/api/message" {
                 message_for_llm.push_str(&embed);
                 message_for_llm.push_str(crate::api_studio::STUDIO_ACCEPTANCE_JSON_END);
             }
+        }
+    }
+    // Composer modes (Ask / Architect / Code) apply to normal chat as well as Code Studio.
+    if let Some(ref mode) = composer_mode {
+        let prefix = crate::agent_profiles::AgentProfilesStore::new(data_dir)
+            .get(mode)
+            .ok()
+            .flatten()
+            .map(|p| p.system_prompt.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| crate::api::agent_role_system_prompt(mode).map(|s| s.to_string()));
+        if let Some(p) = prefix {
+            message_for_llm = format!("[Composer mode: {mode}]\n{p}\n\n{message_for_llm}");
+        } else if mode == "ask" {
+            message_for_llm = format!(
+                "[Composer mode: ask]\nAnswer questions only. Use read-only tools if needed. Do not write files or run mutating shell commands.\n\n{message_for_llm}"
+            );
         }
     }
     let mut envelope = crate::gateway::MessageEnvelope::api(

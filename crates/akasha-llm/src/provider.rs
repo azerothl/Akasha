@@ -1949,6 +1949,8 @@ impl LLMProvider for AkashaEmbeddedProvider {
                 Some(s) if !s.is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
                 _ => request.prompt.clone(),
             };
+            // Match non-stream `complete`: small n_ctx cannot hold full agent dumps.
+            let prompt = akasha_embedded_llm::config::truncate_prompt_for_embedded(&prompt);
             let max_tokens = request.max_tokens.map(|u| u as usize);
             let temperature = request.temperature.map(|f| f as f64);
             match tokio::task::spawn_blocking(move || {

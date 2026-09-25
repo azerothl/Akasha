@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 const HTTP_TIMEOUT_SECS: u64 = 12;
 const MAX_CLOUD_MODELS: usize = 200;
-const MAX_HF_MODELS: usize = 24;
+const MAX_HF_MODELS: usize = 48;
+/// Max Hugging Face entries kept per normalized model family (avoids 20× Llama-3.2-3B clones).
+const MAX_HF_PER_FAMILY: usize = 2;
 
 /// Live provider catalogs plus optional per-model metadata (OpenRouter architecture/pricing, etc.).
 pub struct CookbookCatalog {
@@ -40,6 +42,100 @@ pub fn resolve_gpu_hint() -> String {
         }
     }
     detect_gpu_hint()
+}
+
+/// Host RAM in GiB for cookbook fit / HF queries. `AKASHA_HOST_RAM_GB` overrides auto-detect.
+pub fn detect_host_ram_gb() -> u64 {
+    if let Ok(v) = std::env::var("AKASHA_HOST_RAM_GB") {
+        if let Ok(n) = v.trim().parse::<u64>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(raw) = std::fs::read_to_string("/proc/meminfo") {
+            for line in raw.lines() {
+                if line.starts_with("MemTotal:") {
+                    if let Some(kb) = line
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
+                        return ((kb + 512 * 1024) / (1024 * 1024)).max(1);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(out) = std::process::Command::new("wmic")
+            .args(["computersystem", "get", "totalphysicalmemory", "/value"])
+            .output()
+        {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    if let Some(bytes) = line.strip_prefix("TotalPhysicalMemory=") {
+                        if let Ok(b) = bytes.trim().parse::<u64>() {
+                            return ((b + 512 * 1024 * 1024) / (1024 * 1024 * 1024)).max(1);
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(out) = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if let Ok(b) = text.trim().parse::<u64>() {
+                    return ((b + 512 * 1024 * 1024) / (1024 * 1024 * 1024)).max(1);
+                }
+            }
+        }
+    }
+    16
+}
+
+/// First NVIDIA GPU VRAM in MiB when `nvidia-smi` is available.
+pub fn detect_vram_mb() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .and_then(|l| l.parse::<u64>().ok())
+}
+
+/// Merge live Ollama / Rbitnet tags into the cookbook providers map so installed
+/// models appear even when missing from llm_router routes.
+pub fn inject_live_local_models(
+    providers: &mut HashMap<String, Vec<String>>,
+    ollama_models: &[String],
+    rbitnet_models: &[String],
+) {
+    if !ollama_models.is_empty() {
+        merge_provider_models(providers, "ollama", ollama_models.to_vec());
+    }
+    if !rbitnet_models.is_empty() {
+        merge_provider_models(providers, "bitnet", rbitnet_models.to_vec());
+    }
 }
 
 fn detect_gpu_hint() -> String {
@@ -309,6 +405,82 @@ async fn fetch_ollama_tags(client: &reqwest::Client, base_url: &str) -> Vec<Stri
         .unwrap_or_default()
 }
 
+/// Embedded snapshot of https://ollama.com/library (fallback when live scrape fails).
+const EMBEDDED_OLLAMA_LIBRARY_JSON: &str =
+    include_str!("../../../spec/cookbook/ollama_library.json");
+
+/// Fetch the full Ollama library catalog (all pullable model families).
+/// Prefers a live scrape of ollama.com/library; falls back to the embedded snapshot.
+pub async fn fetch_ollama_library(client: &reqwest::Client) -> Vec<String> {
+    let live = scrape_ollama_library_html(client).await;
+    // Library currently has ~200+ families; treat smaller results as scrape failure.
+    if live.len() >= 50 {
+        return live;
+    }
+    embedded_ollama_library_models()
+}
+
+fn embedded_ollama_library_models() -> Vec<String> {
+    serde_json::from_str::<Value>(EMBEDDED_OLLAMA_LIBRARY_JSON)
+        .ok()
+        .and_then(|v| {
+            v.get("models").and_then(|m| m.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default()
+}
+
+async fn scrape_ollama_library_html(client: &reqwest::Client) -> Vec<String> {
+    let Ok(resp) = client
+        .get("https://ollama.com/library")
+        .header("Accept", "text/html")
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(html) = resp.text().await else {
+        return Vec::new();
+    };
+    parse_ollama_library_html(&html)
+}
+
+/// Extract model family names from ollama.com/library HTML.
+pub fn parse_ollama_library_html(html: &str) -> Vec<String> {
+    // Links look like href="/library/llama3.2" (families) — skip tag links with ':'.
+    let re = regex::Regex::new(r#"href="/library/([a-zA-Z0-9][a-zA-Z0-9._-]*)""#).unwrap();
+    let mut names = HashSet::new();
+    for cap in re.captures_iter(html) {
+        let name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        if name.is_empty() || name.contains(':') || name.contains('/') {
+            continue;
+        }
+        names.insert(name.to_string());
+    }
+    let mut out: Vec<String> = names.into_iter().collect();
+    out.sort();
+    out
+}
+
+/// Whether a model tag belongs to the Ollama library catalog (family or exact name).
+pub fn is_ollama_library_model(model: &str, library: &HashSet<String>) -> bool {
+    let t = model.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if library.contains(t) {
+        return true;
+    }
+    let base = t.split(':').next().unwrap_or(t);
+    library.contains(base)
+}
+
 async fn fetch_openrouter_catalog(
     client: &reqwest::Client,
     base_url: &str,
@@ -399,28 +571,85 @@ async fn fetch_openai_models_list(
 }
 
 pub fn hf_search_queries(ram_gb: u64, gpu_hint: &str) -> Vec<&'static str> {
-    let has_gpu = !gpu_hint.is_empty()
-        && gpu_hint != "unknown"
-        && gpu_hint != "none"
-        && gpu_hint != "cpu";
+    let has_gpu = gpu_hint_has_accelerator(gpu_hint);
+    let mut q: Vec<&'static str> = Vec::new();
     if ram_gb <= 8 {
-        vec!["gguf 1B instruct", "gguf 3B Q4", "bitnet gguf"]
+        q.extend(["gguf 1B instruct", "gguf 3B Q4", "bitnet gguf", "smollm gguf"]);
     } else if ram_gb <= 16 {
-        vec!["gguf 3B instruct", "gguf 7B Q4_K_M", "qwen gguf small"]
-    } else if ram_gb <= 32 {
-        let mut q = vec!["gguf 7B instruct", "gguf 8B Q4", "mistral gguf"];
+        q.extend(["gguf 3B instruct", "gguf 7B Q4_K_M", "qwen2.5 gguf", "phi gguf"]);
         if has_gpu {
-            q.push("gguf 13B Q4");
+            q.extend(["gguf 13B Q4", "gemma3 gguf"]);
         }
-        q
+    } else if ram_gb <= 32 {
+        q.extend([
+            "gguf 7B instruct",
+            "gguf 14B Q4",
+            "mistral gguf",
+            "qwen2.5 gguf",
+            "gemma3 gguf",
+        ]);
+        if has_gpu {
+            q.extend(["gguf 32B Q4", "qwen3 gguf"]);
+        }
     } else {
-        vec![
-            "gguf 13B instruct",
+        q.extend([
+            "gguf 14B instruct",
+            "gguf 32B Q4_K_M",
             "gguf 70B Q4_K_M",
-            "mixtral gguf",
-            "llama gguf",
-        ]
+            "qwen3 gguf",
+            "gemma3 gguf",
+            "deepseek gguf",
+        ]);
+        if has_gpu {
+            q.extend(["mixtral gguf", "qwen2.5-coder gguf"]);
+        }
     }
+    q
+}
+
+fn gpu_hint_has_accelerator(gpu_hint: &str) -> bool {
+    let g = gpu_hint.trim().to_lowercase();
+    !g.is_empty() && g != "unknown" && g != "none" && g != "cpu"
+}
+
+/// Normalize HF repo name for diversity (strip org, GGUF/quant suffixes).
+pub fn hf_family_key(model_id: &str) -> String {
+    let name = model_id
+        .rsplit('/')
+        .next()
+        .unwrap_or(model_id)
+        .to_lowercase();
+    let mut s = name.replace("-gguf", "").replace("_gguf", "");
+    for suffix in [
+        "-q4_k_m",
+        "-q4_k_s",
+        "-q5_k_m",
+        "-q5_k_s",
+        "-q6_k",
+        "-q8_0",
+        "-q3_k_m",
+        "-q2_k",
+        "-iq4_xs",
+        "-iq4_nl",
+        "-ud-q4_k_xl",
+        "-ud-q5_k_xl",
+        "-instruct-q4_k_m",
+        "-instruct-q5_k_m",
+    ] {
+        if let Some(idx) = s.find(suffix) {
+            s.truncate(idx);
+            break;
+        }
+    }
+    // Collapse trailing quant tokens like "q4km" glued without separators.
+    for token in ["q4km", "q4ks", "q5km", "q8_0", "q6k"] {
+        if s.ends_with(token) {
+            s.truncate(s.len() - token.len());
+            s = s.trim_end_matches(['-', '_']).to_string();
+            break;
+        }
+    }
+    s.trim_end_matches(['-', '_']).to_string()
 }
 
 pub async fn fetch_huggingface_local_models(
@@ -429,17 +658,30 @@ pub async fn fetch_huggingface_local_models(
     gpu_hint: &str,
 ) -> Vec<Value> {
     let queries = hf_search_queries(ram_gb, gpu_hint);
-    let mut seen = HashSet::new();
+    let mut seen_ids = HashSet::new();
+    let mut family_counts: HashMap<String, usize> = HashMap::new();
     let mut out = Vec::new();
 
-    for query in queries {
+    // Seed with top GGUF downloads (no search) so popular families are not starved
+    // by narrow query collisions (e.g. twenty Llama-3.2-3B clones).
+    let mut urls: Vec<String> = vec![
+        "https://huggingface.co/api/models?filter=gguf&sort=downloads&direction=-1&limit=24"
+            .to_string(),
+        // Vision / multimodal GGUF often miss pipeline_tag=text-generation.
+        "https://huggingface.co/api/models?search=vl%20gguf%20instruct&sort=downloads&direction=-1&limit=12"
+            .to_string(),
+    ];
+    for query in &queries {
+        urls.push(format!(
+            "https://huggingface.co/api/models?search={}&filter=gguf&sort=downloads&direction=-1&limit=12",
+            urlencoding::encode(query)
+        ));
+    }
+
+    for url in urls {
         if out.len() >= MAX_HF_MODELS {
             break;
         }
-        let url = format!(
-            "https://huggingface.co/api/models?search={}&filter=text-generation&sort=downloads&direction=-1&limit=12",
-            urlencoding::encode(query)
-        );
         let Ok(resp) = client.get(&url).send().await else {
             continue;
         };
@@ -461,10 +703,9 @@ pub async fn fetch_huggingface_local_models(
                 .or_else(|| item.get("id"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if model_id.is_empty() || !seen.insert(model_id.to_string()) {
+            if model_id.is_empty() || !seen_ids.insert(model_id.to_string()) {
                 continue;
             }
-            let downloads = item.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0);
             let tags: Vec<String> = item
                 .get("tags")
                 .and_then(|t| t.as_array())
@@ -474,6 +715,20 @@ pub async fn fetch_huggingface_local_models(
                         .collect()
                 })
                 .unwrap_or_default();
+            let lower = model_id.to_lowercase();
+            let looks_gguf = lower.contains("gguf")
+                || tags.iter().any(|t| t.to_lowercase().contains("gguf"));
+            // Cookbook local path targets GGUF / BitNet — skip unrelated HF repos.
+            if !looks_gguf && !lower.contains("bitnet") {
+                continue;
+            }
+            let family = hf_family_key(model_id);
+            let count = family_counts.entry(family).or_insert(0);
+            if *count >= MAX_HF_PER_FAMILY {
+                continue;
+            }
+            *count += 1;
+            let downloads = item.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0);
             let fit = hf_fit_score(model_id, &tags, ram_gb);
             let integration = hf_integration_hint(model_id, &tags);
             let size_hint = estimate_size_label(model_id);
@@ -979,6 +1234,7 @@ pub fn configured_model_entries(
     provider_meta: &HashMap<String, HashMap<String, Value>>,
     ollama_models: &[String],
     rbitnet_models: &[String],
+    ollama_library: &HashSet<String>,
 ) -> Vec<Value> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -996,14 +1252,20 @@ pub fn configured_model_entries(
                 .filter(|(_, cfg)| route_uses_model(cfg, provider, model))
                 .map(|(tt, _)| tt.clone())
                 .collect();
-            let source = if task_types.is_empty() {
-                "provider_catalog"
-            } else {
+            let from_library =
+                provider == "ollama" && is_ollama_library_model(model, ollama_library);
+            let source = if !task_types.is_empty() {
                 "configured_route"
+            } else if from_library {
+                "ollama_library"
+            } else {
+                "provider_catalog"
             };
             let fit_score = fit_score_for_provider_model(provider, model, ram);
             let notes = if !task_types.is_empty() {
                 format!("Routed for: {}", task_types.join(", "))
+            } else if from_library {
+                format!("Ollama library — pull with `ollama pull {model}`")
             } else {
                 format!("Available from {provider} catalog (llm_router.yaml provider configured)")
             };
@@ -1585,9 +1847,60 @@ mod tests {
     #[test]
     fn hf_queries_scale_with_ram() {
         let low = hf_search_queries(8, "none");
+        let mid_gpu = hf_search_queries(16, "NVIDIA GeForce RTX 4080 SUPER");
         let high = hf_search_queries(64, "cuda");
         assert!(low.iter().any(|q| q.contains("1B")));
-        assert!(high.iter().any(|q| q.contains("13B") || q.contains("70B")));
+        assert!(mid_gpu.iter().any(|q| q.contains("13B") || q.contains("gemma")));
+        assert!(high.iter().any(|q| q.contains("32B") || q.contains("70B")));
+    }
+
+    #[test]
+    fn hf_family_key_collapses_quants() {
+        assert_eq!(
+            hf_family_key("bartowski/Llama-3.2-3B-Instruct-GGUF"),
+            hf_family_key("unsloth/Llama-3.2-3B-Instruct-GGUF")
+        );
+        assert_eq!(
+            hf_family_key("Qwen/Qwen2.5-7B-Instruct-Q4_K_M-GGUF"),
+            "qwen2.5-7b-instruct"
+        );
+    }
+
+    #[test]
+    fn inject_live_local_models_adds_ollama_tags() {
+        let mut m = HashMap::new();
+        m.insert("ollama".into(), vec!["tinyllama".into()]);
+        inject_live_local_models(&mut m, &["llama3.2:latest".into(), "tinyllama".into()], &[]);
+        assert!(m["ollama"].iter().any(|x| x == "llama3.2:latest"));
+        assert_eq!(m["ollama"].iter().filter(|x| *x == "tinyllama").count(), 1);
+    }
+
+    #[test]
+    fn parse_ollama_library_html_extracts_families() {
+        let html = r#"
+            <a href="/library/llama3.2">llama3.2</a>
+            <a href="/library/qwen2.5">qwen2.5</a>
+            <a href="/library/qwen2.5:7b">skip tag</a>
+            <a href="/library/llama3.2">dup</a>
+        "#;
+        let models = parse_ollama_library_html(html);
+        assert_eq!(models, vec!["llama3.2".to_string(), "qwen2.5".to_string()]);
+    }
+
+    #[test]
+    fn embedded_ollama_library_is_populated() {
+        let models = embedded_ollama_library_models();
+        assert!(models.len() >= 100, "got {}", models.len());
+        assert!(models.iter().any(|m| m == "llama3.2"));
+        assert!(models.iter().any(|m| m == "mistral"));
+    }
+
+    #[test]
+    fn is_ollama_library_matches_family_and_tag() {
+        let lib: HashSet<String> = ["llama3.2".into(), "mistral".into()].into_iter().collect();
+        assert!(is_ollama_library_model("llama3.2", &lib));
+        assert!(is_ollama_library_model("llama3.2:latest", &lib));
+        assert!(!is_ollama_library_model("custom-local", &lib));
     }
 
     #[test]
@@ -1704,6 +2017,7 @@ mod tests {
             &HashMap::new(),
             &["qwen/qwen3".into()],
             &[],
+            &HashSet::new(),
         );
         assert_eq!(entries.len(), 2);
         let routed = entries

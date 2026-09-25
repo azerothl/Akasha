@@ -117,6 +117,71 @@ impl RouteEntry {
     }
 }
 
+/// Resolve a practical Ollama `num_ctx` when the route/request left it unset.
+/// Prefer `model_options.num_ctx`, else `min(context_length_max, AKASHA_OLLAMA_NUM_CTX|8192)`,
+/// else 8192 for mid-size models (tiny ≤2B leave unset so Ollama keeps its Modelfile default).
+pub fn resolve_ollama_num_ctx(
+    provider: &str,
+    model: &str,
+    model_options: &HashMap<String, ModelOption>,
+) -> Option<u32> {
+    if !provider.eq_ignore_ascii_case("ollama") {
+        return None;
+    }
+    let cap = std::env::var("AKASHA_OLLAMA_NUM_CTX")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n >= 512)
+        .unwrap_or(8192);
+    let key = model.trim();
+    let opt = model_options
+        .get(key)
+        .or_else(|| model_options.get(&format!("ollama/{key}")));
+    if let Some(o) = opt {
+        if let Some(nc) = o.num_ctx.filter(|&n| n > 0) {
+            return Some(nc.min(cap).min(u32::MAX as u64) as u32);
+        }
+        if let Some(max) = o.context_length_max.filter(|&n| n > 0) {
+            return Some(max.min(cap).min(u32::MAX as u64) as u32);
+        }
+    }
+    // Heuristic: mid/large local models benefit from an explicit 8k window in Akasha.
+    let m = key.to_ascii_lowercase();
+    let looks_tiny = m.contains("tinyllama")
+        || m.contains("smollm")
+        || m.contains(":0.5b")
+        || m.contains(":0.6b")
+        || m.contains(":1b")
+        || m.contains("-1b")
+        || m.contains(":1.5b");
+    if looks_tiny {
+        return None;
+    }
+    Some(cap.min(u32::MAX as u64) as u32)
+}
+
+/// Apply route config, then fill Ollama `num_ctx` from model_options / defaults when still unset.
+/// Caller-provided `thinking_level` (e.g. compact local `off`) wins over route YAML.
+pub fn prepare_ollama_request(
+    entry: &RouteEntry,
+    request: &mut crate::provider::CompletionRequest,
+    model_options: &HashMap<String, ModelOption>,
+) {
+    let caller_thinking = request.thinking_level.clone();
+    let caller_num_ctx = request.num_ctx;
+    entry.apply_config_to_request(request);
+    if let Some(t) = caller_thinking {
+        request.thinking_level = Some(t);
+    }
+    if caller_num_ctx.is_some() {
+        request.num_ctx = caller_num_ctx;
+    } else if request.num_ctx.is_none() {
+        if let Some(nc) = resolve_ollama_num_ctx(&entry.provider, &entry.model, model_options) {
+            request.num_ctx = Some(nc);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteConstraints {
     pub max_cost_per_request: Option<f64>,
@@ -410,5 +475,29 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn resolve_ollama_num_ctx_defaults_8k_for_mid_models() {
+        let opts = HashMap::new();
+        assert_eq!(
+            resolve_ollama_num_ctx("ollama", "qwen3.5:9b", &opts),
+            Some(8192)
+        );
+        assert_eq!(resolve_ollama_num_ctx("ollama", "tinyllama", &opts), None);
+        assert_eq!(resolve_ollama_num_ctx("openai", "gpt-4o", &opts), None);
+    }
+
+    #[test]
+    fn prepare_ollama_request_preserves_caller_thinking_off() {
+        let entry = route_entry_with_config(serde_json::json!({
+            "thinking_level": "medium",
+            "num_ctx": 4096
+        }));
+        let mut req = empty_request();
+        req.thinking_level = Some("off".into());
+        prepare_ollama_request(&entry, &mut req, &HashMap::new());
+        assert_eq!(req.thinking_level.as_deref(), Some("off"));
+        assert_eq!(req.num_ctx, Some(4096));
     }
 }
