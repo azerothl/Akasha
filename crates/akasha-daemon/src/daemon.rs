@@ -113,11 +113,14 @@ fn fail_task_on_worker_slot_timeout(
     }
 }
 
-fn bind_loopback_listener(port: u16) -> std::io::Result<TcpListener> {
-    let addr = format!("127.0.0.1:{port}").parse().map_err(|e| {
+fn bind_api_listener(port: u16) -> std::io::Result<TcpListener> {
+    let host = std::env::var("AKASHA_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let host = host.trim();
+    let host = if host.is_empty() { "127.0.0.1" } else { host };
+    let addr = format!("{host}:{port}").parse().map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("invalid listen addr: {e}"),
+            format!("invalid listen addr {host}:{port}: {e}"),
         )
     })?;
     let socket = TcpSocket::new_v4()?;
@@ -128,6 +131,7 @@ fn bind_loopback_listener(port: u16) -> std::io::Result<TcpListener> {
 }
 
 fn log_bind_port_failure(port: u16, err: &std::io::Error) {
+    let bind_host = std::env::var("AKASHA_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr_in_use = matches!(err.kind(), std::io::ErrorKind::AddrInUse);
     #[cfg(windows)]
     let win_addr_in_use = err.raw_os_error() == Some(10048);
@@ -138,6 +142,7 @@ fn log_bind_port_failure(port: u16, err: &std::io::Error) {
     error!(
         error = %err,
         port = port,
+        bind = %bind_host,
         "Impossible d'écouter sur le port (API + santé). Le port est peut-être déjà utilisé par une autre instance du daemon."
     );
     if likely_port_taken {
@@ -145,13 +150,15 @@ fn log_bind_port_failure(port: u16, err: &std::io::Error) {
             port = port,
             "Si une ancienne instance tourne encore : exécutez « akasha stop » puis relancez (ou « akasha start --foreground »). \
              Sous Windows : « Get-NetTCPConnection -LocalPort {port} -State Listen » pour voir le PID, puis arrêtez ce processus. \
-             Pour utiliser un autre port : définissez AKASHA_PORT (et le même port côté clients : UI Tauri, Code Studio / VITE_DAEMON_URL)."
+             Pour utiliser un autre port : définissez AKASHA_PORT (et le même port côté clients : UI Tauri, Code Studio / VITE_DAEMON_URL). \
+             Pour le Companion ESP32 sur le LAN : AKASHA_BIND=0.0.0.0."
         );
     }
     eprintln!(
-        "Akasha : échec du bind sur 127.0.0.1:{port} — {err}\n\
+        "Akasha : échec du bind sur {bind_host}:{port} — {err}\n\
          → Une autre instance écoute peut-être déjà sur ce port. Essayez : akasha stop\n\
          → Ou changez de port : AKASHA_PORT=<port> puis relancez le daemon et les clients.\n\
+         → Companion LAN : AKASHA_BIND=0.0.0.0 (défaut 127.0.0.1 uniquement).\n\
          → Windows (PID) : Get-NetTCPConnection -LocalPort {port} -State Listen"
     );
 }
@@ -625,15 +632,19 @@ impl Daemon {
                 }
             }
 
-            let listener = match bind_loopback_listener(port) {
+            let listener = match bind_api_listener(port) {
                 Ok(l) => l,
                 Err(e) => {
                     log_bind_port_failure(port, &e);
                     return Err(e.into());
                 }
             };
-
-            info!(port = port, "Daemon listening for health checks and API");
+            let bind_host = std::env::var("AKASHA_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+            info!(port = port, bind = %bind_host, "Daemon listening for health checks and API");
+            crate::companion_discovery::spawn_companion_lan_discovery(
+                port,
+                env!("CARGO_PKG_VERSION").to_string(),
+            );
 
             // Phase A: Tools policy (agent machine tools)
             let data_dir = db_path.parent().unwrap_or_else(|| db_path.as_path());

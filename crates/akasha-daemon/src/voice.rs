@@ -3,8 +3,10 @@
 //! See plan: Kyutai TTS/STT, delayed-streams-modeling, Unmute.
 
 use base64::Engine;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::OnceLock;
 
 const VOICE_TIMEOUT_SECS: u64 = 60;
 
@@ -54,11 +56,86 @@ pub fn load_voice_config(data_dir: &Path) -> Option<VoiceRouterConfig> {
     VoiceRouterConfig::load_from_path(&voice_config_path(data_dir))
 }
 
+/// Strip markdown / markup so TTS does not read `**`, backticks, links, etc. aloud.
+pub fn plain_text_for_speech(text: &str) -> String {
+    static RE_FENCE: OnceLock<Regex> = OnceLock::new();
+    static RE_INLINE_CODE: OnceLock<Regex> = OnceLock::new();
+    static RE_LINK: OnceLock<Regex> = OnceLock::new();
+    static RE_IMAGE: OnceLock<Regex> = OnceLock::new();
+    static RE_BOLD: OnceLock<Regex> = OnceLock::new();
+    static RE_ITALIC: OnceLock<Regex> = OnceLock::new();
+    static RE_HEADING: OnceLock<Regex> = OnceLock::new();
+    static RE_QUOTE: OnceLock<Regex> = OnceLock::new();
+    static RE_LIST: OnceLock<Regex> = OnceLock::new();
+    static RE_HTML: OnceLock<Regex> = OnceLock::new();
+    static RE_WS: OnceLock<Regex> = OnceLock::new();
+
+    let re_fence = RE_FENCE.get_or_init(|| {
+        Regex::new(r"(?s)```[^\n]*\n.*?```|```.*?```").expect("fence regex")
+    });
+    let re_inline_code =
+        RE_INLINE_CODE.get_or_init(|| Regex::new(r"`([^`]+)`").expect("inline code"));
+    let re_image = RE_IMAGE.get_or_init(|| Regex::new(r"!\[([^\]]*)\]\([^)]+\)").expect("image"));
+    let re_link = RE_LINK.get_or_init(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").expect("link"));
+    let re_bold = RE_BOLD.get_or_init(|| {
+        Regex::new(r"\*\*(.+?)\*\*|__(.+?)__").expect("bold")
+    });
+    let re_italic = RE_ITALIC.get_or_init(|| {
+        Regex::new(r"\*([^*\n]+)\*|_([^_\n]+)_").expect("italic")
+    });
+    let re_heading = RE_HEADING.get_or_init(|| Regex::new(r"(?m)^#{1,6}\s*").expect("heading"));
+    let re_quote = RE_QUOTE.get_or_init(|| Regex::new(r"(?m)^>\s?").expect("quote"));
+    let re_list = RE_LIST.get_or_init(|| Regex::new(r"(?m)^(?:[-*+]|\d+\.)\s+").expect("list"));
+    let re_html = RE_HTML.get_or_init(|| Regex::new(r"<[^>]+>").expect("html"));
+    let re_ws = RE_WS.get_or_init(|| Regex::new(r"[ \t]+\n").expect("ws"));
+
+    let mut s = re_fence.replace_all(text, " ").into_owned();
+    s = re_image.replace_all(&s, "$1").into_owned();
+    s = re_link.replace_all(&s, "$1").into_owned();
+    s = re_inline_code.replace_all(&s, "$1").into_owned();
+    s = re_bold.replace_all(&s, |caps: &regex::Captures| {
+        caps.get(1)
+            .or_else(|| caps.get(2))
+            .map(|m| m.as_str())
+            .unwrap_or("")
+            .to_string()
+    })
+    .into_owned();
+    s = re_italic
+        .replace_all(&s, |caps: &regex::Captures| {
+            caps.get(1)
+                .or_else(|| caps.get(2))
+                .map(|m| m.as_str())
+                .unwrap_or("")
+                .to_string()
+        })
+        .into_owned();
+    s = re_heading.replace_all(&s, "").into_owned();
+    s = re_quote.replace_all(&s, "").into_owned();
+    s = re_list.replace_all(&s, "").into_owned();
+    s = re_html.replace_all(&s, " ").into_owned();
+    s = s.replace("~~", "");
+    s = s.replace("---", ". ");
+    s = s.replace("***", " ");
+    s = re_ws.replace_all(&s, "\n").into_owned();
+    // Collapse runs of whitespace / blank lines into single spaces for speech.
+    let collapsed = s
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    collapsed.trim().to_string()
+}
+
 /// TTS: synthesize text to audio. Returns (message, data_url) with data_url = data:audio/wav;base64,....
 pub async fn speech_synthesize_impl(
     data_dir: &Path,
     text: &str,
 ) -> Result<(String, String), String> {
+    let spoken = plain_text_for_speech(text);
+    let text = if spoken.is_empty() { text.trim() } else { spoken.as_str() };
+    if text.is_empty() {
+        return Err("[speech_synthesize] texte vide après nettoyage.".to_string());
+    }
     let config = match load_voice_config(data_dir) {
         Some(c) => c,
         None => {
@@ -203,4 +280,23 @@ pub async fn speech_transcribe_impl(
         .unwrap_or("")
         .to_string();
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_text_for_speech;
+
+    #[test]
+    fn strips_common_markdown_for_speech() {
+        let raw = "## Titre\n\nVoici **gras** et *italique*, un [lien](https://ex.com),\n- item un\n- item deux\n\n```rust\nfn x() {}\n```\nEt `code`.";
+        let plain = plain_text_for_speech(raw);
+        assert!(!plain.contains('#'), "{plain}");
+        assert!(!plain.contains('*'), "{plain}");
+        assert!(!plain.contains('`'), "{plain}");
+        assert!(!plain.contains("https://"), "{plain}");
+        assert!(plain.contains("Titre"), "{plain}");
+        assert!(plain.contains("gras"), "{plain}");
+        assert!(plain.contains("lien"), "{plain}");
+        assert!(plain.contains("code"), "{plain}");
+    }
 }

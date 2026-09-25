@@ -35,6 +35,7 @@ Ce registre est la source de vérité sur l'état de couverture des fonctionnali
 | Life layer | Morning brief → Telegram notify | Implemented | OK | OK | `roadmap_v0.10.0.md` P7 L2, `/api/channels/notify` |
 | Life layer | OAuth CalDAV dans Connectors | Implemented | OK | OK | `roadmap_v0.10.0.md` P7 L3, `ConnectorsPanel` |
 | Life layer | Scheduling langage naturel (Hermes) | Implemented | OK | OK | `roadmap_v0.10.0.md` P7 L4, `/api/schedules/from-nl` |
+| Interfaces | Companion ESP32 (Freenove FNK0104) | Planned | N/A | Planned | Repo `Akasha_companion` — voix-first + avatar ; `docs/COMPANION_SPEC.md`, `/api/voice/*` |
 
 ## Liste prioritaire "À documenter"
 
