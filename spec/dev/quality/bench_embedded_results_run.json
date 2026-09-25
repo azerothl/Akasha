@@ -1,0 +1,38 @@
+[
+  {
+    "model": "Qwen2.5-1.5B Q4",
+    "ok": true,
+    "model_used": "embedded",
+    "device": "cuda",
+    "tok_s": 7.3,
+    "dur_s": 11.0,
+    "toks": 80
+  },
+  {
+    "model": "Gemma3-1B QAT Q4",
+    "ok": true,
+    "model_used": "embedded",
+    "device": "cuda",
+    "tok_s": 4.7,
+    "dur_s": 15.2,
+    "toks": 71
+  },
+  {
+    "model": "Qwen3-1.7B Q4",
+    "ok": true,
+    "model_used": "embedded",
+    "device": "cuda",
+    "tok_s": 6.7,
+    "dur_s": 16.3,
+    "toks": 109
+  },
+  {
+    "model": "Qwen3-0.6B Candle",
+    "ok": true,
+    "model_used": "embedded",
+    "device": "cpu",
+    "tok_s": 0.5,
+    "dur_s": 387.3,
+    "toks": 198
+  }
+]

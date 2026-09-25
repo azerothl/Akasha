@@ -39,6 +39,7 @@ akasha/
 │   ├── akasha-embedded-llm/ # POC : LLM intégré (Qwen3 0.6B ou Baguettotron 321M) — onboarding, diagnostics, conversation ; WSL2 recommandé sous Windows
 │   ├── akasha-embeddings/   # Embeddings locaux (fastembed/ONNX, modèle porté par l’app)
 │   ├── akasha-store/        # SQLite (tâches, mémoire long terme), log immuable
+│   ├── akasha-calendar/     # Calendrier, schedules, wakeups, exceptions
 │   ├── akasha-vault/        # Secrets (keyring OS + fichier chiffré)
 │   ├── akasha-tools/        # Outils machine (fichiers, commandes, diff, conteneur), politique
 │   ├── akasha-plugin-api/   # Plugin API (channel, tool, skill, manifest)
@@ -49,6 +50,7 @@ akasha/
 │   ├── akasha-daemon/       # Daemon 24/7, API, agents, canaux, plugins, skills
 │   ├── akasha-cli/          # CLI : start, stop, doctor, vault, config, router, plugin, init, tui
 │   ├── akasha-tui/          # Interface terminal (7 onglets : Chat, Retours planifiés, Routeur, Doc, Tâches, Calendrier, Mémoire)
+│   ├── akasha-workspace-graph/ # Graphes de connaissance projet (indexation, recherche)
 │   └── akasha-evals/        # Suite d’évals (sécurité, runbooks, hallucinations)
 ├── apps/
 │   └── akasha-ui/           # Application Tauri (React + TypeScript)

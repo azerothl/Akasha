@@ -85,16 +85,35 @@ cargo test -p akasha-llm -F embedded
 
 ### 2.3 akasha-embedded-llm
 
-**Emplacement** : `crates/akasha-embedded-llm/` (`lib.rs`, `config.rs`, `llama_cpp_backend.rs`, `candle_backend.rs`).
+**Emplacement** : `crates/akasha-embedded-llm/` (`lib.rs`, `config.rs`, `hardware.rs`, `profiles.rs`, `runtime.rs`, `calibrate.rs`, `llama_cpp_backend.rs`, `candle_backend.rs`).
 
 | Test | Ce qui est testé | Commande |
 |------|-------------------|----------|
 | `embedded_llm_default_constructs` / `compiled_backends_lists_features` | Façade + backends compilés selon features | `cargo test -p akasha-embedded-llm --lib` |
 | `backend_choice_parses_aliases` | `AKASHA_EMBEDDED_BACKEND=llama-cpp` | idem |
+| `tier_*` (`hardware.rs`) | Classification tier CPU/GPU | idem |
+| `profiles_json_parses` / `gpu_low_candidates_prefer_cpu_ngl` | Matrice `embedded_profiles.json` | idem (avec `spec/` présent) |
 | `embedded_llm_unload_clears_state` | Après `unload()`, `is_loaded()` false | idem |
-| Build llama-cpp (CI optionnel) | Compile `llama-cpp-sys` sans GGUF e2e | `cargo test -p akasha-embedded-llm --features llama-cpp` |
+| Build llama-cpp (CI optionnel) | Compile `llama-cpp-sys` sans GGUF e2e | `cargo test -p akasha-embedded-llm --features llama-cpp,download` |
 
-**Bench manuel v1** (throughput GPU, cible >20 tok/s sur GTX 3080+ avec Q4 chargé) :
+**Bench embarqué v0.10** (CPU + CUDA, JSON, gate release) :
+
+```powershell
+./spec/dev/quality/bench_embedded.ps1 -Backend llama_cpp -Json
+./spec/dev/quality/bench_embedded.ps1 -Backend candle -Json
+./spec/dev/quality/bench_embedded.ps1 -Backend llama_cpp -Strict   # gate >20 tok/s CUDA
+./spec/dev/quality/bench_embedded_models.ps1 -Matrix -SimulatedTier gpu_low_4gb -NglValues 0,99
+```
+
+```bash
+BACKEND=candle ./spec/dev/quality/bench_embedded.sh
+```
+
+**API calibration** (daemon `--features embedded-llama-cpp-cuda`) : `GET /api/router/embedded/hardware`, `POST /api/router/embedded/calibrate`, `GET /api/router/embedded/calibrate/status`. Persistance : `~/akasha/embedded_runtime.json`.
+
+Baselines : [bench_embedded_results.md](bench_embedded_results.md), matrice tier : [embedded_profile_baselines.json](embedded_profile_baselines.json). Criterion : `cargo bench -p akasha-embedded-llm --bench embedded_inference`.
+
+**Bench manuel v1** (legacy alias CUDA) :
 
 ```powershell
 ./spec/dev/quality/bench_embedded_llama_cpp.ps1

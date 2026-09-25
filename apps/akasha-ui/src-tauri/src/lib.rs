@@ -7,6 +7,7 @@ const TASK_POLL_INTERVAL_MS: u64 = 1500;
 const TASK_POLL_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 const LONG_LLM_REQUEST_TIMEOUT_SECS: u64 = 600;
+const LONG_COMPARE_REQUEST_TIMEOUT_SECS: u64 = 1800;
 
 fn daemon_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{}", port)
@@ -18,13 +19,15 @@ fn request_timeout_for_path(path: &str, method: &str) -> std::time::Duration {
     let m = method.trim().to_uppercase();
     let long_post = m == "POST"
         && (p.starts_with("/api/research/deep")
-            || p == "/api/compare"
             || p == "/api/diagnostic/advice"
             || p == "/api/chat/suggest-thread-title"
             || p == "/api/memory/rebuild-relations"
             || p.starts_with("/api/voice/stt")
             || p.starts_with("/api/voice/tts"));
     let long_get = m == "GET" && p.starts_with("/api/first-message");
+    if m == "POST" && p == "/api/compare" {
+        return std::time::Duration::from_secs(LONG_COMPARE_REQUEST_TIMEOUT_SECS);
+    }
     if long_post || long_get {
         std::time::Duration::from_secs(LONG_LLM_REQUEST_TIMEOUT_SECS)
     } else {
@@ -113,6 +116,7 @@ async fn send_message_ack(
     target_task_id: Option<String>,
     priority: Option<String>,
     incognito: Option<bool>,
+    composer_mode: Option<String>,
     port: Option<u16>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
@@ -170,6 +174,12 @@ async fn send_message_ack(
     }
     if incognito == Some(true) {
         body["incognito"] = serde_json::Value::Bool(true);
+    }
+    if let Some(ref mode) = composer_mode {
+        let m = mode.trim().to_lowercase();
+        if !m.is_empty() && m != "agent" {
+            body["composer_mode"] = serde_json::Value::String(m);
+        }
     }
     let resp = client
         .post(&url)
@@ -503,6 +513,231 @@ async fn embedded_reload(port: Option<u16>) -> Result<serde_json::Value, String>
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(json)
+}
+
+/// GET /api/router/embedded/models — manifest for wizard multi-model picker.
+#[tauri::command]
+async fn get_embedded_models(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/models", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/router/embedded/download — start GGUF download.
+#[tauri::command]
+async fn embedded_download_start(
+    port: Option<u16>,
+    model_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/download", daemon_base_url(port));
+    let client = http_client();
+    let body = match model_id {
+        Some(id) => serde_json::json!({ "id": id }),
+        None => serde_json::json!({}),
+    };
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+    if !status.is_success() && status.as_u16() != 202 {
+        return Err(json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("download failed")
+            .to_string());
+    }
+    Ok(json)
+}
+
+/// GET /api/router/embedded/download/status — poll download progress.
+#[tauri::command]
+async fn embedded_download_status(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/download/status", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// GET /api/router/embedded/hardware — tier + static candidates.
+#[tauri::command]
+async fn get_embedded_hardware(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/hardware", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/router/embedded/calibrate — start micro-bench.
+#[tauri::command]
+async fn embedded_calibrate_start(port: Option<u16>, maxConfigs: Option<u64>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/calibrate", daemon_base_url(port));
+    let client = http_client();
+    let body = serde_json::json!({ "max_configs": maxConfigs.unwrap_or(3) });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+    if !status.is_success() && status.as_u16() != 202 {
+        return Err(json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("calibration failed")
+            .to_string());
+    }
+    Ok(json)
+}
+
+/// GET /api/router/embedded/calibrate/status — poll calibration.
+#[tauri::command]
+async fn embedded_calibrate_status(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/calibrate/status", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// GET /api/router/embedded/runtime — model + engine mode settings.
+#[tauri::command]
+async fn get_embedded_runtime(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/runtime", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+        return Err(json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("embedded runtime unavailable")
+            .to_string());
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/router/embedded/runtime — persist model + engine mode.
+#[tauri::command]
+async fn set_embedded_runtime(
+    port: Option<u16>,
+    modelId: String,
+    engineMode: String,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/runtime", daemon_base_url(port));
+    let client = http_client();
+    let body = serde_json::json!({
+        "model_id": modelId,
+        "engine_mode": engineMode,
+    });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+    if !status.is_success() {
+        return Err(json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("set embedded runtime failed")
+            .to_string());
+    }
+    Ok(json)
+}
+
+/// POST /api/message with akasha_embedded for onboarding wizard first-message test.
+#[tauri::command]
+async fn wizard_test_embedded_message(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let base = daemon_base_url(port);
+    let url = format!("{}/api/message", base);
+    let client = http_client();
+    let prompt = "Bonjour — réponds en une phrase pour confirmer que le modèle embarqué fonctionne.";
+    let body = serde_json::json!({
+        "message": prompt,
+        "provider": "akasha_embedded",
+        "max_tokens": 64
+    });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let task_id = json
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if task_id.is_empty() {
+        return Ok(serde_json::json!({ "ok": true, "reply": "Message accepted." }));
+    }
+    let task_url = format!("{}/api/tasks/{}", base, task_id);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    loop {
+        if std::time::Instant::now() > deadline {
+            return Err("timeout".to_string());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let poll = client.get(&task_url).send().await.map_err(|e| e.to_string())?;
+        if !poll.status().is_success() {
+            continue;
+        }
+        let task_json: serde_json::Value = poll.json().await.map_err(|e| e.to_string())?;
+        let status = task_json.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status == "completed" || status == "done" {
+            let reply = task_json
+                .get("result")
+                .or(task_json.get("reply"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("OK");
+            return Ok(serde_json::json!({ "ok": true, "reply": reply }));
+        }
+        if status == "failed" {
+            let err = task_json
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("task failed");
+            return Err(err.to_string());
+        }
+    }
 }
 
 /// GET /api/doctor — health checks (for slash /doctor).
@@ -1312,6 +1547,25 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
     let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "error": "invalid_response" }));
     if !status.is_success() {
         let detail = json.get("detail").and_then(|v| v.as_str()).unwrap_or(json.get("error").and_then(|v| v.as_str()).unwrap_or("Erreur inconnue"));
+        return Err(detail.to_string());
+    }
+    Ok(json)
+}
+
+/// Pause a running task: POST /api/tasks/:id/pause.
+#[tauri::command]
+async fn pause_task(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tasks/{}/pause", daemon_base_url(port), task_id);
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "error": "invalid_response" }));
+    if !status.is_success() {
+        let detail = json
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or(json.get("error").and_then(|v| v.as_str()).unwrap_or("Erreur inconnue"));
         return Err(detail.to_string());
     }
     Ok(json)
@@ -2416,6 +2670,7 @@ pub fn run() {
             get_tasks,
             get_task_events,
             cancel_task,
+            pause_task,
             get_pending_human_input,
             get_task_human_input,
             post_task_human_reply,
@@ -2514,6 +2769,15 @@ pub fn run() {
             voice_tts,
             get_embedded_status,
             embedded_reload,
+            get_embedded_models,
+            embedded_download_start,
+            embedded_download_status,
+            get_embedded_hardware,
+            embedded_calibrate_start,
+            embedded_calibrate_status,
+            get_embedded_runtime,
+            set_embedded_runtime,
+            wizard_test_embedded_message,
             get_device_pending,
             post_device_result,
             execute_synthetic_input,

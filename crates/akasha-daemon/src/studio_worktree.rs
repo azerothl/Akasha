@@ -454,6 +454,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn normalize_newlines(content: String) -> String {
+        content.replace("\r\n", "\n")
+    }
+
+    fn path_in_git_output(path: &Path, git_text: &str) -> bool {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        git_text.replace('\\', "/").contains(normalized.as_str())
+    }
+
     fn git(dir: &Path, args: &[&str]) {
         let output = Command::new("git")
             .arg("-C")
@@ -522,9 +531,8 @@ mod tests {
         .expect("second worktree");
 
         assert!(second.worktree_path.exists());
-        assert!(git_output(&project_root, &["worktree", "list"])
-            .expect("worktree list")
-            .contains(second.worktree_path.to_string_lossy().as_ref()));
+        let worktree_list = git_output(&project_root, &["worktree", "list"]).expect("worktree list");
+        assert!(path_in_git_output(&second.worktree_path, &worktree_list));
 
         cleanup_worktree_paths(&second);
     }
@@ -559,7 +567,7 @@ mod tests {
         assert_eq!(result.integration_status.as_deref(), Some("merged"));
         assert_eq!(current_branch(&project_root), state.base_branch);
         assert_eq!(
-            fs::read_to_string(project_root.join("README.md")).expect("merged file"),
+            normalize_newlines(fs::read_to_string(project_root.join("README.md")).expect("merged file")),
             "child change\n"
         );
         assert!(!state.worktree_path.exists());

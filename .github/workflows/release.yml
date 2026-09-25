@@ -357,6 +357,23 @@ jobs:
             rm -rf "$RELEASE_DIR/${full_name}"
           done
 
+          # Full CUDA Windows zip: CUDA CLI + UI + scripts (mirror full CPU)
+          CUDA_CLI="$ARTIFACTS_ROOT/akasha-windows-x86_64-cuda"
+          UI_WIN="$ARTIFACTS_ROOT/akasha-ui-windows"
+          if [ -d "$CUDA_CLI" ]; then
+            full_cuda="akasha-full-windows-x86_64-cuda"
+            mkdir -p "$RELEASE_DIR/${full_cuda}"
+            cp -r "$CUDA_CLI"/* "$RELEASE_DIR/${full_cuda}/"
+            if [ -d "$UI_WIN" ]; then
+              mkdir -p "$RELEASE_DIR/${full_cuda}/ui"
+              cp -r "$UI_WIN"/* "$RELEASE_DIR/${full_cuda}/ui/"
+            fi
+            printf 'To install: double-click INSTALL.cmd or run: powershell -ExecutionPolicy Bypass -File scripts\\setup.ps1\r\n' > "$RELEASE_DIR/${full_cuda}/README.txt"
+            printf '%s\r\n' '@echo off' 'powershell -ExecutionPolicy Bypass -File "%~dp0scripts\setup.ps1"' 'pause' > "$RELEASE_DIR/${full_cuda}/INSTALL.cmd"
+            (cd "$RELEASE_DIR/${full_cuda}" && zip -r "$RELEASE_DIR/${full_cuda}.zip" .)
+            rm -rf "$RELEASE_DIR/${full_cuda}"
+          fi
+
           echo "Contents of release/ after zipping:"
           ls -la "$RELEASE_DIR/" || true
 

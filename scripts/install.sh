@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Akasha installation script (Linux / macOS)
 # Release archives include playwright-runner/ beside the binaries; Node.js is only needed for the managed browser feature.
-# Usage: ./install.sh [--dir DIR] [--no-auto-start]
-# --dir: install binaries to DIR (default: /usr/local/bin or ~/.local/bin if not writable)
-# --no-auto-start: do not enable daemon at login
+# Usage: ./install.sh [--dir DIR] [--no-auto-start] [--download-embedded] [--skip-embedded-download]
 
 set -e
 
 INSTALL_DIR=""
 NO_AUTO_START=false
+DOWNLOAD_EMBEDDED=false
+SKIP_EMBEDDED_DOWNLOAD=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --dir) INSTALL_DIR="$2"; shift 2 ;;
         --no-auto-start) NO_AUTO_START=true; shift ;;
+        --download-embedded) DOWNLOAD_EMBEDDED=true; shift ;;
+        --skip-embedded-download) SKIP_EMBEDDED_DOWNLOAD=true; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -57,6 +59,20 @@ echo "Binaries installed to $INSTALL_DIR"
 # Initial setup (idempotent)
 export PATH="$INSTALL_DIR:$PATH"
 akasha init --defaults || true
+
+echo ""
+echo "Build CPU (Candle) par defaut sur ce zip ; premier appel potentiellement lent (1-3 min)."
+if [[ "$DOWNLOAD_EMBEDDED" == true ]]; then
+    echo "Telechargement du modele embarque..."
+    akasha config models embedded-download || echo "embedded-download a echoue — relancez manuellement ou via l'assistant UI."
+elif [[ "$SKIP_EMBEDDED_DOWNLOAD" != true ]]; then
+    if akasha doctor --json 2>/dev/null | grep -q '"action".*"embedded-download"'; then
+        read -r -p "Telecharger le modele GGUF embarque (~1 Go) ? [Y/n] " r
+        if [[ "$r" != "n" && "$r" != "N" ]]; then
+            akasha config models embedded-download || true
+        fi
+    fi
+fi
 
 # Ensure ~/.local/bin in PATH for current user
 if [[ "$INSTALL_DIR" == "$HOME/.local/bin" ]]; then

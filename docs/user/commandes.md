@@ -100,8 +100,10 @@ Dans le chat (TUI ou interface web), les messages commençant par **/** sont des
 | `/status` | État du daemon. |
 | `/doctor` | Diagnostic (daemon, Ollama, vault, modèle embarqué). |
 | `/advice` | Conseils de diagnostic (RAG + modèle, nécessite le daemon). |
-| `/embedded` | Statut du modèle local embarqué. |
+| `/embedded` | Statut du modèle local embarqué (backend, GGUF, action recommandée). |
 | `/embedded reload` | Décharge le modèle embarqué (rechargé au prochain appel). |
+
+L'**assistant premier lancement** (wizard UI) reprend ce parcours : doctor --fix → statut embarqué → téléchargement → premier message test.
 | `/metrics` | Métriques du routeur LLM. |
 | `/models` | Liste des modèles (tous les fournisseurs). |
 | `/models list` | Modèles par catégorie (primary + fallback). |

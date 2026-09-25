@@ -19,6 +19,9 @@ Set-Location $ProjectRoot
 if (-not $env:CUDA_PATH) {
     throw "CUDA_PATH is not set. Install the CUDA toolkit or set CUDA_PATH."
 }
+if (-not $env:CudaToolkitDir) {
+    $env:CudaToolkitDir = "$($env:CUDA_PATH.TrimEnd('\'))\"
+}
 
 if (-not $env:LIBCLANG_PATH) {
     $llvmBin = "C:\Program Files\LLVM\bin"
@@ -57,7 +60,10 @@ $env:CARGO_ENCODED_RUSTFLAGS = ($encodedParts -join $sep)
 
 $gitUsrBin = Join-Path $env:ProgramFiles "Git\usr\bin"
 if (Test-Path $gitUsrBin) {
-    $env:PATH = "$gitUsrBin;$env:PATH"
+    # Append patch.exe dir — prepending breaks Rust/MSVC link.exe on Windows.
+    if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $gitUsrBin })) {
+        $env:PATH = "$env:PATH;$gitUsrBin"
+    }
 }
 
 # CI may restore a partial cache from older /MT builds (restore-keys); force a clean link graph.

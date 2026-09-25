@@ -1,5 +1,6 @@
 # Rust
 /target/
+staging/
 Cargo.lock
 
 # Node / npm
@@ -39,3 +40,18 @@ docker/
 *.db
 # Local environment overrides (use .env.example as template)
 .env
+
+# Local toolchain caches
+.tools/
+
+# Local voice toolchain (not part of the daemon build)
+akasha-models/.venv-voice/
+**/__pycache__/
+*.py[cod]
+
+# Local binaries dropped at the repo root
+/akasha.exe
+/akasha-daemon.exe
+/akasha-daemon-lan.exe
+/akasha-daemon-lan-p5.exe
+

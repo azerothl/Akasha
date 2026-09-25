@@ -45,9 +45,21 @@ chmod +x akasha akasha-daemon akasha-tui scripts/*.sh
 
 Pour afficher l'interface en terminal : `akasha tui` (ou `.\akasha.exe tui` sous Windows).
 
+### Modèles embarqués (CPU vs CUDA)
+
+| Archive | Backend | Premier usage |
+|---------|---------|---------------|
+| `akasha-full-windows-x86_64` | Candle (Qwen3 0.6B) | Immédiat ; 1er appel lent (1–3 min) |
+| `akasha-windows-x86_64-cuda` / `akasha-full-windows-x86_64-cuda` | llama-cpp + GPU | Télécharger le GGUF (~1 Go) : `akasha config models embedded-download` ou l'assistant UI |
+
+Après `setup.ps1` / `setup.sh`, l'**assistant de configuration** (wizard) guide le téléchargement, le statut embarqué et un **premier message test**.
+
+Options setup : `-DownloadEmbedded` / `-SkipEmbeddedDownload` (Windows) ou `--download-embedded` / `--skip-embedded-download` (Linux/macOS).
+
 ### Prérequis
 
-- **Modèle embarqué** : par défaut Akasha utilise un modèle LLM intégré (akasha_embedded). Aucune installation externe n'est obligatoire pour recevoir des réponses.
+- **Modèle embarqué CPU** : le zip full CPU inclut Candle — aucun téléchargement obligatoire.
+- **Modèle embarqué GPU (CUDA)** : pilotes NVIDIA récents ; pas de CUDA Toolkit. Téléchargez le GGUF via CLI ou wizard.
 - **Ollama** (optionnel) : pour utiliser d'autres modèles locaux. Configurez-le lors de l'initialisation ou plus tard via `akasha config models set conversation ollama <modèle>`.
 - **Cloud** (optionnel) : OpenAI ou OpenRouter, configurés lors de l'init (clés dans le vault ou variables d'environnement).
 - **Rust** : inutile pour les binaires précompilés.

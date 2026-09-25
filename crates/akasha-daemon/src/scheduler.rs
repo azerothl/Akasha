@@ -48,11 +48,11 @@ async fn tick(
 
     // Do all DB work and collect pending (run_id, task_id, message, session_id). No await here
     // so we never hold ScheduleStore/TaskStore (non-Send) across an await.
-    let pending: Vec<PendingRun> = {
+    let (pending, notify_completed): (Vec<PendingRun>, Vec<(Uuid, Uuid)>) = {
         let schedule_store = ScheduleStore::open(store_path)?;
         let task_store = TaskStore::open(store_path)?;
 
-        sync_terminal_task_run_statuses(&schedule_store, &task_store, now)?;
+        let notify_completed = sync_terminal_task_run_statuses(&schedule_store, &task_store, now)?;
         // Heartbeat/lease watchdog: interrupted tasks whose lease expired.
         if let Ok(expired) = task_store.expired_leases(now, 100) {
             for task_id in expired {
@@ -213,7 +213,7 @@ async fn tick(
                 pending.push((run_id, task_id, message, session_id));
             }
         }
-        pending
+        (pending, notify_completed)
     };
 
     // Send to orchestrator (await) — no store references held.
@@ -257,6 +257,28 @@ async fn tick(
     }
 
     process_due_wakeups(store_path, orch_tx, bus, now).await?;
+
+    // Life layer: push completed schedule results to preferred channel (Telegram).
+    if !notify_completed.is_empty() {
+        let data_dir = store_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let store_path = store_path.clone();
+        for (schedule_id, task_id) in notify_completed {
+            let data_dir = data_dir.clone();
+            let store_path = store_path.clone();
+            tokio::spawn(async move {
+                crate::life_layer::maybe_notify_completed_schedule(
+                    &data_dir,
+                    &store_path,
+                    schedule_id,
+                    task_id,
+                )
+                .await;
+            });
+        }
+    }
 
     Ok(())
 }
@@ -311,11 +333,13 @@ async fn process_due_wakeups(
     Ok(())
 }
 
+/// Returns newly completed (schedule_id, task_id) pairs for Life layer notify.
 fn sync_terminal_task_run_statuses(
     schedule_store: &ScheduleStore,
     task_store: &TaskStore,
     now: chrono::DateTime<Utc>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<(Uuid, Uuid)>> {
+    let mut completed_for_notify = Vec::new();
     let task_runs = schedule_store.list_task_runs(None, 1_000)?;
     for run in task_runs {
         if run.status != TaskRunStatus::Running {
@@ -331,10 +355,15 @@ fn sync_terminal_task_run_statuses(
             _ => None,
         };
         if let Some(status) = terminal_status {
-            schedule_store.update_task_run_status(run.id, status, None, Some(now))?;
+            schedule_store.update_task_run_status(run.id, status.clone(), None, Some(now))?;
+            if status == TaskRunStatus::Completed {
+                if let Some(sid) = run.schedule_id {
+                    completed_for_notify.push((sid, run.task_id));
+                }
+            }
         }
     }
-    Ok(())
+    Ok(completed_for_notify)
 }
 
 /// Returns due slots from RRULE (iCal): occurrences between last run (or start_at) and now.

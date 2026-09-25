@@ -27,6 +27,15 @@ Ce registre est la source de vérité sur l'état de couverture des fonctionnali
 | Observability | Metrics, diagnostics, runbooks | Implemented | Partially documented | OK | `observability.md`, `runbooks/01_diagnostic.md`, `runbooks/02_daemon_restart.md` |
 | Channels | Telegram / Slack / Discord / WhatsApp | Implemented (partiel selon canal) | OK | OK | `docs/user/extensions.md`, `22_multichannel_architecture.md`, `44_whatsapp.md` |
 | Mission autonome | Heartbeats, roles, events API | Implemented | OK | Partially documented | `docs/user/mission.md`, `plan_avancement.md` |
+| Cockpit UI | Active work drawer (chat ↔ tasks) | Implemented | OK | OK | `roadmap_v0.10.0.md` P6 A1, `ActiveWorkDrawer.tsx` |
+| Cockpit UI | Composer modes architect/code/ask | Implemented | OK | OK | `roadmap_v0.10.0.md` P6 A2, `agent_profiles.rs` |
+| Observability | Usage dashboard 7/30j (tokens/coût) | Implemented | OK | OK | `roadmap_v0.10.0.md` P6 A3, `UsageDashboardPanel.tsx` |
+| Interfaces | Session pin / rename / fork / dual-pane | Implemented | OK | OK | `roadmap_v0.10.0.md` P6 A4 |
+| Life layer | Overnight skill pack (schedule template) | Implemented | OK | OK | `roadmap_v0.10.0.md` P7 L1, `LifeLayerPanel.tsx` |
+| Life layer | Morning brief → Telegram notify | Implemented | OK | OK | `roadmap_v0.10.0.md` P7 L2, `/api/channels/notify` |
+| Life layer | OAuth CalDAV dans Connectors | Implemented | OK | OK | `roadmap_v0.10.0.md` P7 L3, `ConnectorsPanel` |
+| Life layer | Scheduling langage naturel (Hermes) | Implemented | OK | OK | `roadmap_v0.10.0.md` P7 L4, `/api/schedules/from-nl` |
+| Interfaces | Companion ESP32 (Freenove FNK0104) | Planned | N/A | Planned | Repo `Akasha_companion` — voix-first + avatar ; `docs/COMPANION_SPEC.md`, `/api/voice/*` |
 
 ## Liste prioritaire "À documenter"
 

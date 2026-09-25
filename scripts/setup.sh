@@ -2,13 +2,15 @@
 # Akasha unified setup (Linux / macOS)
 # Run after extracting the "full" zip. Prompts for: install desktop app (Tauri), daemon at login.
 # The release zip also includes playwright-runner/ next to the binaries (managed browser). Node.js + npm are required only if you use that feature; the daemon can auto-install deps on first use unless AKASHA_PLAYWRIGHT_AUTO_INSTALL=0.
-# Usage: ./setup.sh [--dir DIR] [--install-ui] [--no-install-ui] [--auto-start] [--no-auto-start]
+# Usage: ./setup.sh [--dir DIR] [--install-ui] [--no-install-ui] [--auto-start] [--no-auto-start] [--download-embedded] [--skip-embedded-download]
 
 set -e
 
 INSTALL_DIR=""
 DO_INSTALL_UI=""
 DO_AUTO_START=""
+DOWNLOAD_EMBEDDED=false
+SKIP_EMBEDDED_DOWNLOAD=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -17,6 +19,8 @@ while [[ $# -gt 0 ]]; do
         --no-install-ui) DO_INSTALL_UI=false; shift ;;
         --auto-start) DO_AUTO_START=true; shift ;;
         --no-auto-start) DO_AUTO_START=false; shift ;;
+        --download-embedded) DOWNLOAD_EMBEDDED=true; shift ;;
+        --skip-embedded-download) SKIP_EMBEDDED_DOWNLOAD=true; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -65,6 +69,8 @@ fi
 INSTALL_ARGS=()
 [[ -n "$INSTALL_DIR" ]] && INSTALL_ARGS+=(--dir "$INSTALL_DIR")
 [[ "$DO_AUTO_START" == false ]] && INSTALL_ARGS+=(--no-auto-start)
+[[ "$DOWNLOAD_EMBEDDED" == true ]] && INSTALL_ARGS+=(--download-embedded)
+[[ "$SKIP_EMBEDDED_DOWNLOAD" == true ]] && INSTALL_ARGS+=(--skip-embedded-download)
 
 # 1) Install CLI + daemon + TUI
 "$INSTALL_SCRIPT" "${INSTALL_ARGS[@]}"

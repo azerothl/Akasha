@@ -46,7 +46,14 @@ type AddRouteOptions = {
 };
 
 const MODEL_TYPE_OPTIONS = ["all", "local", "cloud", "embedded", "gguf", "code", "vision", "instruct", "embedding", "other"] as const;
-const SOURCE_OPTIONS = ["all", "configured_route", "provider_catalog", "suggestion", "huggingface"] as const;
+const SOURCE_OPTIONS = [
+  "all",
+  "configured_route",
+  "provider_catalog",
+  "ollama_library",
+  "suggestion",
+  "huggingface",
+] as const;
 const LOCAL_INSTALL_OPTIONS = ["all", "local", "installed", "missing"] as const;
 
 function RuntimeStatus({ runtimes, en }: { runtimes: LocalRuntimes | null; en: boolean }) {
@@ -402,6 +409,7 @@ export function CookbookPanel({
     if (s === "all") return en ? "All sources" : "Toutes sources";
     if (s === "configured_route") return en ? "Routed" : "Routé";
     if (s === "provider_catalog") return en ? "Catalog" : "Catalogue";
+    if (s === "ollama_library") return en ? "Ollama library" : "Bibliothèque Ollama";
     if (s === "suggestion") return en ? "Suggestions" : "Suggestions";
     if (s === "huggingface") return "Hugging Face";
     return s;
@@ -466,6 +474,16 @@ export function CookbookPanel({
           </dd>
           <dt>GPU</dt>
           <dd>{String(hardware.gpu_hint ?? "unknown")}</dd>
+          {hardware.vram_mb != null && hardware.vram_mb !== "" ? (
+            <>
+              <dt>VRAM</dt>
+              <dd>
+                {typeof hardware.vram_mb === "number"
+                  ? `${Math.round(Number(hardware.vram_mb) / 1024)} GB`
+                  : String(hardware.vram_mb)}
+              </dd>
+            </>
+          ) : null}
         </dl>
       ) : null}
       <RuntimeStatus runtimes={localRuntimes} en={en} />

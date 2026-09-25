@@ -4,13 +4,18 @@
 
 #[cfg(feature = "baguettotron")]
 mod baguettotron;
+#[cfg(all(feature = "llama-cpp", feature = "download"))]
+pub mod calibrate;
 #[cfg(feature = "candle")]
 mod candle_backend;
 pub mod config;
 #[cfg(feature = "download")]
 pub mod download;
+pub mod hardware;
 #[cfg(feature = "llama-cpp")]
 mod llama_cpp_backend;
+pub mod profiles;
+pub mod runtime;
 
 use once_cell::sync::Lazy;
 use std::sync::{Mutex, RwLock};
@@ -43,6 +48,38 @@ pub struct EmbeddedStatus {
     pub model_path: Option<String>,
     pub compiled_backends: Vec<String>,
     pub hint: String,
+    /// llama-cpp feature compiled into this binary.
+    pub llama_cpp_compiled: bool,
+    /// A GGUF file exists at the resolved path.
+    pub gguf_present: bool,
+    /// Chat can proceed (backend resolves, possibly Candle fallback).
+    pub ready_for_chat: bool,
+    /// Recommended CLI/API action when GGUF missing on CUDA builds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Static hardware tier (`cpu_only`, `gpu_low_4gb`, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardware_tier: Option<String>,
+    /// Model id recommended by static profile or calibration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_model_id: Option<String>,
+    /// Active engine policy (`llama_cpp_cpu` / `llama_cpp_cuda`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_engine_policy: Option<String>,
+    /// Whether micro-bench calibration completed (`embedded_runtime.json`).
+    pub calibration_done: bool,
+    /// Last calibration winner tok/s.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_bench_tok_per_s: Option<f64>,
+    /// Active manifest model id (runtime or first GGUF on disk).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_model_id: Option<String>,
+    /// User-facing engine mode: `auto`, `cpu`, or `cuda`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_mode: Option<String>,
+    /// Effective GPU layer offload count for llama-cpp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n_gpu_layers: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -63,7 +100,27 @@ impl EmbeddedLlm {
         max_tokens: Option<usize>,
         temperature: Option<f64>,
     ) -> Result<String> {
+        self.complete_for_router_model(None, prompt, max_tokens, temperature)
+    }
+
+    /// Complete using an optional router model id (compare / explicit route model field).
+    pub fn complete_for_router_model(
+        &self,
+        router_model: Option<&str>,
+        prompt: &str,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+    ) -> Result<String> {
         let _guard = acquire_inference_lock()?;
+        #[cfg(feature = "llama-cpp")]
+        if config::llama_cpp_compiled() {
+            let path = router_model
+                .and_then(|m| config::resolve_gguf_path_for_router_model(m))
+                .or_else(config::resolve_gguf_path);
+            if let Some(path) = path {
+                return llama_cpp_backend::complete(&path, prompt, max_tokens, temperature);
+            }
+        }
         let backend = resolve_backend()?;
         dispatch_complete(&backend, prompt, max_tokens, temperature)
     }
@@ -84,7 +141,22 @@ impl EmbeddedLlm {
     }
 
     pub fn is_available() -> bool {
-        !compiled_backends().is_empty() && config::resolve_backend_choice().is_ok()
+        if compiled_backends().is_empty() {
+            return false;
+        }
+        match config::resolve_backend_choice() {
+            Ok(backend) => match backend {
+                #[cfg(feature = "llama-cpp")]
+                config::ResolvedBackend::LlamaCpp(_) => llama_cpp_backend::is_available(),
+                #[cfg(feature = "candle")]
+                config::ResolvedBackend::Candle => true,
+                #[cfg(feature = "baguettotron")]
+                config::ResolvedBackend::Baguettotron => true,
+                #[allow(unreachable_patterns)]
+                _ => false,
+            },
+            Err(_) => false,
+        }
     }
 
     pub fn is_loaded() -> bool {
@@ -161,32 +233,62 @@ impl EmbeddedLlm {
 
     pub fn status_snapshot() -> EmbeddedStatus {
         let compiled = compiled_backends();
-        let available = !compiled.is_empty();
+        let llama_cpp_compiled = config::llama_cpp_compiled();
+        let gguf_present = config::resolve_gguf_path().is_some();
+        let calibration_done = runtime::calibration_done();
+        let profile = hardware::detect_hardware();
+        let ready_for_chat = config::resolve_backend_choice().is_ok();
+        let needs_gguf = llama_cpp_compiled && !gguf_present;
+        let needs_calibrate = gguf_present && llama_cpp_compiled && !calibration_done;
         let loaded = Self::is_loaded();
         let backend = Self::active_backend();
         let device = Self::device_hint();
         let model_path = Self::model_path();
-        let hint = if !available {
+        let action = if needs_gguf {
+            Some("embedded-download".to_string())
+        } else if needs_calibrate {
+            Some("embedded-calibrate".to_string())
+        } else {
+            None
+        };
+        let hint = if compiled.is_empty() {
             "Compile daemon with embedded feature; for llama_cpp run: akasha config models embedded-download".into()
-        } else if backend.as_deref() == Some("llama_cpp") && model_path.is_none() {
-            "llama_cpp compiled but GGUF missing — run: akasha config models embedded-download".into()
+        } else if needs_gguf {
+            "llama_cpp compiled but GGUF missing — run: akasha config models embedded-download (or use wizard)".into()
+        } else if needs_calibrate {
+            "GGUF present — run embedded calibration (wizard) to pick the best engine and model for this machine".into()
         } else if loaded {
             format!(
                 "Embedded model loaded ({}, device {})",
                 backend.as_deref().unwrap_or("?"),
                 device.as_deref().unwrap_or("?")
             )
+        } else if llama_cpp_compiled && gguf_present {
+            "GGUF present — model will load on first message (may take 1–3 min)".into()
         } else {
-            "Embedded model will load on first use (download + load may take several minutes on first run)".into()
+            "Embedded model will load on first use (Candle CPU: first call may take 1–3 min)".into()
         };
+        let last_bench_tok_per_s = runtime::load_runtime().and_then(|r| r.winner_tok_per_s);
         EmbeddedStatus {
-            embedded_available: available && config::resolve_backend_choice().is_ok(),
+            embedded_available: !compiled.is_empty() && ready_for_chat,
             embedded_loaded: loaded,
             backend,
             device,
             model_path,
             compiled_backends: compiled,
             hint,
+            llama_cpp_compiled,
+            gguf_present,
+            ready_for_chat,
+            action,
+            hardware_tier: Some(profile.tier_id),
+            recommended_model_id: config::recommended_model_id(),
+            active_engine_policy: Some(config::active_engine_policy()),
+            calibration_done,
+            last_bench_tok_per_s,
+            active_model_id: config::active_model_id(),
+            engine_mode: Some(config::active_engine_mode()),
+            n_gpu_layers: Some(config::n_gpu_layers()),
         }
     }
 }

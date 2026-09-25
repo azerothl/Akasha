@@ -10,6 +10,41 @@ fn parse_json_body(body: Option<&[u8]>) -> Option<serde_json::Value> {
     body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
 }
 
+fn compare_timeout_for_provider(provider: &str) -> std::time::Duration {
+    let embedded_secs = std::env::var("AKASHA_COMPARE_TIMEOUT_SECS_EMBEDDED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s >= 30)
+        .unwrap_or(600);
+    let default_secs = std::env::var("AKASHA_COMPARE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s >= 30)
+        .unwrap_or(120);
+    match provider {
+        "akasha_embedded" | "akasha_core" => std::time::Duration::from_secs(embedded_secs),
+        _ => std::time::Duration::from_secs(default_secs),
+    }
+}
+
+fn compare_max_tokens_for_provider(provider: &str) -> u32 {
+    match provider {
+        "akasha_embedded" | "akasha_core" => std::env::var("AKASHA_EMBEDDED_MAX_TOKENS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&n| n >= 16)
+            .unwrap_or(512)
+            .min(1024),
+        _ => 1024,
+    }
+}
+
+fn compare_uses_embedded(models: &[(String, String, String)]) -> bool {
+    models
+        .iter()
+        .any(|(_, p, _)| p == "akasha_embedded" || p == "akasha_core")
+}
+
 /// Returns `Some(response)` when this module handled the route.
 pub async fn handle_workspace_routes(
     method: &str,
@@ -50,7 +85,19 @@ pub async fn handle_workspace_routes(
             .unwrap_or_default();
         let catalog =
             crate::cookbook_models::build_cookbook_catalog(llm_router).await;
-        let providers_map = catalog.providers;
+        let mut providers_map = catalog.providers;
+        let ollama_library = crate::cookbook_models::fetch_ollama_library(&client).await;
+        // Full Ollama.com library (pullable) + local tags (installed / custom).
+        crate::cookbook_models::inject_live_local_models(
+            &mut providers_map,
+            &ollama_library,
+            &[],
+        );
+        crate::cookbook_models::inject_live_local_models(
+            &mut providers_map,
+            &ollama_models,
+            &rbitnet_models,
+        );
         let mut huggingface_local =
             crate::cookbook_models::fetch_huggingface_local_models(&client, ram, gpu).await;
         huggingface_local = huggingface_local
@@ -65,6 +112,7 @@ pub async fn handle_workspace_routes(
             &routes,
             &ollama_models,
             &rbitnet_models,
+            &ollama_library,
         );
         let mut task_categories: Vec<String> = routes.keys().cloned().collect();
         task_categories.sort();
@@ -190,7 +238,18 @@ pub async fn handle_workspace_routes(
             .and_then(|m| serde_json::from_value(m.clone()).ok())
             .unwrap_or_default();
         let catalog = crate::cookbook_models::build_cookbook_catalog(llm_router).await;
-        let providers_map = catalog.providers;
+        let mut providers_map = catalog.providers;
+        let ollama_library = crate::cookbook_models::fetch_ollama_library(&client).await;
+        crate::cookbook_models::inject_live_local_models(
+            &mut providers_map,
+            &ollama_library,
+            &[],
+        );
+        crate::cookbook_models::inject_live_local_models(
+            &mut providers_map,
+            &ollama_models,
+            &rbitnet_models,
+        );
         let mut huggingface_local =
             crate::cookbook_models::fetch_huggingface_local_models(&client, ram, gpu).await;
         huggingface_local = huggingface_local
@@ -207,6 +266,7 @@ pub async fn handle_workspace_routes(
             &routes,
             &ollama_models,
             &rbitnet_models,
+            &ollama_library,
         );
         let mut all_items = configured;
         all_items.extend(suggestions);
@@ -348,12 +408,11 @@ pub async fn handle_workspace_routes(
 }
 
 fn hardware_snapshot_json() -> serde_json::Value {
-    let total_ram_gb = std::env::var("AKASHA_HOST_RAM_GB")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(16);
+    let total_ram_gb = crate::cookbook_models::detect_host_ram_gb();
+    let vram_mb = crate::cookbook_models::detect_vram_mb();
     serde_json::json!({
         "total_ram_gb": total_ram_gb,
+        "vram_mb": vram_mb,
         "gpu_hint": crate::cookbook_models::resolve_gpu_hint(),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
@@ -368,12 +427,14 @@ fn cookbook_recommendations(
     routes: &HashMap<String, TaskTypeConfig>,
     ollama_models: &[String],
     rbitnet_models: &[String],
+    ollama_library: &[String],
 ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
     let ram = hw.get("total_ram_gb").and_then(|v| v.as_u64()).unwrap_or(8);
     let gpu = hw
         .get("gpu_hint")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
+    let library_set: HashSet<String> = ollama_library.iter().cloned().collect();
     let configured = crate::cookbook_models::configured_model_entries(
         providers_map,
         routes,
@@ -382,6 +443,7 @@ fn cookbook_recommendations(
         provider_meta,
         ollama_models,
         rbitnet_models,
+        &library_set,
     );
     let seen: HashSet<String> = configured
         .iter()
@@ -419,15 +481,6 @@ fn hardware_suggestions(
             "source": "suggestion",
             "notes": "Configure bitnet.base_url in llm_router.yaml; see Rbitnet/docs/USAGE.md"
         }));
-        raw.push(serde_json::json!({
-            "id": "ollama-llama3",
-            "label": "Ollama llama3.2 (3B)",
-            "provider": "ollama",
-            "model": "llama3.2",
-            "fit_score": 0.85,
-            "source": "suggestion",
-            "notes": "Good balance on 32GB+ hosts"
-        }));
     } else if ram >= 16 {
         raw.push(serde_json::json!({
             "id": "embedded",
@@ -437,15 +490,6 @@ fn hardware_suggestions(
             "fit_score": 0.95,
             "source": "suggestion",
             "notes": "Zero-config; already bundled"
-        }));
-        raw.push(serde_json::json!({
-            "id": "ollama-small",
-            "label": "Ollama small model (≤3B)",
-            "provider": "ollama",
-            "model": "llama3.2:1b",
-            "fit_score": 0.78,
-            "source": "suggestion",
-            "notes": "Install Ollama; akasha config models set conversation ollama <model>"
         }));
     } else {
         raw.push(serde_json::json!({
@@ -465,17 +509,6 @@ fn hardware_suggestions(
             "fit_score": 0.70,
             "source": "suggestion",
             "notes": "Offload inference when local RAM is limited"
-        }));
-    }
-    if gpu != "unknown" && gpu != "none" {
-        raw.push(serde_json::json!({
-            "id": "gpu-local",
-            "label": "Local GPU inference (Ollama / BitNet)",
-            "provider": "ollama",
-            "model": "(see Ollama tags)",
-            "fit_score": 0.86,
-            "source": "suggestion",
-            "notes": format!("GPU hint: {gpu} — prefer local providers when VRAM allows")
         }));
     }
     raw.into_iter()
@@ -523,21 +556,27 @@ async fn run_compare(
         entries.push((label, provider.to_string(), model.to_string()));
     }
 
+    if compare_uses_embedded(&entries) {
+        #[cfg(feature = "embedded")]
+        {
+            if let Err(e) = llm_router.embedded_preload() {
+                tracing::warn!(error = %e, "compare: embedded preload failed");
+            }
+        }
+    }
+
     let mut results = Vec::new();
     for (label, provider, model) in &entries {
-        llm_router.set_primary_route(
-            "compare_slot",
-            akasha_llm::config::RouteEntry {
-                provider: provider.clone(),
-                model: model.clone(),
-                config: None,
-            },
-        );
+        let route = akasha_llm::config::RouteEntry {
+            provider: provider.clone(),
+            model: model.clone(),
+            config: None,
+        };
         let req = CompletionRequest {
             prompt: prompt.to_string(),
-            max_tokens: Some(1024),
+            max_tokens: Some(compare_max_tokens_for_provider(provider)),
             temperature: Some(0.7),
-            preferred_task_type: Some("compare_slot".to_string()),
+            preferred_task_type: None,
             system_prompt: Some(
                 "Answer the user prompt directly. Be concise unless the question requires detail."
                     .to_string(),
@@ -552,9 +591,9 @@ async fn run_compare(
             num_gpu: None,
             thinking_level: None,
         };
-        let timeout = std::time::Duration::from_secs(120);
+        let timeout = compare_timeout_for_provider(provider);
         let started = std::time::Instant::now();
-        let outcome = match tokio::time::timeout(timeout, llm_router.complete(&req)).await {
+        let outcome = match tokio::time::timeout(timeout, llm_router.complete_for_entry(&req, &route)).await {
             Ok(Ok(resp)) => {
                 let latency_ms = resp
                     .total_duration_ns
@@ -585,7 +624,7 @@ async fn run_compare(
             }),
             Err(_) => serde_json::json!({
                 "label": label,
-                "error": "timeout",
+                "error": format!("timeout after {}s", timeout.as_secs()),
                 "ok": false
             }),
         };

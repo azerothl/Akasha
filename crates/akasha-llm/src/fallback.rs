@@ -1,6 +1,7 @@
 //! Fallback engine — try primary then chain, retry policy, log switches.
 
-use crate::config::{RouteEntry, TaskTypeConfig};
+use crate::config::{prepare_ollama_request, ModelOption, RouteEntry, TaskTypeConfig};
+use std::collections::HashMap;
 use crate::metrics::MetricsCollector;
 use crate::provider::{
     provider_error_is_context_window_exceeded, CompletionRequest, CompletionResponse, LLMProvider,
@@ -50,6 +51,7 @@ impl FallbackEngine {
         resolve: &ProviderResolver,
         metrics: &MetricsCollector,
         degraded_only: bool,
+        model_options: &HashMap<String, ModelOption>,
     ) -> Result<CompletionResponse, String> {
         let mut chain: Vec<&RouteEntry> = vec![];
         if let Some(ref p) = task_config.primary {
@@ -77,7 +79,7 @@ impl FallbackEngine {
                 let start = Instant::now();
                 // Clone request and apply model-specific config from routing entry.
                 let mut request_with_config = request.clone();
-                entry.apply_config_to_request(&mut request_with_config);
+                prepare_ollama_request(entry, &mut request_with_config, model_options);
                 if disable_thinking_after_empty {
                     request_with_config.thinking_level = Some("off".to_string());
                 }

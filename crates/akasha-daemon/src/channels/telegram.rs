@@ -62,6 +62,20 @@ async fn send_telegram(
     Ok(())
 }
 
+/// One-shot outbound notify (Life layer morning brief / API `/api/channels/notify`).
+pub async fn send_telegram_message(token: &str, chat_id: i64, text: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60))
+        .user_agent("AkashaDaemon/1.0 TelegramNotify")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!("{}/bot{}/sendMessage", TELEGRAM_API_BASE, token);
+    // Telegram text limit ~4096; truncate safely.
+    let clipped: String = text.chars().take(4000).collect();
+    send_telegram(&client, &url, chat_id, &clipped).await
+}
+
 /// Run Telegram bot loop: getUpdates (long poll) -> messages (private text, /akasha, /akasha@Bot in groups) POST to daemon -> poll task -> sendMessage reply.
 /// If `notify_chat_id` is Some, sends "Akasha Telegram bot is connected." to that chat at startup.
 pub async fn run_telegram_bot(

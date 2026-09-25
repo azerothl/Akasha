@@ -120,13 +120,18 @@ Items livrés après la clôture du 2026-06-06 — à refléter dans les matrice
 
 | Date | Item | Statut | Preuve |
 |------|------|--------|--------|
-| 2026-06-07 | Notes Odysseus (Tauri) | Existe · moyenne | `notes.rs`, `/api/notes`, `NotesPanel.tsx` — voir [`odysseus-inspiration-matrix.md`](./odysseus-inspiration-matrix.md) |
+| 2026-06-07 | Notes Odysseus (Tauri) | Existe · moyenne | `notes.rs`, `/api/notes`, `NotesPanel.tsx` |
+| 2026-07-14 | Release **v0.10.0** — first-use embarqué, discovery, HA, refactor API | Livré | [internal_release_0.10.0.md](../releases/internal_release_0.10.0.md), tag `v0.10.0` |
+| 2026-07-17 | **P7 Life layer** — overnight/morning brief, notify Telegram, NL schedule Hermes, OAuth Connectors | Livré (code) | [roadmap_v0.10.0.md](../releases/roadmap_v0.10.0.md) §P7 ; `life_layer.rs`, `LifeLayerPanel.tsx` |
+| 2026-07-14 | Service discovery agnostique | Existe · moyenne | `akasha-core/service_discovery`, `GET /api/discovery`, `akasha discover` |
+| 2026-07-14 | Connecteur Home Assistant | Existe · moyenne | `ConnectorsPanel`, plugin `homeassistant`, outils `ha_*` |
+| 2026-07-17 | Cockpit agentic (P6) via **0.10.0** | Existe · moyenne | Active work, modes composer, Usage 7/30j, session fork/dual-pane — [roadmap_v0.10.0.md](../releases/roadmap_v0.10.0.md) §P6 |
 
 ---
 
-## Tag Git — instruction de release (ne pas exécuter automatiquement)
+## Tag Git — instruction de release
 
-**État au 2026-06-07 :** tag `v0.8.0` présent ; versions workspace et Tauri alignées sur `0.8.0`.
+**État au 2026-07-14 :** versions workspace et Tauri alignées sur **0.10.0** ; tag `v0.10.0` à publier (workflow Release + dispatch Akasha_app).
 
 Pour une future release documentaire ou produit :
 

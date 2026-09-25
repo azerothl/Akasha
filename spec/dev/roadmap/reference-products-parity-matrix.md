@@ -78,7 +78,7 @@ Document **central** : une ligne = un **domaine fonctionnel** ; les colonnes *He
 | Domaine | Akasha | Hermes | OpenClaw | Claude Code | Cursor | Mercury | jcode (RFC) | État Akasha |
 |---------|--------|--------|----------|-------------|--------|---------|-------------|-------------|
 | Webhooks externes | `POST /api/automation/webhook`, `/direct`, idempotence SQLite, `GET /api/automation/webhook/recent`, rate limit SQLite | Adapter HMAC, routes, direct | Selon automation | n/a focal | n/a focal | n/a focal | — | **Existe · haute** |
-| Cron / automation planifiée | Scheduler persistant, `task_run`, pause/resume/run-now | `cronjob`, livraison plateforme | Tâches / hooks selon stack | n/a | n/a | Tâches planifiées (README) | — | Existe · haute |
+| Cron / automation planifiée | Scheduler persistant, `task_run`, pause/resume/run-now ; **P7** packs overnight/morning brief + `POST /api/schedules/from-nl` (Hermes NL) + `POST /api/channels/notify` | `cronjob`, NL scheduling, briefings gateway | Tâches / hooks selon stack | n/a | n/a | Tâches planifiées (README) | — | Existe · haute |
 | Hooks (gateway / shell) | `lifecycle_hooks.json`, `on_http_request_pre/post`, `on_schedule_fire`, sandbox `strict` | gateway / plugin / shell | Webhooks / scripts | n/a | n/a | Hooks README | Gateway hooks (alignement conceptuel) | **Existe · moyenne** |
 | MCP | validation + probe + `GET /api/mcp/runtime`, stdio long-lived, OAuth refresh `GET/POST …/oauth` | Serveurs MCP, OAuth | Config MCP utilisateur | MCP IDE | MCP IDE | n/a ou minimal | — | **Existe · haute** |
 | Skills | Install URL, `skills.lock.jsonl`, hub `Akasha_skills`, UI galerie Tauri | Hub, auto-amélioration | Skills communautaires | MCP / instructions projet | Rules + packs | n/a focal | — | **Existe · haute** |
@@ -141,6 +141,7 @@ Légende : **C** = core · **Doc** = doc / site · **Cat** = catalogues skills/p
 
 ## Changelog
 
+- **3.0.2** (2026-07-17): P7 Life layer — overnight/morning brief packs, `POST /api/channels/notify`, NL schedule Hermes (`/api/schedules/from-nl`) ; signaux Vellum/Lindy/Joanium/Hermes dans canvas concurrence.
 - **3.0.1** (2026-06-07): resync registre [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md) v1.2.0 — M-* post-clôture, preuves lifecycle/Matrix ; notes Odysseus en suivi post-clôture.
 - **3.0.0** (2026-06-06): **roadmap-complete** — satellites §7 Studio + plugins ● (handoff, fork, recall-metrics, trust-catalog `hook_events`) ; clôture registre [`ROADMAP_FINAL_REGISTRY.md`](./ROADMAP_FINAL_REGISTRY.md) v1.1.0.
 - **2.1.1** (2026-06-06): Phase 1 matrice closure — sessions Reprendre (Tauri + Studio), webhooks recent cockpit, MCP OAuth refresh, skills browse UI, worktree doc site, browser health hint, OpenClaw import memory, S-ORCH-01 runbook ; M-01…M-15 → Existe.

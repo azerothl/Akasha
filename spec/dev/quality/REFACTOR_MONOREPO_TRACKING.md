@@ -28,10 +28,10 @@ Objectif: refactorisation progressive, PRs petites, sans régression fonctionnel
 | L0 | Baseline + ce document | Fait |
 | L1 | Module `api_http` (réponses JSON HTTP, parse requête) | Fait |
 | L2 | Module `api_path_utils` (read_file, chemins verbatim, apostrophes) | Fait |
-| L3 | Découpage `api.rs` par domaines (tasks, config, memory, …) | En cours avancé (parser+dispatch extraits: `api_tool_parser`, `api_tool_dispatch`)  |
-| L4 | `api_studio` / `api_workspace_graph` — alignement HTTP + services | En cours (`api_studio/mod.rs` + `handlers.rs`, `api_workspace_graph/handlers.rs`) |
-| L5 | Frontières crates (core / store / llm / tools) | En cours (doc `CRATE_BOUNDARIES` enrichie) |
-| L6 | Tests + doc dev finale | À faire |
+| L3 | Découpage `api.rs` par domaines (tasks, config, memory, …) | Fait (`api_routes_docs`, `config`, `router`, `plugins`, `memory`, `tasks` + délégation dans `handle_api`) |
+| L4 | `api_studio` / `api_workspace_graph` — alignement HTTP + services | Fait (`api_studio/mod.rs` + `handlers.rs`, `api_workspace_graph/handlers.rs`) |
+| L5 | Frontières crates (core / store / llm / tools) | Fait (doc `CRATE_BOUNDARIES` enrichie) |
+| L6 | Tests + doc dev finale | Fait (smoke tests path matching dans chaque nouveau `api_routes_*`) |
 
 ## Fichiers monolithiques prioritaires
 
@@ -44,4 +44,5 @@ Objectif: refactorisation progressive, PRs petites, sans régression fonctionnel
 | Date | Lignes `api.rs` (approx.) | Notes |
 |------|---------------------------|--------|
 | 2026-04-27 | — | Extraction `api_http`, `api_path_utils` |
-| 2026-04-27 | ~17000 | Suite phase 1-3 : CSRF/query → `api_security.rs` ; automation / terminal / MCP / mission / profils → `api_routes_*.rs` ; cache agent → `agent_profile.rs` ; studio → `api_studio/` ; workspace graph → `api_workspace_graph/handlers.rs` (`wc -l` / PowerShell `Measure-Object -Line` sur les fichiers sources) |
+| 2026-04-27 | ~17000 | Suite phase 1-3 : CSRF/query → `api_security.rs` ; automation / terminal / MCP / mission / profils → `api_routes_*.rs` ; cache agent → `agent_profile.rs` ; studio → `api_studio/` ; workspace graph → `api_workspace_graph/handlers.rs` |
+| 2026-07-14 | ~16115 | v0.10.0 : extraction `api_routes_docs` (101), `config` (435), `router` (769), `plugins` (663), `memory` (611), `tasks` (2423) ; helpers tâches/planning déplacés ; `cargo check -p akasha-daemon --lib` OK |

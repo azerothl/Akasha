@@ -15,6 +15,9 @@
 
 
 - **Modèles d'embeddings** (mémoire long terme) : dans le data_dir, sous `embedding_model/` (sous-dossiers type `models--<org>--<nom>/`).
-- **Modèles LLM embarqués** (Qwen, Baguettotron) : cache Hugging Face par défaut (`~/.cache/huggingface/hub` ou `%USERPROFILE%\.cache\huggingface\hub`). Vous pouvez rediriger avec la variable **HF_HOME** (ex. `HF_HOME=~/akasha/hf_cache`).
+- **Modèles LLM embarqués** :
+  - **GGUF (llama-cpp, zip CUDA)** : `{data_dir}/models/embedded/*.gguf` (défaut `default.gguf`). Téléchargement : `akasha config models embedded-download` ou assistant UI.
+  - **Candle (zip CPU)** : poids SafeTensors via Hugging Face au premier chargement — cache `~/.cache/huggingface/hub` (redirigeable avec **HF_HOME**).
+  - Statut : `akasha doctor --json` (champ `action: embedded-download` si GGUF manquant), commande chat `/embedded`, wizard premier lancement.
 
 ---

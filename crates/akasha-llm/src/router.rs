@@ -1,7 +1,7 @@
 //! LLM Router — classifier + config + fallback engine + provider registry.
 
 use crate::classifier::classify_task_type;
-use crate::config::{RoutingConfig, TaskTypeConfig};
+use crate::config::{prepare_ollama_request, RoutingConfig, TaskTypeConfig};
 use crate::fallback::{FallbackEngine, ProviderResolver};
 use crate::metrics::{MetricsCollector, MetricsPersistence};
 use crate::provider::{
@@ -93,6 +93,16 @@ fn resolve_task_type_with_fallback_chain(
 fn resolve_preferred_task_type(preferred: &str, config: &RoutingConfig) -> String {
     let fallbacks = preferred_task_type_fallbacks(preferred);
     resolve_task_type_with_fallback_chain(preferred, fallbacks, config)
+}
+
+/// When `enable_fallback` is false, only the primary route is attempted.
+fn task_config_for_completion(task_config: &TaskTypeConfig, enable_fallback: bool) -> TaskTypeConfig {
+    if enable_fallback {
+        return task_config.clone();
+    }
+    let mut cfg = task_config.clone();
+    cfg.fallback.clear();
+    cfg
 }
 
 pub struct LLMRouter {
@@ -296,6 +306,89 @@ impl LLMRouter {
         akasha_embedded_llm::EmbeddedLlm::status_snapshot()
     }
 
+    /// List models from embedded_models.json manifest.
+    #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+    pub fn embedded_models_manifest(
+        &self,
+    ) -> Result<akasha_embedded_llm::download::Manifest, String> {
+        akasha_embedded_llm::download::load_manifest()
+    }
+
+    /// Start GGUF download on a background thread.
+    #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+    pub fn embedded_start_download(&self, model_id: Option<String>) -> Result<(), String> {
+        let _ = self;
+        akasha_embedded_llm::download::start_download_background(model_id)
+    }
+
+    /// Poll download progress.
+    #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+    pub fn embedded_download_status(
+        &self,
+    ) -> akasha_embedded_llm::download::DownloadProgress {
+        let _ = self;
+        akasha_embedded_llm::download::download_progress_snapshot()
+    }
+
+    /// Hardware profile + static calibration candidates.
+    #[cfg(feature = "embedded")]
+    pub fn embedded_hardware(&self) -> Result<serde_json::Value, String> {
+        let _ = self;
+        let profile = akasha_embedded_llm::hardware::detect_hardware();
+        let candidates =
+            akasha_embedded_llm::profiles::calibration_candidates(&profile, 3).unwrap_or_default();
+        let models_for_tier = akasha_embedded_llm::profiles::models_for_tier(&profile.tier_id)
+            .unwrap_or_default();
+        Ok(serde_json::json!({
+            "profile": profile,
+            "static_candidates": candidates,
+            "models_for_tier": models_for_tier,
+        }))
+    }
+
+    /// Start embedded micro-bench calibration (background thread).
+    #[cfg(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp"))]
+    pub fn embedded_start_calibrate(&self, max_configs: usize) -> Result<(), String> {
+        let _ = self;
+        akasha_embedded_llm::calibrate::start_calibration_background(max_configs)
+    }
+
+    /// Poll calibration progress.
+    #[cfg(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp"))]
+    pub fn embedded_calibrate_status(
+        &self,
+    ) -> akasha_embedded_llm::calibrate::CalibrateProgress {
+        let _ = self;
+        akasha_embedded_llm::calibrate::calibrate_progress_snapshot()
+    }
+
+    /// Apply persisted runtime config (call at daemon startup).
+    #[cfg(feature = "embedded")]
+    pub fn embedded_apply_runtime(&self) {
+        let _ = self;
+        akasha_embedded_llm::config::apply_persisted_runtime();
+    }
+
+    /// Runtime settings snapshot (model, engine mode, tier).
+    #[cfg(feature = "embedded")]
+    pub fn embedded_settings_view(
+        &self,
+    ) -> Result<akasha_embedded_llm::runtime::EmbeddedSettingsView, String> {
+        let _ = self;
+        akasha_embedded_llm::runtime::settings_view()
+    }
+
+    /// Persist manual model + engine mode and unload for reload.
+    #[cfg(all(feature = "embedded", feature = "embedded-download"))]
+    pub fn embedded_set_runtime(
+        &self,
+        model_id: &str,
+        engine_mode: &str,
+    ) -> Result<akasha_embedded_llm::runtime::EmbeddedRuntime, String> {
+        let _ = self;
+        akasha_embedded_llm::runtime::apply_manual_runtime(model_id, engine_mode)
+    }
+
     /// Replace in-memory routing config (task_types, providers metadata, global) from disk or API reload.
     /// Registered provider clients (Ollama, OpenRouter, etc.) are unchanged — route/model switches take effect immediately.
     pub fn reload_routing_config(&self, config: RoutingConfig) {
@@ -303,6 +396,47 @@ impl LLMRouter {
             Ok(mut cfg) => *cfg = config,
             Err(poisoned) => *poisoned.into_inner() = config,
         }
+    }
+
+    /// Complete using a single route entry — no fallback chain (model compare slots).
+    pub async fn complete_for_entry(
+        &self,
+        request: &CompletionRequest,
+        entry: &crate::config::RouteEntry,
+    ) -> Result<CompletionResponse, String> {
+        let resolve = self.resolve();
+        let provider = resolve(entry.provider.as_str()).ok_or_else(|| {
+            format!(
+                "provider '{}' is not registered",
+                entry.provider
+            )
+        })?;
+        if self.degraded_mode && !provider.is_local() {
+            return Err(format!(
+                "degraded mode: provider '{}' unavailable",
+                entry.provider
+            ));
+        }
+        let timeout_secs = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .default_timeout_secs
+            .unwrap_or(300);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let mut req = request.clone();
+        let model_options = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .model_options
+            .clone();
+        prepare_ollama_request(entry, &mut req, &model_options);
+        provider
+            .complete(&req, timeout, Some(entry.model.as_str()))
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Set the primary provider/model for a task type (e.g. conversation, code_generation). Applied immediately.
@@ -376,7 +510,22 @@ impl LLMRouter {
                 }
             });
 
+        let enable_fallback = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .enable_fallback
+            .unwrap_or(true);
+        let task_config = task_config_for_completion(&task_config, enable_fallback);
+
         let resolve = self.resolve();
+        let model_options = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .model_options
+            .clone();
         self.fallback
             .complete(
                 request,
@@ -384,6 +533,7 @@ impl LLMRouter {
                 &resolve,
                 self.metrics.as_ref(),
                 self.degraded_mode,
+                &model_options,
             )
             .instrument(span)
             .await
@@ -428,7 +578,22 @@ impl LLMRouter {
                 }
             });
 
+        let enable_fallback = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .enable_fallback
+            .unwrap_or(true);
+        let task_config = task_config_for_completion(&task_config, enable_fallback);
+
         let resolve = self.resolve();
+        let model_options = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .model_options
+            .clone();
         let primary_entry = task_config.primary.as_ref();
         if let Some(entry) = primary_entry {
             if let Some(provider) = resolve(entry.provider.as_str()) {
@@ -441,6 +606,9 @@ impl LLMRouter {
                         .default_timeout_secs
                         .unwrap_or(300);
                     let timeout = std::time::Duration::from_secs(timeout);
+                    // Apply route config + Ollama num_ctx (stream path previously skipped this).
+                    let mut stream_req = request.clone();
+                    prepare_ollama_request(entry, &mut stream_req, &model_options);
                     // Use a proxy channel to detect whether streaming emitted any chunks before a failure.
                     // This prevents sending the full fallback text on top of already-streamed partial content.
                     let chunk_tx_fallback = chunk_tx.clone();
@@ -457,7 +625,7 @@ impl LLMRouter {
                     });
                     match provider
                         .complete_stream(
-                            request,
+                            &stream_req,
                             timeout,
                             Some(&entry.model),
                             proxy_tx,
@@ -496,6 +664,7 @@ impl LLMRouter {
                                     &resolve,
                                     self.metrics.as_ref(),
                                     self.degraded_mode,
+                                    &model_options,
                                 )
                                 .await?;
                             // Only forward the fallback as a chunk if streaming emitted nothing;

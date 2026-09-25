@@ -7,6 +7,20 @@ use std::path::Path;
 const DEFAULT_SIZE: &str = "1024x1024";
 const IMAGE_TIMEOUT_SECS: u64 = 120;
 
+/// Look up a vault key, then its lowercase alias (e.g. `OPENROUTER_API_KEY` → `openrouter_api_key`).
+fn vault_get_with_aliases(vault: &dyn akasha_vault::Vault, name: &str) -> Option<String> {
+    if let Ok(k) = vault.get(name) {
+        return Some(k);
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower != name {
+        if let Ok(k) = vault.get(&lower) {
+            return Some(k);
+        }
+    }
+    None
+}
+
 /// Resolve API key: vault (vault://key or key name) then env var.
 pub(crate) fn resolve_api_key(
     vault: Option<&dyn akasha_vault::Vault>,
@@ -20,13 +34,13 @@ pub(crate) fn resolve_api_key(
     if let Some(r) = ref_str {
         if let Some(name) = r.strip_prefix("vault://") {
             if let Some(v) = vault {
-                if let Ok(k) = v.get(name) {
+                if let Some(k) = vault_get_with_aliases(v, name) {
                     return Some(k);
                 }
             }
         }
         if let Some(v) = vault {
-            if let Ok(k) = v.get(r) {
+            if let Some(k) = vault_get_with_aliases(v, r) {
                 return Some(k);
             }
         }
@@ -405,6 +419,33 @@ mod tests {
     fn resolve_api_key_none_when_no_vault_no_ref_no_env() {
         let r = resolve_api_key(None, None, "AKASHA_NONEXISTENT_ENV_98765");
         assert!(r.is_none());
+    }
+
+    #[test]
+    fn resolve_api_key_vault_prefix_lowercase_alias() {
+        struct MockVault;
+        impl akasha_vault::Vault for MockVault {
+            fn get(&self, k: &str) -> Result<String, akasha_vault::VaultError> {
+                if k == "openrouter_api_key" {
+                    Ok("or_secret".to_string())
+                } else {
+                    Err(akasha_vault::VaultError::NotFound(k.to_string()))
+                }
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), akasha_vault::VaultError> {
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> Result<(), akasha_vault::VaultError> {
+                Ok(())
+            }
+            fn list_keys(&self) -> Result<Vec<String>, akasha_vault::VaultError> {
+                Ok(vec![])
+            }
+        }
+        let vault = MockVault;
+        let ref_str = String::from("vault://OPENROUTER_API_KEY");
+        let r = resolve_api_key(Some(&vault), Some(&ref_str), "OPENROUTER_API_KEY");
+        assert_eq!(r.as_deref(), Some("or_secret"));
     }
 
     #[test]

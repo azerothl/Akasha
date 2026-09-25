@@ -125,6 +125,11 @@ enum Commands {
         #[command(subcommand)]
         sub: TaskSub,
     },
+    /// Schedules: create from natural language (Life layer / Hermes-inspired)
+    Schedule {
+        #[command(subcommand)]
+        sub: ScheduleSub,
+    },
     /// Telegram access lifecycle (pairing approvals, roles)
     Telegram {
         #[command(subcommand)]
@@ -134,6 +139,18 @@ enum Commands {
     Discover {
         /// Service profile id (ollama, homeassistant). Omit to list profiles.
         service: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleSub {
+    /// Parse natural language into a schedule preview (or commit with --commit)
+    FromNl {
+        /// Phrase, e.g. "chaque matin à 7h30, brief Telegram"
+        text: String,
+        /// Persist the schedule on the daemon
+        #[arg(long)]
+        commit: bool,
     },
 }
 
@@ -667,8 +684,35 @@ fn main() -> anyhow::Result<()> {
         Commands::Migrate { sub } => cmd_migrate(sub),
         Commands::Terminal { sub } => cmd_terminal(sub),
         Commands::Task { sub } => cmd_task(sub),
+        Commands::Schedule { sub } => cmd_schedule(sub),
         Commands::Telegram { sub } => cmd_telegram(sub),
         Commands::Discover { service } => cmd_discover(service.as_deref()),
+    }
+}
+
+fn cmd_schedule(sub: ScheduleSub) -> anyhow::Result<()> {
+    match sub {
+        ScheduleSub::FromNl { text, commit } => {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?;
+            let url = format!("{}/api/schedules/from-nl", daemon_base_url());
+            let body = serde_json::json!({ "text": text, "commit": commit });
+            let resp = client.post(&url).json(&body).send()?;
+            let status = resp.status();
+            let json: serde_json::Value = resp.json()?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "daemon error {}: {}",
+                    status,
+                    json.get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&json)?);
+            Ok(())
+        }
     }
 }
 
@@ -4172,6 +4216,37 @@ OLLAMA_HOST=http://localhost:11434
         });
     }
 
+    // Recommend embedded GGUF download when llama_cpp is compiled but GGUF missing (do not auto-download ~1 Go).
+    if let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        let port: u16 = std::env::var("AKASHA_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_PORT);
+        if let Ok(resp) = client.get(format!("http://127.0.0.1:{}/api/doctor", port)).send() {
+            if resp.status().is_success() {
+                if let Ok(j) = resp.json::<serde_json::Value>() {
+                    if let Some(checks) = j.get("checks").and_then(|c| c.as_array()) {
+                        for c in checks {
+                            if c.get("id").and_then(|v| v.as_str()) == Some("embedded_llm") {
+                                if c.get("action").and_then(|v| v.as_str())
+                                    == Some("embedded-download")
+                                {
+                                    fixes.push(
+                                        "Modèle embarqué : exécutez `akasha config models embedded-download` (~1 Go) ou utilisez l'assistant UI.".to_string(),
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(fixes)
 }
 
@@ -4553,7 +4628,16 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
 
     // Phase 8: diagnostic advice from daemon (RAG + Core Model)
     if advice {
-        let body = serde_json::json!({ "health": health_payload });
+        let mut advice_health = health_payload.clone();
+        if !daemon_checks.is_empty() {
+            if let Some(obj) = advice_health.as_object_mut() {
+                obj.insert(
+                    "daemon_checks".to_string(),
+                    serde_json::json!(daemon_checks),
+                );
+            }
+        }
+        let body = serde_json::json!({ "health": advice_health });
         match reqwest::blocking::Client::new()
             .post(format!("http://127.0.0.1:{}/api/diagnostic/advice", port))
             .json(&body)
