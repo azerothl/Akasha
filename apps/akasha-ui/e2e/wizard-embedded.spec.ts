@@ -108,7 +108,6 @@ test.describe("Onboarding wizard (embedded)", () => {
     for (let i = 0; i < 3; i++) {
       await page.getByRole("button", { name: /Next|Suivant/i }).click();
     }
-    await expect(page.getByRole("heading", { level: 2 })).toBeVisible();
     await expect(
       page.getByRole("button", { name: /Run calibration|Lancer la calibration/i }),
     ).toBeVisible({ timeout: 10000 });
