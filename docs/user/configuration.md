@@ -21,6 +21,8 @@ Vous pouvez modifier les fichiers suivants dans ce répertoire (avec un éditeur
 | `tools_policy.yaml` | Autorisations des outils : chemins lecture/écriture (`allowed_read_paths`, `allowed_write_paths`), commandes autorisées (`allowed_commands`), recherche web (Brave), hôtes pour l'installation de skills (`allowed_skill_install_hosts`). |
 | `voice_router.yaml` | (Optionnel) Voix TTS/STT : URLs des services de synthèse (`tts.base_url`) et de transcription (`stt.base_url`). Si STT est configuré, l’interface web affiche un bouton **Message vocal** (micro). Si TTS est aussi configuré, la réponse à un message vocal est affichée en texte et lue en audio. |
 | `akasha.env` | Variables d'environnement persistantes (éditables aussi via `akasha config env`). |
+| `companion_presence.json` | (Phase 5) Policy VAD Companion : `enabled`, seuils RMS / durées, `quiet_hours`. Aussi via `GET`/`POST /api/companion/presence/config` ou `AKASHA_COMPANION_VAD_ENABLED`. |
+| `companion_devices.json` | (Phase 4–5) Devices pairés + dernier événement présence. |
 | `connectors.env` | Activation des canaux (Telegram, Slack, Discord). |
 | `agent_profile.json` | Profil de l'agent : nom, rôle, personnalité, règles, **formalité** (tutoiement / vouvoiement, champs optionnels). Éditable dans Paramètres → Profil de l'agent (interface web) ou en modifiant le fichier puis en redémarrant le daemon. |
 | `autonomous_mission.yaml` | (Optionnel) **Mission autonome** : objectif, contexte, règles de fonctionnement, rôles, intervalle de heartbeat, répertoire des rapports, `session_id`, type d’agent pour le premier pas de chaque heartbeat. Éditable dans l’onglet **Mission** de l’interface web ou via `GET` / `PUT /api/autonomous-mission`. |
@@ -237,6 +239,9 @@ Clés supportées (principales et documentées) :
 | Clé | Type / valeurs | Description |
 |---|---|---|
 | `AKASHA_PORT` | int | Port HTTP daemon. |
+| `AKASHA_BIND` | string | Adresse d’écoute (`127.0.0.1` par défaut). Mettre `0.0.0.0` pour accepter le Companion ESP32 (et autres clients) sur le LAN. |
+| `AKASHA_COMPANION_PAIR_SECRET` | string | Secret de pairing Companion (`POST /api/companion/pair`). Si vide, le pairing LAN est ouvert (dev). |
+| `AKASHA_COMPANION_VAD_ENABLED` | `1`/`0`/`true`/`false` | Override policy VAD Companion (Phase 5). Persistance aussi via `data_dir/companion_presence.json` et `GET`/`POST /api/companion/presence/config`. |
 | `AKASHA_LOG` | string | Niveau log (`trace`,`debug`,`info`,`warn`,`error`). |
 | `AKASHA_DATA_DIR` | path | Répertoire données. |
 | `AKASHA_MAX_RESPONSE_TOKENS` | int | Tokens max réponses chat. |

@@ -13859,6 +13859,22 @@ pub async fn handle_api(
         return resp;
     }
 
+    if let Some(resp) = crate::api_routes_companion::try_handle(
+        method,
+        path_only,
+        Some(query_str),
+        body.as_deref(),
+        &crate::api_routes_companion::RouteCtx {
+            data_dir,
+            store_path,
+            llm_router,
+            headers,
+        },
+    )
+    .await
+    {
+        return resp;
+    }
 
     if let Some(resp) = crate::api_routes_config::try_handle(
         method,
