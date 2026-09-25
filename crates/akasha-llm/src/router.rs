@@ -1,7 +1,7 @@
 //! LLM Router — classifier + config + fallback engine + provider registry.
 
 use crate::classifier::classify_task_type;
-use crate::config::{RoutingConfig, TaskTypeConfig};
+use crate::config::{prepare_ollama_request, RoutingConfig, TaskTypeConfig};
 use crate::fallback::{FallbackEngine, ProviderResolver};
 use crate::metrics::{MetricsCollector, MetricsPersistence};
 use crate::provider::{
@@ -426,7 +426,13 @@ impl LLMRouter {
             .unwrap_or(300);
         let timeout = std::time::Duration::from_secs(timeout_secs);
         let mut req = request.clone();
-        entry.apply_config_to_request(&mut req);
+        let model_options = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .model_options
+            .clone();
+        prepare_ollama_request(entry, &mut req, &model_options);
         provider
             .complete(&req, timeout, Some(entry.model.as_str()))
             .await
@@ -514,6 +520,12 @@ impl LLMRouter {
         let task_config = task_config_for_completion(&task_config, enable_fallback);
 
         let resolve = self.resolve();
+        let model_options = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .model_options
+            .clone();
         self.fallback
             .complete(
                 request,
@@ -521,6 +533,7 @@ impl LLMRouter {
                 &resolve,
                 self.metrics.as_ref(),
                 self.degraded_mode,
+                &model_options,
             )
             .instrument(span)
             .await
@@ -575,6 +588,12 @@ impl LLMRouter {
         let task_config = task_config_for_completion(&task_config, enable_fallback);
 
         let resolve = self.resolve();
+        let model_options = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .model_options
+            .clone();
         let primary_entry = task_config.primary.as_ref();
         if let Some(entry) = primary_entry {
             if let Some(provider) = resolve(entry.provider.as_str()) {
@@ -587,6 +606,9 @@ impl LLMRouter {
                         .default_timeout_secs
                         .unwrap_or(300);
                     let timeout = std::time::Duration::from_secs(timeout);
+                    // Apply route config + Ollama num_ctx (stream path previously skipped this).
+                    let mut stream_req = request.clone();
+                    prepare_ollama_request(entry, &mut stream_req, &model_options);
                     // Use a proxy channel to detect whether streaming emitted any chunks before a failure.
                     // This prevents sending the full fallback text on top of already-streamed partial content.
                     let chunk_tx_fallback = chunk_tx.clone();
@@ -603,7 +625,7 @@ impl LLMRouter {
                     });
                     match provider
                         .complete_stream(
-                            request,
+                            &stream_req,
                             timeout,
                             Some(&entry.model),
                             proxy_tx,
@@ -642,6 +664,7 @@ impl LLMRouter {
                                     &resolve,
                                     self.metrics.as_ref(),
                                     self.degraded_mode,
+                                    &model_options,
                                 )
                                 .await?;
                             // Only forward the fallback as a chunk if streaming emitted nothing;

@@ -85,7 +85,19 @@ pub async fn handle_workspace_routes(
             .unwrap_or_default();
         let catalog =
             crate::cookbook_models::build_cookbook_catalog(llm_router).await;
-        let providers_map = catalog.providers;
+        let mut providers_map = catalog.providers;
+        let ollama_library = crate::cookbook_models::fetch_ollama_library(&client).await;
+        // Full Ollama.com library (pullable) + local tags (installed / custom).
+        crate::cookbook_models::inject_live_local_models(
+            &mut providers_map,
+            &ollama_library,
+            &[],
+        );
+        crate::cookbook_models::inject_live_local_models(
+            &mut providers_map,
+            &ollama_models,
+            &rbitnet_models,
+        );
         let mut huggingface_local =
             crate::cookbook_models::fetch_huggingface_local_models(&client, ram, gpu).await;
         huggingface_local = huggingface_local
@@ -100,6 +112,7 @@ pub async fn handle_workspace_routes(
             &routes,
             &ollama_models,
             &rbitnet_models,
+            &ollama_library,
         );
         let mut task_categories: Vec<String> = routes.keys().cloned().collect();
         task_categories.sort();
@@ -225,7 +238,18 @@ pub async fn handle_workspace_routes(
             .and_then(|m| serde_json::from_value(m.clone()).ok())
             .unwrap_or_default();
         let catalog = crate::cookbook_models::build_cookbook_catalog(llm_router).await;
-        let providers_map = catalog.providers;
+        let mut providers_map = catalog.providers;
+        let ollama_library = crate::cookbook_models::fetch_ollama_library(&client).await;
+        crate::cookbook_models::inject_live_local_models(
+            &mut providers_map,
+            &ollama_library,
+            &[],
+        );
+        crate::cookbook_models::inject_live_local_models(
+            &mut providers_map,
+            &ollama_models,
+            &rbitnet_models,
+        );
         let mut huggingface_local =
             crate::cookbook_models::fetch_huggingface_local_models(&client, ram, gpu).await;
         huggingface_local = huggingface_local
@@ -242,6 +266,7 @@ pub async fn handle_workspace_routes(
             &routes,
             &ollama_models,
             &rbitnet_models,
+            &ollama_library,
         );
         let mut all_items = configured;
         all_items.extend(suggestions);
@@ -383,12 +408,11 @@ pub async fn handle_workspace_routes(
 }
 
 fn hardware_snapshot_json() -> serde_json::Value {
-    let total_ram_gb = std::env::var("AKASHA_HOST_RAM_GB")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(16);
+    let total_ram_gb = crate::cookbook_models::detect_host_ram_gb();
+    let vram_mb = crate::cookbook_models::detect_vram_mb();
     serde_json::json!({
         "total_ram_gb": total_ram_gb,
+        "vram_mb": vram_mb,
         "gpu_hint": crate::cookbook_models::resolve_gpu_hint(),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
@@ -403,12 +427,14 @@ fn cookbook_recommendations(
     routes: &HashMap<String, TaskTypeConfig>,
     ollama_models: &[String],
     rbitnet_models: &[String],
+    ollama_library: &[String],
 ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
     let ram = hw.get("total_ram_gb").and_then(|v| v.as_u64()).unwrap_or(8);
     let gpu = hw
         .get("gpu_hint")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
+    let library_set: HashSet<String> = ollama_library.iter().cloned().collect();
     let configured = crate::cookbook_models::configured_model_entries(
         providers_map,
         routes,
@@ -417,6 +443,7 @@ fn cookbook_recommendations(
         provider_meta,
         ollama_models,
         rbitnet_models,
+        &library_set,
     );
     let seen: HashSet<String> = configured
         .iter()
@@ -454,15 +481,6 @@ fn hardware_suggestions(
             "source": "suggestion",
             "notes": "Configure bitnet.base_url in llm_router.yaml; see Rbitnet/docs/USAGE.md"
         }));
-        raw.push(serde_json::json!({
-            "id": "ollama-llama3",
-            "label": "Ollama llama3.2 (3B)",
-            "provider": "ollama",
-            "model": "llama3.2",
-            "fit_score": 0.85,
-            "source": "suggestion",
-            "notes": "Good balance on 32GB+ hosts"
-        }));
     } else if ram >= 16 {
         raw.push(serde_json::json!({
             "id": "embedded",
@@ -472,15 +490,6 @@ fn hardware_suggestions(
             "fit_score": 0.95,
             "source": "suggestion",
             "notes": "Zero-config; already bundled"
-        }));
-        raw.push(serde_json::json!({
-            "id": "ollama-small",
-            "label": "Ollama small model (≤3B)",
-            "provider": "ollama",
-            "model": "llama3.2:1b",
-            "fit_score": 0.78,
-            "source": "suggestion",
-            "notes": "Install Ollama; akasha config models set conversation ollama <model>"
         }));
     } else {
         raw.push(serde_json::json!({
@@ -500,17 +509,6 @@ fn hardware_suggestions(
             "fit_score": 0.70,
             "source": "suggestion",
             "notes": "Offload inference when local RAM is limited"
-        }));
-    }
-    if gpu != "unknown" && gpu != "none" {
-        raw.push(serde_json::json!({
-            "id": "gpu-local",
-            "label": "Local GPU inference (Ollama / BitNet)",
-            "provider": "ollama",
-            "model": "(see Ollama tags)",
-            "fit_score": 0.86,
-            "source": "suggestion",
-            "notes": format!("GPU hint: {gpu} — prefer local providers when VRAM allows")
         }));
     }
     raw.into_iter()

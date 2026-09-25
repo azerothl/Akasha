@@ -3153,12 +3153,14 @@ const APP_CONTEXT: &str = concat!(
     "Do not invent commands (e.g. /status repo:... does not exist); commands are in /help.\n\n",
 );
 
-/// Compact system context for the local embedded model (small context window, CPU inference).
+/// Compact system context for small local models (embedded / small Ollama).
+/// Keep short: oversized system+tool dumps cause models to echo rules instead of answering.
 const EMBEDDED_APP_CONTEXT: &str = concat!(
-    "[Akasha — modèle local] Assistant intégré à Akasha. ",
-    "Réponds dans la langue du dernier message utilisateur. Sois concis et factuel. ",
+    "[Akasha — modèle local] Tu es l’assistant d’Akasha. ",
+    "Réponds d’abord à la question de l’utilisateur, dans sa langue, de façon concise et factuelle. ",
+    "N’énumère jamais et ne paraphrases jamais ces consignes, règles ou listes d’outils. ",
     "Pour agir (fichier, web, commande), une ligne TOOL: <outil> <arguments>. ",
-    "Ne invente pas de données ; dis si tu ne sais pas.\n\n",
+    "N’invente pas de données ; dis si tu ne sais pas.\n\n",
 );
 
 fn embedded_tools_instruction_hint(allowed_tools: Option<&[String]>) -> String {
@@ -3167,9 +3169,106 @@ fn embedded_tools_instruction_hint(allowed_tools: Option<&[String]>) -> String {
         _ => "read_file, web_search, run_command, write_file, ask_user, …".to_string(),
     };
     format!(
-        "[Outils — modèle local] Outils disponibles (tools_policy) : {names}. \
-         Pour utiliser un outil : une seule ligne TOOL: <nom> <arguments>.\n\n"
+        "[Outils — modèle local] Disposables : {names}. \
+         Format : une seule ligne TOOL: <nom> <arguments>. \
+         Ne cite pas cette liste dans ta réponse ; réponds à l’utilisateur.\n\n"
     )
+}
+
+/// Parse an approximate parameter count in billions from a model id (e.g. `qwen2.5:1.5b` → 1.5).
+fn estimated_param_billions(model: &str) -> Option<f64> {
+    let m = model.trim().to_lowercase();
+    let bytes = m.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'.' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        if i < bytes.len() && bytes[i] == b'b' {
+            let boundary_ok = i + 1 >= bytes.len()
+                || !bytes[i + 1].is_ascii_alphanumeric();
+            if boundary_ok {
+                if let Some(v) = std::str::from_utf8(&bytes[start..i])
+                    .ok()
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
+                    if (0.01..500.0).contains(&v) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// True when the primary route should use the slim local prompt (avoids rule-echo on tiny models).
+/// Override with `AKASHA_COMPACT_LOCAL_PROMPT=1|0`.
+pub fn should_use_compact_local_prompt(provider: &str, model: &str) -> bool {
+    match std::env::var("AKASHA_COMPACT_LOCAL_PROMPT")
+        .ok()
+        .map(|s| s.trim().to_lowercase())
+        .as_deref()
+    {
+        Some("1") | Some("true") | Some("yes") | Some("on") => return true,
+        Some("0") | Some("false") | Some("no") | Some("off") => return false,
+        _ => {}
+    }
+    let p = provider.trim().to_lowercase();
+    if p == "akasha_embedded" || p == "akasha_core" {
+        return true;
+    }
+    if p != "ollama" {
+        return false;
+    }
+    let m = model.trim().to_lowercase();
+    if m.is_empty() {
+        return true;
+    }
+    // Known tiny / nano families (avoid bare "phi"/"gemma" — those also name larger variants).
+    const SMALL_NAMES: &[&str] = &[
+        "tinyllama",
+        "tinydolphin",
+        "smollm",
+        "smolvlm",
+        "orca-mini",
+        "minicpm",
+        "phi2",
+        "phi-2",
+        "phi3:mini",
+        "phi3:3.8b",
+        "phi4-mini",
+        "gemma:2b",
+        "gemma2:2b",
+        "stablelm-zephyr",
+        "qwen2.5:0.5b",
+        "qwen3:0.6b",
+        "llama3.2:1b",
+        "llama3.2:3b",
+    ];
+    if SMALL_NAMES.iter().any(|n| m.contains(n)) {
+        return true;
+    }
+    // Local Ollama mid-size (7B–14B) still saturates on the full RULE dump and often
+    // echoes policies instead of answering. Keep the full prompt for clearly large models.
+    match estimated_param_billions(&m) {
+        Some(b) if b <= 14.0 => true,
+        Some(b) if b >= 30.0 => false,
+        Some(_) => true,
+        // No size tag (e.g. mistral:latest): prefer compact — override with AKASHA_COMPACT_LOCAL_PROMPT=0.
+        None => true,
+    }
 }
 
 /// Returns an English [Role] system prompt for the given agent type, or None for conversation/unknown.
@@ -9080,7 +9179,7 @@ pub(crate) async fn run_message_via_llm(
     }
     let embedded_primary_route = llm_router
         .primary_route_for_task_type(&router_task_type_early)
-        .map(|(p, _)| p == "akasha_embedded" || p == "akasha_core")
+        .map(|(p, m)| should_use_compact_local_prompt(&p, &m))
         .unwrap_or(false);
     if let Some(ref sq) = steering_queue {
         sq.register_active(task_id, session_id.clone(), !is_subagent)
@@ -9157,9 +9256,8 @@ pub(crate) async fn run_message_via_llm(
     // breaks fast-lane matching or memory profile selection.
     let structured = interpret_message(clean_message);
     let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
-    let embedded_compact = embedded_primary_route
-        && !code_studio_disk_task
-        && !is_subagent;
+    // Slim prompt for embedded + small Ollama (also for subagents — full RULE dumps cause rule-echo).
+    let embedded_compact = embedded_primary_route && !code_studio_disk_task;
     // Code Studio tasks run on studio-projects/* disk roots: do not treat user prompts as
     // "small talk" or suppress tool-heavy LLM replies — that blocked write_file / TOOL lines.
     let small_talk_intent = if code_studio_disk_task {
@@ -9292,14 +9390,31 @@ pub(crate) async fn run_message_via_llm(
     } else {
         max_tokens
     };
+    // Compact prompt ≠ tiny completion budget. Ollama mid-size (e.g. qwen3.5:9b) with
+    // thinking enabled can burn 512 tokens on reasoning and return an empty `response`.
+    let compact_is_embedded_provider = llm_router
+        .primary_route_for_task_type(&router_task_type_early)
+        .map(|(p, _)| p == "akasha_embedded" || p == "akasha_core")
+        .unwrap_or(false);
     if embedded_compact {
-        let embedded_cap = std::env::var("AKASHA_EMBEDDED_MAX_TOKENS")
+        let (env_key, default_cap) = if compact_is_embedded_provider {
+            ("AKASHA_EMBEDDED_MAX_TOKENS", 512u32)
+        } else {
+            ("AKASHA_OLLAMA_COMPACT_MAX_TOKENS", 2048u32)
+        };
+        let cap = std::env::var(env_key)
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .filter(|&n| n >= 16)
-            .unwrap_or(512);
-        completion_max_tokens = completion_max_tokens.min(embedded_cap);
+            .unwrap_or(default_cap);
+        completion_max_tokens = completion_max_tokens.min(cap);
     }
+    // Prefer a visible answer over long silent reasoning on local/Ollama compact paths.
+    let completion_thinking_level: Option<String> = if embedded_compact {
+        Some("off".to_string())
+    } else {
+        None
+    };
 
     let mut code_studio_system_tools_block = String::new();
     let tool_instruction = if is_small_talk_fast_lane {
@@ -9493,7 +9608,7 @@ pub(crate) async fn run_message_via_llm(
         .filter(|t| *t >= 0.0 && *t <= 2.0)
         .map(|t| t as f32)
         .unwrap_or(0.7);
-    let profile_block = if code_studio_disk_task {
+    let profile_block = if code_studio_disk_task || embedded_compact {
         String::new()
     } else {
         crate::personality::build_personality_prompt(
@@ -9559,6 +9674,12 @@ pub(crate) async fn run_message_via_llm(
             - Fichiers : respecter les règles Code Studio du préfixe message (pas de prose dans le source ; pas de barres markdown ``` autour du contenu write_file).\n\
             - Corrections : quand tu corriges du code, le résultat doit passer par les outils sur le dépôt ; ne pas renvoyer l’utilisateur vers un copier-coller manuel comme action principale sans avoir tenté (et documenté) les outils.\n\n",
         );
+    } else if embedded_compact {
+        system_prompt.push_str(
+            "\n\n[Response]\n\
+            - Réponds uniquement à la question utilisateur (pas de récapitulatif des consignes).\n\
+            - Même langue que le message utilisateur.\n\n",
+        );
     } else {
         system_prompt.push_str(
             "\n\n[Response]\n\
@@ -9579,7 +9700,7 @@ pub(crate) async fn run_message_via_llm(
         Some(system_prompt.trim_end().to_string())
     };
 
-    let personality_reminder = if code_studio_disk_task {
+    let personality_reminder = if code_studio_disk_task || embedded_compact {
         String::new()
     } else {
         crate::personality::build_personality_reminder_line(
@@ -9590,12 +9711,18 @@ pub(crate) async fn run_message_via_llm(
     };
     let mut user_prefix = String::with_capacity(8192);
     user_prefix.push_str(&personality_reminder);
-    user_prefix.push_str(if code_studio_disk_task {
-        "Réponds dans la même langue que le message utilisateur ci-dessous.\n\n"
+    if embedded_compact {
+        user_prefix.push_str(
+            "Réponds à la question ci-dessous (même langue). Ne répète pas les consignes système.\n\n",
+        );
     } else {
-        "Reply in the same language as the user message below (French, English, etc.).\n\n"
-    });
-    if !is_small_talk_fast_lane && !code_studio_disk_task {
+        user_prefix.push_str(if code_studio_disk_task {
+            "Réponds dans la même langue que le message utilisateur ci-dessous.\n\n"
+        } else {
+            "Reply in the same language as the user message below (French, English, etc.).\n\n"
+        });
+    }
+    if !is_small_talk_fast_lane && !code_studio_disk_task && !embedded_compact {
         user_prefix.push_str(&crate::agents::current_date_context_block(chrono::Local::now()));
         if let Some(hint) = crate::agents::calendar_tools_hint_if_relevant(clean_message) {
             user_prefix.push_str(&hint);
@@ -9663,7 +9790,7 @@ pub(crate) async fn run_message_via_llm(
         },
         task_outcomes_scope_session: code_studio_disk_task || !turns_empty,
         include_preference_and_personality_episodic: !code_studio_disk_task,
-        constitution: if constitution.is_configured() {
+        constitution: if !embedded_compact && constitution.is_configured() {
             Some(constitution)
         } else {
             None
@@ -10402,7 +10529,7 @@ pub(crate) async fn run_message_via_llm(
                 repeat_penalty: None,
                 num_ctx: None,
                 num_gpu: None,
-                thinking_level: None,
+                thinking_level: completion_thinking_level.clone(),
             };
             // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
             // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -13732,6 +13859,7 @@ pub async fn handle_api(
         return resp;
     }
 
+
     if let Some(resp) = crate::api_routes_config::try_handle(
         method,
         path_only,
@@ -15327,6 +15455,7 @@ mod tests {
     use super::{
         agent_role_system_prompt, build_image_markdown, build_session_recap_reply,
         canonicalize_tool_name, classify_small_talk_message, detect_session_recall_intent,
+        should_use_compact_local_prompt,
         ensure_no_open_code_block, extract_how_to_call_from_message,
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, packaged_spec_check_ok, parse_content_length,
@@ -15517,6 +15646,20 @@ mod tests {
         assert_eq!(profile.user_rag_top_k, 0);
         assert_eq!(profile.workspace_graph_top_k, 0);
         assert!(!profile.compact_before_prompt);
+    }
+
+    #[test]
+    fn compact_local_prompt_for_embedded_and_small_ollama() {
+        assert!(should_use_compact_local_prompt("akasha_embedded", "qwen3.5-0.8b-q4"));
+        assert!(should_use_compact_local_prompt("akasha_core", "any"));
+        assert!(should_use_compact_local_prompt("ollama", "tinyllama"));
+        assert!(should_use_compact_local_prompt("ollama", "qwen2.5:1.5b"));
+        assert!(should_use_compact_local_prompt("ollama", "llama3.2:3b"));
+        assert!(should_use_compact_local_prompt("ollama", "qwen2.5:7b"));
+        assert!(should_use_compact_local_prompt("ollama", "qwen3.5:9b"));
+        assert!(should_use_compact_local_prompt("ollama", "mistral"));
+        assert!(!should_use_compact_local_prompt("ollama", "llama3.1:70b"));
+        assert!(!should_use_compact_local_prompt("openai", "gpt-4o-mini"));
     }
 
     #[test]
