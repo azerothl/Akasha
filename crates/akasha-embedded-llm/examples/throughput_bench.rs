@@ -24,7 +24,8 @@ fn main() {
     let llm = akasha_embedded_llm::EmbeddedLlm::new();
 
     let load_start = Instant::now();
-    if let Err(e) = llm.preload() {
+    // preload is an associated function (no &self), same as calibrate.rs.
+    if let Err(e) = akasha_embedded_llm::EmbeddedLlm::preload() {
         eprintln!("preload failed: {e}");
         std::process::exit(1);
     }

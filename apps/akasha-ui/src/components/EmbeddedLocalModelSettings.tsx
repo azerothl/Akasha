@@ -180,7 +180,7 @@ export function EmbeddedLocalModelSettings({ t, locale }: Props) {
           <div className="settings-field">
             <label htmlFor="embedded-model-select">
               {t("settings.embedded_model_label")}
-              <InfoTip text={t("settings.embedded_model_tip")} />
+              <InfoTip content={t("settings.embedded_model_tip")} />
             </label>
             <select
               id="embedded-model-select"
@@ -203,7 +203,7 @@ export function EmbeddedLocalModelSettings({ t, locale }: Props) {
           <div className="settings-field">
             <label htmlFor="embedded-engine-select">
               {t("settings.embedded_engine_label")}
-              <InfoTip text={t("settings.embedded_engine_tip")} />
+              <InfoTip content={t("settings.embedded_engine_tip")} />
             </label>
             <select
               id="embedded-engine-select"

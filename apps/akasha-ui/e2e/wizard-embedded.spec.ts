@@ -75,7 +75,9 @@ test.describe("Onboarding wizard (embedded)", () => {
     await expect(page.getByRole("dialog")).toBeVisible({ timeout: 15000 });
     await page.getByRole("button", { name: /Next|Suivant/i }).click();
     await page.getByRole("button", { name: /Next|Suivant/i }).click();
-    await expect(page.getByText(/embedded-download|Télécharger|Download model/i)).toBeVisible({
+    await expect(
+      page.getByRole("button", { name: /Télécharger le modèle|Download model/i }),
+    ).toBeVisible({
       timeout: 10000,
     });
   });
@@ -106,7 +108,8 @@ test.describe("Onboarding wizard (embedded)", () => {
     for (let i = 0; i < 3; i++) {
       await page.getByRole("button", { name: /Next|Suivant/i }).click();
     }
-    await expect(page.getByText(/calibrat|Calibration/i)).toBeVisible({ timeout: 10000 });
-    await expect(page.getByRole("button", { name: /Run calibration|Lancer la calibration/i })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /Run calibration|Lancer la calibration/i }),
+    ).toBeVisible({ timeout: 10000 });
   });
 });

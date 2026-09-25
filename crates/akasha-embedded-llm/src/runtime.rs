@@ -146,10 +146,9 @@ pub struct EmbeddedSettingsView {
 pub fn settings_view() -> Result<EmbeddedSettingsView, String> {
     let profile = crate::hardware::detect_hardware();
     let n_gpu_layers = crate::config::n_gpu_layers();
-    let mut models = Vec::new();
     #[cfg(feature = "download")]
-    if let Ok(manifest) = crate::download::load_manifest() {
-        models = manifest
+    let models = match crate::download::load_manifest() {
+        Ok(manifest) => manifest
             .models
             .into_iter()
             .filter(|entry| {
@@ -164,8 +163,11 @@ pub fn settings_view() -> Result<EmbeddedSettingsView, String> {
                 label: m.label,
                 filename: m.filename,
             })
-            .collect();
-    }
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    #[cfg(not(feature = "download"))]
+    let models = Vec::new();
 
     Ok(EmbeddedSettingsView {
         active_model_id: crate::config::active_model_id(),
