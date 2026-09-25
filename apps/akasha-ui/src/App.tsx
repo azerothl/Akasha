@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type CSSProperties, type MutableRefObject, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./chatTranscriptExport";
 import { invoke } from "@tauri-apps/api/core";
+import { E2E_WEB, e2eDaemonGetJson, e2eDaemonHttpUrl } from "./e2eDaemon";
 import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
 import {
@@ -73,14 +74,6 @@ export type { ThemeId } from "./themeTypes";
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
 const DAEMON_PORT = 3876;
-/** Browser E2E (Playwright): talk to daemon over HTTP instead of Tauri. Match VITE_E2E or vite --mode e2e (npm run test:e2e). */
-const E2E_WEB = import.meta.env.VITE_E2E === "true" || import.meta.env.MODE === "e2e";
-/** Same-origin path proxied in vite `server`/`preview` when mode is e2e — avoids cross-port browser blocks (e.g. Chromium PNA on Windows). */
-function e2eDaemonHttpUrl(path: string): string {
-  const p = path.startsWith("/") ? path : `/${path}`;
-  if (E2E_WEB) return `/__e2e_daemon${p}`;
-  return `http://127.0.0.1:${DAEMON_PORT}${p}`;
-}
 const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
@@ -3440,9 +3433,22 @@ function App() {
     const selectTaskId = options?.selectTaskId;
     if (!silent) setTasksLoading(true);
     try {
-      const data = await invoke<{ tasks?: Array<{ id?: string; status?: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string; session_id?: string }> }>("get_tasks", {
-        port: DAEMON_PORT,
-      });
+      type TasksPayload = {
+        tasks?: Array<{
+          id?: string;
+          status?: string;
+          label?: string;
+          created_at?: string;
+          parent_task_id?: string;
+          assigned_agent?: string;
+          session_id?: string;
+        }>;
+      };
+      const data = E2E_WEB
+        ? await e2eDaemonGetJson<TasksPayload>("/api/tasks")
+        : await invoke<TasksPayload>("get_tasks", {
+            port: DAEMON_PORT,
+          });
       const list = data?.tasks ?? [];
       const tasks: Array<TaskListItem> = list
         .map((t) => ({

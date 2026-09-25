@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { E2E_WEB, e2eDaemonGetJson } from "../e2eDaemon";
 
 const WIZARD_DONE_KEY = "akasha_setup_wizard_done";
 const DAEMON_PORT = 3876;
@@ -110,14 +111,21 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
   const loadEmbedded = useCallback(async () => {
     if (!daemonOk) return;
     try {
-      const status = await invoke<EmbeddedStatus>("get_embedded_status", { port: DAEMON_PORT });
+      const status = E2E_WEB
+        ? await e2eDaemonGetJson<EmbeddedStatus>("/api/router/embedded-status")
+        : await invoke<EmbeddedStatus>("get_embedded_status", { port: DAEMON_PORT });
       setEmbeddedStatus(status);
-      const hw = await invoke<HardwareInfo>("get_embedded_hardware", { port: DAEMON_PORT });
+      const hw = E2E_WEB
+        ? await e2eDaemonGetJson<HardwareInfo>("/api/router/embedded/hardware")
+        : await invoke<HardwareInfo>("get_embedded_hardware", { port: DAEMON_PORT });
       setHardwareInfo(hw);
-      const manifest = await invoke<{ models?: ManifestModel[]; default_id?: string }>(
-        "get_embedded_models",
-        { port: DAEMON_PORT },
-      );
+      const manifest = E2E_WEB
+        ? await e2eDaemonGetJson<{ models?: ManifestModel[]; default_id?: string }>(
+            "/api/router/embedded/models",
+          )
+        : await invoke<{ models?: ManifestModel[]; default_id?: string }>("get_embedded_models", {
+            port: DAEMON_PORT,
+          });
       const tierIds = new Set(hw.models_for_tier ?? []);
       const list = (manifest.models ?? []).filter(
         (m) => tierIds.size === 0 || tierIds.has(m.id),
