@@ -332,3 +332,57 @@ Le fichier **tools_policy.yaml** dans le data_dir contrôle ce que l'agent peut 
 En cas de fichier absent, `akasha doctor --fix` crée un fichier minimal ; éditez-le selon vos besoins. Exemple commenté : `tools_policy.yaml`.
 
 ---
+
+## 8bis. Serveurs MCP (Model Context Protocol)
+
+Akasha peut attacher des **serveurs MCP** (stdio) déclarés dans **`mcp.json`** du data_dir, puis exposer leurs outils à l'agent sous la forme `mcp_<serveur>_<outil>`.
+
+### Fichier `mcp.json`
+
+Exemple :
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/chemin/autorise"]
+    }
+  }
+}
+```
+
+- Valider hors production : `akasha mcp validate ~/akasha/mcp.json`
+- Probe court : `akasha mcp probe ~/akasha/mcp.json --tools`
+- Statut (daemon démarré) : `akasha mcp status`
+- Démarrer / arrêter le processus stdio longue durée : `akasha mcp start --server filesystem` puis `akasha mcp stop`
+
+API HTTP équivalentes : `GET /api/mcp/status`, `GET /api/mcp/runtime`, `POST /api/mcp/runtime/stdio/start|stop`, `POST /api/mcp/runtime/tools/list|call`. L'interface desktop (santé système / mode expert) affiche aussi le résumé MCP.
+
+### Politique (`tools_policy.yaml`)
+
+Si la section **`mcp_servers`** est présente, **seuls** les serveurs listés peuvent être attachés et invoqués (`enabled: false` refuse le serveur). Budget optionnel : `mcp_max_calls_per_task` et `max_calls_per_task` par serveur.
+
+```yaml
+mcp_max_calls_per_task: 20
+mcp_servers:
+  filesystem:
+    enabled: true
+    allowed_tools: ["*"]
+    blocked_tools: []
+    max_calls_per_task: 10
+```
+
+Sans section `mcp_servers`, l'attach reste ouvert (utile en local) — **documentez une allow-list avant un usage production**.
+
+### Checklist opérateur
+
+1. Valider le JSON (`akasha mcp validate`).
+2. Probe sur une machine de test (`akasha mcp probe --tools`).
+3. Vérifier que `command` + `args` ne sont pas un installateur opaque (`curl | sh`).
+4. Ajouter le serveur dans `mcp_servers` de `tools_policy.yaml`.
+5. Tokens HTTP / OAuth MCP : préférer le **vault** (`akasha vault set …`) — l'échange OAuth 2.1 complet reste documenté en stretch (`spec/dev/integrations/mcp-oauth.md`).
+
+L'agent peut aussi gérer `mcp.json` via les outils `mcp_server_add` / `mcp_server_remove` (sous réserve de la politique d'outils).
+
+---

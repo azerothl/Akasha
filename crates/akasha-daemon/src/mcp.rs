@@ -118,6 +118,46 @@ pub fn remove_mcp_server(data_dir: &Path, name: &str) -> Result<String, String> 
     Ok(format!("mcp server {:?} removed ({} remaining)", name, remaining))
 }
 
+/// Snapshot of `tools_policy.yaml` MCP allow-list for operators.
+fn mcp_policy_status(data_dir: &Path) -> Value {
+    let path = data_dir.join("tools_policy.yaml");
+    if !path.is_file() {
+        return json!({
+            "path": path.display().to_string(),
+            "present": false,
+            "mcp_allowlist_active": false,
+            "mcp_servers": [],
+            "mcp_max_calls_per_task": Value::Null,
+            "note": "absent tools_policy → no MCP allow-list (all mcp.json servers may attach)"
+        });
+    }
+    match akasha_tools::ToolsPolicy::load_from_path(&path) {
+        Ok(policy) => {
+            let keys: Vec<String> = policy.mcp_servers.keys().cloned().collect();
+            let active = !policy.mcp_servers.is_empty();
+            json!({
+                "path": path.display().to_string(),
+                "present": true,
+                "mcp_allowlist_active": active,
+                "mcp_servers": keys,
+                "mcp_max_calls_per_task": policy.mcp_max_calls_per_task,
+                "note": if active {
+                    "only listed mcp_servers may attach / invoke (enabled != false)"
+                } else {
+                    "mcp_servers empty → open (document allow-list before production)"
+                }
+            })
+        }
+        Err(e) => json!({
+            "path": path.display().to_string(),
+            "present": true,
+            "error": e.to_string(),
+            "mcp_allowlist_active": Value::Null,
+            "mcp_servers": [],
+        }),
+    }
+}
+
 /// JSON for `GET /api/mcp/status` — validates `mcp.json` under the daemon data dir if present.
 pub fn mcp_operator_status(data_dir: &Path) -> Value {
     let path = mcp_config_path(data_dir);
@@ -127,15 +167,26 @@ pub fn mcp_operator_status(data_dir: &Path) -> Value {
         "config_present": present,
         "valid": Value::Null,
         "server_count": 0_i32,
+        "server_names": [],
         "runtime": "stdio_probe_validate_and_optional_long_lived",
+        "policy": mcp_policy_status(data_dir),
         "oauth": {
             "mode": "documented_vault_reserved",
             "see": "spec/dev/integrations/mcp-oauth.md"
         },
+        "operator_cli": {
+            "validate": "akasha mcp validate <mcp.json>",
+            "probe": "akasha mcp probe <mcp.json> [--name KEY] [--tools]",
+            "status": "akasha mcp status",
+            "start": "akasha mcp start --server KEY",
+            "stop": "akasha mcp stop"
+        },
         "mcp_runtime_http": {
             "GET /api/mcp/runtime": "attached stdio server + transport roadmap",
             "POST /api/mcp/runtime/stdio/start": { "body": { "server": "mcpServers key" } },
-            "POST /api/mcp/runtime/stdio/stop": "kill attached stdio child"
+            "POST /api/mcp/runtime/stdio/stop": "kill attached stdio child",
+            "POST /api/mcp/runtime/tools/list": "tools/list on attached stdio server",
+            "POST /api/mcp/runtime/tools/call": { "body": { "name": "tool", "arguments": {} } }
         },
     });
     if !present {
@@ -158,12 +209,13 @@ pub fn mcp_operator_status(data_dir: &Path) -> Value {
     };
     let valid = validate_mcp_config_json(&root).is_ok();
     out["valid"] = json!(valid);
-    let count = root
+    let names: Vec<String> = root
         .get("mcpServers")
         .and_then(|v| v.as_object())
-        .map(|o| o.len() as i32)
-        .unwrap_or(0);
-    out["server_count"] = json!(count);
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    out["server_count"] = json!(names.len() as i32);
+    out["server_names"] = json!(names);
     out
 }
 
@@ -208,5 +260,34 @@ mod tests {
         super::remove_mcp_server(dir.path(), "demo").unwrap();
         let root2 = super::load_mcp_config(dir.path()).unwrap();
         assert_eq!(root2["mcpServers"].as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn mcp_operator_status_includes_policy_and_cli_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = super::mcp_operator_status(dir.path());
+        assert_eq!(s["config_present"], false);
+        assert_eq!(s["policy"]["present"], false);
+        assert_eq!(s["policy"]["mcp_allowlist_active"], false);
+        assert!(s["operator_cli"]["status"].as_str().unwrap().contains("mcp status"));
+    }
+
+    #[tokio::test]
+    async fn start_stdio_denied_by_mcp_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = serde_json::json!({ "command": "false", "args": [] });
+        super::add_mcp_server(dir.path(), "blocked", &entry).unwrap();
+        std::fs::write(
+            dir.path().join("tools_policy.yaml"),
+            "mcp_servers:\n  other:\n    enabled: true\n    allowed_tools: [\"*\"]\n",
+        )
+        .unwrap();
+        let err = crate::mcp_runtime::start_stdio_server(dir.path(), "blocked")
+            .await
+            .expect_err("allow-list must deny");
+        assert!(
+            err.contains("denied") || err.contains("allow-list"),
+            "unexpected err: {err}"
+        );
     }
 }

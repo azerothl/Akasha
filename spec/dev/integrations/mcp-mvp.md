@@ -4,11 +4,15 @@
 
 Hermes-style **plug-and-play MCP**: declare servers in JSON, validate before enablement, then attach a transport (stdio first, HTTP later) with clear auth guidance.
 
-## What exists today
+## What exists today (Implemented — P4 must)
 
 - **Config validation** (library): `akasha_daemon::mcp::validate_mcp_config_json` checks a `mcpServers` object with per-server `command` + optional `args` array. Used by tests in `crates/akasha-daemon/src/mcp.rs`.
 - **Stdio probe** (library + CLI): `akasha_daemon::mcp::probe_stdio_mcp`, `akasha mcp validate|probe` — see **`mcp-runtime.md`**.
+- **Long-lived stdio** + `tools/list` / `tools/call` via `/api/mcp/runtime/*` and `akasha mcp start|stop|status`.
+- **Policy gates**: `tools_policy.yaml` → `mcp_servers` / `mcp_max_calls_per_task` ; attach denied when allow-list active and server missing/`enabled: false`.
+- **Agent namespace**: `mcp_<server>_<tool>` + tools `mcp_server_add` / `mcp_server_remove`.
 - **Plugin surface**: `PluginKind::Mcp` in `akasha-plugin-api` (bridge staged).
+- **User doc**: `docs/user/configuration.md` §8bis + CLI rows in `docs/user/commandes.md`.
 
 ## Recommended config shape (stdio)
 
@@ -27,6 +31,7 @@ Hermes-style **plug-and-play MCP**: declare servers in JSON, validate before ena
 
 - Prefer **vault keys** (`akasha vault set …`) for tokens used by MCP HTTP transports; document env fallbacks only for local dev.
 - Do not commit MCP JSON with live secrets into git.
+- Full OAuth 2.1 / vault-only refresh remains **stretch** — see **`mcp-oauth.md`**.
 
 ## Tests (Windows)
 
@@ -34,23 +39,20 @@ Hermes-style **plug-and-play MCP**: declare servers in JSON, validate before ena
 
 `cargo test -p akasha-daemon --lib --no-default-features --features embedded mcp`
 
-## Next steps (runtime)
+## Stretch / next (hors must P4)
 
-1. Spawn process, newline-delimited JSON-RPC `initialize` + `tools/list`.
-2. Map MCP tools into Akasha tool namespace with policy gates (`tools_policy.yaml`).
-3. Smoke tests against a reference stdio server (filesystem or echo).
+1. OAuth 2.1 + tokens vault-only (pas `mcp_oauth_state.json` world-readable).
+2. Attestation checksum packages MCP (pattern `skills.lock.jsonl`).
+3. TLS pinning optionnel endpoints SaaS MCP.
+4. HTTP/SSE client pooling multi-serveurs.
 
 ### Parité « Agent TARS » (outillage MCP)
 
-Pour rapprocher l’extensibilité à base MCP d’écosystèmes comme [Agent TARS](https://agent-tars.com) sans dépendre de leur UI :
-
-| Étape | Livrable | Notes |
+| Étape | Livrable | Statut |
 |-------|-----------|--------|
-| **Namespacing** | Préfixer les outils MCP (`mcp_<server>_<tool>` ou équivalent) pour éviter les collisions avec les outils natifs Akasha. | Documenter la convention dans `tools_policy.yaml` (clés `allowed_tools` / refus par défaut). |
-| **Politique** | Étendre `tools_policy.yaml` avec blocs optionnels `mcp_servers:` ou liste blanche par serveur / par nom d’outil MCP. | Alignement avec le centre de permissions pour les appels sensibles. |
-| **Budget** | Compter tokens / coût des tours qui invoquent des outils MCP comme pour les outils natifs. | Réutiliser les métriques session existantes. |
-| **Échec isolé** | Erreur MCP → message d’outil compact ; pas d’arrêt du daemon. | Même style que `execute_tool_call` aujourd’hui. |
-
-Ordre d’implémentation recommandé : **stdio attaché** (déjà partiellement exposé via `/api/mcp/runtime` — voir **`mcp-runtime.md`**) → **tools/list + invoke** → **mapping + policy** → tests de régression sur un serveur filesystem echo.
+| **Namespacing** | Préfixer les outils MCP (`mcp_<server>_<tool>`) | Done |
+| **Politique** | `tools_policy.yaml` → `mcp_servers` | Done |
+| **Budget** | `mcp_max_calls_per_task` / per-server | Done |
+| **Échec isolé** | Erreur MCP → message d'outil compact | Done |
 
 See also `../roadmap/reference-products-parity-matrix.md` and `../../16_plugin_architecture.md`.

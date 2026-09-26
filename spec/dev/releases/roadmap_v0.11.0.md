@@ -105,13 +105,13 @@ Reprend P5 v0.10 et la note R0 — **pas de décision produit figée ici**.
 
 ## P4 — MCP runtime → production doc (Must / Stretch)
 
-[`feature_evolution_tracking.md`](../../feature_evolution_tracking.md) : MCP encore **In progress** ; runtime stdio + probe déjà présents — [mcp-runtime.md](../integrations/mcp-runtime.md), [mcp-oauth.md](../integrations/mcp-oauth.md).
+[`feature_evolution_tracking.md`](../../feature_evolution_tracking.md) : MCP **Implemented** (must) — runtime stdio + probe + policy `mcp_servers` + CLI/UI opérateur — [mcp-runtime.md](../integrations/mcp-runtime.md), [mcp-oauth.md](../integrations/mcp-oauth.md), doc user `docs/user/configuration.md` (§8bis).
 
 ### Must-ship
 
-- [ ] Clôturer le statut registre : MCP **Implemented** + doc user minimale (`docs/user/` ou guide opérateur)
-- [ ] Allow-list / policy MCP alignée `tools_policy` (ou `mcp_policy.yaml`) — checklist opérateur
-- [ ] Surface UI / CLI opérateur stable : status, validate, probe, start/stop stdio (déjà partiel)
+- [x] Clôturer le statut registre : MCP **Implemented** + doc user minimale (`docs/user/` ou guide opérateur)
+- [x] Allow-list / policy MCP alignée `tools_policy` (ou `mcp_policy.yaml`) — checklist opérateur
+- [x] Surface UI / CLI opérateur stable : status, validate, probe, start/stop stdio
 
 ### Stretch
 
@@ -239,7 +239,7 @@ Objectif : **aligner** (docs + chemins d’import/export) les extensions du daem
 - [ ] Tag **`v0.11.0`** + artefacts Release (CPU / CUDA / full) sans régression smoke GitHub-hosted
 - [ ] Benches AR tier 1–2 publiés + **décision défaut CUDA** documentée
 - [ ] `api.rs` **&lt; ~8k** lignes ; check daemon + tests outils verts
-- [ ] MCP : statut registre **Implemented** + doc user minimale
+- [x] MCP : statut registre **Implemented** + doc user minimale
 - [ ] P6-B3 et P6-B4 livrés (ou report explicite avec justification capacité)
 - [ ] Dette doc « Partially documented » prioritaire résorbée (ou tickets GitHub associés)
 - [ ] GPU CI self-hosted : au moins un run `gpu-smoke` documenté (vert ou bloqueur opérateur noté)

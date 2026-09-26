@@ -105,7 +105,7 @@ enum Commands {
         #[command(subcommand)]
         sub: WorktreeSub,
     },
-    /// MCP: validate config JSON, optional stdio probe (operator compatibility)
+    /// MCP: validate / probe offline; status / start / stop via daemon
     Mcp {
         #[command(subcommand)]
         sub: McpSub,
@@ -326,6 +326,20 @@ enum McpSub {
         #[arg(long, default_value_t = 8)]
         timeout_secs: u64,
     },
+    /// Operator status (`GET /api/mcp/status` + attached runtime); falls back to offline mcp.json when daemon is down
+    Status {
+        /// Print full JSON (default: human summary)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach a long-lived stdio MCP server from data_dir/mcp.json (`POST /api/mcp/runtime/stdio/start`)
+    Start {
+        /// Server key under mcpServers
+        #[arg(long)]
+        server: String,
+    },
+    /// Detach the long-lived stdio MCP server (`POST /api/mcp/runtime/stdio/stop`)
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -1291,6 +1305,165 @@ fn cmd_mcp(sub: McpSub) -> anyhow::Result<()> {
                 .block_on(probe_stdio_mcp_local(program, &args, tools, deadline))
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(())
+        }
+        McpSub::Status { json } => cmd_mcp_status(json),
+        McpSub::Start { server } => {
+            let base = daemon_base_url();
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()?;
+            let body = serde_json::json!({ "server": server });
+            let resp = client
+                .post(format!("{}/api/mcp/runtime/stdio/start", base))
+                .json(&body)
+                .send()?;
+            let status = resp.status();
+            let text = resp.text()?;
+            if !status.is_success() {
+                anyhow::bail!("Daemon error {}: {}", status, text);
+            }
+            println!("{}", text);
+            Ok(())
+        }
+        McpSub::Stop => {
+            let base = daemon_base_url();
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()?;
+            let resp = client
+                .post(format!("{}/api/mcp/runtime/stdio/stop", base))
+                .send()?;
+            let status = resp.status();
+            let text = resp.text()?;
+            if !status.is_success() {
+                anyhow::bail!("Daemon error {}: {}", status, text);
+            }
+            println!("{}", text);
+            Ok(())
+        }
+    }
+}
+
+fn cmd_mcp_status(json: bool) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()?;
+    match client.get(format!("{}/api/mcp/status", base)).send() {
+        Ok(resp) if resp.status().is_success() => {
+            let status_json: serde_json::Value = resp.json()?;
+            let runtime_json: serde_json::Value = client
+                .get(format!("{}/api/mcp/runtime", base))
+                .send()
+                .ok()
+                .and_then(|r| {
+                    if r.status().is_success() {
+                        r.json().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(serde_json::json!({ "stdio_server": null }));
+            if json {
+                let merged = serde_json::json!({
+                    "status": status_json,
+                    "runtime": runtime_json,
+                });
+                println!("{}", serde_json::to_string_pretty(&merged)?);
+                return Ok(());
+            }
+            let present = status_json
+                .get("config_present")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let valid = status_json
+                .get("valid")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            let count = status_json
+                .get("server_count")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let names = status_json
+                .get("server_names")
+                .cloned()
+                .unwrap_or(serde_json::json!([]));
+            let allowlist = status_json
+                .pointer("/policy/mcp_allowlist_active")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let attached = runtime_json
+                .get("stdio_server")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(none)");
+            println!("MCP config: {}", status_json["config_path"]);
+            println!(
+                "  present={} valid={} servers={} names={}",
+                present, valid, count, names
+            );
+            println!("  policy allow-list active: {}", allowlist);
+            println!("  attached stdio server: {}", attached);
+            Ok(())
+        }
+        Ok(resp) => anyhow::bail!("Daemon error: {}", resp.status()),
+        Err(_) => {
+            // Offline fallback: validate local mcp.json under data_dir
+            let data_dir = akasha_data_dir();
+            let path = data_dir.join("mcp.json");
+            if !path.is_file() {
+                println!(
+                    "Daemon unreachable at {} — no local mcp.json at {}",
+                    base,
+                    path.display()
+                );
+                return Ok(());
+            }
+            let raw = std::fs::read_to_string(&path)?;
+            let v: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+            match validate_mcp_config_json_local(&v) {
+                Ok(()) => {
+                    let count = v["mcpServers"].as_object().map(|o| o.len()).unwrap_or(0);
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "offline": true,
+                                "config_path": path.display().to_string(),
+                                "valid": true,
+                                "server_count": count,
+                                "mcpServers": v["mcpServers"],
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "Daemon unreachable — offline mcp.json OK ({} server(s)) at {}",
+                            count,
+                            path.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "offline": true,
+                                "config_path": path.display().to_string(),
+                                "valid": false,
+                                "error": e,
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "Daemon unreachable — offline mcp.json INVALID at {}: {}",
+                            path.display(),
+                            e
+                        );
+                    }
+                }
+            }
             Ok(())
         }
     }
