@@ -289,14 +289,16 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, requestEndpoint, e
         const sc = await fetchEndpoint("/api/schedules");
         const runs = await fetchEndpoint("/api/task_runs");
         const pw = await fetchEndpoint("/api/process/watch/recent?limit=20");
+        const cw = await fetchEndpoint("/api/schedules/watch/recent");
         if (!cancelled) {
           const lines = [
             `schedules: ${sc.status}`,
             `task_runs: ${runs.status}`,
             `process_watch: ${pw.status}`,
+            `cron_watch: ${cw.status}`,
           ];
           setOpsSummary(
-            `${lines.join(" | ")}\n\n--- /api/schedules ---\n${sc.text}\n\n--- /api/task_runs ---\n${runs.text}\n\n--- /api/process/watch/recent ---\n${pw.text}`,
+            `${lines.join(" | ")}\n\n--- /api/schedules ---\n${sc.text}\n\n--- /api/task_runs ---\n${runs.text}\n\n--- /api/process/watch/recent ---\n${pw.text}\n\n--- /api/schedules/watch/recent ---\n${cw.text}`,
           );
         }
         if (sessionId?.trim()) {

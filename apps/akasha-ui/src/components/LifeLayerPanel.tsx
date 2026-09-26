@@ -42,6 +42,10 @@ export function LifeLayerPanel({ locale, t, fetchEndpoint }: Props) {
   const [overnightHour, setOvernightHour] = useState(2);
   const [overnightMinute, setOvernightMinute] = useState(0);
   const [notifyChannel, setNotifyChannel] = useState("telegram");
+  const [cronNameContains, setCronNameContains] = useState("");
+  const [cronOnFailure, setCronOnFailure] = useState(true);
+  const [cronMessage, setCronMessage] = useState("");
+  const [cronSubs, setCronSubs] = useState<Array<{ id: string; name_contains?: string; on_failure?: boolean; message?: string }>>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -62,6 +66,13 @@ export function LifeLayerPanel({ locale, t, fetchEndpoint }: Props) {
       if (overnight) {
         setOvernightHour(overnight.hour_local);
         setOvernightMinute(overnight.minute_local);
+      }
+      const cw = await fetchEndpoint("/api/schedules/watch/subscriptions");
+      if (cw.ok) {
+        const cj = JSON.parse(cw.text) as {
+          subscriptions?: Array<{ id: string; name_contains?: string; on_failure?: boolean; message?: string }>;
+        };
+        setCronSubs(cj.subscriptions ?? []);
       }
     } catch (e) {
       setMsg(String(e));
@@ -156,6 +167,43 @@ export function LifeLayerPanel({ locale, t, fetchEndpoint }: Props) {
       const res = await postJson("/api/schedules/from-nl", { text: nlText, commit: true });
       setNlPreview(res.preview ?? null);
       setMsg(locale === "en" ? "Schedule created." : "Schedule créé.");
+      await load();
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const addCronWatch = async () => {
+    setBusy("cron");
+    setMsg(null);
+    try {
+      await postJson("/api/schedules/watch/subscriptions", {
+        name_contains: cronNameContains.trim(),
+        on_failure: cronOnFailure,
+        message:
+          cronMessage.trim() ||
+          (locale === "en" ? "Schedule exit matched" : "Condition schedule atteinte"),
+      });
+      setCronMessage("");
+      await load();
+      setMsg(locale === "en" ? "Cron watch subscription added." : "Abonnement cron watch ajouté.");
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeCronWatch = async (id: string) => {
+    setBusy("cron");
+    setMsg(null);
+    try {
+      const res = await fetchEndpoint(`/api/schedules/watch/subscriptions/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error(res.text || String(res.status));
       await load();
     } catch (e) {
       setMsg(String(e));
@@ -328,6 +376,73 @@ export function LifeLayerPanel({ locale, t, fetchEndpoint }: Props) {
               2,
             )}
           </pre>
+        ) : null}
+      </section>
+
+      <section className="life-layer-card">
+        <h4>{locale === "en" ? "Cron watch → wakeup" : "Cron watch → wakeup"}</h4>
+        <p className="muted settings-doc">
+          {locale === "en"
+            ? "When a matching schedule run exits (optionally only on failure), enqueue an agent wakeup."
+            : "Quand un schedule correspondant se termine (optionnellement seulement en échec), créer un wakeup agent."}
+        </p>
+        <div className="life-layer-row">
+          <label>
+            {locale === "en" ? "Name contains" : "Nom contient"}
+            <input
+              className="settings-input"
+              value={cronNameContains}
+              onChange={(e) => setCronNameContains(e.target.value)}
+              placeholder="overnight"
+            />
+          </label>
+          <label className="life-layer-check">
+            <input
+              type="checkbox"
+              checked={cronOnFailure}
+              onChange={(e) => setCronOnFailure(e.target.checked)}
+            />
+            {locale === "en" ? "On failure only" : "Échec seulement"}
+          </label>
+        </div>
+        <label>
+          {locale === "en" ? "Wakeup message" : "Message wakeup"}
+          <input
+            className="settings-input"
+            value={cronMessage}
+            onChange={(e) => setCronMessage(e.target.value)}
+          />
+        </label>
+        <div className="life-layer-actions">
+          <button
+            type="button"
+            className="btn-primary btn-tiny"
+            disabled={busy === "cron"}
+            onClick={() => void addCronWatch()}
+          >
+            {locale === "en" ? "Add watch" : "Ajouter watch"}
+          </button>
+        </div>
+        {cronSubs.length > 0 ? (
+          <ul className="life-layer-cron-subs">
+            {cronSubs.map((s) => (
+              <li key={s.id}>
+                <span>
+                  {s.name_contains || "*"}
+                  {s.on_failure ? " · fail" : ""}
+                  {s.message ? ` — ${s.message}` : ""}
+                </span>
+                <button
+                  type="button"
+                  className="btn-secondary btn-tiny"
+                  disabled={busy === "cron"}
+                  onClick={() => void removeCronWatch(s.id)}
+                >
+                  {locale === "en" ? "Remove" : "Retirer"}
+                </button>
+              </li>
+            ))}
+          </ul>
         ) : null}
       </section>
     </div>

@@ -60,7 +60,86 @@ pub async fn try_handle(
             &serde_json::json!({ "deleted": ok }).to_string(),
         ));
     }
+    // P6-B3: cron / schedule watch exit → wakeup
+    if method == "GET" && path == "/api/schedules/watch/recent" {
+        let limit = 50usize;
+        let ev = crate::cron_watch::recent(limit).await;
+        return Some(json_response(
+            "200 OK",
+            &serde_json::json!({ "events": ev }).to_string(),
+        ));
+    }
+    if method == "GET" && path == "/api/schedules/watch/subscriptions" {
+        let list = crate::cron_watch::list_subscriptions().await;
+        return Some(json_response(
+            "200 OK",
+            &serde_json::json!({ "subscriptions": list }).to_string(),
+        ));
+    }
+    if method == "POST" && path == "/api/schedules/watch/subscriptions" {
+        return Some(post_cron_watch_sub(body).await);
+    }
+    if method == "DELETE" && path.starts_with("/api/schedules/watch/subscriptions/") {
+        let id = path
+            .trim_start_matches("/api/schedules/watch/subscriptions/")
+            .trim();
+        let ok = crate::cron_watch::remove_subscription(id).await;
+        return Some(json_response(
+            if ok { "200 OK" } else { "404 Not Found" },
+            &serde_json::json!({ "deleted": ok }).to_string(),
+        ));
+    }
     None
+}
+
+async fn post_cron_watch_sub(body: Option<&[u8]>) -> String {
+    let json: serde_json::Value = match body.and_then(|b| serde_json::from_slice(b).ok()) {
+        Some(j) => j,
+        None => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+    };
+    let id = json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let on_status = json
+        .get("on_status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let sub = crate::cron_watch::CronWatchSubscription {
+        id: id.clone(),
+        session_id: json
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        schedule_id: json
+            .get("schedule_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        name_contains: json
+            .get("name_contains")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        on_status,
+        on_failure: json
+            .get("on_failure")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        message: json
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Cron watch condition matched")
+            .to_string(),
+    };
+    crate::cron_watch::add_subscription(sub.clone()).await;
+    json_response(
+        "201 Created",
+        &serde_json::json!({ "ok": true, "subscription": sub }).to_string(),
+    )
 }
 
 async fn post_process_watch_sub(body: Option<&[u8]>) -> String {
