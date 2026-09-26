@@ -10,7 +10,7 @@ Document à l’usage des **contributeurs** et de l’équipe release. Complète
 
 Référence git : **v0.10.0** → **0.11.0** (`[workspace.package].version` + alignement Tauri / `package.json` via `scripts/sync-release-version.py` **à la fin du cycle**, pas dans cette PR roadmap).
 
-**Thème transversal v0.11** : **maturiser l’embarqué et la plateforme** après le first-use / cockpit / life layer v0.10 — benches modèles AR pour figer (ou non) le défaut CUDA, durcissement daemon (`api.rs` &lt; 8k, MCP), complétion cockpit reportée (P6 B3/B4), et dette doc / release ops — **sans** décider a priori le remplacement de llama.cpp par Rbitnet ou un DLM.
+**Thème transversal v0.11** : **maturiser l’embarqué et la plateforme** après le first-use / cockpit / life layer v0.10 — benches modèles AR pour figer (ou non) le défaut CUDA, durcissement daemon (`api.rs` &lt; 8k, MCP), complétion cockpit reportée (P6 B3/B4), dette doc / release ops, et **rapprochement documenté skills / plugins (daemon) ↔ skills / modules ([akasha-os](https://github.com/azerothl/akasha-os))** via le sibling bridge — **sans** fusionner les binaires ni décider a priori le remplacement de llama.cpp par Rbitnet ou un DLM.
 
 ---
 
@@ -188,6 +188,50 @@ Matrices Hermes / pi-mono / memory largement **clôturées** (archives → [ROAD
 
 ---
 
+## P9 — Rapprochement skills / plugins ↔ akasha-os (Must / Stretch)
+
+Objectif : **aligner** (docs + chemins d’import/export) les extensions du daemon Akasha avec le modèle d’extensions d’[akasha-os](https://github.com/azerothl/akasha-os) (Preview), **sans fusionner les binaires** — principe déjà documenté côté OS ([sibling-bridge.md](https://github.com/azerothl/akasha-os/blob/main/docs/sibling-bridge.md), E8 ; anti-roadmap « Do not merge »).
+
+### Lexique (sources réelles — ne pas confondre)
+
+| Terme | Où | Quoi (d’après les dépôts) |
+|-------|-----|---------------------------|
+| **Skill (daemon Akasha)** | [Akasha_skills](https://github.com/azerothl/Akasha_skills) + `data_dir/skills/` ; [spec 33](../../33_agents_tools_orchestrator_skills.md), [docs/user/extensions.md](../../../docs/user/extensions.md) | Recette agent **Agent Skills** : répertoire + `SKILL.md` (front matter `name` / `description`) ; galerie `skill.json` / `skills.json` ; lock `skills.lock.jsonl` ; API `/api/skills*` |
+| **Plugin (daemon Akasha)** | [Akasha_plugins](https://github.com/azerothl/Akasha_plugins) + `data_dir/plugins/` | Outil WASM (`manifest.toml` + `plugin.wasm`) ± **sidecar** natif (Matrix, CalDAV, Home Assistant) ; trust-catalog CI ; `akasha plugin catalog\|install` |
+| **Skill (akasha-os)** | `var/skills/<id>/SKILL.md` ; guides [write-a-skill.md](https://github.com/azerothl/akasha-os/blob/main/docs/write-a-skill.md) ; `community/skills/` | Recette Markdown (MIT) pour agents Preview ; champs typiques `when_to_use`, `tools:` ; **pas** un module WASM |
+| **Module (akasha-os)** | `var/modules/` + paquet `.aospkg` ; [write-a-module.md](https://github.com/azerothl/akasha-os/blob/main/docs/write-a-module.md) ; `modules/` (SDK Apache-2.0) | Extension **dual-surface** (outils agent + UI déclarative egui) ; catalogue local signé + **cap review** — **≠** plugin WASM tools-only du daemon |
+| **Sibling bridge** | [docs/sibling-bridge.md](https://github.com/azerothl/akasha-os/blob/main/docs/sibling-bridge.md), [docs/bridge/](https://github.com/azerothl/akasha-os/tree/main/docs/bridge), binaire `aos-bridged` | Alignement schémas `mem.*` / `secrets.*` / UI déclarative ; HTTP JSON ↔ CBOR bus ; mapping explicite : plugins Wasmtime sibling ↔ modules `.aospkg` = **Partiel — ne pas unifier les ABI encore** |
+| **akasha-packages** | [azerothl/akasha-packages](https://github.com/azerothl/akasha-packages) | Dépôt satellite naissant (LICENSE seule au moment de la sync roadmap) — **pas** de format package documenté côté daemon |
+
+> Dans le monorepo Akasha, **aucune** occurrence de `akasha-os` n’était indexée avant cette roadmap ; le rapprochement s’appuie sur les docs OS + satellites + bridge, pas sur du code bridge déjà présent dans ce dépôt.
+
+### Must-ship
+
+- [ ] **Note d’interop** `spec/dev/integrations/akasha-os-sibling-skills-modules.md` (ou équivalent) : tableau skill↔skill, plugin↔module, limites ABI, liens vers sibling-bridge + write-a-skill/module
+- [ ] **Matrice de compatibilité `SKILL.md`** : champs communs / divergents (daemon : agentskills.io `name`+`description` ; OS : `when_to_use`, `tools`, `license`) + procédure d’adaptation minimale
+- [ ] **Pilote skill partagé** : au moins **un** skill installable des deux côtés (ex. reprise conceptuelle de `morning-brief` OS ↔ skill `Akasha_skills` / life-layer overnight) — même intention produit, chemins d’install documentés
+- [ ] **Inventaire catalogues** : lister skills/plugins daemon vs `community/skills` + modules Preview ; marquer « portable » / « daemon-only » / « OS-only »
+- [ ] Doc user courte : section « extensions vs akasha-os » (ou renvoi depuis [extensions.md](../../../docs/user/extensions.md)) — pas de promesse marketplace unifié
+- [ ] Référencer le bridge dans la doc dev daemon (lien `docs/bridge/` JSON Schema) pour mémoire / secrets **si** un client HTTP optionnel est prévu (sinon doc seule = DoD min)
+
+### Stretch
+
+- [ ] Client optionnel daemon → `aos-bridged` (`127.0.0.1:24710`) pour smoke `mem.*` / `secrets.*` (contrat déjà live côté OS Preview)
+- [ ] Script / CI : valider qu’un sous-ensemble `Akasha_skills` reste chargeable tel quel sous Preview (`var/skills/`) après adaptation front matter
+- [ ] Export / packaging d’un plugin WASM daemon vers un **module script** OS (façade) — **uniquement** si arbitrage A9 = go ; sinon garder deux stacks
+- [ ] Façade « assistant as module » (next step sibling-bridge) — post-stabilisation ABI
+- [ ] Suivi `akasha-packages` si un format de distribution commun émerge
+- [ ] Sync métadonnées catalogue `Akasha_app` (skills/plugins) avec mentions OS Preview
+
+### Hors scope P9
+
+- Fusionner **Akasha** + **akasha-os** en un seul binaire / installateur (anti-roadmap OS)
+- Unifier de force l’ABI Wasmtime plugins ↔ `module_rt` / `.aospkg` (sibling-bridge : Partiel)
+- Marketplace public unique avant catalogues locaux + attestation (OS E10 ; daemon trust-catalog)
+- Re-implémenter les canaux chat / Companion dans le noyau OS
+
+---
+
 ## Critères de clôture v0.11.0
 
 - [ ] Versions alignées **0.11.0** (workspace + Tauri) via `sync-release-version.py` **en fin de cycle**
@@ -199,6 +243,7 @@ Matrices Hermes / pi-mono / memory largement **clôturées** (archives → [ROAD
 - [ ] Dette doc « Partially documented » prioritaire résorbée (ou tickets GitHub associés)
 - [ ] GPU CI self-hosted : au moins un run `gpu-smoke` documenté (vert ou bloqueur opérateur noté)
 - [ ] Note Rbitnet/DLM : spike **ou** no-go renouvelé (pas de silence)
+- [ ] **P9** : note d’interop + matrice `SKILL.md` + pilote skill partagé + inventaire catalogues publiés
 - [ ] Site / `api/latest.json` synchronisés pour la bannière update
 
 ---
@@ -211,12 +256,13 @@ Reprend les hors scope Phase 5 / P6–P7 v0.10 non réouverts :
 - Sandboxes Modal/Singularity, RL trajectoires, GraphRAG hypergraphes
 - Remplacement llama.cpp **sans fallback** par Rbitnet ou DLM (sauf arbitrage documenté contraire)
 - Attach externe IDE, recipes Goose complètes, Chrome extension, session replay, ACP, computer-use vision
+- Fusion binaires Akasha ↔ akasha-os ; unification forcée ABI plugins ↔ modules (voir P9)
 
 ---
 
 ## Arbitrages ouverts (à trancher)
 
-Ne pas décider à la place du product owner au-delà des notes R0 existantes.
+Ne pas décider à la place du product owner au-delà des notes R0 / sibling-bridge existantes.
 
 | # | Question | Options documentées | Source |
 |---|----------|---------------------|--------|
@@ -227,6 +273,10 @@ Ne pas décider à la place du product owner au-delà des notes R0 existantes.
 | A5 | **Companion ESP32** hardware | Stretch MVP voix **ou** rester LAN API-only | feature registry Planned |
 | A6 | **Chiffrement memory.db** | Stretch S-MEM-05 **ou** rester Reporter (chiffrement OS) | ROADMAP_FINAL_REGISTRY |
 | A7 | **P6-B3/B4** bloquent-ils le tag ? | Must-ship strict **ou** report justifié si capacité insuffisante | roadmap / internal 0.10 |
+| A8 | **Convergence format skill** | Conserver deux dialectes `SKILL.md` + guide d’adaptation **ou** profil commun (sous-ensemble agentskills.io + champs OS) | Akasha_skills + write-a-skill OS |
+| A9 | **Plugins WASM ↔ modules `.aospkg`** | Rester stacks séparées (recommandation bridge actuelle) **ou** POC façade module | sibling-bridge mapping Partiel |
+| A10 | **Client `aos-bridged` dans le daemon** | Doc seule (must P9) **ou** smoke HTTP optionnel v0.11 | sibling-bridge live Preview |
+| A11 | **« Assistant as module »** | Report post-v0.11 **ou** spike façade dual-surface | sibling-bridge next steps |
 
 ---
 
@@ -235,25 +285,30 @@ Ne pas décider à la place du product owner au-delà des notes R0 existantes.
 1. **P0** — gates ops v0.10 (GPU CI, benches collés, user_guide_final, matrice manuelle).
 2. **P1** — benches AR + `/api/capabilities` + décision A1 (swap défaut).
 3. **P3** — découpage `api.rs` / boucle outils (parallèle possible avec P1).
-4. **P4** must MCP (doc + policy) ; OAuth selon A4.
-5. **P5** — P6-B3 puis P6-B4.
-6. **P7** — dette doc Partially documented (continu, non bloquant seul).
-7. **P2** — uniquement après arbitrages A2/A3 (spike ou no-go renouvelé).
-8. **P6 / P8** — stretch Companion / mémoire selon A5–A6.
-9. Sync version **0.11.0** + tag + Release + Akasha_app.
+4. **P9** must — note d’interop + matrice `SKILL.md` + inventaire (parallèle doc ; avant stretch bridge).
+5. **P4** must MCP (doc + policy) ; OAuth selon A4.
+6. **P5** — P6-B3 puis P6-B4.
+7. **P7** — dette doc Partially documented (continu, non bloquant seul).
+8. **P2** — uniquement après arbitrages A2/A3 (spike ou no-go renouvelé).
+9. **P6 / P8 / P9 stretch** — Companion / mémoire / bridge client selon A5–A6 / A9–A11.
+10. Sync version **0.11.0** + tag + Release + Akasha_app.
 
 ```mermaid
 flowchart LR
   P0[P0_ops_v010] --> P1[P1_benches_AR]
   P0 --> P3[P3_api_rs]
+  P0 --> P9[P9_akasha_os_interop]
   P1 --> A1{A1_swap_defaut}
   P3 --> P4[P4_MCP]
   P4 --> P5[P5_cockpit_B3_B4]
   P5 --> P7[P7_docs]
+  P9 --> P7
   A1 --> Tag[Tag_v0.11]
   P7 --> Tag
   A2A3{A2_A3_Rbitnet_DLM} -.-> P2[P2_spike_optionnel]
   P2 -.-> Tag
+  A9A11{A9_A11_modules} -.-> P9s[P9_stretch]
+  P9s -.-> Tag
 ```
 
 ---
@@ -268,6 +323,8 @@ flowchart LR
 | Bench | `spec/dev/quality/bench_embedded*.md`, `bench_embedded.ps1` |
 | Refactor | `spec/dev/quality/REFACTOR_MONOREPO_TRACKING.md`, `crates/akasha-daemon/src/api.rs` |
 | MCP | `spec/dev/integrations/mcp-*.md` |
+| Skills / plugins daemon | `spec/33_agents_tools_orchestrator_skills.md`, `docs/user/extensions.md`, satellites `Akasha_skills` / `Akasha_plugins` |
+| akasha-os (externe) | [azerothl/akasha-os](https://github.com/azerothl/akasha-os) — `docs/sibling-bridge.md`, `docs/write-a-skill.md`, `docs/write-a-module.md`, `docs/bridge/` |
 | Features / Companion | `spec/feature_evolution_tracking.md`, Companion LAN APIs daemon |
 | Registre clôturé | `spec/dev/roadmap/ROADMAP_FINAL_REGISTRY.md` |
 | Store projet (miroir) | `/cursor/stores/self/docs/roadmap-v0.11.md` |
@@ -278,4 +335,4 @@ flowchart LR
 
 - **v0.9.0** : premier artefact CUDA Windows ; fixes CI / DLL — [internal_release_0.9.md](internal_release_0.9.md).
 - **v0.10.0** : first-use embarqué, full CUDA, R0, cockpit P6 A1–A4, life layer P7, refactor L0–L6 — tag publié.
-- **v0.11.0** *(proposition)* : maturité embarqué (benches AR), plateforme (`api.rs`, MCP), reste cockpit P6 B3/B4, dette doc ; Rbitnet/DLM en arbitrage.
+- **v0.11.0** *(proposition)* : maturité embarqué (benches AR), plateforme (`api.rs`, MCP), reste cockpit P6 B3/B4, dette doc, **rapprochement skills/plugins ↔ akasha-os (P9)** ; Rbitnet/DLM + ABI modules en arbitrage.
