@@ -81,6 +81,7 @@ pub mod mcp_stdio;
 pub mod lifecycle_hooks;
 pub mod webhook_inbound;
 pub mod process_watch;
+pub mod cron_watch;
 pub mod terminal_pty;
 pub mod http_get_cache;
 pub mod mcp_runtime;
