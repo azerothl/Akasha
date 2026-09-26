@@ -118,8 +118,9 @@ test.describe("Cockpit agentic (P6)", () => {
     });
     await expect(page.getByText(/Parent orchestrator/i)).toBeVisible();
     await page.getByRole("button", { name: /Inspect|Inspecter/i }).click();
-    await expect(page.getByRole("region", { name: /Subagent threads|Threads sous-agents/i })).toBeVisible();
-    await expect(page.getByText(/Child researcher/i)).toBeVisible();
+    const inspectRegion = page.getByRole("region", { name: /Subagent threads|Threads sous-agents/i });
+    await expect(inspectRegion).toBeVisible();
+    await expect(inspectRegion.getByText(/Child researcher/i)).toBeVisible();
     await page.getByRole("button", { name: /Cancel all|Tout annuler/i }).click();
     expect(cancelTreeHit).toBe(true);
   });
