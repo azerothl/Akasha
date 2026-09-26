@@ -54,8 +54,7 @@
 | Commande | Description |
 |----------|-------------|
 | `akasha router metrics` | Affiche les métriques du routeur (requêtes, latence, fallbacks). |
-| `akasha discover [service]` | Découvre services locaux (ollama, homeassistant). Sans argument : liste des profils. |
-| `akasha router discover` | Alias → découverte Ollama (local et réseau local). |
+| `akasha router discover` | Découvre les instances Ollama (local et réseau local). |
 | `akasha router show MODEL` | Affiche les infos d'un modèle Ollama. |
 | `akasha plugin list` | Liste les plugins installés. |
 | `akasha plugin reload` | Recharge les plugins sans redémarrer le daemon. |
@@ -100,10 +99,8 @@ Dans le chat (TUI ou interface web), les messages commençant par **/** sont des
 | `/status` | État du daemon. |
 | `/doctor` | Diagnostic (daemon, Ollama, vault, modèle embarqué). |
 | `/advice` | Conseils de diagnostic (RAG + modèle, nécessite le daemon). |
-| `/embedded` | Statut du modèle local embarqué (backend, GGUF, action recommandée). |
+| `/embedded` | Statut du modèle local embarqué. |
 | `/embedded reload` | Décharge le modèle embarqué (rechargé au prochain appel). |
-
-L'**assistant premier lancement** (wizard UI) reprend ce parcours : doctor --fix → statut embarqué → téléchargement → premier message test.
 | `/metrics` | Métriques du routeur LLM. |
 | `/models` | Liste des modèles (tous les fournisseurs). |
 | `/models list` | Modèles par catégorie (primary + fallback). |
@@ -121,6 +118,27 @@ L'**assistant premier lancement** (wizard UI) reprend ce parcours : doctor --fix
 | `/restart` | Redémarrer le daemon (via le superviseur). |
 
 Pour **ajouter** une clé dans le vault : utilisez le CLI `akasha vault set KEY [value]` (pas d'équivalent slash pour des raisons de sécurité). Pour supprimer : `akasha vault delete KEY`.
+
+
+---
+
+## ## 7bis. Terminal intégré et sessions PTY
+
+
+Akasha propose deux niveaux d'accès terminal :
+
+1. **Commandes one-shot** (outils agent) : `run_command`, `run_terminal`, `run_command_background` + `process` — soumis à `allowed_commands` et `command_timeout_secs` dans `tools_policy.yaml`.
+2. **Sessions PTY interactives** (API HTTP, tranche 1) : créer / lire / écrire / redimensionner / fermer une session.
+
+| Méthode | Chemin | Rôle |
+|---------|--------|------|
+| `POST` | `/api/terminal/pty/sessions` | Créer une session (`argv?`, `cwd?`, `cols`, `rows`) |
+| `GET` | `/api/terminal/pty/sessions/{id}/output` | Lire la sortie (`data_b64`) |
+| `POST` | `/api/terminal/pty/sessions/{id}/input` | Envoyer du texte / octets |
+| `POST` | `/api/terminal/pty/sessions/{id}/resize` | Redimensionner |
+| `DELETE` | `/api/terminal/pty/sessions/{id}` | Fermer la session |
+
+Prérequis : daemon démarré ; capacités via `GET /api/terminal/capabilities` (`pty_api`) ou `akasha terminal capabilities`. Pas de persistance / reprise de session ni UI complète dans toutes les surfaces — voir `spec/43_session_terminal.md`.
 
 ---
 

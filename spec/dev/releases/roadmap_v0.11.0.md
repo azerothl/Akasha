@@ -38,8 +38,8 @@ Travail opérateur / doc déjà listé hors tag ; à traiter en tête de cycle p
 - [ ] **Smoke GPU self-hosted** : provisionner runner `self-hosted,gpu,nvidia` ; job `gpu-smoke` vert — [GPU_SELF_HOSTED_CI.md](../quality/GPU_SELF_HOSTED_CI.md)
 - [ ] **Gate bench post-tag** : exécuter `bench_embedded.ps1` / `.sh` sur machine de référence ; coller résultats dans [bench_embedded_results.md](../quality/bench_embedded_results.md)
 - [ ] **Matrice manuelle first-use** : zip CPU + CUDA → setup → wizard → premier message → `doctor`
-- [ ] **Sync `docs/user_guide_final.md`** : `python scripts/build-user-docs.py` (pages first-use/CUDA déjà dans `docs/user/*`)
-- [ ] Erreurs routeur embarqué indisponible → message FR dédié (reste partiel P2 v0.10)
+- [x] **Sync `docs/user_guide_final.md`** : `python scripts/build-user-docs.py` (pages first-use/CUDA déjà dans `docs/user/*`) — source rattrapée + regen 2026-09-26
+- [x] Erreurs routeur embarqué indisponible → message FR dédié (reste partiel P2 v0.10) — `EMBEDDED_UNAVAILABLE_FR` / `format_provider_error`
 - [ ] Veille **CUDA 13.2+** / `windows-latest` (VS 2026) — évaluation sans engagement artefact (report P4 v0.10)
 
 ---
@@ -164,11 +164,11 @@ Liste prioritaire [feature_evolution_tracking.md](../../feature_evolution_tracki
 
 ### Must-ship
 
-- [ ] Plugins avancés (réseau host, schémas map view) — doc user
-- [ ] Limites runtime terminal / PTY + prérequis — doc user
-- [ ] Options sécurité / politique d’outils avancées — synthèse user
-- [ ] Mission autonome (cycle, contracts, observabilité) — section **dev** `spec/`
-- [ ] Mettre à jour le registre features (statuts → OK) pour les blocs touchés
+- [x] Plugins avancés (réseau host, schémas map view) — doc user (`docs/user/extensions.md`)
+- [x] Limites runtime terminal / PTY + prérequis — doc user (`docs/user/commandes.md` §7bis)
+- [x] Options sécurité / politique d’outils avancées — synthèse user (`docs/user/configuration.md` §8)
+- [x] Mission autonome (cycle, contracts, observabilité) — section **dev** `spec/dev/runtime/autonomous-mission.md`
+- [x] Mettre à jour le registre features (statuts → OK) pour les blocs touchés
 
 ### Stretch
 

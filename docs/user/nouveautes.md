@@ -1,6 +1,18 @@
 # Nouveautés
 
 
+## Nouveautés 0.10.0
+
+- **First-use embarqué** : wizard UI (statut, download GGUF, multi-modèle, premier message test)
+- **Artefacts** : zip CPU (Candle) + CUDA / full CUDA (llama-cpp-4 + GGUF)
+- **Cockpit** : Active work, modes composer, Usage 7/30 j, pin/fork/dual-pane
+- **Life layer** : overnight, brief matinal Telegram, OAuth Connectors, schedules en langage naturel
+- **Companion LAN** : APIs daemon pour client ESP32 (pairing / discovery)
+
+
+---
+
+
 ## Nouveautés 0.9.0
 
 - **Workspace** : Cookbook (Modèles + Recettes), Comparer, Recherche approfondie, Notes

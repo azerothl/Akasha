@@ -52,13 +52,27 @@ Pour afficher l'interface en terminal : `akasha tui` (ou `.\akasha.exe tui` sous
 
 ### Prérequis
 
-- **Modèle embarqué** : par défaut Akasha utilise un modèle LLM intégré (akasha_embedded). Aucune installation externe n'est obligatoire pour recevoir des réponses.
+- **Modèle embarqué CPU** : le zip full CPU inclut Candle (Qwen3 0.6B) — aucun téléchargement obligatoire ; le premier appel peut être lent (1–3 min).
+- **Modèle embarqué GPU (CUDA)** : archive `akasha-windows-x86_64-cuda` / `akasha-full-windows-x86_64-cuda` — pilotes NVIDIA récents ; pas de CUDA Toolkit. Téléchargez le GGUF (~1 Go) via `akasha config models embedded-download` ou l'assistant UI.
 - **Ollama** (optionnel) : pour utiliser d'autres modèles locaux. Configurez-le lors de l'initialisation ou plus tard via `akasha config models set conversation ollama <modèle>`.
 - **Cloud** (optionnel) : OpenAI ou OpenRouter, configurés lors de l'init (clés dans le vault ou variables d'environnement).
 - **Rust** : inutile pour les binaires précompilés.
 - **Node.js** (optionnel) : nécessaire seulement pour l’outil **navigateur géré** (Playwright). Les archives de release incluent le dossier `playwright-runner` à côté des exécutables ; installez [Node.js](https://nodejs.org/) (npm inclus) si vous utilisez cette fonctionnalité. Au premier lancement d’une tâche navigateur, le daemon peut exécuter `npm install` et télécharger Chromium — cela peut prendre plusieurs minutes selon la connexion. Pour désactiver l’installation automatique des dépendances Playwright, définissez `AKASHA_PLAYWRIGHT_AUTO_INSTALL=0` (variable d’environnement ou entrée dans `akasha.env`). Le diagnostic `akasha doctor` (daemon actif) indique si le runner, Node/npm et le paquet Playwright sont détectés.
 
 **Important** : lancez `akasha start` depuis le dossier d'installation (ou après avoir ajouté ce dossier au PATH) afin que l'onglet **Doc** des interfaces affiche cette documentation.
+
+### Modèles embarqués (CPU vs CUDA)
+
+| Archive | Backend | Premier usage |
+|---------|---------|---------------|
+| `akasha-full-windows-x86_64` (et équivalents Linux/macOS) | Candle (Qwen3 0.6B) | Immédiat ; 1er appel lent (1–3 min) |
+| `akasha-windows-x86_64-cuda` / `akasha-full-windows-x86_64-cuda` | llama-cpp + GPU | Télécharger le GGUF (~1 Go) : `akasha config models embedded-download` ou l'assistant UI |
+
+Après `setup.ps1` / `setup.sh`, l'**assistant de configuration** (wizard) guide le téléchargement, le statut embarqué et un **premier message test**.
+
+Options setup : `-DownloadEmbedded` / `-SkipEmbeddedDownload` (Windows) ou `--download-embedded` / `--skip-embedded-download` (Linux/macOS).
+
+Si le chat affiche que le **modèle embarqué n'est pas disponible**, exécutez `akasha config models embedded-download`, vérifiez avec `akasha doctor` (section `embedded_llm`) ou `/embedded`, ou configurez Ollama/cloud dans `llm_router.yaml`.
 
 Des **captures d’écran** de l’interface (chat, onglet Doc) peuvent être incluses sous `docs/screenshots/` dans les archives de développement ; elles sont générées par la suite Playwright du dépôt source (`apps/akasha-ui`, `npm run test:e2e`) et servent aussi au site public Akasha_app.
 
@@ -480,6 +494,10 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 - **Onglets** : Chat, **Retours planifiés**, Routeur, Documentation, Tâches, Calendrier, Mémoire, **Mission**, Paramètres. **Chat** = conversation uniquement ; **Retours planifiés** = réponses de l’agent pour les tâches planifiées (rappels récurrents), dans un onglet dédié.
 - **Raccourcis** : touches **1 à 9** pour basculer vers l'onglet correspondant (Mission = **8**, Paramètres = **9** ; inactif si le focus est dans un champ de saisie ou une modale).
 - **Pièces jointes** : dans le Chat, vous pouvez joindre des images ou des documents (texte, PDF) ; l'agent les reçoit pour analyse.
+- **Modes composer (v0.10)** : barre sous le champ — **Ask** (lecture seule), **Architecte** (conception), **Code** (implémentation), **Agent** (défaut). Envoyé au daemon via `composer_mode`.
+- **Travail actif** : bandeau listant les tâches en cours (ouvrir / annuler / pause) ; indicateur sur les sessions liées.
+- **Sessions** : épingler, forker le transcript, option double panneau.
+- **Usage** : Paramètres → Système → Usage — agrégats tokens / coût estimé sur 7 ou 30 jours.
 - **Données** : dans Paramètres → **Données**, deux sous-onglets — **RAG utilisateur** (documents texte indexés, extraits injectés dans le contexte de l’agent) et **Graphe projet** (plusieurs dossiers de projet enregistrés, index SQLite + rapports sous `workspace_graph/out/<id>/` ; ouverture du HTML par workspace ; agents enrichis automatiquement et outil `workspace_graph_search` si autorisé). Sans interface web, gérer via `/api/user-rag/...` et `/api/workspace-graph/workspaces` (voir le guide complet).
 - **Profil de l'agent** : dans Paramètres → Profil de l'agent, vous pouvez définir le nom, le rôle, la personnalité, les règles et les comportements autorisés/interdits ; des modèles (Neutre, Bienveillant, Concis/technique, etc.) sont proposés. Depuis la version **0.8.0**, un réglage **Tutoiement / vouvoiement** (formel, informel ou par défaut) oriente le registre de l'agent — en français, cela correspond au vouvoiement ou au tutoiement ; dans les autres langues, le registre s'adapte de la même manière.
 - **Mission autonome** : onglet **Mission** pour définir un objectif de fond, le contexte, des règles, des rôles (organisation) et la fréquence des **heartbeats**. Tant que la mission est activée et **active**, le daemon lance périodiquement une tâche orchestrée (type d’agent du premier pas configurable, souvent *chef de projet*) ; l’orchestrateur peut déléguer à d’autres agents. Les rapports Markdown vont dans le répertoire configuré (relatif au data_dir). Fichier **`autonomous_mission.yaml`** ; API **`GET` / `PUT /api/autonomous-mission`**, pause/reprise **`POST`** sur `/api/autonomous-mission/pause` et `/resume`. L’historique des événements de mission est consultable via **`GET /api/autonomous-mission/events`** (paramètres optionnels `limit`, `since` en date ISO). Pour appliquer aussi au **chat** le mode « sans questions » lié à la mission, utilisez le même **`session_id`** que dans la fiche mission. *Exemple* : maintenir un fichier `CHANGELOG_HEBDO.md` à jour dans un dépôt — renseignez l’objectif et le contexte (chemin du dépôt), horizon moyen, heartbeat 120 min, consultez les rapports sous le dossier indiqué après quelques cycles.
@@ -524,6 +542,26 @@ Dans le chat (TUI ou interface web), les messages commençant par **/** sont des
 
 Pour **ajouter** une clé dans le vault : utilisez le CLI `akasha vault set KEY [value]` (pas d'équivalent slash pour des raisons de sécurité). Pour supprimer : `akasha vault delete KEY`.
 
+
+---
+
+## 7bis. Terminal intégré et sessions PTY
+
+Akasha propose deux niveaux d'accès terminal :
+
+1. **Commandes one-shot** (outils agent) : `run_command`, `run_terminal`, `run_command_background` + `process` — soumis à `allowed_commands` et `command_timeout_secs` dans `tools_policy.yaml`.
+2. **Sessions PTY interactives** (API HTTP, tranche 1) : créer / lire / écrire / redimensionner / fermer une session.
+
+| Méthode | Chemin | Rôle |
+|---------|--------|------|
+| `POST` | `/api/terminal/pty/sessions` | Créer une session (`argv?`, `cwd?`, `cols`, `rows`) |
+| `GET` | `/api/terminal/pty/sessions/{id}/output` | Lire la sortie (`data_b64`) |
+| `POST` | `/api/terminal/pty/sessions/{id}/input` | Envoyer du texte / octets |
+| `POST` | `/api/terminal/pty/sessions/{id}/resize` | Redimensionner |
+| `DELETE` | `/api/terminal/pty/sessions/{id}` | Fermer la session |
+
+Prérequis : daemon démarré ; capacités via `GET /api/terminal/capabilities` (`pty_api`) ou `akasha terminal capabilities`. Pas de persistance / reprise de session ni UI complète dans toutes les surfaces — voir `spec/43_session_terminal.md`.
+
 ---
 
 ## 8. Politique des outils (tools_policy.yaml)
@@ -531,11 +569,18 @@ Pour **ajouter** une clé dans le vault : utilisez le CLI `akasha vault set KEY 
 Le fichier **tools_policy.yaml** dans le data_dir contrôle ce que l'agent peut faire sur votre machine :
 
 - **allowed_read_paths** / **allowed_write_paths** : répertoires ou fichiers autorisés en lecture et en écriture. Par défaut (fichier vide ou absent), tout est refusé. Ex. `["."]` pour le répertoire courant, ou des chemins précis pour limiter l'accès.
-- **allowed_commands** : noms d'exécutables autorisés pour les commandes (ex. `cargo`, `npm`, `git`). Les commandes requises par les skills installés sont ajoutées automatiquement.
-- **web_search_enabled** : `true` pour que l'agent utilise la recherche web (Brave API) pour répondre aux questions (météo, actualités, etc.). Nécessite une clé : `akasha vault set brave_api_key VOTRE_CLÉ` ou variable `BRAVE_API_KEY`.
+- **allowed_commands** : noms d'exécutables autorisés pour les commandes (ex. `cargo`, `npm`, `git`). Les commandes requises par les skills installés sont ajoutées automatiquement. Utilisez `["*"]` avec **blocked_commands** pour une liste noire ciblée.
+- **command_timeout_secs** : délai max pour `run_command` / `run_terminal` (défaut typique 60 s).
+- **web_search_enabled** / **search_provider** : recherche web (Brave, SearXNG, DuckDuckGo, etc.). Clés via vault ou variables d'environnement.
+- **allowed_web_domains** / **blocked_web_domains** : domaines autorisés ou refusés pour `web_fetch` (vide = refus par défaut pour fetch).
+- **browser_enabled** / **browser_allowed_domains** : automation navigateur Playwright (prérequis Node.js + runner).
+- **require_approval** : liste d'outils qui demandent une confirmation UI avant exécution (ex. `write_file`, `run_command`, `install_playwright`, `ha_call_service`).
+- **tool_profiles** / **default_profile** : restreindre la liste d'outils exposés à l'agent (profils `dev_sandbox`, `home`, etc.).
 - **allowed_skill_install_hosts** : hôtes autorisés pour l'installation de skills (défaut : GitHub uniquement). Ex. `["*"]` pour tout hôte HTTPS.
+- **mcp_servers** / **mcp_max_calls_per_task** : allow-list des serveurs MCP (`mcp_<server>_<tool>`).
+- **calendar_read_enabled** / **calendar_write_enabled** : lecture / écriture CalDAV (écriture désactivée par défaut).
 
-En cas de fichier absent, `akasha doctor --fix` crée un fichier minimal ; éditez-le selon vos besoins.
+En cas de fichier absent, `akasha doctor --fix` crée un fichier minimal ; éditez-le selon vos besoins. Exemple commenté : `spec/tools_policy.example.yaml`.
 
 ---
 
@@ -550,7 +595,7 @@ Vous pouvez **demander à l'agent d'installer un skill** depuis une URL. Par exe
 
 ## 10. Canaux (Telegram, Slack, Discord)
 
-- **Telegram** : enregistrez le token du bot avec `akasha vault set telegram_bot_token VOTRE_TOKEN`, puis définissez la variable d'environnement `AKASHA_TELEGRAM_ENABLED=1`. Le bot répond aux commandes `/akasha <message>` ou `/start`.
+- **Telegram** : enregistrez le token du bot avec `akasha vault set telegram_bot_token VOTRE_TOKEN`, puis définissez la variable d'environnement `AKASHA_TELEGRAM_ENABLED=1`. Le bot répond aux commandes `/akasha <message>` ou `/start`. Pour les briefs / notifies (Life layer), renseignez aussi `AKASHA_TELEGRAM_NOTIFY_CHAT_ID` (UI Connecteurs) — le daemon peut alors appeler `POST /api/channels/notify`.
 - **Slack** : vault `slack_signing_secret`, puis `AKASHA_SLACK_ENABLED=1`. Configurez la slash command vers l'URL fournie par votre déploiement.
 - **Discord** : vault `discord_bot_token`, puis `AKASHA_DISCORD_ENABLED=1`. Le bot répond au préfixe `!akasha <message>`.
 
@@ -561,17 +606,23 @@ Les variables d'activation sont chargées depuis le fichier **connectors.env** d
 ## 11. Où sont stockés les modèles
 
 - **Modèles d'embeddings** (mémoire long terme) : dans le data_dir, sous `embedding_model/` (sous-dossiers type `models--<org>--<nom>/`).
-- **Modèles LLM embarqués** (Qwen, Baguettotron) : cache Hugging Face par défaut (`~/.cache/huggingface/hub` ou `%USERPROFILE%\.cache\huggingface\hub`). Vous pouvez rediriger avec la variable **HF_HOME** (ex. `HF_HOME=~/akasha/hf_cache`).
+- **Modèles LLM embarqués** :
+  - **GGUF (llama-cpp, zip CUDA)** : `{data_dir}/models/embedded/*.gguf` (défaut `default.gguf`). Téléchargement : `akasha config models embedded-download` ou assistant UI.
+  - **Candle (zip CPU)** : poids SafeTensors via Hugging Face au premier chargement — cache `~/.cache/huggingface/hub` (redirigeable avec **HF_HOME**).
+  - Statut : `akasha doctor --json` (champ `action: embedded-download` si GGUF manquant), commande chat `/embedded`, wizard premier lancement.
 
 ---
 
 ## 12. Dépannage
 
 - **Le daemon ne démarre pas** : vérifiez avec `akasha doctor`. Utilisez `akasha doctor --fix` pour créer le data_dir et les fichiers de config manquants.
-- **Pas de réponses ou timeouts** : par défaut le modèle embarqué est utilisé ; vérifiez avec `akasha doctor` (section embedded_llm) ou `/embedded` dans le chat. Si vous utilisez Ollama, assurez-vous qu'il tourne ; pour le cloud, vérifiez les clés (vault ou variables). Consultez `akasha config models routes` et l'onglet Routeur pour voir les modèles actifs.
+- **Pas de réponses ou timeouts** : par défaut le modèle embarqué est utilisé ; vérifiez avec `akasha doctor` (section embedded_llm) ou `/embedded` dans le chat. Si le message indique que le **modèle embarqué n'est pas disponible**, lancez `akasha config models embedded-download` (GGUF) ou l'assistant UI. Si vous utilisez Ollama, assurez-vous qu'il tourne ; pour le cloud, vérifiez les clés (vault ou variables). Consultez `akasha config models routes` et l'onglet Routeur pour voir les modèles actifs.
 - **Réponses vides avec un modèle « thinking »** (ex. certains modèles OpenRouter) : augmentez `AKASHA_SYSTEM_TASK_MAX_TOKENS` (ex. 8192) via `akasha config env set AKASHA_SYSTEM_TASK_MAX_TOKENS 8192`, puis redémarrez le daemon.
 - **L'onglet Doc est vide** : lancez `akasha start` depuis le dossier où vous avez extrait l'archive (celui qui contient le dossier `docs`). Vérifiez que le fichier `docs/user_guide.md` est bien présent.
 - **Conseils personnalisés** : `akasha doctor --advice` (le daemon doit être démarré).
+
+---
+
 
 ---
 

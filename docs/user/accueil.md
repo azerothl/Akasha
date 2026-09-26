@@ -19,10 +19,9 @@ Bienvenue dans la documentation intégrée d'Akasha. Utilisez le menu à gauche 
 
 ## Parcours rapide
 
-1. Téléchargez le zip **full** (CPU) ou **full CUDA** (Windows NVIDIA) — voir [Installation](installation.md)
-2. `setup.ps1` / `setup.sh` puis `akasha start`
-3. **Assistant premier lancement** (wizard) : statut embarqué, téléchargement GGUF si CUDA, premier message test
-4. `akasha doctor` pour vérifier l'installation (`action: embedded-download` si GGUF manquant)
-5. Chat dans l'application desktop ou `akasha tui`
+1. `akasha init` puis `akasha start`
+2. `akasha doctor` pour vérifier l'installation
+3. Chat dans l'application desktop ou `akasha tui`
+4. Consultez **Workspace** pour le Cookbook et la comparaison de modèles
 
 Le daemon écoute par défaut sur le port **3876** (`AKASHA_PORT`).
