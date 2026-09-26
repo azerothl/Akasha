@@ -129,8 +129,8 @@ Report explicite post-tag v0.10 ([roadmap_v0.10.0.md](roadmap_v0.10.0.md) §P6 S
 
 ### Must-ship
 
-- [ ] **P6-B3 — Cron watch exit/condition (wakeups)** : abonnements schedule/cron → wakeup agent (au-delà du process-watch P7)
-- [ ] **P6-B4 — Subagent threads UI** : inspect + cancel **agrégé** (compléter le groupement enfants déjà dans Active work)
+- [x] **P6-B3 — Cron watch exit/condition (wakeups)** : abonnements schedule/cron → wakeup agent (au-delà du process-watch P7)
+- [x] **P6-B4 — Subagent threads UI** : inspect + cancel **agrégé** (compléter le groupement enfants déjà dans Active work)
 
 ### Stretch / hors tag v0.11 (repris hors scope P6 v0.10)
 
@@ -240,7 +240,7 @@ Objectif : **aligner** (docs + chemins d’import/export) les extensions du daem
 - [ ] Benches AR tier 1–2 publiés + **décision défaut CUDA** documentée
 - [ ] `api.rs` **&lt; ~8k** lignes ; check daemon + tests outils verts
 - [x] MCP : statut registre **Implemented** + doc user minimale
-- [ ] P6-B3 et P6-B4 livrés (ou report explicite avec justification capacité)
+- [x] P6-B3 et P6-B4 livrés (ou report explicite avec justification capacité)
 - [ ] Dette doc « Partially documented » prioritaire résorbée (ou tickets GitHub associés)
 - [ ] GPU CI self-hosted : au moins un run `gpu-smoke` documenté (vert ou bloqueur opérateur noté)
 - [ ] Note Rbitnet/DLM : spike **ou** no-go renouvelé (pas de silence)
