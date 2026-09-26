@@ -1329,6 +1329,7 @@ impl Daemon {
                 let scheduler_tx = normal_tx;
                 async move {
                     crate::process_watch::configure_store_path(store_path.clone()).await;
+                    crate::cron_watch::configure_store_path(store_path.clone()).await;
                     crate::scheduler::run_scheduler(store_path, scheduler_tx, bus).await;
                 }
             });

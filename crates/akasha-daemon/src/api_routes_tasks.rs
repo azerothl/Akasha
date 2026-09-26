@@ -542,6 +542,124 @@ pub(crate) async fn cancel_task(store_path: &Path, id: Uuid, main_agent: &crate:
     json_response("200 OK", &body.to_string())
 }
 
+/// Collect root + all descendant task ids (BFS / stack DFS).
+pub(crate) fn collect_task_tree_ids(store: &TaskStore, root: Uuid) -> Vec<Uuid> {
+    let mut to_cancel: Vec<Uuid> = Vec::new();
+    let mut stack = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        to_cancel.push(cur);
+        if let Ok(children) = store.get_children(cur) {
+            for child in children {
+                stack.push(child.id);
+            }
+        }
+    }
+    to_cancel
+}
+
+/// P6-B4: cancel a parent task and all descendants (aggregated cancel).
+pub(crate) async fn cancel_task_tree(
+    store_path: &Path,
+    id: Uuid,
+    main_agent: &crate::agents::MainAgent,
+) -> String {
+    let store = match TaskStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let root = match store.get(id) {
+        Ok(Some(t)) => t,
+        Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+
+    let to_cancel = collect_task_tree_ids(&store, id);
+
+    let mut cancelled: Vec<String> = Vec::new();
+    let mut skipped: Vec<serde_json::Value> = Vec::new();
+    for tid in to_cancel {
+        let Some(task) = store.get(tid).ok().flatten() else {
+            continue;
+        };
+        let cancellable = matches!(
+            task.status,
+            TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
+        );
+        if !cancellable {
+            skipped.push(serde_json::json!({
+                "task_id": tid.to_string(),
+                "status": task.status.as_str(),
+            }));
+            continue;
+        }
+        if store.update_status(tid, TaskStatus::Cancelled).is_err() {
+            skipped.push(serde_json::json!({
+                "task_id": tid.to_string(),
+                "error": "store",
+            }));
+            continue;
+        }
+        let _ = main_agent.bus().send(
+            EventEnvelope::new(
+                EventType::TaskCancelled,
+                Some(serde_json::json!({
+                    "task_id": tid.to_string(),
+                    "aggregated": true,
+                    "root_task_id": id.to_string(),
+                })),
+            )
+            .with_correlation(tid),
+        );
+        cancelled.push(tid.to_string());
+    }
+
+    let body = serde_json::json!({
+        "cancelled": !cancelled.is_empty(),
+        "root_task_id": id.to_string(),
+        "root_label": task_label(root.initial_message.as_ref(), &root.id),
+        "cancelled_ids": cancelled,
+        "skipped": skipped,
+    });
+    json_response("200 OK", &body.to_string())
+}
+
+/// P6-B4: list direct children for subagent thread inspect.
+pub(crate) async fn get_task_children(store_path: &Path, id: Uuid) -> String {
+    let store = match TaskStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    if store.get(id).ok().flatten().is_none() {
+        return json_response("404 Not Found", r#"{"error":"task_not_found"}"#);
+    }
+    let children = match store.get_children(id) {
+        Ok(c) => c,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let list: Vec<serde_json::Value> = children
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "id": t.id.to_string(),
+                "parent_task_id": t.parent_task_id.map(|u| u.to_string()),
+                "status": t.status.as_str(),
+                "assigned_agent": t.assigned_agent,
+                "created_at": t.created_at.to_rfc3339(),
+                "updated_at": t.updated_at.to_rfc3339(),
+                "label": task_label(t.initial_message.as_ref(), &t.id),
+            })
+        })
+        .collect();
+    json_response(
+        "200 OK",
+        &serde_json::json!({ "parent_task_id": id.to_string(), "children": list }).to_string(),
+    )
+}
+
 /// Returns true when a task in `status` can be paused.
 /// `Running` : la pause est appliquée en base ; la boucle outils sort au prochain tour et ne marque pas la tâche comme terminée.
 pub(crate) fn is_pausable(status: &TaskStatus) -> bool {
@@ -2319,6 +2437,12 @@ if path.starts_with("/api/tasks/") {
             if method == "POST" && parts.get(1) == Some(&"cancel") {
                 return Some(cancel_task(store_path, id, main_agent).await);
             }
+            if method == "POST" && parts.get(1) == Some(&"cancel-tree") {
+                return Some(cancel_task_tree(store_path, id, main_agent).await);
+            }
+            if method == "GET" && parts.get(1) == Some(&"children") {
+                return Some(get_task_children(store_path, id).await);
+            }
             if method == "POST" && parts.get(1) == Some(&"pause") {
                 return Some(pause_task(store_path, id, main_agent).await);
             }
@@ -2501,6 +2625,11 @@ if method == "GET" && path == "/api/schedule_run_reports" {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use akasha_store::Task;
+    use chrono::Utc;
+    use tempfile::NamedTempFile;
+
     #[test]
     fn tasks_paths_smoke() {
         for p in [
@@ -2517,5 +2646,34 @@ mod tests {
                     || p.starts_with("/api/task_runs")
             );
         }
+    }
+
+    #[test]
+    fn collect_task_tree_ids_includes_nested_children() {
+        let db = NamedTempFile::new().expect("temp");
+        let store = TaskStore::open(db.path()).expect("open");
+        let now = Utc::now();
+        let root = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        let grand = Uuid::new_v4();
+        for (id, parent) in [(root, None), (child, Some(root)), (grand, Some(child))] {
+            store
+                .insert(&Task {
+                    id,
+                    parent_task_id: parent,
+                    status: TaskStatus::Running,
+                    assigned_agent: "conversation".into(),
+                    created_at: now,
+                    updated_at: now,
+                    initial_message: Some(format!("t-{id}")),
+                    studio_project_id: None,
+                })
+                .expect("insert");
+        }
+        let ids = collect_task_tree_ids(&store, root);
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&root));
+        assert!(ids.contains(&child));
+        assert!(ids.contains(&grand));
     }
 }

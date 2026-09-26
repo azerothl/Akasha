@@ -48,11 +48,11 @@ async fn tick(
 
     // Do all DB work and collect pending (run_id, task_id, message, session_id). No await here
     // so we never hold ScheduleStore/TaskStore (non-Send) across an await.
-    let (pending, notify_completed): (Vec<PendingRun>, Vec<(Uuid, Uuid)>) = {
+    let (pending, terminals): (Vec<PendingRun>, Vec<TerminalTaskRun>) = {
         let schedule_store = ScheduleStore::open(store_path)?;
         let task_store = TaskStore::open(store_path)?;
 
-        let notify_completed = sync_terminal_task_run_statuses(&schedule_store, &task_store, now)?;
+        let terminals = sync_terminal_task_run_statuses(&schedule_store, &task_store, now)?;
         // Heartbeat/lease watchdog: interrupted tasks whose lease expired.
         if let Ok(expired) = task_store.expired_leases(now, 100) {
             for task_id in expired {
@@ -213,7 +213,7 @@ async fn tick(
                 pending.push((run_id, task_id, message, session_id));
             }
         }
-        (pending, notify_completed)
+        (pending, terminals)
     };
 
     // Send to orchestrator (await) — no store references held.
@@ -240,6 +240,23 @@ async fn tick(
             }
         }
     }
+
+    // P6-B3: schedule exit/condition → wakeup subscriptions.
+    for t in &terminals {
+        crate::cron_watch::on_task_run_terminal(
+            t.schedule_id,
+            &t.schedule_name,
+            t.task_id,
+            t.task_run_id,
+            &t.status,
+        )
+        .await;
+    }
+    let notify_completed: Vec<(Uuid, Uuid)> = terminals
+        .into_iter()
+        .filter(|t| t.status == TaskRunStatus::Completed)
+        .map(|t| (t.schedule_id, t.task_id))
+        .collect();
 
     // Reopen schedule_store only to mark successfully sent runs as Running.
     if !successful_run_ids.is_empty() {
@@ -333,13 +350,22 @@ async fn process_due_wakeups(
     Ok(())
 }
 
-/// Returns newly completed (schedule_id, task_id) pairs for Life layer notify.
+/// Terminal schedule exits for Life layer notify + P6-B3 cron watch wakeups.
+struct TerminalTaskRun {
+    schedule_id: Uuid,
+    task_id: Uuid,
+    task_run_id: Uuid,
+    status: TaskRunStatus,
+    schedule_name: String,
+}
+
+/// Returns newly terminal (schedule, task) runs for Life layer notify and cron watch.
 fn sync_terminal_task_run_statuses(
     schedule_store: &ScheduleStore,
     task_store: &TaskStore,
     now: chrono::DateTime<Utc>,
-) -> anyhow::Result<Vec<(Uuid, Uuid)>> {
-    let mut completed_for_notify = Vec::new();
+) -> anyhow::Result<Vec<TerminalTaskRun>> {
+    let mut terminals = Vec::new();
     let task_runs = schedule_store.list_task_runs(None, 1_000)?;
     for run in task_runs {
         if run.status != TaskRunStatus::Running {
@@ -356,14 +382,22 @@ fn sync_terminal_task_run_statuses(
         };
         if let Some(status) = terminal_status {
             schedule_store.update_task_run_status(run.id, status.clone(), None, Some(now))?;
-            if status == TaskRunStatus::Completed {
-                if let Some(sid) = run.schedule_id {
-                    completed_for_notify.push((sid, run.task_id));
-                }
+            if let Some(sid) = run.schedule_id {
+                let schedule_name = schedule_store
+                    .get_schedule(sid)?
+                    .map(|s| s.name)
+                    .unwrap_or_default();
+                terminals.push(TerminalTaskRun {
+                    schedule_id: sid,
+                    task_id: run.task_id,
+                    task_run_id: run.id,
+                    status,
+                    schedule_name,
+                });
             }
         }
     }
-    Ok(completed_for_notify)
+    Ok(terminals)
 }
 
 /// Returns due slots from RRULE (iCal): occurrences between last run (or start_at) and now.

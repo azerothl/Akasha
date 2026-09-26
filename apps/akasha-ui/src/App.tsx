@@ -3072,6 +3072,7 @@ function App() {
         label: t.label,
         session_id: t.session_id ?? map[t.id] ?? null,
         parent_task_id: t.parent_task_id ?? null,
+        assigned_agent: t.assigned_agent,
       }));
   }, [tasksList]);
 
@@ -6438,7 +6439,13 @@ function App() {
               onOpenSession={(sid) => void selectChatThread(sid)}
               onCancel={async (taskId) => {
                 try {
-                  await invoke("cancel_task", { taskId, port: DAEMON_PORT });
+                  if (E2E_WEB) {
+                    await fetch(e2eDaemonHttpUrl(`/api/tasks/${encodeURIComponent(taskId)}/cancel`), {
+                      method: "POST",
+                    });
+                  } else {
+                    await invoke("cancel_task", { taskId, port: DAEMON_PORT });
+                  }
                   void fetchTasksList({ silent: true });
                 } catch (e) {
                   console.error(e);
@@ -6448,16 +6455,43 @@ function App() {
                 const kids = activeWorkTasks.filter((t) => t.parent_task_id === parentTaskId);
                 for (const k of kids) {
                   try {
-                    await invoke("cancel_task", { taskId: k.id, port: DAEMON_PORT });
+                    if (E2E_WEB) {
+                      await fetch(e2eDaemonHttpUrl(`/api/tasks/${encodeURIComponent(k.id)}/cancel`), {
+                        method: "POST",
+                      });
+                    } else {
+                      await invoke("cancel_task", { taskId: k.id, port: DAEMON_PORT });
+                    }
                   } catch (e) {
                     console.error(e);
                   }
                 }
                 void fetchTasksList({ silent: true });
               }}
+              onCancelTree={async (rootTaskId) => {
+                try {
+                  if (E2E_WEB) {
+                    await fetch(
+                      e2eDaemonHttpUrl(`/api/tasks/${encodeURIComponent(rootTaskId)}/cancel-tree`),
+                      { method: "POST" },
+                    );
+                  } else {
+                    await invoke("cancel_task_tree", { taskId: rootTaskId, port: DAEMON_PORT });
+                  }
+                  void fetchTasksList({ silent: true });
+                } catch (e) {
+                  console.error(e);
+                }
+              }}
               onPause={async (taskId) => {
                 try {
-                  await invoke("pause_task", { taskId, port: DAEMON_PORT });
+                  if (E2E_WEB) {
+                    await fetch(e2eDaemonHttpUrl(`/api/tasks/${encodeURIComponent(taskId)}/pause`), {
+                      method: "POST",
+                    });
+                  } else {
+                    await invoke("pause_task", { taskId, port: DAEMON_PORT });
+                  }
                   void fetchTasksList({ silent: true });
                 } catch (e) {
                   console.error(e);

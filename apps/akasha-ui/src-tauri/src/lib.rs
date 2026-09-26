@@ -1552,6 +1552,32 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
     Ok(json)
 }
 
+/// Cancel parent + descendants: POST /api/tasks/:id/cancel-tree (P6-B4).
+#[tauri::command]
+async fn cancel_task_tree(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tasks/{}/cancel-tree", daemon_base_url(port), task_id);
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .unwrap_or(serde_json::json!({ "error": "invalid_response" }));
+    if !status.is_success() {
+        let detail = json
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or(
+                json.get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Erreur inconnue"),
+            );
+        return Err(detail.to_string());
+    }
+    Ok(json)
+}
+
 /// Pause a running task: POST /api/tasks/:id/pause.
 #[tauri::command]
 async fn pause_task(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -2670,6 +2696,7 @@ pub fn run() {
             get_tasks,
             get_task_events,
             cancel_task,
+            cancel_task_tree,
             pause_task,
             get_pending_human_input,
             get_task_human_input,
