@@ -4,7 +4,8 @@ use crate::config::{prepare_ollama_request, ModelOption, RouteEntry, TaskTypeCon
 use std::collections::HashMap;
 use crate::metrics::MetricsCollector;
 use crate::provider::{
-    provider_error_is_context_window_exceeded, CompletionRequest, CompletionResponse, LLMProvider,
+    format_fallback_chain_failure, format_provider_error, provider_error_is_context_window_exceeded,
+    CompletionRequest, CompletionResponse, LLMProvider,
 };
 use crate::retry::{RetryClass, RetryPolicy};
 use std::sync::Arc;
@@ -243,7 +244,7 @@ impl FallbackEngine {
                         } else {
                             metrics.record_failure(entry.provider.as_str(), &entry.model);
                         }
-                        last_error = Some(format!("{}: {}", entry.provider, e));
+                        last_error = Some(format_provider_error(entry.provider.as_str(), &e));
                         let retry = matches!(
                             RetryPolicy::classify_provider_error(&e),
                             RetryClass::Transient | RetryClass::RateLimited
@@ -274,11 +275,7 @@ impl FallbackEngine {
                 }
             }
         }
-        let msg = match last_error {
-            Some(e) => format!("All providers in fallback chain failed (last: {}).", e),
-            None => "All providers in fallback chain failed.".to_string(),
-        };
-        Err(msg)
+        Err(format_fallback_chain_failure(last_error.as_deref()))
     }
 
     fn is_local_provider(&self, name: &str, resolve: &ProviderResolver) -> bool {

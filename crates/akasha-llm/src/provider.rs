@@ -175,6 +175,39 @@ pub enum ProviderError {
     Auth(String),
 }
 
+/// Message FR dédié quand le routeur tombe sur `akasha_embedded` / `akasha_core` indisponible
+/// (reste P2 v0.10 / P0 v0.11 — évite le seul libellé anglais `unavailable`).
+pub const EMBEDDED_UNAVAILABLE_FR: &str = "Le modèle embarqué n'est pas disponible. \
+Exécutez `akasha config models embedded-download` (GGUF, ~1 Go) ou utilisez l'assistant UI, \
+puis vérifiez avec `akasha doctor` (section embedded_llm) ou `/embedded` dans le chat. \
+Sinon configurez Ollama ou un fournisseur cloud dans `llm_router.yaml`.";
+
+fn is_embedded_router_provider(provider: &str) -> bool {
+    provider == "akasha_embedded" || provider == "akasha_core"
+}
+
+/// Formate une erreur fournisseur pour l'utilisateur (chat / API / compare).
+pub fn format_provider_error(provider: &str, err: &ProviderError) -> String {
+    if matches!(err, ProviderError::Unavailable) && is_embedded_router_provider(provider) {
+        return EMBEDDED_UNAVAILABLE_FR.to_string();
+    }
+    format!("{}: {}", provider, err)
+}
+
+/// Message final quand toute la chaîne de fallback a échoué.
+pub fn format_fallback_chain_failure(last_error: Option<&str>) -> String {
+    match last_error {
+        Some(e) if e.contains("modèle embarqué n'est pas disponible") => {
+            format!("Aucun fournisseur LLM n'a pu répondre. {}", e)
+        }
+        Some(e) => format!(
+            "Tous les fournisseurs de la chaîne de secours ont échoué (dernier : {}).",
+            e
+        ),
+        None => "Tous les fournisseurs de la chaîne de secours ont échoué.".to_string(),
+    }
+}
+
 /// True when the provider refused the call because the **prompt** (plus reserved output) exceeds the model or API context window.
 ///
 /// Used by the router's streaming path to skip non-streaming fallback with the same oversized body (it would fail again with the same 400).
@@ -2085,6 +2118,21 @@ mod tests {
         assert_eq!(acc, "Hello");
         assert!(last_done.is_some());
         assert_eq!(last_done.unwrap()["eval_count"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn format_provider_error_embedded_unavailable_is_french() {
+        let msg = format_provider_error("akasha_embedded", &ProviderError::Unavailable);
+        assert!(msg.contains("modèle embarqué"));
+        assert!(msg.contains("embedded-download"));
+        assert_eq!(msg, EMBEDDED_UNAVAILABLE_FR);
+        let core = format_provider_error("akasha_core", &ProviderError::Unavailable);
+        assert_eq!(core, EMBEDDED_UNAVAILABLE_FR);
+        let other = format_provider_error("ollama", &ProviderError::Unavailable);
+        assert_eq!(other, "ollama: unavailable");
+        let chain = format_fallback_chain_failure(Some(EMBEDDED_UNAVAILABLE_FR));
+        assert!(chain.starts_with("Aucun fournisseur LLM"));
+        assert!(chain.contains("modèle embarqué"));
     }
 
     #[test]

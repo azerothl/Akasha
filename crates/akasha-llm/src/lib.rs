@@ -16,8 +16,9 @@ pub use discovery::{discover_all, discover_local, discover_network};
 pub use fallback::FallbackEngine;
 pub use metrics::{MetricsCollector, MetricsPersistence, ModelMetrics};
 pub use provider::{
-    provider_error_is_context_window_exceeded, AnthropicProvider, AkashaCoreProvider,
-    AkashaEmbeddedProvider, AzureOpenAIProvider, BitNetProvider, CompletionRequest, CompletionResponse,
+    format_fallback_chain_failure, format_provider_error, provider_error_is_context_window_exceeded,
+    AnthropicProvider, AkashaCoreProvider, AkashaEmbeddedProvider, AzureOpenAIProvider,
+    BitNetProvider, CompletionRequest, CompletionResponse, EMBEDDED_UNAVAILABLE_FR,
     GoogleAIProvider, LLMProvider, OllamaProvider, OpenAIProvider, OpenRouterProvider,
 };
 pub use retry::{RetryClass, RetryPolicy};
