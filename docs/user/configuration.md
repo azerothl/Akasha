@@ -21,8 +21,6 @@ Vous pouvez modifier les fichiers suivants dans ce répertoire (avec un éditeur
 | `tools_policy.yaml` | Autorisations des outils : chemins lecture/écriture (`allowed_read_paths`, `allowed_write_paths`), commandes autorisées (`allowed_commands`), recherche web (Brave), hôtes pour l'installation de skills (`allowed_skill_install_hosts`). |
 | `voice_router.yaml` | (Optionnel) Voix TTS/STT : URLs des services de synthèse (`tts.base_url`) et de transcription (`stt.base_url`). Si STT est configuré, l’interface web affiche un bouton **Message vocal** (micro). Si TTS est aussi configuré, la réponse à un message vocal est affichée en texte et lue en audio. |
 | `akasha.env` | Variables d'environnement persistantes (éditables aussi via `akasha config env`). |
-| `companion_presence.json` | (Phase 5) Policy VAD Companion : `enabled`, seuils RMS / durées, `quiet_hours`. Aussi via `GET`/`POST /api/companion/presence/config` ou `AKASHA_COMPANION_VAD_ENABLED`. |
-| `companion_devices.json` | (Phase 4–5) Devices pairés + dernier événement présence. |
 | `connectors.env` | Activation des canaux (Telegram, Slack, Discord). |
 | `agent_profile.json` | Profil de l'agent : nom, rôle, personnalité, règles, **formalité** (tutoiement / vouvoiement, champs optionnels). Éditable dans Paramètres → Profil de l'agent (interface web) ou en modifiant le fichier puis en redémarrant le daemon. |
 | `autonomous_mission.yaml` | (Optionnel) **Mission autonome** : objectif, contexte, règles de fonctionnement, rôles, intervalle de heartbeat, répertoire des rapports, `session_id`, type d’agent pour le premier pas de chaque heartbeat. Éditable dans l’onglet **Mission** de l’interface web ou via `GET` / `PUT /api/autonomous-mission`. |
@@ -37,7 +35,8 @@ L'onglet **Doc** des interfaces charge le guide depuis **`docs/user_guide.md`** 
 
 ---
 
-## 2bis. Exemples et référence exhaustive des propriétés de configuration
+## ## 2bis. Exemples et référence exhaustive des propriétés de configuration
+
 
 Cette section complète la vue d’ensemble de la section 2 avec des **exemples de fichiers** et un **tableau exhaustif des propriétés** que vous pouvez définir dans les fichiers de configuration utilisateur.
 
@@ -239,9 +238,6 @@ Clés supportées (principales et documentées) :
 | Clé | Type / valeurs | Description |
 |---|---|---|
 | `AKASHA_PORT` | int | Port HTTP daemon. |
-| `AKASHA_BIND` | string | Adresse d’écoute (`127.0.0.1` par défaut). Mettre `0.0.0.0` pour accepter le Companion ESP32 (et autres clients) sur le LAN. |
-| `AKASHA_COMPANION_PAIR_SECRET` | string | Secret de pairing Companion (`POST /api/companion/pair`). Si vide, le pairing LAN est ouvert (dev). |
-| `AKASHA_COMPANION_VAD_ENABLED` | `1`/`0`/`true`/`false` | Override policy VAD Companion (Phase 5). Persistance aussi via `data_dir/companion_presence.json` et `GET`/`POST /api/companion/presence/config`. |
 | `AKASHA_LOG` | string | Niveau log (`trace`,`debug`,`info`,`warn`,`error`). |
 | `AKASHA_DATA_DIR` | path | Répertoire données. |
 | `AKASHA_MAX_RESPONSE_TOKENS` | int | Tokens max réponses chat. |
@@ -292,8 +288,6 @@ Propriétés supportées :
 
 ---
 
-
-
 ## ## 5. Variables d'environnement utiles
 
 
@@ -324,10 +318,17 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 Le fichier **tools_policy.yaml** dans le data_dir contrôle ce que l'agent peut faire sur votre machine :
 
 - **allowed_read_paths** / **allowed_write_paths** : répertoires ou fichiers autorisés en lecture et en écriture. Par défaut (fichier vide ou absent), tout est refusé. Ex. `["."]` pour le répertoire courant, ou des chemins précis pour limiter l'accès.
-- **allowed_commands** : noms d'exécutables autorisés pour les commandes (ex. `cargo`, `npm`, `git`). Les commandes requises par les skills installés sont ajoutées automatiquement.
-- **web_search_enabled** : `true` pour que l'agent utilise la recherche web (Brave API) pour répondre aux questions (météo, actualités, etc.). Nécessite une clé : `akasha vault set brave_api_key VOTRE_CLÉ` ou variable `BRAVE_API_KEY`.
+- **allowed_commands** : noms d'exécutables autorisés pour les commandes (ex. `cargo`, `npm`, `git`). Les commandes requises par les skills installés sont ajoutées automatiquement. Utilisez `["*"]` avec **blocked_commands** pour une liste noire ciblée.
+- **command_timeout_secs** : délai max pour `run_command` / `run_terminal` (défaut typique 60 s).
+- **web_search_enabled** / **search_provider** : recherche web (Brave, SearXNG, DuckDuckGo, etc.). Clés via vault ou variables d'environnement.
+- **allowed_web_domains** / **blocked_web_domains** : domaines autorisés ou refusés pour `web_fetch` (vide = refus par défaut pour fetch).
+- **browser_enabled** / **browser_allowed_domains** : automation navigateur Playwright (prérequis Node.js + runner).
+- **require_approval** : liste d'outils qui demandent une confirmation UI avant exécution (ex. `write_file`, `run_command`, `install_playwright`, `ha_call_service`).
+- **tool_profiles** / **default_profile** : restreindre la liste d'outils exposés à l'agent (profils `dev_sandbox`, `home`, etc.).
 - **allowed_skill_install_hosts** : hôtes autorisés pour l'installation de skills (défaut : GitHub uniquement). Ex. `["*"]` pour tout hôte HTTPS.
+- **mcp_servers** / **mcp_max_calls_per_task** : allow-list des serveurs MCP (`mcp_<server>_<tool>`).
+- **calendar_read_enabled** / **calendar_write_enabled** : lecture / écriture CalDAV (écriture désactivée par défaut).
 
-En cas de fichier absent, `akasha doctor --fix` crée un fichier minimal ; éditez-le selon vos besoins.
+En cas de fichier absent, `akasha doctor --fix` crée un fichier minimal ; éditez-le selon vos besoins. Exemple commenté : `tools_policy.yaml`.
 
 ---

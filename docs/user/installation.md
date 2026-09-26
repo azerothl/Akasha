@@ -45,26 +45,28 @@ chmod +x akasha akasha-daemon akasha-tui scripts/*.sh
 
 Pour afficher l'interface en terminal : `akasha tui` (ou `.\akasha.exe tui` sous Windows).
 
-### Modèles embarqués (CPU vs CUDA)
-
-| Archive | Backend | Premier usage |
-|---------|---------|---------------|
-| `akasha-full-windows-x86_64` | Candle (Qwen3 0.6B) | Immédiat ; 1er appel lent (1–3 min) |
-| `akasha-windows-x86_64-cuda` / `akasha-full-windows-x86_64-cuda` | llama-cpp + GPU | Télécharger le GGUF (~1 Go) : `akasha config models embedded-download` ou l'assistant UI |
-
-Après `setup.ps1` / `setup.sh`, l'**assistant de configuration** (wizard) guide le téléchargement, le statut embarqué et un **premier message test**.
-
-Options setup : `-DownloadEmbedded` / `-SkipEmbeddedDownload` (Windows) ou `--download-embedded` / `--skip-embedded-download` (Linux/macOS).
-
 ### Prérequis
 
-- **Modèle embarqué CPU** : le zip full CPU inclut Candle — aucun téléchargement obligatoire.
-- **Modèle embarqué GPU (CUDA)** : pilotes NVIDIA récents ; pas de CUDA Toolkit. Téléchargez le GGUF via CLI ou wizard.
+- **Modèle embarqué CPU** : le zip full CPU inclut Candle (Qwen3 0.6B) — aucun téléchargement obligatoire ; le premier appel peut être lent (1–3 min).
+- **Modèle embarqué GPU (CUDA)** : archive `akasha-windows-x86_64-cuda` / `akasha-full-windows-x86_64-cuda` — pilotes NVIDIA récents ; pas de CUDA Toolkit. Téléchargez le GGUF (~1 Go) via `akasha config models embedded-download` ou l'assistant UI.
 - **Ollama** (optionnel) : pour utiliser d'autres modèles locaux. Configurez-le lors de l'initialisation ou plus tard via `akasha config models set conversation ollama <modèle>`.
 - **Cloud** (optionnel) : OpenAI ou OpenRouter, configurés lors de l'init (clés dans le vault ou variables d'environnement).
 - **Rust** : inutile pour les binaires précompilés.
 - **Node.js** (optionnel) : nécessaire seulement pour l’outil **navigateur géré** (Playwright). Les archives de release incluent le dossier `playwright-runner` à côté des exécutables ; installez [Node.js](https://nodejs.org/) (npm inclus) si vous utilisez cette fonctionnalité. Au premier lancement d’une tâche navigateur, le daemon peut exécuter `npm install` et télécharger Chromium — cela peut prendre plusieurs minutes selon la connexion. Pour désactiver l’installation automatique des dépendances Playwright, définissez `AKASHA_PLAYWRIGHT_AUTO_INSTALL=0` (variable d’environnement ou entrée dans `akasha.env`). Le diagnostic `akasha doctor` (daemon actif) indique si le runner, Node/npm et le paquet Playwright sont détectés.
 
 **Important** : lancez `akasha start` depuis le dossier d'installation (ou après avoir ajouté ce dossier au PATH) afin que l'onglet **Doc** des interfaces affiche cette documentation.
+
+### Modèles embarqués (CPU vs CUDA)
+
+| Archive | Backend | Premier usage |
+|---------|---------|---------------|
+| `akasha-full-windows-x86_64` (et équivalents Linux/macOS) | Candle (Qwen3 0.6B) | Immédiat ; 1er appel lent (1–3 min) |
+| `akasha-windows-x86_64-cuda` / `akasha-full-windows-x86_64-cuda` | llama-cpp + GPU | Télécharger le GGUF (~1 Go) : `akasha config models embedded-download` ou l'assistant UI |
+
+Après `setup.ps1` / `setup.sh`, l'**assistant de configuration** (wizard) guide le téléchargement, le statut embarqué et un **premier message test**.
+
+Options setup : `-DownloadEmbedded` / `-SkipEmbeddedDownload` (Windows) ou `--download-embedded` / `--skip-embedded-download` (Linux/macOS).
+
+Si le chat affiche que le **modèle embarqué n'est pas disponible**, exécutez `akasha config models embedded-download`, vérifiez avec `akasha doctor` (section `embedded_llm`) ou `/embedded`, ou configurez Ollama/cloud dans `llm_router.yaml`.
 
 ---

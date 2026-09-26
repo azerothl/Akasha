@@ -25,7 +25,7 @@ PAGES = [
     ("nouveautes", "Nouveautés", "nouveautes.md", r"^## 14\. "),
 ]
 
-SECTION_RE = re.compile(r"^## \d+(?:bis|\.)? .*", re.MULTILINE)
+SECTION_RE = re.compile(r"^## \d+(?:bis)?\.\s+.*", re.MULTILINE)
 
 
 def split_sections(text: str) -> list[tuple[str, str]]:
@@ -161,6 +161,20 @@ Onglet **Mission** (application desktop) ou fichier **`autonomous_mission.yaml`*
 - `GET /api/autonomous-mission/events` — journal (`limit`, `since`)
 
 Les rapports Markdown sont écrits sous le répertoire configuré après chaque heartbeat réussi.
+
+## Life layer (packs planifiés)
+
+En complément de la mission autonome, l’onglet **Calendrier → Récurrences** propose un panneau **Life layer** :
+
+| Pack | Rôle |
+|------|------|
+| **Brief matinal** | Schedule quotidien ; le résultat est poussé sur Telegram (`AKASHA_TELEGRAM_NOTIFY_CHAT_ID`) via `POST /api/channels/notify` |
+| **Pack nuit** | Passage nocturne avec rapport (skills / agenda / follow-ups) |
+| **Langage naturel** | Phrase du type « chaque matin à 7h30, brief Telegram » → aperçu puis création (`POST /api/schedules/from-nl`, CLI `akasha schedule from-nl`) |
+
+Prérequis brief canal : connecteur Telegram activé + chat id notify (Paramètres → Connecteurs).
+
+Détail cycle / contrats / observabilité (contributeurs) : `spec/dev/runtime/autonomous-mission.md`.
 """
 
 DONNEES_BODY = """# Données, RAG et mémoire
@@ -204,7 +218,39 @@ Installez depuis un dossier cloné : `akasha plugin install CHEMIN`.
 
 Catalogue public : page **Plugins** sur https://azerothl.github.io/Akasha_app/plugins.html
 
-Plugins **sidecar** (canaux Matrix, CalDAV) : processus compagnon ; voir le README de chaque plugin.
+Plugins **sidecar** (canaux Matrix, CalDAV, **Home Assistant événements**) : processus compagnon ; voir le README de chaque plugin.
+
+### Réseau host (sandbox HTTP)
+
+Les plugins WASM n’ont pas d’accès réseau libre. Pour autoriser des appels HTTP :
+
+1. Dans le `manifest.toml` du plugin : `permissions = ["network"]`.
+2. Section `[network]` avec `allowed_url_prefixes`, `https_only`, `max_response_bytes`, `timeout_ms`, `max_requests_per_run`.
+
+L’host expose uniquement `akasha::http_fetch` (JSON in/out). Sans permission `network` ou sans préfixe autorisé, les appels sont refusés. Détail : `spec/dev/plugins/plugin-host-network.md`.
+
+### Vue carte (`view: "map"`)
+
+Un outil (plugin ou natif) peut renvoyer un JSON avec `"view": "map"` pour afficher une carte dans l’UI (géométrie GeoJSON-like `[lon, lat]`, routes, étapes, bbox, liens OSM optionnels). Contrat : `spec/dev/plugins/plugin-map-view-schema.md`.
+
+### Home Assistant (domotique)
+
+Akasha pilote **Home Assistant** (Zigbee, Z-Wave, Matter via HA) — pas un hub radio natif.
+
+**Prérequis HA**
+
+1. Installer [Home Assistant](https://www.home-assistant.io/installation/).
+2. Créer un jeton d'accès long-lived (Profil → Sécurité).
+3. Détecter l'URL : `akasha discover homeassistant` ou Réglages → Connecteurs → **Détecter**.
+
+**Configuration Akasha**
+
+- `connectors.env` : `AKASHA_HOMEASSISTANT_ENABLED=1`, `HA_BASE_URL=http://…`
+- Vault : `akasha vault set ha_access_token VOTRE_TOKEN`
+- Plugin : `akasha plugin install CHEMIN/vers/Akasha_plugins/plugins/homeassistant`
+- Sidecar (événements → webhooks) : voir `plugins/homeassistant/README.md`
+
+**Outils agent** : `ha_get_state`, `ha_list_entities`, `ha_call_service`, `ha_run_script` (plugin `homeassistant`).
 
 ## Code Studio
 
@@ -239,6 +285,8 @@ def main() -> None:
         + sections_matching(sections, r"^## 3\. ")
         + "\n\n"
         + sections_matching(sections, r"^## 7\. ")
+        + "\n\n"
+        + sections_matching(sections, r"^## 7bis\. ")
         + "\n\n"
         + sections_matching(sections, r"^## 13\. "),
         "interfaces.md": lambda: build_interfaces(sections),
@@ -279,6 +327,15 @@ def build_interfaces(sections: list[tuple[str, str]]) -> str:
 
 def build_nouveautes(sections: list[tuple[str, str]]) -> str:
     old = sections_matching(sections, r"^## 14\. ")
+    v010 = """
+## Nouveautés 0.10.0
+
+- **First-use embarqué** : wizard UI (statut, download GGUF, multi-modèle, premier message test)
+- **Artefacts** : zip CPU (Candle) + CUDA / full CUDA (llama-cpp-4 + GGUF)
+- **Cockpit** : Active work, modes composer, Usage 7/30 j, pin/fork/dual-pane
+- **Life layer** : overnight, brief matinal Telegram, OAuth Connectors, schedules en langage naturel
+- **Companion LAN** : APIs daemon pour client ESP32 (pairing / discovery)
+"""
     v09 = """
 ## Nouveautés 0.9.0
 
@@ -288,7 +345,7 @@ def build_nouveautes(sections: list[tuple[str, str]]) -> str:
 - **Plugins canaux** : Matrix et CalDAV (sidecar) dans le catalogue public
 - **Code Studio** : `npx akasha-code-studio@0.9.0`
 """
-    return clean_user_text("# Nouveautés\n\n" + v09 + "\n\n---\n\n" + old)
+    return clean_user_text("# Nouveautés\n\n" + v010 + "\n\n---\n\n" + v09 + "\n\n---\n\n" + old)
 
 
 if __name__ == "__main__":

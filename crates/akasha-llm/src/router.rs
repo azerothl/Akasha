@@ -436,7 +436,7 @@ impl LLMRouter {
         provider
             .complete(&req, timeout, Some(entry.model.as_str()))
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| crate::provider::format_provider_error(entry.provider.as_str(), &e))
     }
 
     /// Set the primary provider/model for a task type (e.g. conversation, code_generation). Applied immediately.

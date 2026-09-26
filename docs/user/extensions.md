@@ -17,7 +17,7 @@ Vous pouvez **demander à l'agent d'installer un skill** depuis une URL. Par exe
 ## ## 10. Canaux (Telegram, Slack, Discord)
 
 
-- **Telegram** : enregistrez le token du bot avec `akasha vault set telegram_bot_token VOTRE_TOKEN`, puis définissez la variable d'environnement `AKASHA_TELEGRAM_ENABLED=1`. Le bot répond aux commandes `/akasha <message>` ou `/start`. Pour les briefs / notifies (Life layer), renseignez aussi `AKASHA_TELEGRAM_NOTIFY_CHAT_ID` (UI Connecteurs) — le daemon peut alors appeler `POST /api/channels/notify` `{ "channel": "telegram", "text": "…" }`.
+- **Telegram** : enregistrez le token du bot avec `akasha vault set telegram_bot_token VOTRE_TOKEN`, puis définissez la variable d'environnement `AKASHA_TELEGRAM_ENABLED=1`. Le bot répond aux commandes `/akasha <message>` ou `/start`. Pour les briefs / notifies (Life layer), renseignez aussi `AKASHA_TELEGRAM_NOTIFY_CHAT_ID` (UI Connecteurs) — le daemon peut alors appeler `POST /api/channels/notify`.
 - **Slack** : vault `slack_signing_secret`, puis `AKASHA_SLACK_ENABLED=1`. Configurez la slash command vers l'URL fournie par votre déploiement.
 - **Discord** : vault `discord_bot_token`, puis `AKASHA_DISCORD_ENABLED=1`. Le bot répond au préfixe `!akasha <message>`.
 
@@ -33,6 +33,19 @@ Installez depuis un dossier cloné : `akasha plugin install CHEMIN`.
 Catalogue public : page **Plugins** sur https://azerothl.github.io/Akasha_app/plugins.html
 
 Plugins **sidecar** (canaux Matrix, CalDAV, **Home Assistant événements**) : processus compagnon ; voir le README de chaque plugin.
+
+### Réseau host (sandbox HTTP)
+
+Les plugins WASM n’ont pas d’accès réseau libre. Pour autoriser des appels HTTP :
+
+1. Dans le `manifest.toml` du plugin : `permissions = ["network"]`.
+2. Section `[network]` avec `allowed_url_prefixes`, `https_only`, `max_response_bytes`, `timeout_ms`, `max_requests_per_run`.
+
+L’host expose uniquement `akasha::http_fetch` (JSON in/out). Sans permission `network` ou sans préfixe autorisé, les appels sont refusés. Détail : `spec/dev/plugins/plugin-host-network.md`.
+
+### Vue carte (`view: "map"`)
+
+Un outil (plugin ou natif) peut renvoyer un JSON avec `"view": "map"` pour afficher une carte dans l’UI (géométrie GeoJSON-like `[lon, lat]`, routes, étapes, bbox, liens OSM optionnels). Contrat : `spec/dev/plugins/plugin-map-view-schema.md`.
 
 ### Home Assistant (domotique)
 
@@ -50,13 +63,8 @@ Akasha pilote **Home Assistant** (Zigbee, Z-Wave, Matter via HA) — pas un hub 
 - Vault : `akasha vault set ha_access_token VOTRE_TOKEN`
 - Plugin : `akasha plugin install CHEMIN/vers/Akasha_plugins/plugins/homeassistant`
 - Sidecar (événements → webhooks) : voir `plugins/homeassistant/README.md`
-- Webhooks : `AKASHA_AUTOMATION_WEBHOOK_SECRET` pour le sidecar ou automatisations HA
 
 **Outils agent** : `ha_get_state`, `ha_list_entities`, `ha_call_service`, `ha_run_script` (plugin `homeassistant`).
-
-Skill recommandé : installer `home-assistant` depuis [Akasha_skills](https://github.com/azerothl/Akasha_skills/tree/main/skills/home-assistant).
-
-Voir aussi : `spec/dev/integrations/service-discovery.md` dans le dépôt Akasha (moteur mutualisé).
 
 ## Code Studio
 

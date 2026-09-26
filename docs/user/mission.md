@@ -38,3 +38,5 @@ En complément de la mission autonome, l’onglet **Calendrier → Récurrences*
 | **Langage naturel** | Phrase du type « chaque matin à 7h30, brief Telegram » → aperçu puis création (`POST /api/schedules/from-nl`, CLI `akasha schedule from-nl`) |
 
 Prérequis brief canal : connecteur Telegram activé + chat id notify (Paramètres → Connecteurs).
+
+Détail cycle / contrats / observabilité (contributeurs) : `spec/dev/runtime/autonomous-mission.md`.
