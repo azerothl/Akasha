@@ -198,3 +198,12 @@ Entrées dans `spec/embedded_models.json` ; scripts `bench_embedded.ps1` / `.sh`
 - Spike DLM discret si runtime Rust/Windows mature
 - Intégration Rbitnet POC avec bench comparatif
 - Camelid-style `/api/capabilities` pour modèles GGUF (+ flags vision/mmproj)
+
+### Socle livré (automatisable sans GPU)
+
+- `GET /api/capabilities` — taxonomie `supported` / `evidence_only` / `groundwork_only` + evidence runtime
+- Protocole AR : `spec/dev/quality/bench_ar_protocol.json` + runner `bench_ar_protocol.py --mock|--live`
+- Doc : `spec/dev/quality/bench_ar_v0.11.md`
+- `n_batch` configurable (`AKASHA_EMBEDDED_N_BATCH`) avec hint arch hybrid Qwen3.5
+
+**Reste opérateur** : benches NVIDIA réels + collage résultats + décision A1.

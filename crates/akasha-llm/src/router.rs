@@ -306,6 +306,13 @@ impl LLMRouter {
         akasha_embedded_llm::EmbeddedLlm::status_snapshot()
     }
 
+    /// Camelid-style evidence-gated capabilities for `/api/capabilities`.
+    #[cfg(feature = "embedded")]
+    pub fn embedded_capabilities(&self) -> serde_json::Value {
+        let _ = self;
+        akasha_embedded_llm::capabilities::build_capabilities()
+    }
+
     /// List models from embedded_models.json manifest.
     #[cfg(all(feature = "embedded", feature = "embedded-download"))]
     pub fn embedded_models_manifest(

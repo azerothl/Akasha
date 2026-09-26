@@ -1,13 +1,26 @@
 //! llama-cpp-4 GGUF embedded backend (CPU or CUDA).
 
+use crate::capabilities::{recommended_n_batch_for_arch, resolved_n_batch_hint};
 use crate::config::n_gpu_layers;
 use crate::{EmbeddedLlmError, Result};
 use once_cell::sync::{Lazy, OnceCell};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
-const DEFAULT_N_BATCH: u32 = 2048;
 const DEFAULT_N_CTX: u32 = 4096;
+
+/// Effective `n_batch` for llama.cpp context (env `AKASHA_EMBEDDED_N_BATCH`, min 256).
+/// Hybrid arches (Qwen3.5) need a generous batch to avoid `n_tokens_all <= n_batch` asserts.
+fn effective_n_batch() -> u32 {
+    let arch = std::env::var("AKASHA_EMBEDDED_ARCH")
+        .ok()
+        .unwrap_or_default();
+    if arch.trim().is_empty() {
+        resolved_n_batch_hint()
+    } else {
+        recommended_n_batch_for_arch(&arch)
+    }
+}
 
 static BACKEND: OnceCell<llama_cpp_4::llama_backend::LlamaBackend> = OnceCell::new();
 static PIPELINE: Lazy<RwLock<Option<LlamaCppPipeline>>> = Lazy::new(|| RwLock::new(None));
@@ -161,9 +174,11 @@ where
     let backend = llama_backend()?;
     let n_ctx = std::num::NonZeroU32::new(DEFAULT_N_CTX)
         .expect("DEFAULT_N_CTX must be non-zero");
+    let n_batch = effective_n_batch();
+    let n_ubatch = n_batch.min(512).max(64);
     let ctx_params = LlamaContextParams::default()
-        .with_n_batch(DEFAULT_N_BATCH)
-        .with_n_ubatch(512)
+        .with_n_batch(n_batch)
+        .with_n_ubatch(n_ubatch)
         .with_n_ctx(Some(n_ctx));
     let mut ctx = pipeline
         .model
@@ -188,8 +203,8 @@ where
         return Ok(String::new());
     }
 
-    let mut batch = LlamaBatch::new(DEFAULT_N_BATCH as usize, 1);
-    decode_prompt_tokens(&mut ctx, &mut batch, &prompt_tokens, DEFAULT_N_BATCH)?;
+    let mut batch = LlamaBatch::new(n_batch as usize, 1);
+    decode_prompt_tokens(&mut ctx, &mut batch, &prompt_tokens, n_batch)?;
 
     let temp = temperature.unwrap_or(0.3) as f32;
     let max_new = max_tokens.unwrap_or(256).min(2048);

@@ -45,6 +45,30 @@ pub struct ManifestModel {
     pub engine_candidates: Vec<String>,
     #[serde(default)]
     pub profile_tiers: Vec<String>,
+    /// Camelid-style class: supported | evidence_only | groundwork_only.
+    #[serde(default)]
+    pub compatibility: Option<String>,
+    /// Whether the architecture is multimodal (vision) — requires mmproj for llama.cpp.
+    #[serde(default)]
+    pub vision: bool,
+    /// If true, chat-with-image needs a companion mmproj GGUF.
+    #[serde(default)]
+    pub mmproj_required: bool,
+    /// Optional mmproj filename under `models/embedded/`.
+    #[serde(default)]
+    pub mmproj_filename: Option<String>,
+    /// Optional mmproj download URL (wizard / bench tooling).
+    #[serde(default)]
+    pub mmproj_url: Option<String>,
+    /// Bench tier label: tier1 | tier2 | tier3.
+    #[serde(default)]
+    pub bench_tier: Option<String>,
+    /// Role: default | wizard_variant | bench_candidate | watch.
+    #[serde(default)]
+    pub bench_role: Option<String>,
+    /// Free-form evidence note for `/api/capabilities`.
+    #[serde(default)]
+    pub evidence_notes: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
