@@ -7,6 +7,7 @@
 - `interfaces/`: TUI, web/desktop, UX technique
 - `integrations/`: MCP, webhooks, bridges externes  
   - Voir aussi [pi_mono_backend_parity_check.md](integrations/pi_mono_backend_parity_check.md) (streaming outils, tokens/coût vs pi-ai).
+  - [akasha-os-sibling-skills-modules.md](integrations/akasha-os-sibling-skills-modules.md) — P9 interop skills/plugins daemon ↔ skills/modules Preview (sans fusion binaire).
 - `plugins/`: host plugin, schemas, strategie plugin
 - `runtime/`: execution, terminal backends, cache, hooks runtime  
   - Voir aussi [agent_client_event_contract.md](runtime/agent_client_event_contract.md) (événements agent côté client, alignement Pi).

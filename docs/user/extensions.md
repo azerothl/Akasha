@@ -1,5 +1,7 @@
 # Skills, plugins et canaux
 
+> **akasha-os** : les skills/plugins du daemon ne sont pas les modules Preview — voir [extensions vs akasha-os](extensions-vs-akasha-os.md).
+
 ## ## 9. Skills (capacités supplémentaires)
 
 

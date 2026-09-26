@@ -207,12 +207,12 @@ Objectif : **aligner** (docs + chemins d’import/export) les extensions du daem
 
 ### Must-ship
 
-- [ ] **Note d’interop** `spec/dev/integrations/akasha-os-sibling-skills-modules.md` (ou équivalent) : tableau skill↔skill, plugin↔module, limites ABI, liens vers sibling-bridge + write-a-skill/module
-- [ ] **Matrice de compatibilité `SKILL.md`** : champs communs / divergents (daemon : agentskills.io `name`+`description` ; OS : `when_to_use`, `tools`, `license`) + procédure d’adaptation minimale
-- [ ] **Pilote skill partagé** : au moins **un** skill installable des deux côtés (ex. reprise conceptuelle de `morning-brief` OS ↔ skill `Akasha_skills` / life-layer overnight) — même intention produit, chemins d’install documentés
-- [ ] **Inventaire catalogues** : lister skills/plugins daemon vs `community/skills` + modules Preview ; marquer « portable » / « daemon-only » / « OS-only »
-- [ ] Doc user courte : section « extensions vs akasha-os » (ou renvoi depuis [extensions.md](../../../docs/user/extensions.md)) — pas de promesse marketplace unifié
-- [ ] Référencer le bridge dans la doc dev daemon (lien `docs/bridge/` JSON Schema) pour mémoire / secrets **si** un client HTTP optionnel est prévu (sinon doc seule = DoD min)
+- [x] **Note d’interop** `spec/dev/integrations/akasha-os-sibling-skills-modules.md` (ou équivalent) : tableau skill↔skill, plugin↔module, limites ABI, liens vers sibling-bridge + write-a-skill/module
+- [x] **Matrice de compatibilité `SKILL.md`** : champs communs / divergents (daemon : agentskills.io `name`+`description` ; OS : `when_to_use`, `tools`, `license`) + procédure d’adaptation minimale
+- [x] **Pilote skill partagé** : au moins **un** skill installable des deux côtés (ex. reprise conceptuelle de `morning-brief` OS ↔ skill `Akasha_skills` / life-layer overnight) — même intention produit, chemins d’install documentés (`spec/skills/morning-brief/`)
+- [x] **Inventaire catalogues** : lister skills/plugins daemon vs `community/skills` + modules Preview ; marquer « portable » / « daemon-only » / « OS-only »
+- [x] Doc user courte : section « extensions vs akasha-os » (ou renvoi depuis [extensions.md](../../../docs/user/extensions.md)) — pas de promesse marketplace unifié ([extensions-vs-akasha-os.md](../../../docs/user/extensions-vs-akasha-os.md))
+- [x] Référencer le bridge dans la doc dev daemon (lien `docs/bridge/` JSON Schema) pour mémoire / secrets **si** un client HTTP optionnel est prévu (sinon doc seule = DoD min)
 
 ### Stretch
 
@@ -244,7 +244,7 @@ Objectif : **aligner** (docs + chemins d’import/export) les extensions du daem
 - [ ] Dette doc « Partially documented » prioritaire résorbée (ou tickets GitHub associés)
 - [ ] GPU CI self-hosted : au moins un run `gpu-smoke` documenté (vert ou bloqueur opérateur noté)
 - [ ] Note Rbitnet/DLM : spike **ou** no-go renouvelé (pas de silence)
-- [ ] **P9** : note d’interop + matrice `SKILL.md` + pilote skill partagé + inventaire catalogues publiés
+- [x] **P9** : note d’interop + matrice `SKILL.md` + pilote skill partagé + inventaire catalogues publiés (must ; stretch bridge/ABI encore ouverts)
 - [ ] Site / `api/latest.json` synchronisés pour la bannière update
 
 ---

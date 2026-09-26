@@ -47,6 +47,11 @@
       "file": "extensions.md"
     },
     {
+      "id": "extensions-vs-akasha-os",
+      "title": "Extensions vs akasha-os",
+      "file": "extensions-vs-akasha-os.md"
+    },
+    {
       "id": "depannage",
       "title": "Dépannage",
       "file": "depannage.md"

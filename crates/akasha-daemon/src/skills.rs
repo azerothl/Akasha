@@ -200,3 +200,56 @@ impl Default for SkillRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dual_os_front_matter_loads_name_and_description() {
+        let content = r#"---
+name: morning-brief
+description: Short local morning briefing from memory, open tasks, and notes — no network.
+license: MIT
+when_to_use: >
+  User asks for a morning briefing or daily recap.
+tools:
+  - memory.recall
+  - tasks.list
+  - goal.complete
+metadata:
+  version: "1.0.0"
+---
+
+# Morning brief
+
+Body text.
+"#;
+        let (fm, body_start) = parse_skill_front_matter(content).expect("parse dual SKILL.md");
+        assert_eq!(fm.name, "morning-brief");
+        assert!(fm.description.contains("morning briefing"));
+        assert!(fm.tool_ref.is_empty());
+        assert!(fm.agents.is_empty());
+        let body = content[body_start..].trim();
+        assert!(body.starts_with("# Morning brief"));
+    }
+
+    #[tokio::test]
+    async fn load_morning_brief_pilot_from_spec_skills() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("spec/skills/morning-brief/SKILL.md");
+        assert!(
+            root.is_file(),
+            "P9 pilot missing at {}",
+            root.display()
+        );
+        let def = load_skill_from_md(&root)
+            .await
+            .expect("io")
+            .expect("front matter");
+        assert_eq!(def.name, "morning-brief");
+        assert!(!def.description.is_empty());
+        assert_eq!(def.body_path.as_ref(), Some(&root));
+    }
+}
