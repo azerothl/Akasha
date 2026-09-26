@@ -19,7 +19,7 @@ Ce registre est la source de vérité sur l'état de couverture des fonctionnali
 | Workspace UI | Cookbook (modèles + recettes), Comparer, Recherche, Notes | Implemented | OK | OK | `docs/user/workspace.md`, `38_interfaces.md`, `spec/cookbook/` |
 | Doc embarquée | Guide multi-pages + API index | Implemented | OK | OK | `docs/user/`, `user_docs.rs`, `51_doc_vs_code_audit.md`, `scripts/build-user-docs.py` |
 | Runtime | Sessions terminal / PTY et backends | Implemented | OK | OK | `docs/user/commandes.md` (§7bis), `43_session_terminal.md`, `dev/runtime/terminal-backends-roadmap.md` |
-| Integrations | MCP runtime / OAuth / MVP | In progress | N/A | OK | `dev/integrations/mcp-runtime.md`, `dev/integrations/mcp-oauth.md`, `dev/integrations/mcp-mvp.md` |
+| Integrations | MCP runtime / OAuth / MVP | Implemented | OK | OK | `docs/user/configuration.md` (§8bis), `docs/user/commandes.md`, `dev/integrations/mcp-runtime.md`, `dev/integrations/mcp-oauth.md`, `dev/integrations/mcp-mvp.md` |
 | Plugins | Architecture plugins + reputation + reseau host | Implemented | OK | OK | `docs/user/extensions.md`, `16_plugin_architecture.md`, `27_plugin_reputation_system.md`, `dev/plugins/plugin-host-network.md`, `dev/plugins/plugin-map-view-schema.md` |
 | Memory | Memoire LT + compaction + knowledge graph + user RAG async | Implemented | Partially documented | OK | `06_memory_model.md`, `47_memory_4_layers.md`, `dev/roadmap/kinbot_inspired_roadmap.md` |
 | Graph | Workspace project graph | Implemented | OK | OK | `docs/user/donnees.md`, `54_workspace_project_knowledge_graph.md` |

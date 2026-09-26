@@ -280,7 +280,9 @@ def main() -> None:
         + "\n\n"
         + sections_matching(sections, r"^## 5\. ")
         + "\n\n"
-        + sections_matching(sections, r"^## 8\. "),
+        + sections_matching(sections, r"^## 8\. ")
+        + "\n\n"
+        + sections_matching(sections, r"^## 8bis\. "),
         "commandes.md": lambda: "# Commandes\n\n"
         + sections_matching(sections, r"^## 3\. ")
         + "\n\n"

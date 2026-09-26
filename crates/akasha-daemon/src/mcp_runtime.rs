@@ -269,6 +269,22 @@ pub async fn oauth_put(data_dir: &Path, body: &Value) -> Result<Value, String> {
 
 /// Spawn one MCP server from `mcp.json`, send `initialize`, keep the process alive for operator tooling.
 pub async fn start_stdio_server(data_dir: &Path, server: &str) -> Result<Value, String> {
+    let policy_path = data_dir.join("tools_policy.yaml");
+    if policy_path.is_file() {
+        match akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+            Ok(policy) if !policy.can_attach_mcp_server(server) => {
+                return Err(format!(
+                    "MCP server {:?} denied by tools_policy.yaml (mcp_servers allow-list)",
+                    server
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Err(format!("tools_policy.yaml: {}", e));
+            }
+        }
+    }
+
     let path = data_dir.join("mcp.json");
     let raw = tokio::fs::read_to_string(&path)
         .await

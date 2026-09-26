@@ -61,6 +61,11 @@
 | `akasha plugin install CHEMIN` | Installe un plugin depuis un répertoire. |
 | `akasha plugin uninstall ID` | Désinstalle un plugin. |
 | `akasha plugin catalog` | Affiche le catalogue local des plugins. |
+| `akasha mcp validate FICHIER` | Valide un fichier `mcp.json` (schéma `mcpServers`). |
+| `akasha mcp probe FICHIER [--name CLE] [--tools]` | Handshake stdio court (`initialize` [+ `tools/list`]). |
+| `akasha mcp status [--json]` | Statut opérateur (config, allow-list policy, serveur stdio attaché). |
+| `akasha mcp start --server CLE` | Attache un serveur MCP stdio longue durée (daemon requis). |
+| `akasha mcp stop` | Détache le serveur MCP stdio attaché. |
 
 **Sélection des plugins (daemon)** : pour chaque message utilisateur (hors petit-talk et tâches Code Studio disque), le daemon interroge brièvement le modèle configuré pour la route **`system`** dans `llm_router.yaml` afin de choisir quels plugins WASM (tool) sont pertinents d’après leur **description** ; un bloc récapitulatif est ajouté au prompt. Les anciennes règles `routing_rules` des manifests ne bloquent plus les autres outils (`write_file`, etc.) — seule la politique **`tools_policy.yaml`** s’applique à l’exécution.
 

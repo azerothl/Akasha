@@ -334,6 +334,22 @@ impl ToolsPolicy {
         })
     }
 
+    /// Returns whether an MCP stdio server may be attached (`POST …/stdio/start`).
+    /// When `mcp_servers` is non-empty, only listed servers with `enabled != false` may attach.
+    pub fn can_attach_mcp_server(&self, server: &str) -> bool {
+        let server = server.trim();
+        if server.is_empty() {
+            return false;
+        }
+        if self.mcp_servers.is_empty() {
+            return true;
+        }
+        match self.mcp_servers.get(server) {
+            None => false,
+            Some(entry) => entry.enabled != Some(false),
+        }
+    }
+
     /// Returns whether an MCP namespaced tool may run (`mcp_<server>_<tool>`).
     /// When `mcp_servers` is non-empty, only listed servers are allowed (unless `enabled: false`).
     pub fn can_use_mcp_tool(&self, server: &str, tool: &str) -> bool {
@@ -342,16 +358,14 @@ impl ToolsPolicy {
         if server.is_empty() || tool.is_empty() {
             return false;
         }
+        if !self.can_attach_mcp_server(server) {
+            return false;
+        }
         let full = format!("mcp_{server}_{tool}");
-        if self.mcp_servers.is_empty() {
-            return true;
-        }
         let Some(entry) = self.mcp_servers.get(server) else {
-            return false;
+            // Empty allow-list → all servers/tools permitted (can_attach already returned true).
+            return true;
         };
-        if entry.enabled == Some(false) {
-            return false;
-        }
         if entry
             .blocked_tools
             .iter()
@@ -818,8 +832,36 @@ mod tests {
             mcp_servers: servers,
             ..Default::default()
         };
+        assert!(p.can_attach_mcp_server("fs"));
+        assert!(!p.can_attach_mcp_server("other"));
         assert!(p.can_use_mcp_tool("fs", "read"));
         assert!(!p.can_use_mcp_tool("other", "read"));
+    }
+
+    #[test]
+    fn mcp_attach_disabled_server() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "fs".to_string(),
+            McpServerPolicy {
+                enabled: Some(false),
+                allowed_tools: vec!["*".to_string()],
+                ..Default::default()
+            },
+        );
+        let p = ToolsPolicy {
+            mcp_servers: servers,
+            ..Default::default()
+        };
+        assert!(!p.can_attach_mcp_server("fs"));
+        assert!(!p.can_use_mcp_tool("fs", "read"));
+    }
+
+    #[test]
+    fn mcp_attach_open_when_no_allowlist() {
+        let p = ToolsPolicy::default();
+        assert!(p.can_attach_mcp_server("any"));
+        assert!(p.can_use_mcp_tool("any", "tool"));
     }
 
     // --- can_use_device_interface ---
