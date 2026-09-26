@@ -125,6 +125,11 @@ def main() -> None:
     print(f"  {lock_json.relative_to(root)}")
     print(f"  {ui_cargo.relative_to(root)}")
     print(f"  {tauri_conf.relative_to(root)}")
+    print(
+        "Next (recommended before tag): regenerate spec/dev/architecture/ "
+        "(architecture-graph.json + architecture-diagram.html). "
+        "See spec/dev/architecture/README.md"
+    )
 
 
 if __name__ == "__main__":

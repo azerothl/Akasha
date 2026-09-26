@@ -31,8 +31,9 @@ Product version must match across the workspace Cargo.toml (`[workspace.package]
 **Recommended sequence (automated):**
 
 1. Actions → **Sync release version** → set `version` (e.g. `0.8.0`, no `v` prefix) and `branch` (e.g. `main`). This runs `scripts/sync-release-version.py` and pushes one commit.
-2. Pull locally, then create and push the tag: `git tag v0.8.0 && git push origin v0.8.0`.
-3. The **Release** workflow builds and publishes artifacts. The `verify-release-version` job fails the tag build if the tag does not match the embedded versions (run step 1 first).
+2. **Regenerate the architecture map** under `spec/dev/architecture/` (`architecture-graph.json` + standalone `architecture-diagram.html`) so the diagram matches the release’s crates, APIs, and flows. See [spec/dev/architecture/README.md](spec/dev/architecture/README.md). Commit before tagging.
+3. Pull locally, then create and push the tag: `git tag v0.8.0 && git push origin v0.8.0`.
+4. The **Release** workflow builds and publishes artifacts. The `verify-release-version` job fails the tag build if the tag does not match the embedded versions (run step 1 first).
 
 If `main` is branch-protected, add a repository secret `VERSION_SYNC_TOKEN` (PAT with `contents: write`) so the sync workflow can push.
 

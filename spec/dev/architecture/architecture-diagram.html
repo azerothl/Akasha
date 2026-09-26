@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Akasha — Architecture Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg0: #f3f5f8;
+    --bg1: #e8edf3;
+    --ink: #1a2332;
+    --ink-soft: #4a5568;
+    --muted: #7a8699;
+    --line: #c5ceda;
+    --panel: rgba(255, 255, 255, 0.82);
+    --panel-border: rgba(26, 35, 50, 0.08);
+    --accent: #0d7a6f;
+    --accent-soft: #d4efe9;
+    --warn: #b45309;
+    --warn-soft: #fde8c8;
+    --node-fill: #ffffff;
+    --node-stroke: #9aa8bc;
+    --edge: #9aa8bc;
+    --edge-active: #0d7a6f;
+    --dim: 0.18;
+    --shadow: 0 10px 40px rgba(26, 35, 50, 0.08);
+    --radius: 12px;
+    --font: "Sora", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    font-family: var(--font);
+    color: var(--ink);
+    background:
+      radial-gradient(1200px 600px at 10% -10%, #d9e7ef 0%, transparent 55%),
+      radial-gradient(900px 500px at 100% 0%, #e2ebe4 0%, transparent 50%),
+      linear-gradient(165deg, var(--bg0), var(--bg1));
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: 1fr minmax(280px, 360px);
+    grid-template-rows: auto 1fr;
+    height: 100%;
+    min-height: 100dvh;
+  }
+
+  header {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.85rem 1.25rem;
+    border-bottom: 1px solid var(--panel-border);
+    background: var(--panel);
+    backdrop-filter: blur(10px);
+  }
+
+  header .brand {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  header h1 {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  header p {
+    margin: 0;
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+  }
+
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .toolbar input {
+    font: 500 0.8rem var(--font);
+    padding: 0.45rem 0.7rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ink);
+    min-width: 160px;
+  }
+
+  .toolbar button {
+    font: 500 0.78rem var(--font);
+    padding: 0.45rem 0.75rem;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: #fff;
+    color: var(--ink);
+    cursor: pointer;
+  }
+
+  .toolbar button:hover { border-color: var(--accent); color: var(--accent); }
+  .toolbar button.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  .stage {
+    position: relative;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .canvas-wrap {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    cursor: grab;
+  }
+  .canvas-wrap.dragging { cursor: grabbing; }
+
+  svg#map {
+    display: block;
+    min-width: 1100px;
+    min-height: 760px;
+    width: 100%;
+    height: 100%;
+    user-select: none;
+  }
+
+  .layer-band {
+    fill: rgba(255, 255, 255, 0.35);
+    stroke: rgba(26, 35, 50, 0.04);
+  }
+
+  .layer-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    fill: var(--muted);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .edge {
+    fill: none;
+    stroke: var(--edge);
+    stroke-width: 1.5;
+    opacity: 0.55;
+    transition: stroke 0.2s, opacity 0.2s, stroke-width 0.2s;
+  }
+
+  .edge.active {
+    stroke: var(--edge-active);
+    stroke-width: 2.75;
+    opacity: 1;
+  }
+
+  .edge.dim { opacity: var(--dim); }
+
+  .node {
+    cursor: pointer;
+  }
+
+  .node rect {
+    fill: var(--node-fill);
+    stroke: var(--node-stroke);
+    stroke-width: 1.4;
+    transition: fill 0.2s, stroke 0.2s, filter 0.2s, opacity 0.2s;
+    filter: drop-shadow(0 2px 4px rgba(26, 35, 50, 0.06));
+  }
+
+  .node text {
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: 600;
+    fill: var(--ink);
+    pointer-events: none;
+  }
+
+  .node .sub {
+    font-size: 9.5px;
+    font-weight: 500;
+    fill: var(--muted);
+    font-family: var(--mono);
+  }
+
+  .node:hover rect {
+    stroke: var(--accent);
+    fill: var(--accent-soft);
+  }
+
+  .node.active rect {
+    stroke: var(--accent);
+    stroke-width: 2.4;
+    fill: var(--accent-soft);
+  }
+
+  .node.path rect {
+    stroke: var(--warn);
+    stroke-width: 2.2;
+    fill: var(--warn-soft);
+  }
+
+  .node.dim { opacity: var(--dim); }
+
+  .side {
+    border-left: 1px solid var(--panel-border);
+    background: var(--panel);
+    backdrop-filter: blur(10px);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    box-shadow: var(--shadow);
+  }
+
+  .side-head {
+    padding: 1rem 1rem 0.6rem;
+    border-bottom: 1px solid var(--panel-border);
+  }
+
+  .side-head h2 {
+    margin: 0 0 0.25rem;
+    font-size: 0.95rem;
+  }
+
+  .side-head p {
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+    line-height: 1.4;
+  }
+
+  .flows {
+    overflow: auto;
+    padding: 0.6rem;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .flow {
+    text-align: left;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: #fff;
+    padding: 0.7rem 0.8rem;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, transform 0.15s;
+  }
+
+  .flow:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+  }
+
+  .flow.selected {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .flow .name {
+    font-size: 0.82rem;
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+  }
+
+  .flow .desc {
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+    line-height: 1.35;
+  }
+
+  .flow .meta {
+    margin-top: 0.4rem;
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    color: var(--muted);
+  }
+
+  .detail {
+    border-top: 1px solid var(--panel-border);
+    padding: 0.85rem 1rem 1rem;
+    min-height: 140px;
+    background: rgba(255, 255, 255, 0.55);
+  }
+
+  .detail h3 {
+    margin: 0 0 0.35rem;
+    font-size: 0.9rem;
+  }
+
+  .detail .crate {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--accent);
+    margin-bottom: 0.45rem;
+  }
+
+  .detail p {
+    margin: 0;
+    font-size: 0.76rem;
+    color: var(--ink-soft);
+    line-height: 1.45;
+  }
+
+  .detail .apis {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+  }
+
+  .detail .apis span {
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    padding: 0.2rem 0.4rem;
+    border-radius: 5px;
+    background: #eef2f6;
+    color: var(--ink-soft);
+  }
+
+  .tooltip {
+    position: absolute;
+    z-index: 20;
+    pointer-events: none;
+    max-width: 280px;
+    padding: 0.65rem 0.75rem;
+    border-radius: 10px;
+    background: #1a2332;
+    color: #f3f5f8;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.2);
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity 0.12s, transform 0.12s;
+  }
+
+  .tooltip.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .tooltip strong {
+    display: block;
+    font-size: 0.82rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .tooltip .t-crate {
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    color: #8fd4c8;
+    margin-bottom: 0.35rem;
+  }
+
+  .legend {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    padding: 0.45rem 0.65rem;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid var(--panel-border);
+    font-size: 0.68rem;
+    color: var(--ink-soft);
+  }
+
+  .legend i {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    margin-right: 0.3rem;
+    vertical-align: -1px;
+  }
+
+  @media (max-width: 900px) {
+    .app {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto minmax(45vh, 1fr) minmax(40vh, 1fr);
+    }
+    .side { border-left: none; border-top: 1px solid var(--panel-border); }
+    header { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <h1>Akasha Architecture</h1>
+      <p>Interactive map of crates, runtime paths, and agent flows · local-first agent OS</p>
+    </div>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Filter nodes…" aria-label="Filter nodes" />
+      <button type="button" id="btn-clear">Clear flow</button>
+      <button type="button" id="btn-fit">Fit view</button>
+    </div>
+  </header>
+
+  <section class="stage" aria-label="Architecture diagram">
+    <div class="canvas-wrap" id="canvas-wrap">
+      <svg id="map" viewBox="0 0 1280 820" role="img" aria-label="Akasha system architecture graph"></svg>
+    </div>
+    <div class="legend">
+      <span><i style="background:#d4efe9;border:1.5px solid #0d7a6f"></i>Selected</span>
+      <span><i style="background:#fde8c8;border:1.5px solid #b45309"></i>Flow path</span>
+      <span><i style="background:#fff;border:1.5px solid #9aa8bc"></i>Component</span>
+    </div>
+    <div class="tooltip" id="tooltip" role="tooltip"></div>
+  </section>
+
+  <aside class="side" aria-label="Flows panel">
+    <div class="side-head">
+      <h2>Flows</h2>
+      <p>Select a flow to highlight its complete path across the diagram.</p>
+    </div>
+    <div class="flows" id="flows"></div>
+    <div class="detail" id="detail">
+      <h3>Component info</h3>
+      <p>Hover a node for a quick tip, or click to pin details here.</p>
+    </div>
+  </aside>
+</div>
+
+<script id="arch-data" type="application/json">
+{
+  "meta": {
+    "product": "Akasha",
+    "version": "0.10+",
+    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, and Tauri/TUI clients.",
+    "defaultPort": 3876
+  },
+  "nodes": [
+    {"id":"ui-tauri","label":"Tauri UI","layer":"clients","crate":"apps/akasha-ui","description":"Desktop React/TypeScript app (Chat, Tasks, Calendar, Memory, Router, Settings). Talks to the daemon on port 3876.","apis":["POST /api/message","GET /api/tasks/:id","GET /api/events","GET /api/status"]},
+    {"id":"ui-tui","label":"TUI","layer":"clients","crate":"akasha-tui","description":"Terminal interface with 7+ tabs. Same slash commands as the UI.","apis":["POST /api/message","GET /api/docs","GET /api/router/metrics"]},
+    {"id":"ui-cli","label":"CLI","layer":"clients","crate":"akasha-cli","description":"Operator CLI: init, start/stop/up, doctor, vault, config, router, plugin, tui.","apis":["akasha start","akasha doctor","akasha init"]},
+    {"id":"ch-slack","label":"Slack","layer":"channels","crate":"akasha-daemon/channels","description":"Slack adapter: signature verify, parse payload, build MessageEnvelope, poll and post replies."},
+    {"id":"ch-teams","label":"Teams","layer":"channels","crate":"akasha-daemon/channels","description":"Microsoft Teams / Bot Framework adapter with JWT validation."},
+    {"id":"ch-discord","label":"Discord","layer":"channels","crate":"akasha-daemon/channels","description":"Discord channel adapter; inbound messages normalize through the gateway / API path."},
+    {"id":"ch-telegram","label":"Telegram","layer":"channels","crate":"akasha-daemon/channels","description":"Telegram bot adapter with cross-channel slash commands."},
+    {"id":"ch-voice","label":"Voice (TTS/STT)","layer":"channels","crate":"akasha-daemon","description":"Optional local voice path via speech tools and voice_router.yaml."},
+    {"id":"http-api","label":"HTTP API :3876","layer":"ingress","crate":"akasha-daemon","description":"Minimal HTTP surface: health, message, tasks, memory, router, plugins, MCP, calendar.","apis":["GET /","GET /api/status","POST /api/message","GET /api/tasks/:id"]},
+    {"id":"gateway","label":"Gateway","layer":"ingress","crate":"akasha-daemon","description":"Normalizes every channel into MessageEnvelope and calls handle_envelope → Main Agent.","apis":["handle_envelope"]},
+    {"id":"main-agent","label":"Main Agent","layer":"agents","crate":"akasha-daemon/agents","description":"Single user-facing entry: ack <500ms, create task, classify complexity, route Direct vs Orchestrated.","apis":["handle_message"]},
+    {"id":"supervisor","label":"Supervisor","layer":"agents","crate":"akasha-daemon/agents","description":"Complexity classifier choosing Direct / Guided / Orchestrated modes."},
+    {"id":"orchestrator","label":"Orchestrator","layer":"agents","crate":"akasha-daemon/agents","description":"Decomposes requests, assigns specialists, aggregates, satisfaction check."},
+    {"id":"conversation","label":"Conversation Worker","layer":"agents","crate":"akasha-daemon/agents","description":"Direct-mode worker: LLM chat loop with tool calls, memory recall, final reply."},
+    {"id":"specialists","label":"Specialist Agents","layer":"agents","crate":"akasha-daemon/agents","description":"Roster: analyst, architect, frontend/backend, QA, documentalist, creative, system, code, research…"},
+    {"id":"event-bus","label":"Event Bus","layer":"runtime","crate":"akasha-daemon/agents","description":"In-process event fan-out feeding UI SSE/polling."},
+    {"id":"task-store","label":"Task Store","layer":"data","crate":"akasha-store","description":"SQLite tasks, todos, pipeline context, schedules."},
+    {"id":"scheduler","label":"Scheduler / Calendar","layer":"runtime","crate":"akasha-calendar","description":"Cron schedules, wakeups, calendar OAuth/CalDAV; fires tasks into Main Agent."},
+    {"id":"memory-orch","label":"Memory Orchestrator","layer":"memory","crate":"akasha-daemon","description":"recall_context: fuses short-term, vector, graph facts, episodic events into one prompt block."},
+    {"id":"mem-short","label":"Short-term Memory","layer":"memory","crate":"akasha-daemon","description":"Session turns with compaction when context exceeds token budget."},
+    {"id":"mem-vector","label":"Vector Memory","layer":"memory","crate":"akasha-store + embeddings","description":"memory_entries with ONNX embeddings; hybrid keyword + semantic search."},
+    {"id":"mem-graph","label":"Graph / Facts","layer":"memory","crate":"akasha-store","description":"Structured subject–predicate–object facts for relational recall."},
+    {"id":"mem-episodic","label":"Episodic Memory","layer":"memory","crate":"akasha-store","description":"Significant events journal with importance/scope metadata."},
+    {"id":"llm-router","label":"LLM Router","layer":"llm","crate":"akasha-llm","description":"Task-type classifier, routes, fallbacks, streaming, metrics. Config: llm_router.yaml."},
+    {"id":"llm-cloud","label":"Cloud Providers","layer":"llm","crate":"akasha-llm","description":"OpenAI, Anthropic, OpenRouter, Azure, Google."},
+    {"id":"llm-local","label":"Local Providers","layer":"llm","crate":"akasha-llm","description":"Ollama and custom local OpenAI-compatible endpoints."},
+    {"id":"llm-embedded","label":"Embedded LLM","layer":"llm","crate":"akasha-embedded-llm","description":"Bundled Candle (Qwen3 0.6B) or llama.cpp GGUF for offline fallback."},
+    {"id":"tools","label":"Tools Engine","layer":"tools","crate":"akasha-tools","description":"File/shell/web/browser/memory/device/voice tools; agentic TOOL: loop."},
+    {"id":"tools-policy","label":"Tools Policy","layer":"tools","crate":"akasha-tools","description":"tools_policy.yaml: allowed paths, commands, domains, timeouts."},
+    {"id":"vault","label":"Vault","layer":"security","crate":"akasha-vault","description":"OS keyring + encrypted file secrets. VAULT: substitution when authorized."},
+    {"id":"policy-engine","label":"Policy Engine","layer":"security","crate":"akasha-daemon","description":"Permissions center, constitution, budget checks."},
+    {"id":"plugin-host","label":"Plugin Host (WASM)","layer":"extensibility","crate":"akasha-plugin-host","description":"Wasmtime sandbox for channel/tool/skill plugins."},
+    {"id":"plugin-api","label":"Plugin API","layer":"extensibility","crate":"akasha-plugin-api","description":"Manifest and capability contracts for plugins."},
+    {"id":"mcp","label":"MCP Runtime","layer":"extensibility","crate":"akasha-daemon","description":"Model Context Protocol stdio/SSE: list/call tools, OAuth helpers."},
+    {"id":"rag","label":"RAG / Spec","layer":"knowledge","crate":"akasha-rag","description":"Retrieval over specs and runbooks for doctor --advice and system agent."},
+    {"id":"workspace-graph","label":"Workspace Graph","layer":"knowledge","crate":"akasha-workspace-graph","description":"Project knowledge graph for codebase/workspace structure."},
+    {"id":"core","label":"akasha-core","layer":"foundation","crate":"akasha-core","description":"Shared types, EventEnvelope, Spec Loader, prompt security helpers."},
+    {"id":"cluster","label":"Cluster (optional)","layer":"ops","crate":"akasha-cluster","description":"NATS, leader election, mTLS. Optional; single-node is default."},
+    {"id":"evals","label":"Evals","layer":"ops","crate":"akasha-evals","description":"Security, runbook, and hallucination evaluation suite."},
+    {"id":"sqlite","label":"SQLite","layer":"data","crate":"akasha-store","description":"Bundled rusqlite for tasks, memory, facts, schedules, metrics."}
+  ],
+  "edges": [
+    {"id":"e1","from":"ui-tauri","to":"http-api","label":"HTTP"},
+    {"id":"e2","from":"ui-tui","to":"http-api","label":"HTTP"},
+    {"id":"e3","from":"ui-cli","to":"http-api","label":"control"},
+    {"id":"e4","from":"ch-slack","to":"gateway","label":"envelope"},
+    {"id":"e5","from":"ch-teams","to":"gateway","label":"envelope"},
+    {"id":"e6","from":"ch-discord","to":"http-api","label":"API"},
+    {"id":"e7","from":"ch-telegram","to":"http-api","label":"API"},
+    {"id":"e8","from":"ch-voice","to":"tools","label":"TTS/STT"},
+    {"id":"e9","from":"http-api","to":"gateway","label":"envelope"},
+    {"id":"e10","from":"gateway","to":"main-agent","label":"handle"},
+    {"id":"e11","from":"main-agent","to":"supervisor","label":"classify"},
+    {"id":"e12","from":"main-agent","to":"event-bus","label":"emit"},
+    {"id":"e13","from":"main-agent","to":"task-store","label":"create"},
+    {"id":"e14","from":"supervisor","to":"conversation","label":"Direct"},
+    {"id":"e15","from":"supervisor","to":"orchestrator","label":"Guided"},
+    {"id":"e16","from":"orchestrator","to":"specialists","label":"delegate"},
+    {"id":"e17","from":"orchestrator","to":"conversation","label":"synth"},
+    {"id":"e18","from":"conversation","to":"memory-orch","label":"recall"},
+    {"id":"e19","from":"specialists","to":"memory-orch","label":"recall"},
+    {"id":"e20","from":"conversation","to":"llm-router","label":"complete"},
+    {"id":"e21","from":"specialists","to":"llm-router","label":"complete"},
+    {"id":"e22","from":"orchestrator","to":"llm-router","label":"decompose"},
+    {"id":"e23","from":"llm-router","to":"llm-cloud","label":"route"},
+    {"id":"e24","from":"llm-router","to":"llm-local","label":"route"},
+    {"id":"e25","from":"llm-router","to":"llm-embedded","label":"fallback"},
+    {"id":"e26","from":"conversation","to":"tools","label":"TOOL:"},
+    {"id":"e27","from":"specialists","to":"tools","label":"TOOL:"},
+    {"id":"e28","from":"tools","to":"tools-policy","label":"authz"},
+    {"id":"e29","from":"tools","to":"vault","label":"secrets"},
+    {"id":"e30","from":"tools","to":"policy-engine","label":"perms"},
+    {"id":"e31","from":"memory-orch","to":"mem-short","label":"session"},
+    {"id":"e32","from":"memory-orch","to":"mem-vector","label":"semantic"},
+    {"id":"e33","from":"memory-orch","to":"mem-graph","label":"facts"},
+    {"id":"e34","from":"memory-orch","to":"mem-episodic","label":"events"},
+    {"id":"e35","from":"mem-vector","to":"sqlite","label":"persist"},
+    {"id":"e36","from":"mem-graph","to":"sqlite","label":"persist"},
+    {"id":"e37","from":"mem-episodic","to":"sqlite","label":"persist"},
+    {"id":"e38","from":"task-store","to":"sqlite","label":"persist"},
+    {"id":"e39","from":"scheduler","to":"main-agent","label":"wakeup"},
+    {"id":"e40","from":"scheduler","to":"task-store","label":"schedules"},
+    {"id":"e41","from":"tools","to":"plugin-host","label":"WASM"},
+    {"id":"e42","from":"plugin-host","to":"plugin-api","label":"manifest"},
+    {"id":"e43","from":"tools","to":"mcp","label":"MCP"},
+    {"id":"e44","from":"conversation","to":"rag","label":"ground"},
+    {"id":"e45","from":"ui-cli","to":"rag","label":"doctor"},
+    {"id":"e46","from":"conversation","to":"workspace-graph","label":"KG"},
+    {"id":"e47","from":"event-bus","to":"http-api","label":"SSE"},
+    {"id":"e48","from":"main-agent","to":"core","label":"types"},
+    {"id":"e49","from":"cluster","to":"http-api","label":"HA"},
+    {"id":"e50","from":"evals","to":"llm-router","label":"gates"},
+    {"id":"e51","from":"conversation","to":"mem-vector","label":"promote"},
+    {"id":"e52","from":"gateway","to":"core","label":"types"}
+  ],
+  "flows": [
+    {"id":"flow-direct-chat","name":"Direct chat (UI → reply)","description":"Simple message: Gateway → Main Agent → Direct conversation → memory + LLM → reply.","steps":["ui-tauri","http-api","gateway","main-agent","supervisor","task-store","conversation","memory-orch","llm-router","llm-cloud","event-bus","http-api","ui-tauri"]},
+    {"id":"flow-orchestrated","name":"Guided / Orchestrated multi-agent","description":"Complex request: Orchestrator decomposes, specialists + tools, aggregate and deliver.","steps":["ui-tauri","http-api","gateway","main-agent","supervisor","orchestrator","llm-router","specialists","tools","tools-policy","memory-orch","task-store","event-bus","http-api","ui-tauri"]},
+    {"id":"flow-slack-inbound","name":"Slack inbound message","description":"Slack adapter → envelope → Main Agent → reply posted back to Slack.","steps":["ch-slack","gateway","main-agent","supervisor","conversation","llm-router","event-bus","ch-slack"]},
+    {"id":"flow-telegram","name":"Telegram via API path","description":"Telegram posts to /api/message; same normalized gateway path as the UI.","steps":["ch-telegram","http-api","gateway","main-agent","supervisor","conversation","llm-router","ch-telegram"]},
+    {"id":"flow-memory-recall","name":"4-layer memory recall","description":"Fuse short-term, vector, graph, episodic into the prompt before generation.","steps":["conversation","memory-orch","mem-short","mem-vector","mem-graph","mem-episodic","sqlite","llm-router"]},
+    {"id":"flow-memory-promote","name":"Memory promote after task","description":"Promote writes document + facts + episodic event into SQLite layers.","steps":["conversation","mem-vector","mem-graph","mem-episodic","sqlite"]},
+    {"id":"flow-tool-vault","name":"Tool call with vault secret","description":"TOOL: call → policy → vault secret substitution → result to LLM loop.","steps":["conversation","tools","tools-policy","policy-engine","vault","llm-router"]},
+    {"id":"flow-llm-fallback","name":"LLM primary → fallback chain","description":"Router tries primary then fallbacks through cloud / local / embedded.","steps":["conversation","llm-router","llm-cloud","llm-local","llm-embedded"]},
+    {"id":"flow-scheduled","name":"Scheduled / calendar wakeup","description":"Scheduler fires wakeup → Main Agent → reply to scheduled-returns UI.","steps":["scheduler","task-store","main-agent","supervisor","conversation","llm-router","event-bus","http-api","ui-tauri"]},
+    {"id":"flow-plugin-wasm","name":"WASM plugin tool","description":"Tool plugin runs in Wasmtime under declared permissions.","steps":["conversation","tools","plugin-host","plugin-api","tools-policy","llm-router"]},
+    {"id":"flow-mcp","name":"MCP external tool","description":"MCP runtime lists/calls tools on attached stdio or SSE server.","steps":["conversation","tools","mcp","llm-router"]},
+    {"id":"flow-doctor-rag","name":"Doctor with RAG advice","description":"CLI doctor --advice retrieves runbooks and asks the LLM for remediation.","steps":["ui-cli","http-api","rag","llm-router","llm-embedded","ui-cli"]},
+    {"id":"flow-workspace-kg","name":"Workspace knowledge graph","description":"Query project structure/symbols while coding.","steps":["conversation","workspace-graph","sqlite","llm-router","tools"]},
+    {"id":"flow-browser-tool","name":"Browser automation tool","description":"browser navigate/snapshot under allowed_web_domains.","steps":["conversation","tools","tools-policy","llm-router"]},
+    {"id":"flow-voice","name":"Voice in / voice out","description":"STT → chat path → TTS playback.","steps":["ch-voice","tools","gateway","main-agent","conversation","llm-router","tools","ch-voice"]}
+  ]
+}
+</script>
+
+<script>
+(() => {
+  const DATA = JSON.parse(document.getElementById("arch-data").textContent);
+  const byId = Object.fromEntries(DATA.nodes.map((n) => [n.id, n]));
+
+  const LAYER_ORDER = [
+    "clients",
+    "channels",
+    "ingress",
+    "agents",
+    "runtime",
+    "memory",
+    "llm",
+    "tools",
+    "security",
+    "extensibility",
+    "knowledge",
+    "data",
+    "foundation",
+    "ops",
+  ];
+
+  const LAYER_LABELS = {
+    clients: "Clients",
+    channels: "Channels",
+    ingress: "Ingress",
+    agents: "Agents",
+    runtime: "Runtime",
+    memory: "Memory",
+    llm: "LLM",
+    tools: "Tools",
+    security: "Security",
+    extensibility: "Extensibility",
+    knowledge: "Knowledge",
+    data: "Data",
+    foundation: "Foundation",
+    ops: "Ops",
+  };
+
+  const NODE_W = 132;
+  const NODE_H = 44;
+  const COL_GAP = 168;
+  const ROW_GAP = 58;
+  const PAD_X = 70;
+  const PAD_Y = 48;
+
+  const layout = {};
+  LAYER_ORDER.forEach((layer, col) => {
+    const nodes = DATA.nodes.filter((n) => n.layer === layer);
+    nodes.forEach((n, row) => {
+      layout[n.id] = {
+        x: PAD_X + col * COL_GAP,
+        y: PAD_Y + row * ROW_GAP,
+        w: NODE_W,
+        h: NODE_H,
+        cx: PAD_X + col * COL_GAP + NODE_W / 2,
+        cy: PAD_Y + row * ROW_GAP + NODE_H / 2,
+      };
+    });
+  });
+
+  const maxCol = LAYER_ORDER.length;
+  const maxRows = Math.max(
+    ...LAYER_ORDER.map((l) => DATA.nodes.filter((n) => n.layer === l).length)
+  );
+  const viewW = PAD_X * 2 + (maxCol - 1) * COL_GAP + NODE_W + 40;
+  const viewH = PAD_Y * 2 + (maxRows - 1) * ROW_GAP + NODE_H + 40;
+
+  const svg = document.getElementById("map");
+  svg.setAttribute("viewBox", `0 0 ${viewW} ${viewH}`);
+  svg.style.minWidth = `${Math.max(900, viewW * 0.7)}px`;
+  svg.style.minHeight = `${Math.max(560, viewH * 0.55)}px`;
+
+  const ns = "http://www.w3.org/2000/svg";
+  const el = (name, attrs = {}, text) => {
+    const node = document.createElementNS(ns, name);
+    Object.entries(attrs).forEach(([k, v]) => node.setAttribute(k, v));
+    if (text != null) node.textContent = text;
+    return node;
+  };
+
+  const gBands = el("g", { class: "bands" });
+  const gEdges = el("g", { class: "edges" });
+  const gNodes = el("g", { class: "nodes" });
+  svg.append(gBands, gEdges, gNodes);
+
+  LAYER_ORDER.forEach((layer, col) => {
+    const count = DATA.nodes.filter((n) => n.layer === layer).length;
+    if (!count) return;
+    const x = PAD_X + col * COL_GAP - 10;
+    const y = PAD_Y - 28;
+    const h = count * ROW_GAP + 20;
+    gBands.appendChild(
+      el("rect", {
+        class: "layer-band",
+        x,
+        y,
+        width: NODE_W + 20,
+        height: h,
+        rx: 10,
+      })
+    );
+    gBands.appendChild(
+      el(
+        "text",
+        { class: "layer-label", x: x + 6, y: y + 14 },
+        LAYER_LABELS[layer] || layer
+      )
+    );
+  });
+
+  function edgePath(a, b) {
+    const x1 = a.cx;
+    const y1 = a.cy;
+    const x2 = b.cx;
+    const y2 = b.cy;
+    const dx = Math.max(40, Math.abs(x2 - x1) * 0.35);
+    if (Math.abs(x2 - x1) < 8) {
+      const bulge = y2 > y1 ? 28 : -28;
+      return `M ${x1} ${y1} C ${x1 + bulge} ${y1}, ${x2 + bulge} ${y2}, ${x2} ${y2}`;
+    }
+    return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  }
+
+  const edgeEls = {};
+  DATA.edges.forEach((e) => {
+    const a = layout[e.from];
+    const b = layout[e.to];
+    if (!a || !b) return;
+    const path = el("path", {
+      class: "edge",
+      id: `edge-${e.id}`,
+      d: edgePath(a, b),
+      "data-from": e.from,
+      "data-to": e.to,
+    });
+    gEdges.appendChild(path);
+    edgeEls[e.id] = path;
+  });
+
+  const nodeEls = {};
+  DATA.nodes.forEach((n) => {
+    const L = layout[n.id];
+    const g = el("g", {
+      class: "node",
+      id: `node-${n.id}`,
+      transform: `translate(${L.x},${L.y})`,
+      "data-id": n.id,
+    });
+    g.appendChild(el("rect", { width: L.w, height: L.h, rx: 9 }));
+    const label = n.label.length > 18 ? n.label.slice(0, 16) + "…" : n.label;
+    g.appendChild(el("text", { x: 10, y: 18 }, label));
+    g.appendChild(el("text", { class: "sub", x: 10, y: 34 }, n.layer));
+    gNodes.appendChild(g);
+    nodeEls[n.id] = g;
+  });
+
+  const flowsEl = document.getElementById("flows");
+  const detailEl = document.getElementById("detail");
+  const tooltip = document.getElementById("tooltip");
+  const stage = document.querySelector(".stage");
+  let selectedFlow = null;
+  let pinnedNode = null;
+  let filterText = "";
+
+  function renderFlows() {
+    flowsEl.innerHTML = "";
+    DATA.flows.forEach((f) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "flow" + (selectedFlow === f.id ? " selected" : "");
+      btn.innerHTML = `<div class="name">${f.name}</div><div class="desc">${f.description}</div><div class="meta">${f.steps.length} steps · ${f.id}</div>`;
+      btn.addEventListener("click", () => {
+        selectedFlow = selectedFlow === f.id ? null : f.id;
+        applyHighlight();
+        renderFlows();
+      });
+      flowsEl.appendChild(btn);
+    });
+  }
+
+  function showDetail(node) {
+    if (!node) {
+      detailEl.innerHTML = `<h3>Component info</h3><p>Hover a node for a quick tip, or click to pin details here.</p>`;
+      return;
+    }
+    const apis = (node.apis || [])
+      .map((a) => `<span>${a}</span>`)
+      .join("");
+    detailEl.innerHTML = `
+      <h3>${node.label}</h3>
+      <div class="crate">${node.crate || ""} · ${node.layer}</div>
+      <p>${node.description}</p>
+      ${apis ? `<div class="apis">${apis}</div>` : ""}
+    `;
+  }
+
+  function applyHighlight() {
+    const flow = DATA.flows.find((f) => f.id === selectedFlow);
+    const pathNodes = flow ? new Set(flow.steps) : null;
+    const q = filterText.trim().toLowerCase();
+
+    Object.entries(nodeEls).forEach(([id, g]) => {
+      g.classList.remove("active", "path", "dim");
+      const n = byId[id];
+      const matchFilter =
+        !q ||
+        n.label.toLowerCase().includes(q) ||
+        n.id.toLowerCase().includes(q) ||
+        (n.crate || "").toLowerCase().includes(q) ||
+        n.layer.toLowerCase().includes(q);
+
+      if (!matchFilter) {
+        g.classList.add("dim");
+        return;
+      }
+      if (pinnedNode === id) g.classList.add("active");
+      if (pathNodes) {
+        if (pathNodes.has(id)) g.classList.add("path");
+        else if (!q) g.classList.add("dim");
+      }
+    });
+
+    Object.values(edgeEls).forEach((path) => {
+      path.classList.remove("active", "dim");
+      const from = path.getAttribute("data-from");
+      const to = path.getAttribute("data-to");
+      if (pathNodes) {
+        if (pathNodes.has(from) && pathNodes.has(to)) {
+          path.classList.add("active");
+        } else {
+          path.classList.add("dim");
+        }
+      }
+    });
+  }
+
+  Object.entries(nodeEls).forEach(([id, g]) => {
+    g.addEventListener("mouseenter", (ev) => {
+      const n = byId[id];
+      tooltip.innerHTML = `<strong>${n.label}</strong><div class="t-crate">${n.crate || n.layer}</div>${n.description}`;
+      tooltip.classList.add("show");
+      positionTooltip(ev);
+      if (!pinnedNode) showDetail(n);
+    });
+    g.addEventListener("mousemove", positionTooltip);
+    g.addEventListener("mouseleave", () => {
+      tooltip.classList.remove("show");
+      if (!pinnedNode) showDetail(byId[pinnedNode]);
+    });
+    g.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      pinnedNode = pinnedNode === id ? null : id;
+      showDetail(byId[pinnedNode]);
+      applyHighlight();
+    });
+  });
+
+  function positionTooltip(ev) {
+    const rect = stage.getBoundingClientRect();
+    let x = ev.clientX - rect.left + 14;
+    let y = ev.clientY - rect.top + 14;
+    tooltip.style.left = "0px";
+    tooltip.style.top = "0px";
+    const tw = tooltip.offsetWidth;
+    const th = tooltip.offsetHeight;
+    if (x + tw > rect.width - 8) x = ev.clientX - rect.left - tw - 12;
+    if (y + th > rect.height - 8) y = ev.clientY - rect.top - th - 12;
+    tooltip.style.left = `${Math.max(8, x)}px`;
+    tooltip.style.top = `${Math.max(8, y)}px`;
+  }
+
+  document.getElementById("btn-clear").addEventListener("click", () => {
+    selectedFlow = null;
+    pinnedNode = null;
+    filterText = "";
+    const search = document.getElementById("search");
+    if (search) search.value = "";
+    showDetail(null);
+    renderFlows();
+    applyHighlight();
+  });
+
+  document.getElementById("search").addEventListener("input", (e) => {
+    filterText = e.target.value;
+    applyHighlight();
+  });
+
+  const wrap = document.getElementById("canvas-wrap");
+  document.getElementById("btn-fit").addEventListener("click", () => {
+    wrap.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+  });
+
+  // Drag to pan
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  let scrollL = 0;
+  let scrollT = 0;
+  wrap.addEventListener("mousedown", (e) => {
+    if (e.target.closest(".node")) return;
+    dragging = true;
+    wrap.classList.add("dragging");
+    startX = e.clientX;
+    startY = e.clientY;
+    scrollL = wrap.scrollLeft;
+    scrollT = wrap.scrollTop;
+  });
+  window.addEventListener("mouseup", () => {
+    dragging = false;
+    wrap.classList.remove("dragging");
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    wrap.scrollLeft = scrollL - (e.clientX - startX);
+    wrap.scrollTop = scrollT - (e.clientY - startY);
+  });
+
+  renderFlows();
+  applyHighlight();
+})();
+</script>
+</body>
+</html>
