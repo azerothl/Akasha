@@ -1,0 +1,579 @@
+{
+  "meta": {
+    "product": "Akasha",
+    "version": "0.10+",
+    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, and Tauri/TUI clients.",
+    "defaultPort": 3876,
+    "dataDir": "~/akasha (or AKASHA_DATA_DIR)",
+    "sources": [
+      "README.md",
+      "spec/05_agent_architecture.md",
+      "spec/32_llm_router_architecture.md",
+      "spec/47_memory_4_layers.md",
+      "spec/48_gateway_layer.md",
+      "spec/33_agents_tools_orchestrator_skills.md",
+      "spec/16_plugin_architecture.md",
+      "spec/dev/core/CRATE_BOUNDARIES.md",
+      "crates/*"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "ui-tauri",
+      "label": "Tauri UI",
+      "layer": "clients",
+      "crate": "apps/akasha-ui",
+      "description": "Desktop React/TypeScript app (Chat, Tasks, Calendar, Memory, Router, Settings). Talks to the daemon on port 3876.",
+      "apis": ["POST /api/message", "GET /api/tasks/:id", "GET /api/events", "GET /api/status"]
+    },
+    {
+      "id": "ui-tui",
+      "label": "TUI",
+      "layer": "clients",
+      "crate": "akasha-tui",
+      "description": "Terminal interface with 7+ tabs (Chat, Scheduled returns, Router, Docs, Tasks, Calendar, Memory). Same slash commands as the UI.",
+      "apis": ["POST /api/message", "GET /api/docs", "GET /api/router/metrics"]
+    },
+    {
+      "id": "ui-cli",
+      "label": "CLI",
+      "layer": "clients",
+      "crate": "akasha-cli",
+      "description": "Operator CLI: init, start/stop/up, doctor, vault, config, router, plugin, tui. Supervises the daemon process.",
+      "apis": ["akasha start", "akasha doctor", "akasha init"]
+    },
+    {
+      "id": "ch-slack",
+      "label": "Slack",
+      "layer": "channels",
+      "crate": "akasha-daemon/channels",
+      "description": "Slack adapter: signature verify, parse payload, build MessageEnvelope, poll and post replies."
+    },
+    {
+      "id": "ch-teams",
+      "label": "Teams",
+      "layer": "channels",
+      "crate": "akasha-daemon/channels",
+      "description": "Microsoft Teams / Bot Framework adapter with JWT validation and conversation-scoped envelopes."
+    },
+    {
+      "id": "ch-discord",
+      "label": "Discord",
+      "layer": "channels",
+      "crate": "akasha-daemon/channels",
+      "description": "Discord channel adapter; inbound messages normalize through the gateway / API path."
+    },
+    {
+      "id": "ch-telegram",
+      "label": "Telegram",
+      "layer": "channels",
+      "crate": "akasha-daemon/channels",
+      "description": "Telegram bot adapter with cross-channel slash commands (/status, /budget, /permissions, /memory, /tasks)."
+    },
+    {
+      "id": "ch-voice",
+      "label": "Voice (TTS/STT)",
+      "layer": "channels",
+      "crate": "akasha-daemon",
+      "description": "Optional local voice path via speech_synthesize / speech_transcribe tools and voice_router.yaml."
+    },
+    {
+      "id": "http-api",
+      "label": "HTTP API :3876",
+      "layer": "ingress",
+      "crate": "akasha-daemon",
+      "description": "Minimal HTTP surface: health, message, tasks, memory, router, plugins, MCP, calendar, workspace graph. CSRF checks on mutating routes.",
+      "apis": ["GET /", "GET /api/status", "POST /api/message", "GET /api/tasks/:id", "GET /api/docs"]
+    },
+    {
+      "id": "gateway",
+      "label": "Gateway",
+      "layer": "ingress",
+      "crate": "akasha-daemon",
+      "description": "Normalizes every channel into MessageEnvelope and calls handle_envelope → Main Agent. Spec 48.",
+      "apis": ["handle_envelope"]
+    },
+    {
+      "id": "main-agent",
+      "label": "Main Agent",
+      "layer": "agents",
+      "crate": "akasha-daemon/agents",
+      "description": "Single user-facing entry: ack <500ms, create task, complexity classification, route Direct vs Guided/Orchestrated.",
+      "apis": ["handle_message"]
+    },
+    {
+      "id": "supervisor",
+      "label": "Supervisor",
+      "layer": "agents",
+      "crate": "akasha-daemon/agents",
+      "description": "Complexity classifier choosing Direct / Guided / Orchestrated execution modes."
+    },
+    {
+      "id": "orchestrator",
+      "label": "Orchestrator",
+      "layer": "agents",
+      "crate": "akasha-daemon/agents",
+      "description": "Decomposes requests, assigns specialists, aggregates results, satisfaction check, multi-state pipeline in Orchestrated mode."
+    },
+    {
+      "id": "conversation",
+      "label": "Conversation Worker",
+      "layer": "agents",
+      "crate": "akasha-daemon/agents",
+      "description": "Direct-mode worker: LLM chat loop with tool calls (TOOL: lines), memory recall, and final reply to the channel/UI."
+    },
+    {
+      "id": "specialists",
+      "label": "Specialist Agents",
+      "layer": "agents",
+      "crate": "akasha-daemon/agents",
+      "description": "Roster: analyst, architect, frontend/backend/db/integration, QA, documentalist, creative, system, code, research, security_audit, financial, etc."
+    },
+    {
+      "id": "event-bus",
+      "label": "Event Bus",
+      "layer": "runtime",
+      "crate": "akasha-daemon/agents",
+      "description": "In-process event fan-out (UserRequestReceived, TaskCreated, TodoListUpdated, progress). Feeds UI SSE/polling."
+    },
+    {
+      "id": "task-store",
+      "label": "Task Store",
+      "layer": "data",
+      "crate": "akasha-store",
+      "description": "SQLite tasks, todos, pipeline context, schedules. Source of truth for task lifecycle."
+    },
+    {
+      "id": "scheduler",
+      "label": "Scheduler / Calendar",
+      "layer": "runtime",
+      "crate": "akasha-calendar + akasha-daemon",
+      "description": "Cron schedules, wakeups, exceptions, calendar OAuth/CalDAV; fires tasks back into Main Agent."
+    },
+    {
+      "id": "memory-orch",
+      "label": "Memory Orchestrator",
+      "layer": "memory",
+      "crate": "akasha-daemon",
+      "description": "recall_context: fuses short-term, vector, graph facts, episodic events, and policy preferences into one prompt block."
+    },
+    {
+      "id": "mem-short",
+      "label": "Short-term Memory",
+      "layer": "memory",
+      "crate": "akasha-daemon",
+      "description": "Session turns with compaction when context exceeds token budget; injected as recent conversation context."
+    },
+    {
+      "id": "mem-vector",
+      "label": "Vector Memory",
+      "layer": "memory",
+      "crate": "akasha-store + akasha-embeddings",
+      "description": "memory_entries with ONNX/fastembed embeddings; hybrid keyword + semantic search."
+    },
+    {
+      "id": "mem-graph",
+      "label": "Graph / Facts",
+      "layer": "memory",
+      "crate": "akasha-store",
+      "description": "Structured subject–predicate–object facts linked to memory entries for relational recall."
+    },
+    {
+      "id": "mem-episodic",
+      "label": "Episodic Memory",
+      "layer": "memory",
+      "crate": "akasha-store",
+      "description": "Significant events journal (preferences, promotions, task outcomes) with importance/scope metadata."
+    },
+    {
+      "id": "llm-router",
+      "label": "LLM Router",
+      "layer": "llm",
+      "crate": "akasha-llm",
+      "description": "Task-type classifier, route config, provider manager, fallback engine, streaming, metrics. Config: llm_router.yaml."
+    },
+    {
+      "id": "llm-cloud",
+      "label": "Cloud Providers",
+      "layer": "llm",
+      "crate": "akasha-llm",
+      "description": "OpenAI, Anthropic, OpenRouter, Azure, Google — selected per task_type primary/fallback."
+    },
+    {
+      "id": "llm-local",
+      "label": "Local Providers",
+      "layer": "llm",
+      "crate": "akasha-llm",
+      "description": "Ollama and custom local OpenAI-compatible endpoints."
+    },
+    {
+      "id": "llm-embedded",
+      "label": "Embedded LLM",
+      "layer": "llm",
+      "crate": "akasha-embedded-llm",
+      "description": "Bundled Candle (Qwen3 0.6B) or llama.cpp GGUF path for offline onboarding, diagnostics, and fallback."
+    },
+    {
+      "id": "tools",
+      "label": "Tools Engine",
+      "layer": "tools",
+      "crate": "akasha-tools + akasha-daemon",
+      "description": "File/shell/web/browser/memory/device/voice tools; agentic TOOL: loop with policy filtering."
+    },
+    {
+      "id": "tools-policy",
+      "label": "Tools Policy",
+      "layer": "tools",
+      "crate": "akasha-tools",
+      "description": "tools_policy.yaml: allowed paths, commands, web domains, device interfaces, timeouts."
+    },
+    {
+      "id": "vault",
+      "label": "Vault",
+      "layer": "security",
+      "crate": "akasha-vault",
+      "description": "OS keyring + encrypted file secrets. Agents never see secrets unless VAULT: substitution is authorized."
+    },
+    {
+      "id": "policy-engine",
+      "label": "Policy Engine",
+      "layer": "security",
+      "crate": "akasha-daemon",
+      "description": "Permissions center / ask_me vs allow_all, constitution, budget checks around tool and channel actions."
+    },
+    {
+      "id": "plugin-host",
+      "label": "Plugin Host (WASM)",
+      "layer": "extensibility",
+      "crate": "akasha-plugin-host",
+      "description": "Wasmtime sandbox for channel/tool/skill plugins declared via akasha-plugin-api manifests."
+    },
+    {
+      "id": "plugin-api",
+      "label": "Plugin API",
+      "layer": "extensibility",
+      "crate": "akasha-plugin-api",
+      "description": "Manifest and capability contracts for plugins (channel, tool, skill, MCP)."
+    },
+    {
+      "id": "mcp",
+      "label": "MCP Runtime",
+      "layer": "extensibility",
+      "crate": "akasha-daemon",
+      "description": "Model Context Protocol stdio/SSE runtime: list/call tools, OAuth helpers, lifecycle hooks."
+    },
+    {
+      "id": "rag",
+      "label": "RAG / Spec",
+      "layer": "knowledge",
+      "crate": "akasha-rag",
+      "description": "Retrieval over product specs and runbooks for doctor --advice, system agent, and grounded answers."
+    },
+    {
+      "id": "workspace-graph",
+      "label": "Workspace Graph",
+      "layer": "knowledge",
+      "crate": "akasha-workspace-graph",
+      "description": "Project knowledge graph: index, search, and expose codebase/workspace structure to agents."
+    },
+    {
+      "id": "core",
+      "label": "akasha-core",
+      "layer": "foundation",
+      "crate": "akasha-core",
+      "description": "Shared types, EventEnvelope, Spec Loader, prompt security helpers. No store/LLM/daemon deps."
+    },
+    {
+      "id": "cluster",
+      "label": "Cluster (optional)",
+      "layer": "ops",
+      "crate": "akasha-cluster",
+      "description": "NATS, leader election, mTLS for multi-node deployments. Optional; single-node is the default."
+    },
+    {
+      "id": "evals",
+      "label": "Evals",
+      "layer": "ops",
+      "crate": "akasha-evals",
+      "description": "Security, runbook, and hallucination evaluation suite for release quality gates."
+    },
+    {
+      "id": "sqlite",
+      "label": "SQLite",
+      "layer": "data",
+      "crate": "akasha-store",
+      "description": "Bundled rusqlite persistence for tasks, memory, facts, episodic events, schedules, metrics."
+    }
+  ],
+  "edges": [
+    { "id": "e1", "from": "ui-tauri", "to": "http-api", "label": "HTTP" },
+    { "id": "e2", "from": "ui-tui", "to": "http-api", "label": "HTTP" },
+    { "id": "e3", "from": "ui-cli", "to": "http-api", "label": "control / HTTP" },
+    { "id": "e4", "from": "ch-slack", "to": "gateway", "label": "envelope" },
+    { "id": "e5", "from": "ch-teams", "to": "gateway", "label": "envelope" },
+    { "id": "e6", "from": "ch-discord", "to": "http-api", "label": "via /api/message" },
+    { "id": "e7", "from": "ch-telegram", "to": "http-api", "label": "via /api/message" },
+    { "id": "e8", "from": "ch-voice", "to": "tools", "label": "TTS/STT tools" },
+    { "id": "e9", "from": "http-api", "to": "gateway", "label": "MessageEnvelope" },
+    { "id": "e10", "from": "gateway", "to": "main-agent", "label": "handle_envelope" },
+    { "id": "e11", "from": "main-agent", "to": "supervisor", "label": "classify" },
+    { "id": "e12", "from": "main-agent", "to": "event-bus", "label": "emit" },
+    { "id": "e13", "from": "main-agent", "to": "task-store", "label": "create task" },
+    { "id": "e14", "from": "supervisor", "to": "conversation", "label": "Direct" },
+    { "id": "e15", "from": "supervisor", "to": "orchestrator", "label": "Guided/Orchestrated" },
+    { "id": "e16", "from": "orchestrator", "to": "specialists", "label": "delegate" },
+    { "id": "e17", "from": "orchestrator", "to": "conversation", "label": "synth / fallback" },
+    { "id": "e18", "from": "conversation", "to": "memory-orch", "label": "recall" },
+    { "id": "e19", "from": "specialists", "to": "memory-orch", "label": "recall" },
+    { "id": "e20", "from": "conversation", "to": "llm-router", "label": "complete" },
+    { "id": "e21", "from": "specialists", "to": "llm-router", "label": "complete" },
+    { "id": "e22", "from": "orchestrator", "to": "llm-router", "label": "decompose" },
+    { "id": "e23", "from": "llm-router", "to": "llm-cloud", "label": "primary/fallback" },
+    { "id": "e24", "from": "llm-router", "to": "llm-local", "label": "primary/fallback" },
+    { "id": "e25", "from": "llm-router", "to": "llm-embedded", "label": "offline fallback" },
+    { "id": "e26", "from": "conversation", "to": "tools", "label": "TOOL: loop" },
+    { "id": "e27", "from": "specialists", "to": "tools", "label": "TOOL: loop" },
+    { "id": "e28", "from": "tools", "to": "tools-policy", "label": "authorize" },
+    { "id": "e29", "from": "tools", "to": "vault", "label": "VAULT: secrets" },
+    { "id": "e30", "from": "tools", "to": "policy-engine", "label": "permissions" },
+    { "id": "e31", "from": "memory-orch", "to": "mem-short", "label": "session" },
+    { "id": "e32", "from": "memory-orch", "to": "mem-vector", "label": "semantic" },
+    { "id": "e33", "from": "memory-orch", "to": "mem-graph", "label": "facts" },
+    { "id": "e34", "from": "memory-orch", "to": "mem-episodic", "label": "events" },
+    { "id": "e35", "from": "mem-vector", "to": "sqlite", "label": "persist" },
+    { "id": "e36", "from": "mem-graph", "to": "sqlite", "label": "persist" },
+    { "id": "e37", "from": "mem-episodic", "to": "sqlite", "label": "persist" },
+    { "id": "e38", "from": "task-store", "to": "sqlite", "label": "persist" },
+    { "id": "e39", "from": "scheduler", "to": "main-agent", "label": "wakeup task" },
+    { "id": "e40", "from": "scheduler", "to": "task-store", "label": "schedules" },
+    { "id": "e41", "from": "tools", "to": "plugin-host", "label": "WASM tools" },
+    { "id": "e42", "from": "plugin-host", "to": "plugin-api", "label": "manifest" },
+    { "id": "e43", "from": "tools", "to": "mcp", "label": "MCP tools" },
+    { "id": "e44", "from": "conversation", "to": "rag", "label": "grounding" },
+    { "id": "e45", "from": "ui-cli", "to": "rag", "label": "doctor --advice" },
+    { "id": "e46", "from": "conversation", "to": "workspace-graph", "label": "project KG" },
+    { "id": "e47", "from": "event-bus", "to": "http-api", "label": "SSE/poll" },
+    { "id": "e48", "from": "main-agent", "to": "core", "label": "EventEnvelope" },
+    { "id": "e49", "from": "cluster", "to": "http-api", "label": "optional HA" },
+    { "id": "e50", "from": "evals", "to": "llm-router", "label": "quality gates" },
+    { "id": "e51", "from": "conversation", "to": "mem-vector", "label": "promote" },
+    { "id": "e52", "from": "gateway", "to": "core", "label": "types" }
+  ],
+  "flows": [
+    {
+      "id": "flow-direct-chat",
+      "name": "Direct chat (UI → reply)",
+      "description": "User sends a simple message from Tauri/TUI. Gateway creates an envelope; Main Agent acks, Supervisor chooses Direct, Conversation worker recalls memory, calls LLM Router, optionally runs tools, then returns the answer.",
+      "steps": [
+        "ui-tauri",
+        "http-api",
+        "gateway",
+        "main-agent",
+        "supervisor",
+        "task-store",
+        "conversation",
+        "memory-orch",
+        "llm-router",
+        "llm-cloud",
+        "event-bus",
+        "http-api",
+        "ui-tauri"
+      ]
+    },
+    {
+      "id": "flow-orchestrated",
+      "name": "Guided / Orchestrated multi-agent",
+      "description": "Complex request: Supervisor routes to Orchestrator, which decomposes via LLM, delegates to specialists with tools, aggregates, satisfaction-checks, then delivers.",
+      "steps": [
+        "ui-tauri",
+        "http-api",
+        "gateway",
+        "main-agent",
+        "supervisor",
+        "orchestrator",
+        "llm-router",
+        "specialists",
+        "tools",
+        "tools-policy",
+        "memory-orch",
+        "task-store",
+        "event-bus",
+        "http-api",
+        "ui-tauri"
+      ]
+    },
+    {
+      "id": "flow-slack-inbound",
+      "name": "Slack inbound message",
+      "description": "Slack adapter verifies signature, builds MessageEnvelope, handle_envelope → Main Agent; reply polled and posted back to Slack.",
+      "steps": [
+        "ch-slack",
+        "gateway",
+        "main-agent",
+        "supervisor",
+        "conversation",
+        "llm-router",
+        "event-bus",
+        "ch-slack"
+      ]
+    },
+    {
+      "id": "flow-telegram",
+      "name": "Telegram via API path",
+      "description": "Telegram client posts to /api/message; same normalized gateway path as the UI.",
+      "steps": [
+        "ch-telegram",
+        "http-api",
+        "gateway",
+        "main-agent",
+        "supervisor",
+        "conversation",
+        "llm-router",
+        "ch-telegram"
+      ]
+    },
+    {
+      "id": "flow-memory-recall",
+      "name": "4-layer memory recall",
+      "description": "Before generation, Memory Orchestrator fuses short-term, vector hits, graph facts, and episodic events into the prompt context.",
+      "steps": [
+        "conversation",
+        "memory-orch",
+        "mem-short",
+        "mem-vector",
+        "mem-graph",
+        "mem-episodic",
+        "sqlite",
+        "llm-router"
+      ]
+    },
+    {
+      "id": "flow-memory-promote",
+      "name": "Memory promote after task",
+      "description": "After a successful turn, promote extracts document + facts + episodic event into SQLite-backed layers.",
+      "steps": [
+        "conversation",
+        "mem-vector",
+        "mem-graph",
+        "mem-episodic",
+        "sqlite"
+      ]
+    },
+    {
+      "id": "flow-tool-vault",
+      "name": "Tool call with vault secret",
+      "description": "Agent emits TOOL: run_command; policy authorizes; vault substitutes secrets; result returns to the LLM loop.",
+      "steps": [
+        "conversation",
+        "tools",
+        "tools-policy",
+        "policy-engine",
+        "vault",
+        "llm-router"
+      ]
+    },
+    {
+      "id": "flow-llm-fallback",
+      "name": "LLM primary → fallback chain",
+      "description": "Router classifies task_type, tries primary provider, then fallbacks through cloud/local/embedded per llm_router.yaml.",
+      "steps": [
+        "conversation",
+        "llm-router",
+        "llm-cloud",
+        "llm-local",
+        "llm-embedded"
+      ]
+    },
+    {
+      "id": "flow-scheduled",
+      "name": "Scheduled / calendar wakeup",
+      "description": "Scheduler fires a cron or calendar wakeup, creates a task through Main Agent, and delivers the result to scheduled-returns UI.",
+      "steps": [
+        "scheduler",
+        "task-store",
+        "main-agent",
+        "supervisor",
+        "conversation",
+        "llm-router",
+        "event-bus",
+        "http-api",
+        "ui-tauri"
+      ]
+    },
+    {
+      "id": "flow-plugin-wasm",
+      "name": "WASM plugin tool",
+      "description": "Agent selects a tool plugin; Plugin Host runs it in Wasmtime sandbox under declared permissions.",
+      "steps": [
+        "conversation",
+        "tools",
+        "plugin-host",
+        "plugin-api",
+        "tools-policy",
+        "llm-router"
+      ]
+    },
+    {
+      "id": "flow-mcp",
+      "name": "MCP external tool",
+      "description": "MCP runtime lists/calls tools on an attached stdio or SSE server; results feed back into the agent loop.",
+      "steps": [
+        "conversation",
+        "tools",
+        "mcp",
+        "llm-router"
+      ]
+    },
+    {
+      "id": "flow-doctor-rag",
+      "name": "Doctor with RAG advice",
+      "description": "CLI doctor --advice retrieves runbooks via RAG and asks the LLM for grounded remediation tips (daemon required).",
+      "steps": [
+        "ui-cli",
+        "http-api",
+        "rag",
+        "llm-router",
+        "llm-embedded",
+        "ui-cli"
+      ]
+    },
+    {
+      "id": "flow-workspace-kg",
+      "name": "Workspace knowledge graph",
+      "description": "Conversation or specialist queries the workspace graph for project structure and symbols while coding.",
+      "steps": [
+        "conversation",
+        "workspace-graph",
+        "sqlite",
+        "llm-router",
+        "tools"
+      ]
+    },
+    {
+      "id": "flow-browser-tool",
+      "name": "Browser automation tool",
+      "description": "Agent uses browser navigate/snapshot (Playwright per task) under allowed_web_domains policy.",
+      "steps": [
+        "conversation",
+        "tools",
+        "tools-policy",
+        "llm-router"
+      ]
+    },
+    {
+      "id": "flow-voice",
+      "name": "Voice in / voice out",
+      "description": "Microphone capture → speech_transcribe → chat path; reply → speech_synthesize → audio playback.",
+      "steps": [
+        "ch-voice",
+        "tools",
+        "gateway",
+        "main-agent",
+        "conversation",
+        "llm-router",
+        "tools",
+        "ch-voice"
+      ]
+    }
+  ]
+}

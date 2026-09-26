@@ -235,6 +235,7 @@ Objectif : **aligner** (docs + chemins d’import/export) les extensions du daem
 ## Critères de clôture v0.11.0
 
 - [ ] Versions alignées **0.11.0** (workspace + Tauri) via `sync-release-version.py` **en fin de cycle**
+- [ ] Carte d’architecture régénérée (`spec/dev/architecture/` — diagramme HTML + `architecture-graph.json`) avant le tag — [architecture/README.md](../architecture/README.md)
 - [ ] Tag **`v0.11.0`** + artefacts Release (CPU / CUDA / full) sans régression smoke GitHub-hosted
 - [ ] Benches AR tier 1–2 publiés + **décision défaut CUDA** documentée
 - [ ] `api.rs` **&lt; ~8k** lignes ; check daemon + tests outils verts

@@ -1,6 +1,10 @@
 # Bump product version in repo (workspace + akasha-ui) in one commit.
 # Run this BEFORE creating the release tag, then: git pull, git tag vX.Y.Z, git push origin vX.Y.Z
 #
+# After this sync (and before the tag): regenerate spec/dev/architecture/
+# (architecture-diagram.html + architecture-graph.json) so the map matches the release.
+# See spec/dev/architecture/README.md and AGENTS.md § Release version alignment.
+#
 # If `main` is branch-protected, add repository secret VERSION_SYNC_TOKEN (PAT with contents:write).
 
 name: Sync release version

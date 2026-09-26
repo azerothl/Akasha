@@ -2,6 +2,7 @@
 
 ## Blocs
 
+- `architecture/`: carte interactive crates/runtime/flows ([architecture-diagram.html](architecture/architecture-diagram.html), [architecture-graph.json](architecture/architecture-graph.json)) — **à régénérer à chaque release** (voir [architecture/README.md](architecture/README.md)).
 - `core/`: architecture centrale et decisions transverses
 - `interfaces/`: TUI, web/desktop, UX technique
 - `integrations/`: MCP, webhooks, bridges externes  
