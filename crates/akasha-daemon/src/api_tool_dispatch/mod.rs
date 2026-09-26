@@ -4,6 +4,7 @@ use crate::memory_actor::LongTermMemoryClient;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+pub mod execute;
 pub mod fs_ops;
 pub mod process_ops;
 pub mod web_device_memory_ops;
@@ -30,7 +31,7 @@ pub async fn execute_tool_call(
     tool_name: &str,
     args: &[String],
 ) -> (bool, String, Option<String>) {
-    crate::api::execute_tool_call_impl(
+    crate::api_tool_dispatch::execute::execute_tool_call_impl(
         executor,
         tool_name,
         args,

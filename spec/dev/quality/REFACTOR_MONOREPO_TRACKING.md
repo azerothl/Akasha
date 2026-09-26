@@ -46,3 +46,4 @@ Objectif: refactorisation progressive, PRs petites, sans régression fonctionnel
 | 2026-04-27 | — | Extraction `api_http`, `api_path_utils` |
 | 2026-04-27 | ~17000 | Suite phase 1-3 : CSRF/query → `api_security.rs` ; automation / terminal / MCP / mission / profils → `api_routes_*.rs` ; cache agent → `agent_profile.rs` ; studio → `api_studio/` ; workspace graph → `api_workspace_graph/handlers.rs` |
 | 2026-07-14 | ~16115 | v0.10.0 : extraction `api_routes_docs` (101), `config` (435), `router` (769), `plugins` (663), `memory` (611), `tasks` (2423) ; helpers tâches/planning déplacés ; `cargo check -p akasha-daemon --lib` OK |
+| 2026-09-26 | ~11600 | P3 v0.11 incrément : `execute_tool_call_impl` → `api_tool_dispatch/execute.rs` (~3.7k) ; routes restantes → `api_routes_ops` / `channels` / `permissions` (+ smoke path matching) ; baseline `main` 16755 → ~11600 (−~5150) |
