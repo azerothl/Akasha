@@ -1,5 +1,7 @@
 # Akasha
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 Assistant personnel **sécurisé**, **local-first**, conçu comme une infrastructure agentique autonome 24/7. Orchestration d’agents spécialisés, multi-canaux (texte, Slack, Discord, Telegram), protection des secrets (vault), routeur LLM avec fallback.
 
 **Vision et principes** : [spec/00_vision.md](spec/00_vision.md)
@@ -205,4 +207,4 @@ Quand le daemon tourne, le guide utilisateur est servi en markdown via **GET /ap
 
 ## Licence
 
-Propriétaire / À définir
+Ce projet est publié sous [Apache License, Version 2.0](LICENSE).
