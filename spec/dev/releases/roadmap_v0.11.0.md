@@ -321,7 +321,7 @@ flowchart LR
 | Cette roadmap | `spec/dev/releases/roadmap_v0.11.0.md` |
 | Roadmap / notes v0.10 | `spec/dev/releases/roadmap_v0.10.0.md`, `internal_release_0.10.0.md` |
 | Recherche modèles | `spec/dev/roadmap/embedded_models_research_v0.10.md` |
-| Bench | `spec/dev/quality/bench_embedded*.md`, `bench_embedded.ps1` |
+| Bench | `spec/dev/quality/bench_embedded*.md`, `bench_embedded.ps1`, **`bench_ar_v0.11.md`**, `bench_ar_protocol.json` / `.py` |
 | Refactor | `spec/dev/quality/REFACTOR_MONOREPO_TRACKING.md`, `crates/akasha-daemon/src/api.rs` |
 | MCP | `spec/dev/integrations/mcp-*.md` |
 | Skills / plugins daemon | `spec/33_agents_tools_orchestrator_skills.md`, `docs/user/extensions.md`, satellites `Akasha_skills` / `Akasha_plugins` |

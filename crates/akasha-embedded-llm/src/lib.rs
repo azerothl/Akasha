@@ -8,6 +8,7 @@ mod baguettotron;
 pub mod calibrate;
 #[cfg(feature = "candle")]
 mod candle_backend;
+pub mod capabilities;
 pub mod config;
 #[cfg(feature = "download")]
 pub mod download;

@@ -113,6 +113,13 @@ BACKEND=candle ./spec/dev/quality/bench_embedded.sh
 
 Baselines : [bench_embedded_results.md](bench_embedded_results.md), matrice tier : [embedded_profile_baselines.json](embedded_profile_baselines.json). Criterion : `cargo bench -p akasha-embedded-llm --bench embedded_inference`.
 
+**Socle AR v0.11** (sans GPU) : protocole 5 prompts FR + `GET /api/capabilities` — voir [bench_ar_v0.11.md](bench_ar_v0.11.md).
+
+```bash
+python3 spec/dev/quality/bench_ar_protocol.py --mock --json
+CXX=g++ cargo test -p akasha-embedded-llm --lib capabilities::
+```
+
 **Bench manuel v1** (legacy alias CUDA) :
 
 ```powershell

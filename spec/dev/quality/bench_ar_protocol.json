@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "id": "ar_fr_v1",
+  "title": "Protocole bench candidats AR v0.11",
+  "doc": "spec/dev/quality/bench_ar_v0.11.md",
+  "source": "spec/dev/roadmap/embedded_models_research_v0.10.md",
+  "metrics": ["ttft_s", "tok_per_s", "load_s", "ok"],
+  "max_tokens": 128,
+  "provider": "akasha_embedded",
+  "ngl_matrix": [0, 99],
+  "prompts": [
+    {
+      "id": "greet",
+      "text": "Bonjour, présente-toi en une phrase."
+    },
+    {
+      "id": "doctor",
+      "text": "Mon daemon ne répond pas sur le port 3876, que vérifier ?"
+    },
+    {
+      "id": "json",
+      "text": "Réponds uniquement avec un JSON {\"ok\":true}."
+    },
+    {
+      "id": "fr_explain",
+      "text": "Explique en français ce qu'est Akasha en 2 phrases."
+    },
+    {
+      "id": "code_fib",
+      "text": "Écris une fonction Python fibonacci(n) en 10 lignes max."
+    }
+  ],
+  "candidates": [
+    {
+      "id": "qwen2.5-1.5b-instruct-q4",
+      "role": "baseline_default",
+      "tier": "tier1",
+      "gguf_filename": "default.gguf",
+      "arch": "qwen2",
+      "in_wizard_manifest": true
+    },
+    {
+      "id": "qwen3.5-0.8b-q4",
+      "role": "bench_candidate",
+      "tier": "tier1",
+      "gguf_filename": "qwen3.5-0.8b-q4.gguf",
+      "arch": "qwen35",
+      "n_batch_hint": 2048,
+      "mmproj_required": true,
+      "in_wizard_manifest": true
+    },
+    {
+      "id": "qwen3-0.6b-q4",
+      "role": "bench_candidate",
+      "tier": "tier1",
+      "gguf_filename": "qwen3-0.6b-q4.gguf",
+      "arch": "qwen3",
+      "in_wizard_manifest": true
+    },
+    {
+      "id": "gemma3-1b-qat-q4",
+      "role": "bench_candidate",
+      "tier": "tier2",
+      "gguf_filename": "gemma3-1b.gguf",
+      "arch": "gemma3",
+      "in_wizard_manifest": false,
+      "hf_url_hint": "https://huggingface.co/bartowski/google_gemma-3-1b-it-qat-GGUF"
+    },
+    {
+      "id": "qwen3-1.7b-q4",
+      "role": "bench_candidate",
+      "tier": "tier2",
+      "gguf_filename": "qwen3-1.7b.gguf",
+      "arch": "qwen3",
+      "in_wizard_manifest": false,
+      "hf_url_hint": "https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF"
+    },
+    {
+      "id": "phi-4-mini-q4",
+      "role": "bench_out_of_onboarding",
+      "tier": "tier2",
+      "gguf_filename": "phi-4-mini.gguf",
+      "arch": "phi3",
+      "in_wizard_manifest": false,
+      "skip_default_matrix": true
+    }
+  ],
+  "watch_tier3": [
+    {
+      "id": "qwen3.6-mtp-rocmfp4",
+      "note": "Fork ROCmFPX requis — hors stack NVIDIA release Akasha"
+    }
+  ],
+  "decision_gate": {
+    "id": "A1",
+    "question": "Swap défaut CUDA après benches ?",
+    "options": ["keep_qwen2.5_1.5b", "promote_candidate"],
+    "requires": ["tier1_results", "n_batch_validated"]
+  }
+}

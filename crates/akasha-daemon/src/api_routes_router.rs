@@ -288,6 +288,42 @@ if method == "GET" && path == "/api/router/embedded-status" {
     }
 }
 
+// GET /api/capabilities — Camelid-style evidence-gated embedded model capabilities
+if method == "GET" && path_only == "/api/capabilities" {
+    #[cfg(feature = "embedded")]
+    {
+        let body = llm_router.embedded_capabilities().to_string();
+        return Some(json_response("200 OK", &body));
+    }
+    #[cfg(not(feature = "embedded"))]
+    {
+        let body = serde_json::json!({
+            "schema_version": 1,
+            "runtime": {
+                "embedded_available": false,
+                "gguf": false,
+                "vision": false,
+                "mmproj": false,
+                "evidence": {
+                    "gguf_present": false,
+                    "llama_cpp_compiled": false,
+                    "ready_for_chat": false,
+                    "vision_runtime": false
+                }
+            },
+            "models": [],
+            "taxonomy": {
+                "supported": "Runtime-proven on stock backends",
+                "evidence_only": "Bench evidence only",
+                "groundwork_only": "Docs / watch only"
+            },
+            "hint": "Recompile daemon with feature embedded"
+        })
+        .to_string();
+        return Some(json_response("200 OK", &body));
+    }
+}
+
 // POST /api/router/reload — hot-reload llm_router.yaml (routes/models per task type)
 if method == "POST" && path == "/api/router/reload" {
     let router_path = data_dir.join("llm_router.yaml");
@@ -786,10 +822,17 @@ mod tests {
         for p in [
             "/api/router/routes",
             "/api/router/models",
+            "/api/router/embedded-status",
+            "/api/capabilities",
             "/api/budget",
             "/api/voice/status",
         ] {
-            assert!(p.starts_with("/api/router") || p.starts_with("/api/budget") || p.starts_with("/api/voice"));
+            assert!(
+                p.starts_with("/api/router")
+                    || p.starts_with("/api/budget")
+                    || p.starts_with("/api/voice")
+                    || p == "/api/capabilities"
+            );
         }
     }
 }
