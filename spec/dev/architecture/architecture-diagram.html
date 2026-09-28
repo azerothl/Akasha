@@ -444,7 +444,7 @@
 {
   "meta": {
     "product": "Akasha",
-    "version": "0.10+",
+    "version": "0.11.0",
     "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, and Tauri/TUI clients.",
     "defaultPort": 3876
   },
@@ -457,12 +457,12 @@
     {"id":"ch-discord","label":"Discord","layer":"channels","crate":"akasha-daemon/channels","description":"Discord channel adapter; inbound messages normalize through the gateway / API path."},
     {"id":"ch-telegram","label":"Telegram","layer":"channels","crate":"akasha-daemon/channels","description":"Telegram bot adapter with cross-channel slash commands."},
     {"id":"ch-voice","label":"Voice (TTS/STT)","layer":"channels","crate":"akasha-daemon","description":"Optional local voice path via speech tools and voice_router.yaml."},
-    {"id":"http-api","label":"HTTP API :3876","layer":"ingress","crate":"akasha-daemon","description":"Minimal HTTP surface: health, message, tasks, memory, router, plugins, MCP, calendar.","apis":["GET /","GET /api/status","POST /api/message","GET /api/tasks/:id"]},
+    {"id":"http-api","label":"HTTP API :3876","layer":"ingress","crate":"akasha-daemon","description":"HTTP surface: health, message, tasks, memory, router, plugins, MCP, calendar, capabilities. Routes in api_routes_*; LLM loop in api_llm_loop.","apis":["GET /","GET /api/status","POST /api/message","GET /api/tasks/:id","GET /api/capabilities"]},
     {"id":"gateway","label":"Gateway","layer":"ingress","crate":"akasha-daemon","description":"Normalizes every channel into MessageEnvelope and calls handle_envelope → Main Agent.","apis":["handle_envelope"]},
     {"id":"main-agent","label":"Main Agent","layer":"agents","crate":"akasha-daemon/agents","description":"Single user-facing entry: ack <500ms, create task, classify complexity, route Direct vs Orchestrated.","apis":["handle_message"]},
     {"id":"supervisor","label":"Supervisor","layer":"agents","crate":"akasha-daemon/agents","description":"Complexity classifier choosing Direct / Guided / Orchestrated modes."},
     {"id":"orchestrator","label":"Orchestrator","layer":"agents","crate":"akasha-daemon/agents","description":"Decomposes requests, assigns specialists, aggregates, satisfaction check."},
-    {"id":"conversation","label":"Conversation Worker","layer":"agents","crate":"akasha-daemon/agents","description":"Direct-mode worker: LLM chat loop with tool calls, memory recall, final reply."},
+    {"id":"conversation","label":"Conversation Worker","layer":"agents","crate":"akasha-daemon/agents","description":"Direct-mode LLM+tools loop (api_llm_loop / api_tool_dispatch) with memory recall and final reply."},
     {"id":"specialists","label":"Specialist Agents","layer":"agents","crate":"akasha-daemon/agents","description":"Roster: analyst, architect, frontend/backend, QA, documentalist, creative, system, code, research…"},
     {"id":"event-bus","label":"Event Bus","layer":"runtime","crate":"akasha-daemon/agents","description":"In-process event fan-out feeding UI SSE/polling."},
     {"id":"task-store","label":"Task Store","layer":"data","crate":"akasha-store","description":"SQLite tasks, todos, pipeline context, schedules."},
@@ -475,7 +475,7 @@
     {"id":"llm-router","label":"LLM Router","layer":"llm","crate":"akasha-llm","description":"Task-type classifier, routes, fallbacks, streaming, metrics. Config: llm_router.yaml."},
     {"id":"llm-cloud","label":"Cloud Providers","layer":"llm","crate":"akasha-llm","description":"OpenAI, Anthropic, OpenRouter, Azure, Google."},
     {"id":"llm-local","label":"Local Providers","layer":"llm","crate":"akasha-llm","description":"Ollama and custom local OpenAI-compatible endpoints."},
-    {"id":"llm-embedded","label":"Embedded LLM","layer":"llm","crate":"akasha-embedded-llm","description":"Bundled Candle (Qwen3 0.6B) or llama.cpp GGUF for offline fallback."},
+    {"id":"llm-embedded","label":"Embedded LLM","layer":"llm","crate":"akasha-embedded-llm","description":"Candle CPU or llama.cpp GGUF (default CUDA Qwen2.5-1.5B). Evidence via /api/capabilities; Rbitnet/DLM no-go v0.11."},
     {"id":"tools","label":"Tools Engine","layer":"tools","crate":"akasha-tools","description":"File/shell/web/browser/memory/device/voice tools; agentic TOOL: loop."},
     {"id":"tools-policy","label":"Tools Policy","layer":"tools","crate":"akasha-tools","description":"tools_policy.yaml: allowed paths, commands, domains, timeouts."},
     {"id":"vault","label":"Vault","layer":"security","crate":"akasha-vault","description":"OS keyring + encrypted file secrets. VAULT: substitution when authorized."},
@@ -545,6 +545,7 @@
     {"id":"e52","from":"gateway","to":"core","label":"types"}
   ],
   "flows": [
+    {"id":"flow-capabilities","label":"Capabilities / evidence (v0.11)","description":"UI/doctor queries GET /api/capabilities and embedded-status before GGUF/vision ready.","steps":["ui-tauri","http-api","llm-embedded","llm-router"]},
     {"id":"flow-direct-chat","name":"Direct chat (UI → reply)","description":"Simple message: Gateway → Main Agent → Direct conversation → memory + LLM → reply.","steps":["ui-tauri","http-api","gateway","main-agent","supervisor","task-store","conversation","memory-orch","llm-router","llm-cloud","event-bus","http-api","ui-tauri"]},
     {"id":"flow-orchestrated","name":"Guided / Orchestrated multi-agent","description":"Complex request: Orchestrator decomposes, specialists + tools, aggregate and deliver.","steps":["ui-tauri","http-api","gateway","main-agent","supervisor","orchestrator","llm-router","specialists","tools","tools-policy","memory-orch","task-store","event-bus","http-api","ui-tauri"]},
     {"id":"flow-slack-inbound","name":"Slack inbound message","description":"Slack adapter → envelope → Main Agent → reply posted back to Slack.","steps":["ch-slack","gateway","main-agent","supervisor","conversation","llm-router","event-bus","ch-slack"]},

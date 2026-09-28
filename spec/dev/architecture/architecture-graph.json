@@ -1,8 +1,8 @@
 {
   "meta": {
     "product": "Akasha",
-    "version": "0.10+",
-    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, and Tauri/TUI clients.",
+    "version": "0.11.0",
+    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, MCP stdio, GET /api/capabilities evidence flags, and Tauri/TUI clients (v0.11).",
     "defaultPort": 3876,
     "dataDir": "~/akasha (or AKASHA_DATA_DIR)",
     "sources": [
@@ -14,7 +14,11 @@
       "spec/33_agents_tools_orchestrator_skills.md",
       "spec/16_plugin_architecture.md",
       "spec/dev/core/CRATE_BOUNDARIES.md",
-      "crates/*"
+      "crates/*",
+      "spec/dev/quality/REFACTOR_MONOREPO_TRACKING.md",
+      "crates/akasha-daemon/src/api_llm_loop/",
+      "crates/akasha-daemon/src/api_tool_dispatch/",
+      "spec/dev/integrations/mcp-runtime.md"
     ]
   },
   "nodes": [
@@ -24,7 +28,12 @@
       "layer": "clients",
       "crate": "apps/akasha-ui",
       "description": "Desktop React/TypeScript app (Chat, Tasks, Calendar, Memory, Router, Settings). Talks to the daemon on port 3876.",
-      "apis": ["POST /api/message", "GET /api/tasks/:id", "GET /api/events", "GET /api/status"]
+      "apis": [
+        "POST /api/message",
+        "GET /api/tasks/:id",
+        "GET /api/events",
+        "GET /api/status"
+      ]
     },
     {
       "id": "ui-tui",
@@ -32,7 +41,11 @@
       "layer": "clients",
       "crate": "akasha-tui",
       "description": "Terminal interface with 7+ tabs (Chat, Scheduled returns, Router, Docs, Tasks, Calendar, Memory). Same slash commands as the UI.",
-      "apis": ["POST /api/message", "GET /api/docs", "GET /api/router/metrics"]
+      "apis": [
+        "POST /api/message",
+        "GET /api/docs",
+        "GET /api/router/metrics"
+      ]
     },
     {
       "id": "ui-cli",
@@ -40,7 +53,11 @@
       "layer": "clients",
       "crate": "akasha-cli",
       "description": "Operator CLI: init, start/stop/up, doctor, vault, config, router, plugin, tui. Supervises the daemon process.",
-      "apis": ["akasha start", "akasha doctor", "akasha init"]
+      "apis": [
+        "akasha start",
+        "akasha doctor",
+        "akasha init"
+      ]
     },
     {
       "id": "ch-slack",
@@ -82,8 +99,16 @@
       "label": "HTTP API :3876",
       "layer": "ingress",
       "crate": "akasha-daemon",
-      "description": "Minimal HTTP surface: health, message, tasks, memory, router, plugins, MCP, calendar, workspace graph. CSRF checks on mutating routes.",
-      "apis": ["GET /", "GET /api/status", "POST /api/message", "GET /api/tasks/:id", "GET /api/docs"]
+      "description": "HTTP surface: health, message, tasks, memory, router, plugins, MCP, calendar, workspace graph, capabilities. CSRF on mutating routes. Routes split across api_routes_*; LLM tool loop in api_llm_loop.",
+      "apis": [
+        "GET /",
+        "GET /api/status",
+        "POST /api/message",
+        "GET /api/tasks/:id",
+        "GET /api/docs",
+        "GET /api/capabilities",
+        "GET /api/router/embedded-status"
+      ]
     },
     {
       "id": "gateway",
@@ -91,7 +116,9 @@
       "layer": "ingress",
       "crate": "akasha-daemon",
       "description": "Normalizes every channel into MessageEnvelope and calls handle_envelope → Main Agent. Spec 48.",
-      "apis": ["handle_envelope"]
+      "apis": [
+        "handle_envelope"
+      ]
     },
     {
       "id": "main-agent",
@@ -99,7 +126,9 @@
       "layer": "agents",
       "crate": "akasha-daemon/agents",
       "description": "Single user-facing entry: ack <500ms, create task, complexity classification, route Direct vs Guided/Orchestrated.",
-      "apis": ["handle_message"]
+      "apis": [
+        "handle_message"
+      ]
     },
     {
       "id": "supervisor",
@@ -120,7 +149,7 @@
       "label": "Conversation Worker",
       "layer": "agents",
       "crate": "akasha-daemon/agents",
-      "description": "Direct-mode worker: LLM chat loop with tool calls (TOOL: lines), memory recall, and final reply to the channel/UI."
+      "description": "Direct-mode worker: LLM chat loop with tool calls (TOOL: lines), memory recall, final reply. Implementation: run_message_via_llm in api_llm_loop + api_tool_dispatch."
     },
     {
       "id": "specialists",
@@ -211,7 +240,7 @@
       "label": "Embedded LLM",
       "layer": "llm",
       "crate": "akasha-embedded-llm",
-      "description": "Bundled Candle (Qwen3 0.6B) or llama.cpp GGUF path for offline onboarding, diagnostics, and fallback."
+      "description": "Bundled Candle (Qwen3 0.6B) or llama.cpp GGUF (CUDA default Qwen2.5-1.5B Q4_K_M). Evidence via GET /api/capabilities + embedded-status; Rbitnet/DLM no-go v0.11."
     },
     {
       "id": "tools",
@@ -260,7 +289,7 @@
       "label": "MCP Runtime",
       "layer": "extensibility",
       "crate": "akasha-daemon",
-      "description": "Model Context Protocol stdio/SSE runtime: list/call tools, OAuth helpers, lifecycle hooks."
+      "description": "MCP runtime stdio: probe, policy mcp_servers / tools_policy, CLI/UI operator (Implemented v0.11). OAuth vault = stretch."
     },
     {
       "id": "rag",
@@ -306,58 +335,318 @@
     }
   ],
   "edges": [
-    { "id": "e1", "from": "ui-tauri", "to": "http-api", "label": "HTTP" },
-    { "id": "e2", "from": "ui-tui", "to": "http-api", "label": "HTTP" },
-    { "id": "e3", "from": "ui-cli", "to": "http-api", "label": "control / HTTP" },
-    { "id": "e4", "from": "ch-slack", "to": "gateway", "label": "envelope" },
-    { "id": "e5", "from": "ch-teams", "to": "gateway", "label": "envelope" },
-    { "id": "e6", "from": "ch-discord", "to": "http-api", "label": "via /api/message" },
-    { "id": "e7", "from": "ch-telegram", "to": "http-api", "label": "via /api/message" },
-    { "id": "e8", "from": "ch-voice", "to": "tools", "label": "TTS/STT tools" },
-    { "id": "e9", "from": "http-api", "to": "gateway", "label": "MessageEnvelope" },
-    { "id": "e10", "from": "gateway", "to": "main-agent", "label": "handle_envelope" },
-    { "id": "e11", "from": "main-agent", "to": "supervisor", "label": "classify" },
-    { "id": "e12", "from": "main-agent", "to": "event-bus", "label": "emit" },
-    { "id": "e13", "from": "main-agent", "to": "task-store", "label": "create task" },
-    { "id": "e14", "from": "supervisor", "to": "conversation", "label": "Direct" },
-    { "id": "e15", "from": "supervisor", "to": "orchestrator", "label": "Guided/Orchestrated" },
-    { "id": "e16", "from": "orchestrator", "to": "specialists", "label": "delegate" },
-    { "id": "e17", "from": "orchestrator", "to": "conversation", "label": "synth / fallback" },
-    { "id": "e18", "from": "conversation", "to": "memory-orch", "label": "recall" },
-    { "id": "e19", "from": "specialists", "to": "memory-orch", "label": "recall" },
-    { "id": "e20", "from": "conversation", "to": "llm-router", "label": "complete" },
-    { "id": "e21", "from": "specialists", "to": "llm-router", "label": "complete" },
-    { "id": "e22", "from": "orchestrator", "to": "llm-router", "label": "decompose" },
-    { "id": "e23", "from": "llm-router", "to": "llm-cloud", "label": "primary/fallback" },
-    { "id": "e24", "from": "llm-router", "to": "llm-local", "label": "primary/fallback" },
-    { "id": "e25", "from": "llm-router", "to": "llm-embedded", "label": "offline fallback" },
-    { "id": "e26", "from": "conversation", "to": "tools", "label": "TOOL: loop" },
-    { "id": "e27", "from": "specialists", "to": "tools", "label": "TOOL: loop" },
-    { "id": "e28", "from": "tools", "to": "tools-policy", "label": "authorize" },
-    { "id": "e29", "from": "tools", "to": "vault", "label": "VAULT: secrets" },
-    { "id": "e30", "from": "tools", "to": "policy-engine", "label": "permissions" },
-    { "id": "e31", "from": "memory-orch", "to": "mem-short", "label": "session" },
-    { "id": "e32", "from": "memory-orch", "to": "mem-vector", "label": "semantic" },
-    { "id": "e33", "from": "memory-orch", "to": "mem-graph", "label": "facts" },
-    { "id": "e34", "from": "memory-orch", "to": "mem-episodic", "label": "events" },
-    { "id": "e35", "from": "mem-vector", "to": "sqlite", "label": "persist" },
-    { "id": "e36", "from": "mem-graph", "to": "sqlite", "label": "persist" },
-    { "id": "e37", "from": "mem-episodic", "to": "sqlite", "label": "persist" },
-    { "id": "e38", "from": "task-store", "to": "sqlite", "label": "persist" },
-    { "id": "e39", "from": "scheduler", "to": "main-agent", "label": "wakeup task" },
-    { "id": "e40", "from": "scheduler", "to": "task-store", "label": "schedules" },
-    { "id": "e41", "from": "tools", "to": "plugin-host", "label": "WASM tools" },
-    { "id": "e42", "from": "plugin-host", "to": "plugin-api", "label": "manifest" },
-    { "id": "e43", "from": "tools", "to": "mcp", "label": "MCP tools" },
-    { "id": "e44", "from": "conversation", "to": "rag", "label": "grounding" },
-    { "id": "e45", "from": "ui-cli", "to": "rag", "label": "doctor --advice" },
-    { "id": "e46", "from": "conversation", "to": "workspace-graph", "label": "project KG" },
-    { "id": "e47", "from": "event-bus", "to": "http-api", "label": "SSE/poll" },
-    { "id": "e48", "from": "main-agent", "to": "core", "label": "EventEnvelope" },
-    { "id": "e49", "from": "cluster", "to": "http-api", "label": "optional HA" },
-    { "id": "e50", "from": "evals", "to": "llm-router", "label": "quality gates" },
-    { "id": "e51", "from": "conversation", "to": "mem-vector", "label": "promote" },
-    { "id": "e52", "from": "gateway", "to": "core", "label": "types" }
+    {
+      "id": "e1",
+      "from": "ui-tauri",
+      "to": "http-api",
+      "label": "HTTP"
+    },
+    {
+      "id": "e2",
+      "from": "ui-tui",
+      "to": "http-api",
+      "label": "HTTP"
+    },
+    {
+      "id": "e3",
+      "from": "ui-cli",
+      "to": "http-api",
+      "label": "control / HTTP"
+    },
+    {
+      "id": "e4",
+      "from": "ch-slack",
+      "to": "gateway",
+      "label": "envelope"
+    },
+    {
+      "id": "e5",
+      "from": "ch-teams",
+      "to": "gateway",
+      "label": "envelope"
+    },
+    {
+      "id": "e6",
+      "from": "ch-discord",
+      "to": "http-api",
+      "label": "via /api/message"
+    },
+    {
+      "id": "e7",
+      "from": "ch-telegram",
+      "to": "http-api",
+      "label": "via /api/message"
+    },
+    {
+      "id": "e8",
+      "from": "ch-voice",
+      "to": "tools",
+      "label": "TTS/STT tools"
+    },
+    {
+      "id": "e9",
+      "from": "http-api",
+      "to": "gateway",
+      "label": "MessageEnvelope"
+    },
+    {
+      "id": "e10",
+      "from": "gateway",
+      "to": "main-agent",
+      "label": "handle_envelope"
+    },
+    {
+      "id": "e11",
+      "from": "main-agent",
+      "to": "supervisor",
+      "label": "classify"
+    },
+    {
+      "id": "e12",
+      "from": "main-agent",
+      "to": "event-bus",
+      "label": "emit"
+    },
+    {
+      "id": "e13",
+      "from": "main-agent",
+      "to": "task-store",
+      "label": "create task"
+    },
+    {
+      "id": "e14",
+      "from": "supervisor",
+      "to": "conversation",
+      "label": "Direct"
+    },
+    {
+      "id": "e15",
+      "from": "supervisor",
+      "to": "orchestrator",
+      "label": "Guided/Orchestrated"
+    },
+    {
+      "id": "e16",
+      "from": "orchestrator",
+      "to": "specialists",
+      "label": "delegate"
+    },
+    {
+      "id": "e17",
+      "from": "orchestrator",
+      "to": "conversation",
+      "label": "synth / fallback"
+    },
+    {
+      "id": "e18",
+      "from": "conversation",
+      "to": "memory-orch",
+      "label": "recall"
+    },
+    {
+      "id": "e19",
+      "from": "specialists",
+      "to": "memory-orch",
+      "label": "recall"
+    },
+    {
+      "id": "e20",
+      "from": "conversation",
+      "to": "llm-router",
+      "label": "complete"
+    },
+    {
+      "id": "e21",
+      "from": "specialists",
+      "to": "llm-router",
+      "label": "complete"
+    },
+    {
+      "id": "e22",
+      "from": "orchestrator",
+      "to": "llm-router",
+      "label": "decompose"
+    },
+    {
+      "id": "e23",
+      "from": "llm-router",
+      "to": "llm-cloud",
+      "label": "primary/fallback"
+    },
+    {
+      "id": "e24",
+      "from": "llm-router",
+      "to": "llm-local",
+      "label": "primary/fallback"
+    },
+    {
+      "id": "e25",
+      "from": "llm-router",
+      "to": "llm-embedded",
+      "label": "offline fallback"
+    },
+    {
+      "id": "e26",
+      "from": "conversation",
+      "to": "tools",
+      "label": "TOOL: loop"
+    },
+    {
+      "id": "e27",
+      "from": "specialists",
+      "to": "tools",
+      "label": "TOOL: loop"
+    },
+    {
+      "id": "e28",
+      "from": "tools",
+      "to": "tools-policy",
+      "label": "authorize"
+    },
+    {
+      "id": "e29",
+      "from": "tools",
+      "to": "vault",
+      "label": "VAULT: secrets"
+    },
+    {
+      "id": "e30",
+      "from": "tools",
+      "to": "policy-engine",
+      "label": "permissions"
+    },
+    {
+      "id": "e31",
+      "from": "memory-orch",
+      "to": "mem-short",
+      "label": "session"
+    },
+    {
+      "id": "e32",
+      "from": "memory-orch",
+      "to": "mem-vector",
+      "label": "semantic"
+    },
+    {
+      "id": "e33",
+      "from": "memory-orch",
+      "to": "mem-graph",
+      "label": "facts"
+    },
+    {
+      "id": "e34",
+      "from": "memory-orch",
+      "to": "mem-episodic",
+      "label": "events"
+    },
+    {
+      "id": "e35",
+      "from": "mem-vector",
+      "to": "sqlite",
+      "label": "persist"
+    },
+    {
+      "id": "e36",
+      "from": "mem-graph",
+      "to": "sqlite",
+      "label": "persist"
+    },
+    {
+      "id": "e37",
+      "from": "mem-episodic",
+      "to": "sqlite",
+      "label": "persist"
+    },
+    {
+      "id": "e38",
+      "from": "task-store",
+      "to": "sqlite",
+      "label": "persist"
+    },
+    {
+      "id": "e39",
+      "from": "scheduler",
+      "to": "main-agent",
+      "label": "wakeup task"
+    },
+    {
+      "id": "e40",
+      "from": "scheduler",
+      "to": "task-store",
+      "label": "schedules"
+    },
+    {
+      "id": "e41",
+      "from": "tools",
+      "to": "plugin-host",
+      "label": "WASM tools"
+    },
+    {
+      "id": "e42",
+      "from": "plugin-host",
+      "to": "plugin-api",
+      "label": "manifest"
+    },
+    {
+      "id": "e43",
+      "from": "tools",
+      "to": "mcp",
+      "label": "MCP tools"
+    },
+    {
+      "id": "e44",
+      "from": "conversation",
+      "to": "rag",
+      "label": "grounding"
+    },
+    {
+      "id": "e45",
+      "from": "ui-cli",
+      "to": "rag",
+      "label": "doctor --advice"
+    },
+    {
+      "id": "e46",
+      "from": "conversation",
+      "to": "workspace-graph",
+      "label": "project KG"
+    },
+    {
+      "id": "e47",
+      "from": "event-bus",
+      "to": "http-api",
+      "label": "SSE/poll"
+    },
+    {
+      "id": "e48",
+      "from": "main-agent",
+      "to": "core",
+      "label": "EventEnvelope"
+    },
+    {
+      "id": "e49",
+      "from": "cluster",
+      "to": "http-api",
+      "label": "optional HA"
+    },
+    {
+      "id": "e50",
+      "from": "evals",
+      "to": "llm-router",
+      "label": "quality gates"
+    },
+    {
+      "id": "e51",
+      "from": "conversation",
+      "to": "mem-vector",
+      "label": "promote"
+    },
+    {
+      "id": "e52",
+      "from": "gateway",
+      "to": "core",
+      "label": "types"
+    }
   ],
   "flows": [
     {
@@ -573,6 +862,17 @@
         "llm-router",
         "tools",
         "ch-voice"
+      ]
+    },
+    {
+      "id": "flow-capabilities",
+      "label": "Capabilities / evidence (v0.11)",
+      "description": "UI or doctor queries GET /api/capabilities and embedded-status before marking GGUF/vision ready.",
+      "steps": [
+        "ui-tauri",
+        "http-api",
+        "llm-embedded",
+        "llm-router"
       ]
     }
   ]
