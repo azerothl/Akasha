@@ -130,3 +130,31 @@ Commandes exécutées par le job (à reproduire sur le runner) :
 ```
 
 Après première run CI verte : coller la sortie JSON ici et mettre à jour `embedded_profile_baselines.json`.
+
+---
+
+## v0.11.0 — gate benches (2026-09-28)
+
+### Mock protocole AR (cloud, sans NVIDIA)
+
+- Commande : `python3 spec/dev/quality/bench_ar_protocol.py --mock --json`
+- Résultat : **50/50** lignes ok (valeurs **synthétiques** — wiring CI uniquement)
+- **Aucun tok/s réel inventé** pour le tag
+
+### Décision défaut CUDA
+
+**Garder Qwen2.5-1.5B Q4_K_M** (statu quo manifeste). Swap candidat **différé** faute de benches GPU v0.11 sur machine de référence.
+
+### Checklist opérateur (bloqué)
+
+| # | Action | Doc |
+|---|--------|-----|
+| 1 | Runner `self-hosted,gpu,nvidia` + job `gpu-smoke` | [GPU_SELF_HOSTED_CI.md](GPU_SELF_HOSTED_CI.md) |
+| 2 | Bench live protocole AR (5 prompts FR) + collage ici | [bench_ar_v0.11.md](bench_ar_v0.11.md) |
+| 3 | Matrice `ngl=0` vs `ngl=99` (GPU 4 Go) | `bench_embedded_models.ps1 -Matrix` |
+| 4 | Validation `n_batch` Qwen3.5 hybrid | env `AKASHA_EMBEDDED_N_BATCH` / arch hint |
+| 5 | Matrice manuelle first-use zip CPU + CUDA | roadmap P0 |
+| 6 | Réouverture A1 si un candidat bat le défaut | note R0a |
+
+Baselines XPS 2026-06-22 (section ci-dessus) restent la dernière mesure GPU réelle connue.
+
