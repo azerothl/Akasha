@@ -25,7 +25,7 @@ Ne pas re-lister comme objectifs v0.11. Preuves : tag `v0.10.0`, [internal_relea
 | Veille R0 | Note recherche AR/DLM/moteurs/Rbitnet | Décisions : DLM surveiller ; Rbitnet no-go prod v0.10 |
 | Cockpit P6 A1–A4 | Active work, modes, Usage 7/30j, pin/fork/dual-pane | Stretch P6 B3/B4 **reportés** |
 | Life layer P7 L1–L4 | Overnight, morning brief Telegram, OAuth Connectors, NL schedule | Stretch P7 B3/B4/H5 **livrés** |
-| Refactor API L0–L6 | `api_routes_*` + smoke path matching | `api.rs` encore ~16–17k lignes ; cible &lt;8k **reportée** |
+| Refactor API L0–L6 | `api_routes_*` + smoke path matching | `api.rs` ~7212 (P3 v0.11) ; boucle LLM → `api_llm_loop` |
 | Intégrations | Discovery, Home Assistant, Companion LAN APIs (#122) | Companion ESP32 hardware encore **Planned** |
 | CI / packaging | GPU workflow, smoke staging, release artefacts | Runner self-hosted + gates manuels : ops post-tag |
 
@@ -96,10 +96,10 @@ Reprend P5 v0.10 et la note R0 — **pas de décision produit figée ici**.
 
 [REFACTOR_MONOREPO_TRACKING.md](../quality/REFACTOR_MONOREPO_TRACKING.md) : L0–L6 **faits** ; [internal_release_0.10.0.md](internal_release_0.10.0.md) : cible &lt;8k reportée v0.11 pour la **boucle outils / `execute_tool_call`**.
 
-- [ ] Extraire / découper la boucle outils (`execute_tool_call` et helpers associés) hors du monolithe restant
-- [ ] Ramener `crates/akasha-daemon/src/api.rs` **&lt; ~8k lignes** (baseline actuelle ~16–17k)
-- [ ] Conserver checklist PR refactor : `cargo check -p akasha-daemon --lib`, tests ciblés, pas de duplication `api_http`
-- [ ] Mettre à jour la table métriques dans `REFACTOR_MONOREPO_TRACKING.md`
+- [x] Extraire / découper la boucle outils (`execute_tool_call` et helpers associés) hors du monolithe restant — `api_tool_dispatch` + `api_llm_loop/run_message.rs`
+- [x] Ramener `crates/akasha-daemon/src/api.rs` **&lt; ~8k lignes** (~7212 au 2026-09-27)
+- [x] Conserver checklist PR refactor : `cargo check -p akasha-daemon --lib`, tests ciblés, pas de duplication `api_http`
+- [x] Mettre à jour la table métriques dans `REFACTOR_MONOREPO_TRACKING.md`
 
 ---
 
@@ -238,7 +238,7 @@ Objectif : **aligner** (docs + chemins d’import/export) les extensions du daem
 - [ ] Carte d’architecture régénérée (`spec/dev/architecture/` — diagramme HTML + `architecture-graph.json`) avant le tag — [architecture/README.md](../architecture/README.md)
 - [ ] Tag **`v0.11.0`** + artefacts Release (CPU / CUDA / full) sans régression smoke GitHub-hosted
 - [ ] Benches AR tier 1–2 publiés + **décision défaut CUDA** documentée
-- [ ] `api.rs` **&lt; ~8k** lignes ; check daemon + tests outils verts
+- [x] `api.rs` **&lt; ~8k** lignes ; check daemon + tests outils verts
 - [x] MCP : statut registre **Implemented** + doc user minimale
 - [x] P6-B3 et P6-B4 livrés (ou report explicite avec justification capacité)
 - [ ] Dette doc « Partially documented » prioritaire résorbée (ou tickets GitHub associés)
