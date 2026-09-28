@@ -3,7 +3,7 @@
 Document de veille **R0a–R0d** pour la release Akasha 0.10.0. Complète [roadmap_v0.10.0.md](../releases/roadmap_v0.10.0.md).
 
 **Statut** : publié (cycle v0.10)  
-**Dernière mise à jour** : 2026-06-21
+**Dernière mise à jour** : 2026-09-28
 
 ---
 
@@ -207,3 +207,36 @@ Entrées dans `spec/embedded_models.json` ; scripts `bench_embedded.ps1` / `.sh`
 - `n_batch` configurable (`AKASHA_EMBEDDED_N_BATCH`) avec hint arch hybrid Qwen3.5
 
 **Reste opérateur** : benches NVIDIA réels + collage résultats + décision A1.
+
+---
+
+## Annexe v0.11 — Rbitnet / DLM (clôture datée)
+
+**Date** : 2026-09-28  
+**Critère de clôture roadmap P2** : spike **ou** no-go renouvelé (pas de silence).
+
+### Décision A2 — Rbitnet
+
+| Point | État au 2026-09-28 |
+|-------|---------------------|
+| Spike POC code dans le monorepo Akasha | **Non réalisé** (capacité release + priorité benches AR / plateforme) |
+| Bench comparatif vs llama-cpp-4 | **Non réalisé** — pas de runner GPU self-hosted ni intégration Rbitnet dans ce dépôt |
+| Remplacement backend GPU défaut | **No-go renouvelé** |
+
+**No-go renouvelé v0.11** : Rbitnet reste hors prod first-use. **llama-cpp-4** demeure le backend GPU par défaut ; Candle reste le fallback CPU. Revoir uniquement si un POC + bench comparatif documenté bat llama-cpp sur le protocole AR (machine de référence Insider / XPS).
+
+### Décision A3 — DLM
+
+| Blocker R0b (inchangé) | Toujours vrai ? |
+|------------------------|-----------------|
+| TTFT / génération par steps vs streaming chat AR | Oui |
+| Runtime Rust/Windows mature pour onboarding | **Non** observé pour LLaDA / Dream en stack native Akasha |
+| Taille & Python-first | Oui |
+
+**No-go renouvelé v0.11** : continuer **« surveiller seulement »**. Pas de spike DLM dans le binaire release. Pas de chemin first-use DLM.
+
+### Implication produit
+
+- Manifeste / wizard : pas de variante Rbitnet ou DLM.
+- Arbitrages A2/A3 clos pour le tag `v0.11.0` ; réouverture possible en v0.12+ avec preuve runtime.
+

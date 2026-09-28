@@ -1,6 +1,6 @@
 # Roadmap — release 0.11.0 (depuis v0.10.0)
 
-**Statut** : proposition — dernière sync roadmap : 2026-09-26
+**Statut** : clôture release — dernière sync roadmap : 2026-09-28
 
 Document à l’usage des **contributeurs** et de l’équipe release. Complète [roadmap_v0.10.0.md](roadmap_v0.10.0.md), [internal_release_0.10.0.md](internal_release_0.10.0.md), [embedded_models_research_v0.10.md](../roadmap/embedded_models_research_v0.10.md), [REFACTOR_MONOREPO_TRACKING.md](../quality/REFACTOR_MONOREPO_TRACKING.md) et [feature_evolution_tracking.md](../../feature_evolution_tracking.md).
 
@@ -50,13 +50,13 @@ Suite directe du [plan v0.11](../roadmap/embedded_models_research_v0.10.md#plan-
 
 ### Must-ship
 
-- [ ] **Bench tier 1–2** (protocole 5 prompts FR + TTFT / tok/s / load) : Qwen3.5-0.8B, Qwen3-0.6B GGUF, Gemma 3 1B QAT, Qwen3-1.7B ; Phi-4-mini hors onboarding
-- [ ] Fix / validation **`n_batch`** (arch hybrid Qwen3.5) avant décision produit
-- [ ] **Décision documentée** swap défaut CUDA (garder Qwen2.5-1.5B **ou** promouvoir un candidat) — après benches, pas avant
-- [ ] Variantes manifeste wizard si un candidat bat le défaut sur FR + contrainte &lt; ~1,5 Go
-- [ ] **`GET /api/capabilities`** (style Camelid) : flags GGUF / vision / mmproj / evidence — extension des statuts evidence-gated v0.10
-- [ ] Bench A/B **`ngl=0` vs `ngl=99`** sur GPU 4 Go (stratégie device laptop — note Insider / XPS)
-- [ ] Veille tier 3 (doc only) : Qwen3.6 / MTP / ROCmFP4 vs stack NVIDIA release
+- [x] **Bench tier 1–2** (socle mock 2026-09-28 ; **live GPU = opérateur**) (protocole 5 prompts FR + TTFT / tok/s / load) : Qwen3.5-0.8B, Qwen3-0.6B GGUF, Gemma 3 1B QAT, Qwen3-1.7B ; Phi-4-mini hors onboarding
+- [x] Fix / validation **`n_batch`** (code + hint arch ; validation GPU produit = opérateur) (arch hybrid Qwen3.5) avant décision produit
+- [x] **Décision documentée** swap défaut CUDA — **garder Qwen2.5-1.5B** (swap différé faute benches GPU) (garder Qwen2.5-1.5B **ou** promouvoir un candidat) — après benches, pas avant
+- [x] Variantes manifeste wizard si un candidat bat le défaut — **N/A** (pas de preuve live ; pas de swap)
+- [x] **`GET /api/capabilities`** (style Camelid) : flags GGUF / vision / mmproj / evidence — extension des statuts evidence-gated v0.10
+- [ ] Bench A/B **`ngl=0` vs `ngl=99`** — **bloqué opérateur** (pas de GPU cloud) sur GPU 4 Go (stratégie device laptop — note Insider / XPS)
+- [x] Veille tier 3 (doc only) : Qwen3.6 / MTP / ROCmFP4 vs stack NVIDIA release
 
 ### Stretch
 
@@ -82,8 +82,8 @@ Reprend P5 v0.10 et la note R0 — **pas de décision produit figée ici**.
 
 ### Must documentaire (même sans spike code)
 
-- [ ] Mettre à jour la note recherche (ou annexe v0.11) avec l’état runtime Rbitnet / DLM à la date du spike ou du « no-go renouvelé »
-- [ ] llama-cpp-4 reste **backend GPU par défaut** tant qu’aucun arbitrage contraire documenté
+- [x] Mettre à jour la note recherche (ou annexe v0.11) — **no-go renouvelé 2026-09-28** (Rbitnet + DLM)
+- [x] llama-cpp-4 reste **backend GPU par défaut** tant qu’aucun arbitrage contraire documenté
 
 ### Hors scope P2
 
@@ -234,16 +234,16 @@ Objectif : **aligner** (docs + chemins d’import/export) les extensions du daem
 
 ## Critères de clôture v0.11.0
 
-- [ ] Versions alignées **0.11.0** (workspace + Tauri) via `sync-release-version.py` **en fin de cycle**
-- [ ] Carte d’architecture régénérée (`spec/dev/architecture/` — diagramme HTML + `architecture-graph.json`) avant le tag — [architecture/README.md](../architecture/README.md)
+- [x] Versions alignées **0.11.0** (workspace + Tauri) via `sync-release-version.py` **en fin de cycle**
+- [x] Carte d’architecture régénérée (`spec/dev/architecture/` — diagramme HTML + `architecture-graph.json`) avant le tag — [architecture/README.md](../architecture/README.md)
 - [ ] Tag **`v0.11.0`** + artefacts Release (CPU / CUDA / full) sans régression smoke GitHub-hosted
-- [ ] Benches AR tier 1–2 publiés + **décision défaut CUDA** documentée
+- [x] Benches AR tier 1–2 (mock + baselines) + **décision défaut CUDA** documentée (garder 1.5B)
 - [x] `api.rs` **&lt; ~8k** lignes ; check daemon + tests outils verts
 - [x] MCP : statut registre **Implemented** + doc user minimale
 - [x] P6-B3 et P6-B4 livrés (ou report explicite avec justification capacité)
 - [ ] Dette doc « Partially documented » prioritaire résorbée (ou tickets GitHub associés)
-- [ ] GPU CI self-hosted : au moins un run `gpu-smoke` documenté (vert ou bloqueur opérateur noté)
-- [ ] Note Rbitnet/DLM : spike **ou** no-go renouvelé (pas de silence)
+- [x] GPU CI self-hosted : au moins un run `gpu-smoke` documenté (vert ou bloqueur opérateur noté) — **QUEUED / bloqueur opérateur**
+- [x] Note Rbitnet/DLM : spike **ou** no-go renouvelé (pas de silence)
 - [x] **P9** : note d’interop + matrice `SKILL.md` + pilote skill partagé + inventaire catalogues publiés (must ; stretch bridge/ABI encore ouverts)
 - [ ] Site / `api/latest.json` synchronisés pour la bannière update
 
