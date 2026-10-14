@@ -281,7 +281,10 @@ fn try_integrate_worktree(state: &mut StudioWorktreeState) {
             &[
                 "commit",
                 "-m",
-                &format!("auto-commit child worktree changes ({})", state.worktree_branch),
+                &format!(
+                    "auto-commit child worktree changes ({})",
+                    state.worktree_branch
+                ),
             ],
         );
     }
@@ -491,19 +494,55 @@ fn registry_file(data_dir: &Path) -> PathBuf {
     data_dir.join("studio-worktrees").join("registry.json")
 }
 
-fn load_records(data_dir: &Path) -> Vec<StudioWorktreeRecord> {
+type RegistryFileLocks = std::sync::Mutex<HashMap<PathBuf, Arc<std::sync::Mutex<()>>>>;
+
+fn registry_file_lock(data_dir: &Path) -> Arc<std::sync::Mutex<()>> {
+    static LOCKS: OnceLock<RegistryFileLocks> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(data_dir.to_path_buf())
+        .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+        .clone()
+}
+
+fn load_records_unlocked(data_dir: &Path) -> Vec<StudioWorktreeRecord> {
     let text = fs::read_to_string(registry_file(data_dir)).unwrap_or_default();
     serde_json::from_str(&text).unwrap_or_default()
 }
 
-fn save_records(data_dir: &Path, records: &[StudioWorktreeRecord]) {
+fn save_records_unlocked(data_dir: &Path, records: &[StudioWorktreeRecord]) -> Result<(), String> {
     let path = registry_file(data_dir);
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|e| format!("registry_dir_create_failed: {e}"))?;
     }
-    if let Ok(body) = serde_json::to_string_pretty(records) {
-        let _ = fs::write(path, body);
-    }
+    let body = serde_json::to_string_pretty(records)
+        .map_err(|e| format!("registry_serialize_failed: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, body).map_err(|e| format!("registry_write_failed: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("registry_rename_failed: {e}"))?;
+    Ok(())
+}
+
+fn with_registry_read<R>(data_dir: &Path, f: impl FnOnce(&[StudioWorktreeRecord]) -> R) -> R {
+    let lock = registry_file_lock(data_dir);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let records = load_records_unlocked(data_dir);
+    f(&records)
+}
+
+fn with_registry_write<R>(
+    data_dir: &Path,
+    f: impl FnOnce(&mut Vec<StudioWorktreeRecord>) -> R,
+) -> R {
+    let lock = registry_file_lock(data_dir);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut records = load_records_unlocked(data_dir);
+    let result = f(&mut records);
+    let _ = save_records_unlocked(data_dir, &records);
+    result
 }
 
 fn record_from_state(state: &StudioWorktreeState) -> StudioWorktreeRecord {
@@ -522,13 +561,60 @@ fn record_from_state(state: &StudioWorktreeState) -> StudioWorktreeRecord {
     }
 }
 
-fn state_from_record(record: &StudioWorktreeRecord) -> Result<StudioWorktreeState, String> {
+fn expected_worktree_layout(
+    data_dir: &Path,
+    root_task_id: Uuid,
+    child_task_id: Uuid,
+) -> (String, PathBuf) {
+    let branch_suffix: String = child_task_id.simple().to_string().chars().take(8).collect();
+    let worktree_branch = format!("wt/{}/{}", root_task_id.simple(), branch_suffix);
+    let worktree_path = data_dir
+        .join("studio-worktrees")
+        .join(root_task_id.to_string())
+        .join(branch_suffix);
+    (worktree_branch, worktree_path)
+}
+
+/// Re-bind persisted paths to the daemon's studio layout (never trust registry.json verbatim).
+fn validate_record_paths(data_dir: &Path, record: &StudioWorktreeRecord) -> Result<(), String> {
+    let project_root = crate::studio::resolve_studio_project_dir(data_dir, &record.project_id)?;
+    let recorded_root = PathBuf::from(&record.project_root);
+    if recorded_root != project_root {
+        return Err("invalid_project_root".to_string());
+    }
+    if !crate::studio::is_strictly_under_studio_root(&recorded_root, &project_root) {
+        return Err("invalid_project_root".to_string());
+    }
+
+    let root_task_id = Uuid::parse_str(&record.root_task_id).map_err(|e| e.to_string())?;
+    let child_task_id = Uuid::parse_str(&record.task_id).map_err(|e| e.to_string())?;
+    let (expected_branch, expected_path) =
+        expected_worktree_layout(data_dir, root_task_id, child_task_id);
+    if record.worktree_branch != expected_branch {
+        return Err("invalid_worktree_branch".to_string());
+    }
+    let recorded_path = PathBuf::from(&record.worktree_path);
+    if recorded_path != expected_path {
+        return Err("invalid_worktree_path".to_string());
+    }
+    let worktrees_root = data_dir.join("studio-worktrees");
+    if !crate::studio::is_strictly_under_studio_root(&recorded_path, &worktrees_root) {
+        return Err("invalid_worktree_path".to_string());
+    }
+    Ok(())
+}
+
+fn state_from_record(
+    data_dir: &Path,
+    record: &StudioWorktreeRecord,
+) -> Result<StudioWorktreeState, String> {
+    validate_record_paths(data_dir, record)?;
     let created_at = now();
     Ok(StudioWorktreeState {
         root_task_id: Uuid::parse_str(&record.root_task_id).map_err(|e| e.to_string())?,
         task_id: Uuid::parse_str(&record.task_id).map_err(|e| e.to_string())?,
         project_id: record.project_id.clone(),
-        project_root: PathBuf::from(&record.project_root),
+        project_root: crate::studio::resolve_studio_project_dir(data_dir, &record.project_id)?,
         base_branch: record.base_branch.clone(),
         base_sha: record.base_sha.clone(),
         worktree_branch: record.worktree_branch.clone(),
@@ -541,16 +627,20 @@ fn state_from_record(record: &StudioWorktreeRecord) -> Result<StudioWorktreeStat
     })
 }
 
+fn allows_explicit_worktree_action(lifecycle_state: &str) -> bool {
+    lifecycle_state == "awaiting_review" || lifecycle_state == "needs_user_resolution"
+}
+
 fn upsert_record(data_dir: &Path, state: &StudioWorktreeState) {
-    let mut records = load_records(data_dir);
-    let id = state.task_id.to_string();
-    let next = record_from_state(state);
-    if let Some(existing) = records.iter_mut().find(|row| row.task_id == id) {
-        *existing = next;
-    } else {
-        records.push(next);
-    }
-    save_records(data_dir, &records);
+    with_registry_write(data_dir, |records| {
+        let id = state.task_id.to_string();
+        let next = record_from_state(state);
+        if let Some(existing) = records.iter_mut().find(|row| row.task_id == id) {
+            *existing = next;
+        } else {
+            records.push(next);
+        }
+    });
 }
 
 /// Keep the child worktree and record it as waiting for an explicit integrate/abandon.
@@ -578,10 +668,13 @@ pub async fn park_for_review(
 }
 
 pub fn list_project_worktrees(data_dir: &Path, project_id: &str) -> Vec<StudioWorktreeRecord> {
-    load_records(data_dir)
-        .into_iter()
-        .filter(|row| row.project_id == project_id)
-        .collect()
+    with_registry_read(data_dir, |records| {
+        records
+            .iter()
+            .filter(|row| row.project_id == project_id)
+            .cloned()
+            .collect()
+    })
 }
 
 pub async fn integrate_recorded_worktree(
@@ -589,16 +682,20 @@ pub async fn integrate_recorded_worktree(
     project_id: &str,
     task_id: Uuid,
 ) -> Result<StudioWorktreeState, String> {
-    let records = load_records(data_dir);
-    let record = records
-        .iter()
-        .find(|row| row.project_id == project_id && row.task_id == task_id.to_string())
-        .cloned()
-        .ok_or_else(|| "worktree_not_found".to_string())?;
+    let record = with_registry_read(data_dir, |records| {
+        records
+            .iter()
+            .find(|row| row.project_id == project_id && row.task_id == task_id.to_string())
+            .cloned()
+            .ok_or_else(|| "worktree_not_found".to_string())
+    })?;
     if record.lifecycle_state == "cleaned" || record.lifecycle_state == "integrated" {
         return Err("already_integrated".to_string());
     }
-    let state = state_from_record(&record)?;
+    if !allows_explicit_worktree_action(&record.lifecycle_state) {
+        return Err("worktree_not_ready_for_review".to_string());
+    }
+    let state = state_from_record(data_dir, &record)?;
     let registry = new_studio_worktree_registry();
     register_worktree(&registry, state).await;
     let result = complete_and_cleanup_worktree(&registry, task_id)
@@ -615,22 +712,35 @@ pub fn abandon_recorded_worktree(
     project_id: &str,
     task_id: Uuid,
 ) -> Result<StudioWorktreeRecord, String> {
-    let mut records = load_records(data_dir);
-    let record = records
-        .iter_mut()
-        .find(|row| row.project_id == project_id && row.task_id == task_id.to_string())
-        .ok_or_else(|| "worktree_not_found".to_string())?;
+    let record = with_registry_read(data_dir, |records| {
+        records
+            .iter()
+            .find(|row| row.project_id == project_id && row.task_id == task_id.to_string())
+            .cloned()
+            .ok_or_else(|| "worktree_not_found".to_string())
+    })?;
     if record.lifecycle_state == "cleaned" {
-        return Ok(record.clone());
+        return Ok(record);
     }
-    let state = state_from_record(record)?;
+    if !allows_explicit_worktree_action(&record.lifecycle_state) {
+        return Err("worktree_not_ready_for_review".to_string());
+    }
+    let state = state_from_record(data_dir, &record)?;
     cleanup_worktree_paths(&state);
-    record.lifecycle_state = "cleaned".to_string();
-    record.integration_status = Some("abandoned".to_string());
-    record.conflict_state = None;
-    let updated = record.clone();
-    save_records(data_dir, &records);
-    Ok(updated)
+    let updated = with_registry_write(data_dir, |records| {
+        let row = records
+            .iter_mut()
+            .find(|row| row.project_id == project_id && row.task_id == task_id.to_string());
+        if let Some(row) = row {
+            row.lifecycle_state = "cleaned".to_string();
+            row.integration_status = Some("abandoned".to_string());
+            row.conflict_state = None;
+            Some(row.clone())
+        } else {
+            None
+        }
+    });
+    updated.ok_or_else(|| "worktree_not_found".to_string())
 }
 
 pub async fn gc_stale_worktrees(registry: &StudioWorktreeRegistry, max_age_hours: u64) {
@@ -731,7 +841,8 @@ mod tests {
         .expect("second worktree");
 
         assert!(second.worktree_path.exists());
-        let worktree_list = git_output(&project_root, &["worktree", "list"]).expect("worktree list");
+        let worktree_list =
+            git_output(&project_root, &["worktree", "list"]).expect("worktree list");
         assert!(path_in_git_output(&second.worktree_path, &worktree_list));
 
         cleanup_worktree_paths(&second);
@@ -767,7 +878,9 @@ mod tests {
         assert_eq!(result.integration_status.as_deref(), Some("merged"));
         assert_eq!(current_branch(&project_root), state.base_branch);
         assert_eq!(
-            normalize_newlines(fs::read_to_string(project_root.join("README.md")).expect("merged file")),
+            normalize_newlines(
+                fs::read_to_string(project_root.join("README.md")).expect("merged file")
+            ),
             "child change\n"
         );
         assert!(!state.worktree_path.exists());
@@ -835,6 +948,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn integrate_rejects_active_worktree_until_parked() {
+        let (data_dir, project_id, _project_root) = init_studio_git_repo();
+        let root_task_id = Uuid::new_v4();
+        let child_task_id = Uuid::new_v4();
+        let state = create_worktree_for_child_task_blocking(
+            data_dir.path(),
+            &project_id,
+            root_task_id,
+            child_task_id,
+        )
+        .expect("worktree");
+        let registry = new_studio_worktree_registry();
+        register_worktree(&registry, state).await;
+        let err = integrate_recorded_worktree(data_dir.path(), &project_id, child_task_id)
+            .await
+            .expect_err("integrate while active");
+        assert_eq!(err, "worktree_not_ready_for_review");
+    }
+
+    #[test]
+    fn registry_rejects_tampered_paths() {
+        let (data_dir, project_id, project_root) = init_studio_git_repo();
+        let root_task_id = Uuid::new_v4();
+        let child_task_id = Uuid::new_v4();
+        let (branch, path) = expected_worktree_layout(data_dir.path(), root_task_id, child_task_id);
+        let tampered = StudioWorktreeRecord {
+            task_id: child_task_id.to_string(),
+            root_task_id: root_task_id.to_string(),
+            project_id: project_id.clone(),
+            project_root: "/tmp/evil".to_string(),
+            base_branch: "main".to_string(),
+            base_sha: "deadbeef".to_string(),
+            worktree_branch: branch,
+            worktree_path: path.to_string_lossy().into_owned(),
+            lifecycle_state: "awaiting_review".to_string(),
+            integration_status: None,
+            conflict_state: None,
+        };
+        assert_eq!(
+            state_from_record(data_dir.path(), &tampered).unwrap_err(),
+            "invalid_project_root"
+        );
+        let mut ok_paths = tampered.clone();
+        ok_paths.project_root = project_root.to_string_lossy().into_owned();
+        assert!(state_from_record(data_dir.path(), &ok_paths).is_ok());
+    }
+
+    #[tokio::test]
     async fn park_for_review_keeps_the_base_until_explicit_integrate() {
         let (data_dir, project_id, project_root) = init_studio_git_repo();
         let root_task_id = Uuid::new_v4();
@@ -857,9 +1018,14 @@ mod tests {
         let parked = park_for_review(&registry, child_task_id)
             .await
             .expect("parked");
-        assert_eq!(parked.lifecycle_state, WorktreeLifecycleState::AwaitingReview);
         assert_eq!(
-            normalize_newlines(fs::read_to_string(project_root.join("README.md")).expect("base file")),
+            parked.lifecycle_state,
+            WorktreeLifecycleState::AwaitingReview
+        );
+        assert_eq!(
+            normalize_newlines(
+                fs::read_to_string(project_root.join("README.md")).expect("base file")
+            ),
             "base\n"
         );
         let listed = list_project_worktrees(data_dir.path(), &project_id);
@@ -871,9 +1037,14 @@ mod tests {
         let integrated = integrate_recorded_worktree(data_dir.path(), &project_id, child_task_id)
             .await
             .expect("integrated");
-        assert_eq!(integrated.lifecycle_state, WorktreeLifecycleState::Integrated);
         assert_eq!(
-            normalize_newlines(fs::read_to_string(project_root.join("README.md")).expect("merged file")),
+            integrated.lifecycle_state,
+            WorktreeLifecycleState::Integrated
+        );
+        assert_eq!(
+            normalize_newlines(
+                fs::read_to_string(project_root.join("README.md")).expect("merged file")
+            ),
             "child change\n"
         );
     }
