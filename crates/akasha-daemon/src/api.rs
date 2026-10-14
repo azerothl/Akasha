@@ -1041,6 +1041,8 @@ pub async fn run_delegation_handler(
                                         "event_type": "studio_worktree_created",
                                         "worktree_branch": wt.worktree_branch,
                                         "worktree_path": worktree_path,
+                                        "base_branch": wt.base_branch,
+                                        "base_sha": wt.base_sha,
                                     })),
                                 )
                                 .with_correlation(req.requesting_task_id),
@@ -1178,38 +1180,25 @@ pub async fn run_delegation_handler(
                     })
             };
             if crate::studio_worktree::worktree_feature_enabled() {
-                if let Some(wt) = crate::studio_worktree::complete_and_cleanup_worktree(
+                if let Some(wt) = crate::studio_worktree::park_for_review(
                     &studio_worktree_registry,
                     child_id_span,
                 )
                 .await
                 {
-                    let event_type = match wt.lifecycle_state {
-                        crate::studio_worktree::WorktreeLifecycleState::NeedsUserResolution => {
-                            "studio_worktree_integration_conflict"
-                        }
-                        crate::studio_worktree::WorktreeLifecycleState::Cleaned => {
-                            "studio_worktree_integration_cleaned"
-                        }
-                        crate::studio_worktree::WorktreeLifecycleState::Integrated => {
-                            "studio_worktree_integration_merged"
-                        }
-                        crate::studio_worktree::WorktreeLifecycleState::Failed => {
-                            "studio_worktree_integration_failed"
-                        }
-                        _ => "studio_worktree_integration_state",
-                    };
                     let worktree_path = wt.worktree_path.to_string_lossy().into_owned();
                     let _ = bus_for_waiter.send(
                         EventEnvelope::new(
                             EventType::ProgressUpdate,
                             Some(serde_json::json!({
                                 "task_id": child_id_span.to_string(),
-                                "event_type": event_type,
+                                "event_type": "studio_worktree_awaiting_review",
                                 "integration_status": wt.integration_status,
                                 "conflict_state": wt.conflict_state,
                                 "worktree_branch": wt.worktree_branch,
                                 "worktree_path": worktree_path,
+                                "base_branch": wt.base_branch,
+                                "base_sha": wt.base_sha,
                             })),
                         )
                         .with_correlation(parent_task_id_span),
