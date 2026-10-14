@@ -3,16 +3,16 @@
 use super::*;
 
 async fn handle_worktree_api(method: &str, path_only: &str, data_dir: &Path) -> Option<String> {
+    let rest = strip_studio_projects_prefix(path_only)?;
+    let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() < 2 || segments[1] != "worktrees" {
+        return None;
+    }
     if !crate::studio_worktree::worktree_feature_enabled() {
         return Some(json_response(
             "404 Not Found",
             r#"{"error":"worktree_feature_disabled"}"#,
         ));
-    }
-    let rest = strip_studio_projects_prefix(path_only)?;
-    let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-    if segments.len() < 2 || segments[1] != "worktrees" {
-        return None;
     }
     let project_id = segments[0];
     let root = match resolve_studio_project_dir(data_dir, project_id) {
