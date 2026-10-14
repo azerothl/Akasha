@@ -2,6 +2,97 @@
 
 use super::*;
 
+async fn handle_worktree_api(method: &str, path_only: &str, data_dir: &Path) -> Option<String> {
+    let rest = strip_studio_projects_prefix(path_only)?;
+    let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() < 2 || segments[1] != "worktrees" {
+        return None;
+    }
+    let project_id = segments[0];
+    let root = match resolve_studio_project_dir(data_dir, project_id) {
+        Ok(dir) => dir,
+        Err(e) => {
+            return Some(json_response(
+                "400 Bad Request",
+                &serde_json::json!({ "error": e }).to_string(),
+            ));
+        }
+    };
+    if !root.is_dir() {
+        return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+    }
+    if method == "GET" && segments.len() == 2 {
+        let worktrees = crate::studio_worktree::list_project_worktrees(data_dir, project_id);
+        let body = serde_json::json!({
+            "isolation_unit": "child_task",
+            "explicit_integrate": true,
+            "concurrency_limit_env": "AKASHA_STUDIO_MAX_PARALLEL_OPS",
+            "cleanup": "integrate or abandon removes the git worktree; in-memory terminal rows older than 24h are dropped from the registry. Awaiting review rows stay until an explicit action.",
+            "worktrees": worktrees,
+        })
+        .to_string();
+        return Some(json_response("200 OK", &body));
+    }
+    if method == "POST" && segments.len() == 4 {
+        let task_id = match uuid::Uuid::parse_str(segments[2]) {
+            Ok(id) => id,
+            Err(_) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid_task_id"}"#,
+                ));
+            }
+        };
+        let action = segments[3];
+        if action == "integrate" {
+            match crate::studio_worktree::integrate_recorded_worktree(data_dir, project_id, task_id).await {
+                Ok(state) => {
+                    let integrated = state.lifecycle_state
+                        == crate::studio_worktree::WorktreeLifecycleState::Integrated;
+                    let body = serde_json::json!({
+                        "ok": integrated,
+                        "task_id": state.task_id.to_string(),
+                        "lifecycle_state": crate::studio_worktree::lifecycle_to_str(&state.lifecycle_state),
+                        "integration_status": state.integration_status,
+                        "conflict_state": state.conflict_state,
+                        "worktree_branch": state.worktree_branch,
+                        "base_branch": state.base_branch,
+                        "base_sha": state.base_sha,
+                    })
+                    .to_string();
+                    let status = if integrated { "200 OK" } else { "409 Conflict" };
+                    return Some(json_response(status, &body));
+                }
+                Err(err) => {
+                    return Some(json_response(
+                        "409 Conflict",
+                        &serde_json::json!({ "error": err }).to_string(),
+                    ));
+                }
+            }
+        }
+        if action == "abandon" {
+            match crate::studio_worktree::abandon_recorded_worktree(data_dir, project_id, task_id) {
+                Ok(record) => {
+                    let body = serde_json::to_string(&serde_json::json!({
+                        "ok": true,
+                        "worktree": record,
+                    }))
+                    .unwrap_or_else(|_| r#"{"ok":true}"#.to_string());
+                    return Some(json_response("200 OK", &body));
+                }
+                Err(err) => {
+                    return Some(json_response(
+                        "404 Not Found",
+                        &serde_json::json!({ "error": err }).to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Some(json_response("404 Not Found", r#"{"error":"worktree_route"}"#))
+}
+
 /// Returns HTTP response if handled.
 pub async fn handle_studio_route(
     method: &str,
@@ -12,6 +103,10 @@ pub async fn handle_studio_route(
 ) -> Option<String> {
     let base = studio_projects_base(data_dir);
     let _ = fs::create_dir_all(&base);
+
+    if let Some(resp) = handle_worktree_api(method, path_only, data_dir).await {
+        return Some(resp);
+    }
 
     if method == "GET" && path_only == "/api/studio/projects" {
         let dirs = list_project_dirs(&base);
