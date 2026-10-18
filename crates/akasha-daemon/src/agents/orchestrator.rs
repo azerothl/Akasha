@@ -2605,8 +2605,10 @@ Do not only describe the files — execute the tools."#,
             if !all_done {
                 // Persist timeout truth while preserving a concurrent operator stop.
                 let (status,outcome) = match store.finalize_outcome(root_task_id,TaskStatus::Failed,serde_json::json!({"schema_version":1,"termination_reason":"timeout","result":if children.iter().any(|child|child.status==TaskStatus::Completed){"partial"}else{"failed"},"reason":"Subtasks did not reach a terminal result before timeout","acceptance_verified":false,"verification":[],"subtasks":children.iter().map(|child|serde_json::json!({"task_id":child.id,"status":child.status})).collect::<Vec<_>>()})) {
-                    Ok(value)=>value,Err(error)=>{tracing::error!(%root_task_id,%error,"Cannot persist orchestration timeout");return;}
+                    Ok(value)=>value,Err(error)=>{tracing::error!(%root_task_id,%error,"Cannot persist orchestration timeout");let _=store.clear_lease(root_task_id);let _=lease_stop_tx.send(());return;}
                 };
+                let _=store.clear_lease(root_task_id);
+                let _=lease_stop_tx.send(());
                 emit_timeline_once_for_task(
                     &bus,
                     Some(store_path_buf.as_path()),

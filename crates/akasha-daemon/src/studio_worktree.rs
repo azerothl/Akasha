@@ -576,7 +576,7 @@ fn expected_worktree_layout(
 }
 
 /// Re-bind persisted paths to the daemon's studio layout (never trust registry.json verbatim).
-fn validate_record_paths(data_dir: &Path, record: &StudioWorktreeRecord) -> Result<(), String> {
+pub(crate) fn validate_record_paths(data_dir: &Path, record: &StudioWorktreeRecord) -> Result<(), String> {
     let project_root = crate::studio::resolve_studio_project_dir(data_dir, &record.project_id)?;
     let recorded_root = PathBuf::from(&record.project_root);
     if recorded_root != project_root {
