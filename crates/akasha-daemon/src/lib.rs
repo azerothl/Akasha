@@ -98,6 +98,7 @@ pub mod inter_agent;
 pub mod memory_consolidation;
 pub mod memory_retrieval_enhance;
 pub mod user_rag;
+pub mod pdf_extract_safe;
 pub mod user_rag_indexer;
 pub mod notes;
 pub mod api_routes_notes;

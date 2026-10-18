@@ -541,7 +541,7 @@ pub(crate) async fn pdf_extract_message_from_disk(
     via_tool: &str,
 ) -> (bool, String, Option<String>) {
     match tokio::fs::read(disk_path).await {
-        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+        Ok(bytes) => match crate::pdf_extract_safe::extract_text_from_mem(&bytes) {
             Ok(text) => {
                 let preview = if text.len() > 2000 {
                     format!("{}…", text.chars().take(2000).collect::<String>())

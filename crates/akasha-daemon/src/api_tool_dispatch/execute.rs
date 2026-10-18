@@ -2308,7 +2308,7 @@ pub(crate) async fn execute_tool_call_impl(
                     (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None)
                 } else {
                     match tokio::fs::read(&disk_path).await {
-                        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+                        Ok(bytes) => match crate::pdf_extract_safe::extract_text_from_mem(&bytes) {
                             Ok(text) => {
                                 let preview = if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
                                 (true, format!("[pdf {}] extracted {} chars:\n{}", disk_path.display(), text.len(), preview), None)
@@ -2324,7 +2324,7 @@ pub(crate) async fn execute_tool_call_impl(
                     (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None)
                 } else {
                     match tokio::fs::read(path).await {
-                        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+                        Ok(bytes) => match crate::pdf_extract_safe::extract_text_from_mem(&bytes) {
                             Ok(text) => {
                                 let preview = if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
                                 (true, format!("[pdf {}] extracted {} chars:\n{}", path.display(), text.len(), preview), None)
