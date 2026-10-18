@@ -374,7 +374,7 @@ impl TaskStore {
     pub fn update_status(&self, id: Uuid, status: TaskStatus) -> anyhow::Result<()> {
         let now = Utc::now();
         self.conn.execute(
-            "UPDATE tasks SET status = ?1, updated_at = ?2, outcome_json = CASE WHEN ?1 = 'running' THEN NULL ELSE outcome_json END WHERE id = ?3",
+            "UPDATE tasks SET status = ?1, updated_at = ?2, outcome_json = CASE WHEN ?1 IN ('running','queued') THEN NULL ELSE outcome_json END WHERE id = ?3",
             rusqlite::params![status.as_str(), now.to_rfc3339(), id.to_string()],
         )?;
         Ok(())
@@ -406,6 +406,12 @@ impl TaskStore {
     pub fn get_outcome(&self, id: Uuid) -> anyhow::Result<Option<serde_json::Value>> {
         let raw: Option<String> = self.conn.query_row("SELECT outcome_json FROM tasks WHERE id = ?1", [id.to_string()], |r| r.get(0))?;
         raw.map(|s| serde_json::from_str(&s).map_err(Into::into)).transpose()
+    }
+
+    /// Restore a failed enqueue without overwriting a concurrent stop or worker.
+    pub fn rollback_queued_resume(&self, id: Uuid, status: TaskStatus, outcome: Option<&serde_json::Value>) -> anyhow::Result<bool> {
+        Ok(self.conn.execute("UPDATE tasks SET status=?1,outcome_json=?2,updated_at=?3 WHERE id=?4 AND status='queued'",
+            rusqlite::params![status.as_str(),outcome.map(|v|v.to_string()),Utc::now().to_rfc3339(),id.to_string()])? == 1)
     }
 
     pub fn get_all(&self) -> anyhow::Result<Vec<Task>> {

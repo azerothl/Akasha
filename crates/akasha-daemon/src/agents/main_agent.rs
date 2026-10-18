@@ -806,6 +806,7 @@ User message:\n{}",
         }
         // Remember the original status so we can roll back on channel closure.
         let original_status = task.status;
+        let original_outcome = store.get_outcome(task_id)?;
         let message = match store.get_todos(task_id) {
             Ok(todos)
                 if todos
@@ -843,12 +844,12 @@ User message:\n{}",
             match e {
                 mpsc::error::TrySendError::Full(_) => {
                     // Channel is full: roll back status and return a clear error instead of blocking.
-                    let _ = store.update_status(task_id, original_status);
+                    let _ = store.rollback_queued_resume(task_id, original_status, original_outcome.as_ref());
                     anyhow::bail!("conversation queue full when resuming task")
                 }
                 mpsc::error::TrySendError::Closed(_) => {
                     // Channel is closed: attempt to roll back the status and report a clear error.
-                    let _ = store.update_status(task_id, original_status);
+                    let _ = store.rollback_queued_resume(task_id, original_status, original_outcome.as_ref());
                     anyhow::bail!("conversation channel closed when resuming task")
                 }
             }
