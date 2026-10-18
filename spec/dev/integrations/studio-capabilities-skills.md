@@ -60,3 +60,5 @@ Sept workflows sont livrés dans `spec/skills` : `studio-explore`, `studio-imple
 - Aucun lancement local de suite de tests, de recette modèle ou de release dans ce lot.
 
 Restent à exécuter : deux projets avec skills homonymes, priorité utilisateur/pack/projet, champ agents refusé, ressource sortante et source modifiée, AGENTS imbriqué avant mutation, annulation/reprise d’une tâche, manifeste task/project falsifié, outils annoncés/acceptés cohérents, packaging installé. Les tickets demeurent ouverts pendant revue et validation.
+
+Un profil explicite doit lister les outils Kanban requis (studio_list_tickets, studio_create_ticket, studio_update_ticket). Leur ancien passe-droit de dispatch ne contourne plus le contrat commun : aucun outil ne peut élargir une liste explicite, et une liste vide refuse tout. Le manifeste explique le refus ; adapter le profil pour les workflows PM/reviewer qui utilisent Kanban.

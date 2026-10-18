@@ -1831,6 +1831,7 @@ async fn process_root_task(
     let retry_timeout = deliverable_retry_timeout();
     let mut startup_watchdog_tx = startup_watchdog_tx;
     tokio::spawn(async move {
+        let _active_execution = _active_execution;
         let workspace_root = store_path_buf
             .parent()
             .map(Path::to_path_buf)

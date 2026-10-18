@@ -55,6 +55,19 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use uuid::Uuid;
 
+async fn studio_round_limit_choice(store: &Option<HumanInputStore>, bus: &EventBus, task: Uuid, round: u32, max: u32) -> Option<String> {
+    let store = store.as_ref()?;
+    let question = "Limite de tours d'outils atteinte. Souhaitez-vous continuer la tâche ?".to_string();
+    let context = format!("La tâche a utilisé {round} tours d'outils (max {max}). Une reprise exige une nouvelle décision ; aucune ancienne approbation n'est réutilisée.");
+    let choices = vec!["Continuer (+10 tours)".to_string(), "Réinitialiser et continuer (+10 tours)".to_string(), "Arrêter".to_string()];
+    let (tx, rx) = oneshot::channel();
+    store.write().await.insert(task, PendingHumanInput { question:question.clone(), context:context.clone(), choices:Some(choices.clone()), response_tx:tx });
+    let _ = bus.send(EventEnvelope::new(EventType::TaskWaitingUserInput, Some(serde_json::json!({"task_id":task,"question":question,"context":context,"choices":choices,"tool_round_limit":true,"current_round":round,"max_tool_rounds":max}))).with_correlation(task));
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(300), rx).await.ok().and_then(Result::ok);
+    store.write().await.remove(&task);
+    answer
+}
+
 fn studio_tool_followup(request: &str, results: &str) -> String {
     // The previous model reply is an executable proposal, not another request.
     // Repeating it here primes text-tool models to emit the same operation again.
@@ -195,9 +208,8 @@ pub(crate) async fn run_message_via_llm(
         }
         }
     };
-    let code_studio_disk_task = tool_disk_workspace_root
-        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags))
-        || TaskStore::open(&store_path).ok()
+    // A path shape is not a project identity. Match the dispatcher/ledger gate.
+    let code_studio_disk_task = TaskStore::open(&store_path).ok()
             .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten()).is_some();
     let studio_disk_system_append = {
         let proj_base = crate::studio::studio_projects_base(data_dir_for_studio_flags);
@@ -1517,7 +1529,16 @@ pub(crate) async fn run_message_via_llm(
                 }
             });
 
+        let mut resumed_limit_wait = recovery_checkpoint.as_ref().and_then(|c|c.waiting.as_ref()).filter(|v|v["tool_round_limit"] == true).cloned();
         'tool_rounds: loop {
+            if let Some(waiting) = resumed_limit_wait.take() {
+                max_tool_rounds = waiting["max_tool_rounds"].as_u64().map(|v|v as u32).unwrap_or(max_tool_rounds);
+                match studio_round_limit_choice(&human_input_store, &bus, task_id, round, max_tool_rounds).await.as_deref() {
+                    Some("Continuer (+10 tours)") => max_tool_rounds = round.max(max_tool_rounds).saturating_add(10),
+                    Some("Réinitialiser et continuer (+10 tours)") => { round=0; max_tool_rounds=max_tool_rounds.saturating_add(10); }
+                    _ => { run_outcome.termination=TerminationReason::ToolRoundLimit; reply_text="Tool round continuation declined or timed out.".into(); break 'tool_rounds; }
+                }
+            }
             match store.get(task_id).ok().flatten().map(|t| t.status) {
                 Some(TaskStatus::Paused)
                 | Some(TaskStatus::Cancelled)
@@ -2294,7 +2315,11 @@ pub(crate) async fn run_message_via_llm(
                             } else if actual_tool == "read_file" {
                                 let (parts, _, _) = parse_read_file_args(tool_args);
                                 vec![parts.join(" ")]
-                            } else if matches!(actual_tool.as_str(), "rename_path" | "move_tree" | "file_diff" | "diff_unified" | "dir_compare") {
+                            } else if matches!(actual_tool.as_str(), "rename_path" | "move_tree") {
+                                let mut paths: Vec<String> = tool_args.first().cloned().into_iter().collect();
+                                if tool_args.len() > 1 { paths.push(tool_args[1..].join(" ")); }
+                                paths
+                            } else if matches!(actual_tool.as_str(), "file_diff" | "diff_unified" | "dir_compare") {
                                 tool_args.iter().take(2).cloned().collect()
                             } else if matches!(actual_tool.as_str(), "search_files" | "grep_content" | "edit_file" | "apply_patch" | "search_replace" | "delete_file") {
                                 tool_args.first().cloned().into_iter().collect()
@@ -3539,70 +3564,13 @@ pub(crate) async fn run_message_via_llm(
                     };
 
                     // When human_input_store is available, ask user whether to continue (+10 rounds), reset and continue, or stop.
-                    let should_stop = match &human_input_store {
-                        Some(store) => {
-                            const TOOL_ROUND_LIMIT_TIMEOUT_SECS: u64 = 300;
-                            let question = "Limite de tours d'outils atteinte. Souhaitez-vous continuer la tâche ?".to_string();
-                            let context = format!(
-                            "La tâche a utilisé {} tours d'outils (max {}). Vous pouvez ajouter 10 tours, réinitialiser le compteur et ajouter 10 tours, ou arrêter.",
-                            round, max_tool_rounds
-                        );
-                            let choices = vec![
-                                "Continuer (+10 tours)".to_string(),
-                                "Réinitialiser et continuer (+10 tours)".to_string(),
-                                "Arrêter".to_string(),
-                            ];
-                            let (tx, rx) = tokio::sync::oneshot::channel();
-                            let pending = PendingHumanInput {
-                                question: question.clone(),
-                                context: context.clone(),
-                                choices: Some(choices.clone()),
-                                response_tx: tx,
-                            };
-                            {
-                                let mut g = store.write().await;
-                                g.insert(task_id, pending);
-                            }
-                            let payload = serde_json::json!({
-                                "task_id": task_id.to_string(),
-                                "question": question,
-                                "context": context,
-                                "choices": choices,
-                                "tool_round_limit": true,
-                                "current_round": round,
-                                "max_tool_rounds": max_tool_rounds
-                            });
-                            let _ = bus.send(
-                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload))
-                                    .with_correlation(task_id),
-                            );
-                            let reply = tokio::time::timeout(
-                                std::time::Duration::from_secs(TOOL_ROUND_LIMIT_TIMEOUT_SECS),
-                                rx,
-                            )
-                            .await;
-                            {
-                                let mut g = store.write().await;
-                                g.remove(&task_id);
-                            }
-                            match reply {
-                                Ok(Ok(user_choice)) => {
-                                    let choice = user_choice.trim();
-                                    if choice == "Continuer (+10 tours)" {
-                                        max_tool_rounds += 10;
-                                        false
-                                    } else if choice == "Réinitialiser et continuer (+10 tours)" {
-                                        round = 0;
-                                        max_tool_rounds += 10;
-                                        false
-                                    } else {
-                                        true
-                                    }
-                                }
-                                _ => true,
-                            }
-                        }
-                        None => true,
+                    if code_studio_disk_task {
+                        if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",serde_json::json!({"tool_round_limit":true,"question":"Continue tool rounds?","current_round":round,"max_tool_rounds":max_tool_rounds})) { run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds; }
+                    }
+                    let should_stop = match studio_round_limit_choice(&human_input_store,&bus,task_id,round,max_tool_rounds).await.as_deref() {
+                        Some("Continuer (+10 tours)") => { max_tool_rounds=max_tool_rounds.saturating_add(10); false }
+                        Some("Réinitialiser et continuer (+10 tours)") => { round=0; max_tool_rounds=max_tool_rounds.saturating_add(10); false }
+                        _ => true,
                     };
                     if should_stop {
                         run_outcome.termination = TerminationReason::ToolRoundLimit;
@@ -3948,20 +3916,21 @@ pub(crate) async fn run_message_via_llm(
                 let tmo = crate::api_studio::studio_project_verify_timeout_sec(
                     tool_disk_workspace_root.as_path(),
                 );
-                let mech = crate::api_studio::run_mechanical_acceptance_checks(
-                    tool_disk_workspace_root.as_path(),
-                    pay,
-                    tmo,
-                )
-                .await;
+                let mut mech = Vec::new();
                 for criterion in &pay.criteria {
+                    let errors = crate::api_studio::run_mechanical_acceptance_checks(
+                        tool_disk_workspace_root.as_path(),
+                        &crate::api_studio::StudioAcceptancePayload { criteria: vec![criterion.clone()] },
+                        tmo,
+                    ).await;
                     let status = if matches!(criterion.kind, crate::api_studio::StudioCriterionKind::Manual) { "manual" }
-                        else if mech.is_empty() { "passed" } else { "not_confirmed" };
+                        else if errors.is_empty() { "passed" } else { "failed" };
                     run_outcome.checks.push(serde_json::json!({
                         "kind":"acceptance", "id":criterion.id, "criterion_kind":criterion.kind,
                         "status":status, "text":criterion.text,
                         "exit_code":if status == "passed" && matches!(criterion.kind, crate::api_studio::StudioCriterionKind::CommandOk) {Some(0)} else {None::<i32>}
                     }));
+                    mech.extend(errors);
                 }
                 if !mech.is_empty() {
                     studio_verify_error = Some(format!(
