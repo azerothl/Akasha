@@ -2335,6 +2335,14 @@ pub(crate) async fn execute_tool_call_impl(
                     } else {
                         format!("[search_files] failed: {}", res.summary)
                     };
+                    let msg = if is_studio_workspace && res.success {
+                        let Some(root)=workspace_root else {return (false,"Studio workspace missing".into(),None);};
+                        let Some(data_dir)=store_path.and_then(Path::parent) else {return (false,"Studio task store missing".into(),None);};
+                        match crate::studio_project_context::rules_for_results(root,&paths.iter().take(20).cloned().collect::<Vec<_>>(),&executor.policy,data_dir,task_id) {
+                            Ok(rules)=>format!("{rules}{msg}"),
+                            Err(error)=>return (false,error,None),
+                        }
+                    } else {msg};
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[search_files] failed: {}", e), None),
@@ -2392,6 +2400,14 @@ pub(crate) async fn execute_tool_call_impl(
                     } else {
                         format!("[grep_content] failed: {}", res.summary)
                     };
+                    let msg = if is_studio_workspace && res.success {
+                        let Some(root)=workspace_root else {return (false,"Studio workspace missing".into(),None);};
+                        let Some(data_dir)=store_path.and_then(Path::parent) else {return (false,"Studio task store missing".into(),None);};
+                        match crate::studio_project_context::rules_for_results(root,&matches.iter().take(30).map(|(path,_,_)|path.clone()).collect::<Vec<_>>(),&executor.policy,data_dir,task_id) {
+                            Ok(rules)=>format!("{rules}{msg}"),
+                            Err(error)=>return (false,error,None),
+                        }
+                    } else {msg};
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[grep_content] failed: {}", e), None),
