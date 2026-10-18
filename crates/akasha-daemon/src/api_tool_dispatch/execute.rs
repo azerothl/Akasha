@@ -2420,7 +2420,10 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "write_file" | "write_code" => {
             if assigned_agent_for_task.as_deref() == Some("studio_planner") {
-                if !executor.policy.can_write(Path::new("CODE_STUDIO_PLAN.md")) {
+                let Some(plan) = workspace_root.map(|root| strip_verbatim_prefix(root.join("CODE_STUDIO_PLAN.md"))) else {
+                    return (false, "[write_file] planner workspace missing".into(), None);
+                };
+                if !executor.policy.can_write(&plan) {
                     return (false, "[write_file] plan write denied by tools policy".into(), None);
                 }
                 return match crate::studio_role_policy::write_planner_plan(args, workspace_root) {
