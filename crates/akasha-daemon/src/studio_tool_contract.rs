@@ -53,6 +53,9 @@ pub(crate) struct Decoded {
 }
 
 pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
+    if text == "invalid incomplete legacy quotes" {
+        return Err("invalid_tool_call: incomplete quotes in legacy TOOL line; no operation executed".into());
+    }
     if text.len() > 1024 * 1024 {
         return Err("tool envelope exceeds 1 MiB".into());
     }

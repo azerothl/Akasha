@@ -176,9 +176,8 @@ pub(crate) async fn run_message_via_llm(
         }
         }
     };
-    let code_studio_disk_task = tool_disk_workspace_root
-        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags))
-        || TaskStore::open(&store_path).ok()
+    // A path shape is not a project identity. Match the dispatcher/ledger gate.
+    let code_studio_disk_task = TaskStore::open(&store_path).ok()
             .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten()).is_some();
     let studio_disk_system_append = {
         let proj_base = crate::studio::studio_projects_base(data_dir_for_studio_flags);
