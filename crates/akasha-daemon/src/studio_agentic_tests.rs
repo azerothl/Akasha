@@ -40,6 +40,42 @@ fn every_abnormal_termination_is_failure() {
 }
 
 #[test]
+fn mixed_typed_and_legacy_tools_filter_reasoning_and_keep_order() {
+    let calls = crate::api_tool_parser::parse_tool_calls("<think>\nTOOL_JSON: {\"hidden\":true}\n</think>\nTOOL: write_file workspace:/a.txt\nhello\nTOOL_JSON: {\"visible\":true}\nTOOL: read_todos");
+    assert_eq!(calls.iter().map(|c|c.0.as_str()).collect::<Vec<_>>(), vec!["write_file","studio_call","read_todos"]);
+    assert!(!calls[0].1.join(" ").contains("TOOL_JSON"));
+    assert_eq!(calls[1].1, vec!["{\"visible\":true}"]);
+    assert!(contracts::decode("invalid incomplete legacy quotes").err().unwrap().contains("incomplete quotes"));
+}
+
+#[test]
+fn queued_resume_clears_and_conditionally_restores_outcome() {
+    use akasha_store::{Task, TaskStatus, TaskStore};
+    let dir=tempfile::tempdir().unwrap(); let store=TaskStore::open(&dir.path().join("tasks.db")).unwrap();
+    let id=Uuid::new_v4();let now=chrono::Utc::now();
+    store.insert(&Task{id,parent_task_id:None,status:TaskStatus::Running,assigned_agent:"code".into(),created_at:now,updated_at:now,initial_message:None,studio_project_id:None}).unwrap();
+    store.finalize_outcome(id,TaskStatus::Paused,json!({"status":"paused"})).unwrap();
+    let saved=store.get_outcome(id).unwrap();
+    assert!(store.transition_if(id,&[TaskStatus::Paused],TaskStatus::Queued).unwrap());
+    assert!(store.get_outcome(id).unwrap().is_none());
+    assert!(store.rollback_queued_resume(id,TaskStatus::Paused,saved.as_ref()).unwrap());
+    assert_eq!(store.get_outcome(id).unwrap(),saved);
+    store.update_status(id,TaskStatus::Queued).unwrap();
+    assert!(store.get_outcome(id).unwrap().is_none());
+    store.update_status(id,TaskStatus::Cancelled).unwrap();
+    assert!(!store.rollback_queued_resume(id,TaskStatus::Paused,saved.as_ref()).unwrap());
+}
+
+#[test]
+fn push_prerequisite_includes_github_cli_permission() {
+    let dir=tempfile::tempdir().unwrap();let mut p=policy(dir.path());
+    p.allowed_commands=vec!["git".into()];
+    let row=crate::studio_capabilities::tool(&p,"studio_project_manager","git_push").unwrap();
+    assert!(!row.runnable);
+    assert!(row.notes.iter().any(|n|n.contains("github_cli_unavailable_or_denied")));
+}
+
+#[test]
 fn finalization_preserves_concurrent_stops_in_sqlite() {
     use akasha_store::{Task, TaskStatus, TaskStore};
     for stopped in [TaskStatus::Cancelled, TaskStatus::Paused, TaskStatus::Failed, TaskStatus::Interrupted, TaskStatus::WaitingUserInput] {

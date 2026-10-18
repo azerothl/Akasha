@@ -139,7 +139,7 @@ pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<Stud
         notes.push("LSP: TypeScript/JavaScript, Rust, Python; server capability checked at invocation".into());
         if name=="lsp_query" && !["rust-analyzer","typescript-language-server","pyright-langserver"].iter().any(|program|policy.can_run_command(program)&&executable_available(program)){runnable=false;notes.push("preflight:no_lsp_server_available_or_allowed".into());}
     }
-    if matches!(name,"github_create_pr"|"github_pr_status") {
+    if matches!(name,"git_push"|"github_create_pr"|"github_pr_status") {
         prerequisites.push("github_cli_authenticated_for_repository".into());
         if !policy.can_run_command("gh")||!executable_available("gh"){runnable=false;notes.push("preflight:github_cli_unavailable_or_denied".into());}
     }
