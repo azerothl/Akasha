@@ -2266,7 +2266,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<bool,
                         "secours: npm exec -- vite build (sans étape tsc du script build)".into(),
                     );
                     match studio_run_command_capture(project_root, &vite_argv, timeout_sec).await {
-                        Ok((Some(0), _, _)) => return Err(format!("{first_err}\n\nVite fallback passed, but the configured build still failed (TypeScript step not verified).")),
+                        Ok((Some(0), _, _)) => return Err(format!("{}\n\n[Tentatives automatiques : {}]\nVite fallback passed, but the configured build still failed (TypeScript step not verified).",format_verify_failure(code,&out,&err),fix_notes.join(" ; "))),
                         Ok((cv, ov, ev)) => {
                             fix_notes.push(format!(
                                 "vite build secours — {}",

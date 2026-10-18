@@ -385,10 +385,13 @@ impl TaskStore {
         &self, id: Uuid, proposed: TaskStatus, mut outcome: serde_json::Value,
     ) -> anyhow::Result<(TaskStatus, serde_json::Value)> {
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
-        let previous: String = tx.query_row("SELECT status FROM tasks WHERE id = ?1", [id.to_string()], |r| r.get(0))?;
+        let (previous,previous_outcome): (String,Option<String>) = tx.query_row("SELECT status,outcome_json FROM tasks WHERE id = ?1", [id.to_string()], |r| Ok((r.get(0)?,r.get(1)?)))?;
         let previous = TaskStatus::from_str(&previous);
         let status = if matches!(previous, TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Paused | TaskStatus::Interrupted | TaskStatus::WaitingUserInput) {
-            if previous != proposed {
+            if let Some(saved)=previous_outcome.and_then(|raw|serde_json::from_str(&raw).ok()) {
+                outcome=saved;
+                outcome["acceptance_verified"]=serde_json::json!(false);
+            } else {
                 outcome["termination_reason"] = serde_json::json!(previous.as_str());
                 outcome["reason"] = serde_json::json!("Task stopped before finalization; existing status preserved.");
                 outcome["result"] = serde_json::json!(if previous == TaskStatus::Failed { "failed" } else { "stopped" });
