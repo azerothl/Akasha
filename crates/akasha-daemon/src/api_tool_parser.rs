@@ -807,6 +807,24 @@ pub(crate) fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String
         let line = lines[i].trim();
         if let Some(rest) = line.strip_prefix("TOOL:") {
             let rest = rest.trim();
+            // Preserve the MCP JSON object verbatim; shell-style quote splitting changes its keys/values.
+            if let Some((name, json)) = rest.split_once(char::is_whitespace) {
+                if name.starts_with("mcp_") && tool_name_is_safe_identifier(name) {
+                    out.push((name.to_string(), vec![json.trim().to_string()]));
+                    i += 1;
+                    continue;
+                }
+            }
+            if let Some(payload)=rest.strip_prefix("terminal_session ") {
+                if let Some(json)=payload.strip_prefix("start ").filter(|value|value.trim_start().starts_with('{')) {
+                    out.push(("terminal_session".into(),vec!["start".into(),json.trim().into()])); i+=1; continue;
+                }
+                if let Some(write)=payload.strip_prefix("write ") {
+                    if let Some((id,input))=write.split_once(char::is_whitespace) {
+                        out.push(("terminal_session".into(),vec!["write".into(),id.into(),input.trim().into()])); i+=1; continue;
+                    }
+                }
+            }
             // Split by whitespace, respecting double-quoted args (so run_command -H "Bearer $VAR" works)
             let parts: Vec<String> = split_whitespace_respecting_quotes(rest);
             if let Some((name, fixed_args)) = parts.split_first() {

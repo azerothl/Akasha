@@ -12,6 +12,7 @@ pub(crate) fn allows_tool(role: &str, tool: &str) -> bool {
     let read = matches!(
         tool,
         "read_file"
+            | "list_tools"
             | "search_files"
             | "grep_content"
             | "file_diff"

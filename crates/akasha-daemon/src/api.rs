@@ -1285,7 +1285,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche. Pour GitHub depuis le shell, préférer gh-axi (npm install -g gh-axi ; principes AXI https://axi.md/) s'il est installé — sorties compactes pour l'agent. Pour l'automation navigateur en CLI, chrome-devtools-axi (même dépôt https://github.com/kunchenguid/axi) en complément d'Akasha browser."),
     ("run_terminal", "run_terminal [--cwd <path>] <cmd> [args...] — exécuter une commande (même que run_command)"),
     ("run_command_background", "run_command_background [--cwd <path>] <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
-    ("terminal_session", "terminal_session — PTY interactif: GET /api/terminal/capabilities ; API HTTP /api/terminal/pty/sessions (spec/43_session_terminal.md). Sinon: run_command / run_terminal, run_command_background + process list|poll|kill, GET /api/process/watch/recent."),
+    ("terminal_session", "terminal_session start [JSON argv,cols,rows] | list | read <id> | write <id> <text> | resize <id> <cols> <rows> | stop <id> — PTY réservé à cette tâche, dossier du projet imposé. Le shell autorisé peut exécuter des commandes arbitraires; pas de sandbox OS. Extrait archivé à la fermeture."),
     ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers (ligne à ligne)"),
     ("diff_unified", "diff_unified <path_a> <path_b> [context_lines] — diff unifié style patch (défaut context_lines=3) ; chemins réels ou workspace:/"),
@@ -1328,7 +1328,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("calendar_delete", "calendar_delete <event_id> — supprimer (soft-delete) un événement externe."),
     ("budget_status", "budget_status [session_id] — état budget (usage tokens/coût, seuil, auto-concise)."),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
-    ("browser", "browser navigate <url> — navigate (http/https; domain allowed). browser snapshot — texte + liens. browser screenshot | browser click <css> | browser fill <css> <texte> | browser wait <css_selector|ms> — automation Playwright (spec 39)."),
+    ("browser", "browser navigate <url> | snapshot | screenshot | click <css> | fill <css> <texte> | wait <css|ms> | viewport <largeur> <hauteur> | console | network — Playwright, domaines filtrés y compris ressources et WebSocket. Captures et journaux archivés par tâche. Studio exige Node/Playwright/Chromium déjà installés."),
     ("install_playwright", "install_playwright — run npm install and npx playwright install chromium in the Playwright runner directory (scripts/playwright-runner or AKASHA_PLAYWRIGHT_RUNNER). Requires browser_enabled. Use after ask_user consent if you need explicit approval before download; optional require_approval in tools_policy."),
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
@@ -1348,6 +1348,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("merge_todos", "merge_todos <payload> — ajoute des étapes (même format que write_todos) sans supprimer les existantes ; titres déjà présents ignorés (casse insensible)."),
     ("read_todos", "read_todos — retourne la liste des étapes (todos) de la tâche courante."),
     ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
+    ("list_tools", "list_tools [name] — current task capabilities: permissions, availability, argument schemas. Refresh after MCP or policy changes."),
     ("list_skills", "list_skills — retourne la liste des skills installés (nom et description). Utiliser avant read_skill pour charger le détail d'un skill."),
     ("search_skills_catalog", "search_skills_catalog <query> [max] — rechercher dans la galerie Akasha_skills (skills.json distant)"),
     ("read_skill", "read_skill <name> — charge le contenu (instructions, usage) du skill. À utiliser quand tu as besoin du détail d'un skill avant de l'invoquer par son nom."),
@@ -1375,6 +1376,9 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
 /// `delegate_to_agent` n’est ajouté que pour `studio_project_manager` et seulement si la politique l’autorise.
 pub(crate) fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent: &str) -> Vec<String> {
     const STUDIO: &[&str] = &[
+        "list_tools",
+        "browser",
+        "terminal_session",
         "read_file",
         "write_file",
         "write_code",
@@ -1469,22 +1473,6 @@ pub(crate) fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, ass
     }
     out.retain(|tool| crate::studio_role_policy::allows_tool(assigned_agent, tool));
     out
-}
-
-/// Like [`available_tools_instruction`] but **only** listed tool names — no `always_misc` merge
-/// (Code Studio must not advertise install_skill, browser, delegate_to_agent, etc.).
-pub(crate) fn available_tools_instruction_exact(allowed: &[String]) -> String {
-    if allowed.is_empty() {
-        return String::new();
-    }
-    let allowed_lc: std::collections::HashSet<String> =
-        allowed.iter().map(|s| s.to_ascii_lowercase()).collect();
-    AVAILABLE_TOOLS
-        .iter()
-        .filter(|(name, _)| allowed_lc.contains(&name.to_ascii_lowercase()))
-        .map(|(_, desc)| *desc)
-        .collect::<Vec<_>>()
-        .join(" ; ")
 }
 
 pub(crate) fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -5513,6 +5501,10 @@ pub async fn handle_api(
         path: path_only.to_string(),
     };
     crate::lifecycle_hooks::run_http_request_pre_hooks(data_dir, method, path_only).await;
+    if let Some(response) = crate::studio_observation::handle_route(method, path_only, query_str, body.as_deref(), data_dir, tools_executor).await {
+        return response;
+    }
+
 
     if let Some(resp) = crate::api_studio::handle_studio_route(
         method,

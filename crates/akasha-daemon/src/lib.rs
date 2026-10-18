@@ -43,6 +43,8 @@ pub mod studio;
 pub(crate) mod studio_role_policy;
 pub(crate) mod studio_capabilities;
 pub(crate) mod studio_project_context;
+pub(crate) mod studio_artifacts;
+pub(crate) mod studio_observation;
 pub(crate) mod task_outcome;
 pub mod studio_worktree;
 pub mod tool_output;

@@ -67,6 +67,7 @@ pdf-extract = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 portable-pty = "0.8"
 tempfile = "3"
+jsonschema = { version = "0.18", default-features = false }
 lru = "0.12"
 
 [dev-dependencies]

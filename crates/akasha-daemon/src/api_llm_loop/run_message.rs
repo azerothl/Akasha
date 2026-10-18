@@ -2,7 +2,7 @@
 
 use crate::agents::{interpret_message, EventBus, OrchestratorTask};
 use crate::api::{
-    agent_role_system_prompt, available_tools_instruction, available_tools_instruction_exact,
+    agent_role_system_prompt, available_tools_instruction,
     build_image_markdown, build_session_recap_reply, cancel_task_watchdogs,
     canonicalize_tool_name, captured_media_suitable_for_vision_injection,
     classify_small_talk_message, compact_short_term_if_needed,
@@ -527,8 +527,8 @@ pub(crate) async fn run_message_via_llm(
         } else {
             None
         };
-        let base = if let Some(ref v) = studio_tool_list {
-            available_tools_instruction_exact(v)
+        let base = if studio_tool_list.is_some() {
+            tools_executor_snapshot.as_ref().map(|executor| crate::studio_capabilities::prompt(&executor.policy, &assigned_agent)).unwrap_or_default()
         } else {
             available_tools_instruction(allowed_tools.as_deref())
         };
@@ -2172,6 +2172,11 @@ pub(crate) async fn run_message_via_llm(
                     .with_correlation(task_id),
                 );
                     for (name, args) in &lane_calls {
+                        // Hot-reloaded permissions must constrain the next invocation of an active task.
+                        let current_executor = if let Some(registry) = tools_executor.as_ref() {
+                            registry.read().await.clone()
+                        } else { exec.clone() };
+                        let exec = &current_executor;
                         if matches!(store.get(task_id).ok().flatten().map(|t| t.status),
                             Some(TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Interrupted | TaskStatus::WaitingUserInput | TaskStatus::Failed)) {
                             break 'tool_rounds;
@@ -2418,7 +2423,7 @@ pub(crate) async fn run_message_via_llm(
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(
                                         effective_role_tool,
-                                        "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
+                                        "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file" | "terminal_session"
                                     ) {
                                         "[redacted]".to_string()
                                     } else {
@@ -3139,7 +3144,7 @@ pub(crate) async fn run_message_via_llm(
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                         let redacted_args: Vec<String> = if matches!(
                             actual_tool.as_str(),
-                            "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
+                            "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file" | "terminal_session"
                         ) {
                             vec!["[redacted for write-like tool]".to_string()]
                         } else {
@@ -4254,6 +4259,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     if let Some(reg) = &browser_registry {
         crate::browser::close_task(reg, task_id).await;
     }
+    crate::studio_observation::close_task(task_id).await;
     // Release per-task workspace memory immediately — no longer needed once the task finishes.
     if let Some(ws) = &workspace_store {
         ws.write().await.remove(&task_id);

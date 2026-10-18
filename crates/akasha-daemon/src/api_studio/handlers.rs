@@ -2963,6 +2963,7 @@ pub async fn handle_studio_route(
                         let _ = prev.child.kill().await;
                     }
                 }
+                crate::studio_observation::close_project(id).await;
                 let id_owned = id.to_string();
                 let data_dir_owned = data_dir.to_path_buf();
                 let root_owned = root.clone();

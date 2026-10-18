@@ -18,7 +18,7 @@ pub(crate) struct StudioTool {
     pub parameter_checks_required: bool,
 }
 
-fn executable_available(program: &str) -> bool {
+pub(crate) fn executable_available(program: &str) -> bool {
     let paths = std::env::var_os("PATH").unwrap_or_default();
     let suffixes = if cfg!(windows) {
         vec!["", ".exe", ".cmd", ".bat", ".com"]
@@ -33,6 +33,49 @@ fn executable_available(program: &str) -> bool {
 }
 
 pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<StudioTool> {
+    if name.starts_with("mcp_") {
+        let descriptor = crate::mcp_runtime::discovered_tool(name)?;
+        let empty = policy.default_profile.as_ref().is_some_and(|profile| {
+            policy
+                .tool_profiles
+                .get(profile)
+                .is_none_or(|tools| tools.is_empty())
+        });
+        let role_allowed = crate::studio_role_policy::allows_tool(agent, name);
+        let allowed = !empty
+            && role_allowed
+            && policy.can_use_mcp_tool(&descriptor.server, &descriptor.tool)
+            && std::env::var("AKASHA_MCP_TOOLS_ENABLED").ok().as_deref() != Some("0");
+        let candidates = crate::mcp_runtime::discovered_tools()
+            .into_iter()
+            .filter(|tool| policy.can_use_mcp_tool(&tool.server, &tool.tool))
+            .take(32)
+            .any(|tool| tool.name == name);
+        let bounded = candidates && descriptor.input_schema.to_string().len() <= 4096;
+        return Some(StudioTool {
+            name: name.into(),
+            description: descriptor.description,
+            input_schema: descriptor.input_schema,
+            announced: allowed && bounded,
+            allowed,
+            runnable: allowed && bounded,
+            requires_user_approval: policy.requires_approval(name),
+            rule_sources: vec![
+                format!("mcp_server:{}", descriptor.server),
+                format!("studio_role:{agent}"),
+                "runtime:discovered_on_attached_server".into(),
+            ],
+            notes: if !allowed {
+                vec!["mcp:denied_by_role_policy_or_feature".into()]
+            } else if !bounded {
+                vec!["mcp:prompt_budget_limit_32_tools_4KiB_schema".into()]
+            } else {
+                Vec::new()
+            },
+            prerequisites: vec!["attached_mcp_stdio_server".into()],
+            parameter_checks_required: true,
+        });
+    }
     let description = crate::api::AVAILABLE_TOOLS
         .iter()
         .find(|(n, _)| *n == name)?
@@ -90,6 +133,31 @@ pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<Stud
             notes.push("preflight:no_allowed_command".into());
         }
     }
+    if name == "terminal_session" {
+        prerequisites.push("authorized_interactive_executable_and_project_cwd".into());
+        if policy.allowed_commands.is_empty() {
+            runnable = false;
+            notes.push("preflight:no_allowed_command".into());
+        }
+    }
+    if name == "browser" {
+        prerequisites.push("node_playwright_chromium_and_allowed_domain".into());
+        let runner = crate::browser::find_playwright_runner_path();
+        if !executable_available("node")
+            || runner
+                .as_ref()
+                .and_then(|path| path.parent())
+                .is_none_or(|dir| !dir.join("node_modules/playwright/package.json").is_file())
+            || policy.browser_allowed_domains.is_empty()
+        {
+            runnable = false;
+            notes.push("preflight:browser_runtime_or_domains_missing".into());
+        }
+        notes.push(
+            "Chromium launch is verified on first use; Studio does not auto-install packages"
+                .into(),
+        );
+    }
     Some(StudioTool {
         name: name.into(),
         description: description.into(),
@@ -108,7 +176,13 @@ pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<Stud
 pub(crate) fn catalogue(policy: &ToolsPolicy, agent: &str) -> Vec<StudioTool> {
     crate::api::AVAILABLE_TOOLS
         .iter()
-        .filter_map(|(name, _)| tool(policy, agent, name))
+        .map(|(name, _)| name.to_string())
+        .chain(
+            crate::mcp_runtime::discovered_tools()
+                .into_iter()
+                .map(|tool| tool.name),
+        )
+        .filter_map(|name| tool(policy, agent, &name))
         .collect()
 }
 
@@ -118,6 +192,24 @@ pub(crate) fn announced_names(policy: &ToolsPolicy, agent: &str) -> Vec<String> 
         .filter(|t| t.announced)
         .map(|t| t.name)
         .collect()
+}
+
+pub(crate) fn prompt(policy: &ToolsPolicy, agent: &str) -> String {
+    catalogue(policy, agent)
+        .into_iter()
+        .filter(|tool| tool.announced)
+        .map(|tool| {
+            if tool.name.starts_with("mcp_") {
+                format!(
+                    "{} — {}. Call with one JSON object matching schema: {}",
+                    tool.name, tool.description, tool.input_schema
+                )
+            } else {
+                tool.description
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ; ")
 }
 
 pub(crate) fn check(policy: &ToolsPolicy, agent: &str, name: &str) -> Result<(), String> {
