@@ -634,11 +634,25 @@ fn doctor_is_source_checkout(cwd: &Path) -> bool {
     cwd.join("Cargo.toml").exists() || cwd.join(".git").exists() || cwd.join("spec").is_dir()
 }
 
+/// Rust monorepo / git tree (not: release dir that only ships `spec/` examples).
+fn doctor_is_repo_workspace(cwd: &Path) -> bool {
+    cwd.join("Cargo.toml").exists() || cwd.join(".git").exists()
+}
+
 fn doctor_uses_source_checkout_checks(cwd: &Path) -> bool {
     doctor_is_source_checkout(cwd)
 }
 
-fn doctor_spec_check(spec_dir_override: Option<&OsStr>, data_dir: &Path) -> (bool, String) {
+const DOCTOR_SPEC_YAML_INFO_DESC: &str =
+    "Spec YAML 09/10 not in release bundle (optional; dev checkout uses repo spec/)";
+const DOCTOR_SPEC_YAML_DEV_MISSING_DESC: &str =
+    "Spec YAML files missing (expected 09_event_model.yaml and 10_data_model.yaml in spec/)";
+
+fn doctor_spec_check(
+    spec_dir_override: Option<&OsStr>,
+    data_dir: &Path,
+    cwd: &Path,
+) -> DoctorCheck {
     let spec_dir = valid_spec_dir_override(spec_dir_override).or_else(|| {
         let candidate = akasha_core::resolve_spec_dir(data_dir);
         if candidate.is_dir() {
@@ -649,24 +663,56 @@ fn doctor_spec_check(spec_dir_override: Option<&OsStr>, data_dir: &Path) -> (boo
     });
 
     let Some(spec_dir) = spec_dir else {
-        return (
-            true,
-            "Spec YAML files not bundled (OK for installed binaries)".to_string(),
+        return DoctorCheck::info(
+            "spec_files",
+            "Spec YAML files not bundled (OK for installed binaries)",
         );
     };
 
     let event_model = spec_dir.join("09_event_model.yaml");
     let data_model = spec_dir.join("10_data_model.yaml");
     let spec_files_ok = event_model.exists() && data_model.exists();
-    let desc = if spec_files_ok {
-        format!("Spec YAML files (09, 10) in {}", spec_dir.display())
+    if spec_files_ok {
+        return DoctorCheck::pass_fail(
+            "spec_files",
+            true,
+            format!("Spec YAML files (09, 10) in {}", spec_dir.display()),
+        );
+    }
+    if doctor_is_repo_workspace(cwd) {
+        return DoctorCheck::pass_fail(
+            "spec_files",
+            false,
+            format!(
+                "{} — {}",
+                DOCTOR_SPEC_YAML_DEV_MISSING_DESC,
+                spec_dir.display()
+            ),
+        );
+    }
+    DoctorCheck::info("spec_files", DOCTOR_SPEC_YAML_INFO_DESC)
+}
+
+/// Daemon `/api/doctor` checks: `level: info` does not fail aggregate pass/fail.
+fn daemon_doctor_check_passes(check: &serde_json::Value) -> bool {
+    if check.get("level").and_then(|v| v.as_str()) == Some("info") {
+        return true;
+    }
+    check.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn daemon_doctor_checks_all_ok(checks: &[serde_json::Value]) -> bool {
+    checks.is_empty() || checks.iter().all(daemon_doctor_check_passes)
+}
+
+fn daemon_doctor_check_status_label(check: &serde_json::Value) -> &'static str {
+    if check.get("level").and_then(|v| v.as_str()) == Some("info") {
+        "INFO"
+    } else if daemon_doctor_check_passes(check) {
+        "OK"
     } else {
-        format!(
-            "Spec YAML files missing in {} (expected 09_event_model.yaml and 10_data_model.yaml)",
-            spec_dir.display()
-        )
-    };
-    (spec_files_ok, desc)
+        "KO"
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -4705,13 +4751,8 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
         "akasha-daemon binary",
     ));
 
-    // Check spec directory
-    let (spec_files_ok, spec_desc) = doctor_spec_check(spec_dir_override.as_deref(), &data_dir);
-    checks.push(DoctorCheck::pass_fail(
-        "spec_files",
-        spec_files_ok,
-        spec_desc,
-    ));
+    // Check spec directory (09/10 YAML are dev-only; release bundle ships examples only)
+    checks.push(doctor_spec_check(spec_dir_override.as_deref(), &data_dir, &cwd));
 
     // Check daemon health (if running)
     let daemon_healthy = reqwest::blocking::Client::new()
@@ -4874,9 +4915,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
 
     if json {
         if !daemon_checks.is_empty() {
-            let daemon_all_ok_json = daemon_checks
-                .iter()
-                .all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+            let daemon_all_ok_json = daemon_doctor_checks_all_ok(&daemon_checks);
             let combined_ok = all_ok && daemon_all_ok_json;
             let mut payload = health_payload.clone();
             if let Some(obj) = payload.as_object_mut() {
@@ -4904,9 +4943,8 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
             println!("Daemon checks (when daemon is running):");
             for c in &daemon_checks {
                 let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                let ok = c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                 let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                let status = if ok { "OK" } else { "KO" };
+                let status = daemon_doctor_check_status_label(c);
                 println!("  [{}] {} — {}", status, id, desc);
             }
         }
@@ -4932,15 +4970,17 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
             data_dir.join("tools_policy.yaml").display()
         );
         println!();
-        let daemon_all_ok = daemon_checks.is_empty()
-            || daemon_checks
-                .iter()
-                .all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        let daemon_all_ok = daemon_doctor_checks_all_ok(&daemon_checks);
         if all_ok && daemon_all_ok {
             println!("All checks passed.");
         } else {
             println!("Some checks failed. Fix the issues above.");
         }
+    }
+
+    let daemon_all_ok_final = daemon_doctor_checks_all_ok(&daemon_checks);
+    if !(all_ok && daemon_all_ok_final) {
+        std::process::exit(1);
     }
 
     // Phase 8: diagnostic advice from daemon (RAG + Core Model)
@@ -5134,30 +5174,80 @@ mod tests {
         let orig_cwd = std::env::current_dir().expect("cwd");
         std::env::set_current_dir(&data_dir).expect("chdir");
         std::env::set_var("AKASHA_DATA_DIR", &data_dir);
-        let (ok, desc) = doctor_spec_check(None, &data_dir);
+        let check = doctor_spec_check(None, &data_dir, &data_dir);
         std::env::set_current_dir(orig_cwd).expect("chdir back");
         std::env::remove_var("AKASHA_DATA_DIR");
 
-        assert!(ok);
-        assert!(desc.contains("installed binaries"));
+        assert_eq!(check.level, DoctorCheckLevel::Info);
+        assert!(check.description.contains("installed binaries"));
 
         std::fs::remove_dir_all(&data_dir).unwrap();
     }
 
     #[test]
-    fn doctor_spec_check_requires_expected_files_when_spec_dir_is_configured() {
+    fn doctor_spec_check_info_when_release_spec_dir_missing_yaml() {
+        let data_dir = make_temp_dir("doctor-spec-release-partial");
+        let spec_dir = data_dir.join("spec");
+        std::fs::create_dir_all(&spec_dir).unwrap();
+        std::fs::write(spec_dir.join("llm_router.example.yaml"), "providers: {}\n").unwrap();
+        let orig_cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&data_dir).expect("chdir");
+        std::env::set_var("AKASHA_DATA_DIR", &data_dir);
+        let check = doctor_spec_check(None, &data_dir, &data_dir);
+        std::env::set_current_dir(orig_cwd).expect("chdir back");
+        std::env::remove_var("AKASHA_DATA_DIR");
+
+        assert_eq!(check.level, DoctorCheckLevel::Info);
+        assert_eq!(check.description, DOCTOR_SPEC_YAML_INFO_DESC);
+        assert!(doctor_checks_all_ok(&[check]));
+
+        std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+
+    #[test]
+    fn doctor_spec_check_requires_expected_files_in_source_checkout() {
         let data_dir = make_temp_dir("doctor-spec-dev");
         let spec_dir = data_dir.join("spec");
         std::fs::create_dir_all(&spec_dir).unwrap();
         std::fs::write(spec_dir.join("09_event_model.yaml"), "events: []\n").unwrap();
+        std::fs::write(data_dir.join("Cargo.toml"), "[package]\nname = \"fake\"\n").unwrap();
         std::env::set_var("AKASHA_DATA_DIR", &data_dir);
-        let (ok, desc) = doctor_spec_check(None, &data_dir);
+        let check = doctor_spec_check(None, &data_dir, &data_dir);
         std::env::remove_var("AKASHA_DATA_DIR");
 
-        assert!(!ok);
-        assert!(desc.contains("10_data_model.yaml"));
+        assert_eq!(check.level, DoctorCheckLevel::PassFail);
+        assert!(!check.ok);
+        assert!(check.description.contains("10_data_model.yaml"));
 
         std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+
+    #[test]
+    fn daemon_info_checks_do_not_fail_aggregate_or_exit() {
+        let checks = vec![
+            serde_json::json!({ "id": "embedded_llm", "ok": true }),
+            serde_json::json!({
+                "id": "ollama",
+                "level": "info",
+                "description": "Ollama : non installé (optionnel)"
+            }),
+            serde_json::json!({
+                "id": "rbitnet",
+                "level": "info",
+                "description": "Rbitnet : non installé (optionnel, expérimental)"
+            }),
+        ];
+        assert!(daemon_doctor_checks_all_ok(&checks));
+        assert_eq!(daemon_doctor_check_status_label(&checks[1]), "INFO");
+    }
+
+    #[test]
+    fn daemon_fails_when_no_llm_backend() {
+        let checks = vec![
+            serde_json::json!({ "id": "embedded_llm", "ok": false }),
+            serde_json::json!({ "id": "ollama", "ok": false, "description": "Ollama unreachable" }),
+        ];
+        assert!(!daemon_doctor_checks_all_ok(&checks));
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub mod api_routes_workspace;
 pub mod cookbook_models;
 pub mod cookbook_recipes;
 pub mod deep_research;
+pub mod doctor_checks;
 pub mod api_routes_mission;
 pub mod api_routes_kinbot;
 pub mod api_routes_profiles;
