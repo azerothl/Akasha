@@ -20,20 +20,30 @@ Les routes voix (`/api/voice/*`) existent séparément pour STT/TTS ; le snapsho
 | Bind LAN | Par défaut le daemon écoute sur **`127.0.0.1`** : définir **`AKASHA_BIND=0.0.0.0`** pour accepter les connexions LAN |
 | Port API | **`3876`** par défaut (`AKASHA_PORT`) — le même port doit être utilisé côté client |
 | Data dir | Fichiers sous `~/akasha` (ou votre `AKASHA_DATA_DIR`) : `companion_devices.json`, `companion_presence.json` |
-| Pairing (recommandé) | Variable **`AKASHA_COMPANION_PAIR_SECRET`** : secret partagé pour `POST /api/companion/pair` |
+| Pairing (recommandé) | Variable **`AKASHA_COMPANION_PAIR_SECRET`** : secret partagé pour **`POST /api/companion/pair` uniquement** — il protège l’appairage, **pas** l’accès aux autres routes `/api/companion/*` |
 
 Découverte UDP : le daemon écoute **`0.0.0.0:3877`** dès le démarrage (indépendamment de `AKASHA_BIND` pour l’HTTP).
 
 ## Étapes
 
+> **Avertissement** — Sans en-tête `Authorization`, toutes les routes `/api/companion/*` sont accessibles depuis le LAN ([#172](https://github.com/azerothl/Akasha/issues/172)).
+
 ### 1. Activer l’écoute LAN
 
-Dans `akasha.env` (data_dir) ou l’environnement du service :
+Dans **`~/akasha/akasha.env`** (ou votre `AKASHA_DATA_DIR`) : une ligne **`CLE=valeur` par variable**, **sans** préfixe `export` (le chargeur `akasha.env` ne le comprend pas et ignorerait la ligne silencieusement).
+
+```env
+AKASHA_BIND=0.0.0.0
+AKASHA_PORT=3876
+# Recommandé sur un réseau partagé :
+AKASHA_COMPANION_PAIR_SECRET=votre-secret-long-et-aleatoire
+```
+
+Pour une session shell ponctuelle ou un unit file qui exporte l’environnement **avant** de lancer le binaire (hors fichier `akasha.env`) :
 
 ```bash
 export AKASHA_BIND=0.0.0.0
 export AKASHA_PORT=3876
-# Recommandé sur un réseau partagé :
 export AKASHA_COMPANION_PAIR_SECRET="votre-secret-long-et-aleatoire"
 ```
 
@@ -153,4 +163,4 @@ Commandes utiles : `akasha doctor`, page **Dépannage** de cette documentation.
 - **`notify.unread`** et **`notify.headline`** dans le snapshot sont des placeholders (non alimentés).
 - La découverte UDP ne transmet pas d’adresse IP : le client utilise l’IP source du datagramme de réponse ou une IP configurée manuellement.
 - Les routes **`/api/voice/*`** ne font pas partie du préfixe `/api/companion` ; un client voix doit les appeler séparément si besoin.
-- Détail normatif daemon : [COMPANION_SPEC.md](../COMPANION_SPEC.md). Le registre `spec/feature_evolution_tracking.md` distingue **Companion LAN** (API) et **matériel ESP32** (Planned).
+- Spécification technique Companion : [COMPANION_SPEC.md](../COMPANION_SPEC.md) ; le registre `spec/feature_evolution_tracking.md` distingue **Companion LAN** (API) et **matériel ESP32** (Planned).
