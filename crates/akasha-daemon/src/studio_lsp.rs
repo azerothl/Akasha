@@ -271,6 +271,7 @@ impl Session {
         }
         self.next += 1;
         let id = self.next;
+        let mut application_error = false;
         let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             send(
                 &mut self.stdin,
@@ -285,7 +286,8 @@ impl Session {
                     .ok_or("LSP reader disconnected")??;
                 if let Some(response) = self.incoming(message).await? {
                     if response["id"] == id {
-                        if response.get("error").is_some() {
+                        if response.get("error").is_some_and(|error| !error.is_null()) {
+                            application_error = true;
                             return Err(format!(
                                 "LSP request failed: {}",
                                 response["error"]["message"]
@@ -299,7 +301,7 @@ impl Session {
         })
         .await
         .unwrap_or_else(|_| Err("LSP request timeout".into()));
-        if result.is_err() {
+        if result.is_err() && !application_error {
             self.healthy = false;
             let _ = self.child.kill().await;
         }
@@ -307,18 +309,25 @@ impl Session {
         result
     }
     async fn open(&mut self, uri: &str, language: &str, text: String) -> Result<(), String> {
-        if let Some(document) = self.documents.get_mut(uri) {
+        if let Some(document) = self.documents.get(uri) {
             if document.text == text {
                 return Ok(());
             }
-            document.version = document
+            let version = document
                 .version
                 .checked_add(1)
                 .ok_or("LSP document version overflow")?;
-            document.text = text.clone();
-            let version = document.version;
+            let sync = self.capabilities.get("textDocumentSync").unwrap_or(&Value::Null);
+            let mode = sync.as_u64().or_else(||sync.get("change").and_then(Value::as_u64)).unwrap_or(0);
+            let change = match mode {
+                1 => json!({"text":text}),
+                2 => json!({"range":{"start":{"line":0,"character":0},"end":{"line":document.text.matches('\n').count(),"character":document.text.rsplit('\n').next().unwrap_or("").encode_utf16().count()}},"text":text}),
+                _ => return Err("LSP server does not synchronize changed buffers".into()),
+            };
+            self.notify("textDocument/didChange",json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[change]})).await?;
+            self.documents.insert(uri.into(), Document {version,text});
             self.diagnostics.remove(uri);
-            self.notify("textDocument/didChange",json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[{"text":text}]})).await
+            Ok(())
         } else {
             if self.documents.len() >= 128 {
                 return Err(
@@ -577,6 +586,14 @@ pub(crate) async fn query(
                     .ok_or("LSP diagnostic response missing full report")?;
                 json!({"status":"ready","diagnostics":items.iter().take(200).cloned().collect::<Vec<_>>()})
             } else {
+                for _ in 0..512 {
+                    match session.reader.try_recv() {
+                        Ok(Ok(message)) => { session.incoming(message).await?; }
+                        Ok(Err(error)) => {session.healthy=false;return Err(error);}
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {session.healthy=false;return Err("LSP reader disconnected".into());}
+                    }
+                }
                 let until = tokio::time::Instant::now() + std::time::Duration::from_millis(1800);
                 while !session.diagnostics.contains_key(&uri) {
                     match tokio::time::timeout_at(until, session.reader.recv()).await {
@@ -591,14 +608,14 @@ pub(crate) async fn query(
                             session.healthy = false;
                             return Err("LSP reader disconnected".into());
                         }
-                        Err(_) => {
-                            return Ok(
-                                json!({"schema_version":1,"status":"pending","server":program,"path":relative(&root,&path)?,"diagnostics":[],"reason":"Diagnostics not received yet; retry while the server indexes"}),
-                            );
-                        }
+                        Err(_) => break,
                     }
                 }
-                json!({"status":"ready","diagnostics":session.diagnostics.get(&uri)})
+                if let Some(diagnostics)=session.diagnostics.get(&uri) {
+                    json!({"status":"ready","diagnostics":diagnostics})
+                } else {
+                    json!({"status":"pending","diagnostics":[],"reason":"Diagnostics not received yet; retry while the server indexes"})
+                }
             }
         }
         "definition" | "references" => {
@@ -989,7 +1006,14 @@ pub(crate) async fn route(
             .filter(|body| body.len() <= 1024 * 1024)
             .and_then(|body| serde_json::from_slice::<Query>(body).ok())
         {
-            Some(request) => query(data_dir, &root, &policy, None, request).await,
+            Some(request) => {
+                if request.action == "rename" {
+                    match crate::studio_tool_contract::workspace_guard(&root).await {
+                        Ok(_guard) => query(data_dir,&root,&policy,None,request).await,
+                        Err(error) => Err(error),
+                    }
+                } else {query(data_dir, &root, &policy, None, request).await}
+            },
             None => Err("invalid or oversized LSP query".into()),
         },
         ("POST", "rename", 8) if parts[7] == "apply" => match Uuid::parse_str(parts[6]) {
