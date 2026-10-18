@@ -666,7 +666,7 @@ fn doctor_spec_yaml_release_info_desc(locale: &str) -> &'static str {
     if locale == "en" {
         "Spec files: not included in this release (not needed to run Akasha)."
     } else {
-        "Fichiers de spec : non inclus dans cette version (inutiles pour faire tourner Akasha)."
+        "Fichiers de spec : non inclus dans cette version (pas nécessaires pour utiliser Akasha)."
     }
 }
 
