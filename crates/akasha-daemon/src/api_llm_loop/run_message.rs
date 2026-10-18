@@ -3869,20 +3869,21 @@ pub(crate) async fn run_message_via_llm(
                 let tmo = crate::api_studio::studio_project_verify_timeout_sec(
                     tool_disk_workspace_root.as_path(),
                 );
-                let mech = crate::api_studio::run_mechanical_acceptance_checks(
-                    tool_disk_workspace_root.as_path(),
-                    pay,
-                    tmo,
-                )
-                .await;
+                let mut mech = Vec::new();
                 for criterion in &pay.criteria {
+                    let errors = crate::api_studio::run_mechanical_acceptance_checks(
+                        tool_disk_workspace_root.as_path(),
+                        &crate::api_studio::StudioAcceptancePayload { criteria: vec![criterion.clone()] },
+                        tmo,
+                    ).await;
                     let status = if matches!(criterion.kind, crate::api_studio::StudioCriterionKind::Manual) { "manual" }
-                        else if mech.is_empty() { "passed" } else { "not_confirmed" };
+                        else if errors.is_empty() { "passed" } else { "failed" };
                     run_outcome.checks.push(serde_json::json!({
                         "kind":"acceptance", "id":criterion.id, "criterion_kind":criterion.kind,
                         "status":status, "text":criterion.text,
                         "exit_code":if status == "passed" && matches!(criterion.kind, crate::api_studio::StudioCriterionKind::CommandOk) {Some(0)} else {None::<i32>}
                     }));
+                    mech.extend(errors);
                 }
                 if !mech.is_empty() {
                     studio_verify_error = Some(format!(
