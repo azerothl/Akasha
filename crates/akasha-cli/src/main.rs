@@ -46,8 +46,8 @@ enum Commands {
         /// Fix missing or minimal config: create missing files in data_dir (llm_router.yaml, tools_policy.yaml, connectors.env, akasha.env, agent_profile.json)
         #[arg(long)]
         fix: bool,
-        /// With --fix: set AKASHA_MEMORY_ENCRYPT=1 in akasha.env (SQLCipher / field-at-rest encryption foundation; see memory_encryption_rfc.md)
-        #[arg(long)]
+        /// Deprecated: memory encryption is not available; flag is ignored (see `akasha doctor` memory_at_rest check).
+        #[arg(long, hide = true)]
         encrypt_memory: bool,
     },
     /// Vault: manage secrets (Phase 3)
@@ -745,7 +745,10 @@ fn cmd_discover(service: Option<&str>) -> anyhow::Result<()> {
     let Some(prof) = profile(service_id) else {
         anyhow::bail!("Profil inconnu : {service_id}. Utilisez `akasha discover` sans argument pour la liste.");
     };
-    println!("Découverte {} (local puis réseau local)…", prof.display_name);
+    println!(
+        "Découverte {} (local puis réseau local)…",
+        prof.display_name
+    );
     let rt = tokio::runtime::Runtime::new()?;
     let opts = DiscoveryOptions::from_env();
     let list = rt.block_on(discover(prof, &opts));
@@ -756,7 +759,11 @@ fn cmd_discover(service: Option<&str>) -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    println!("{} trouvé ({} instance(s)) :", prof.display_name, list.len());
+    println!(
+        "{} trouvé ({} instance(s)) :",
+        prof.display_name,
+        list.len()
+    );
     for (i, entry) in list.iter().enumerate() {
         let kind = match entry.scope {
             DiscoveryScope::Local => "local",
@@ -828,10 +835,7 @@ fn cmd_task(sub: TaskSub) -> anyhow::Result<()> {
                             .get("progress_pct")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        let msg = last
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let msg = last.get("message").and_then(|v| v.as_str()).unwrap_or("");
                         if !msg.trim().is_empty() {
                             line.push_str(&format!(" progress={} message={}", pct, msg));
                         }
@@ -890,7 +894,10 @@ fn cmd_task(sub: TaskSub) -> anyhow::Result<()> {
                     .or_else(|| row.get("kind"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let payload = row.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let payload = row
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 let preview = if payload.is_null() {
                     String::from("null")
                 } else {
@@ -923,7 +930,10 @@ fn cmd_task(sub: TaskSub) -> anyhow::Result<()> {
                 if !resp.status().is_success() {
                     anyhow::bail!("Daemon error: {}", resp.status());
                 }
-                println!("{}", serde_json::to_string_pretty(&resp.json::<serde_json::Value>()?)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&resp.json::<serde_json::Value>()?)?
+                );
             }
             TaskQueueSub::Clear { task_id } => {
                 let resp = client
@@ -956,7 +966,10 @@ fn cmd_permissions(sub: PermissionsSub) -> anyhow::Result<()> {
                 if !resp.status().is_success() {
                     anyhow::bail!("Daemon error: {}", resp.status());
                 }
-                println!("{}", serde_json::to_string_pretty(&resp.json::<serde_json::Value>()?)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&resp.json::<serde_json::Value>()?)?
+                );
             }
             PermissionsQueueSub::Approve { id, note } => {
                 let body = note.map(|n| serde_json::json!({ "note": n }));
@@ -1111,7 +1124,10 @@ fn validate_mcp_config_json_local(root: &serde_json::Value) -> Result<(), String
         }
         if let Some(args) = entry.get("args") {
             if !args.is_null() && !args.is_array() {
-                return Err(format!("server {:?}: \"args\" must be array or omitted", name));
+                return Err(format!(
+                    "server {:?}: \"args\" must be array or omitted",
+                    name
+                ));
             }
         }
     }
@@ -1153,8 +1169,7 @@ async fn mcp_read_framed_local<R: tokio::io::AsyncRead + Unpin>(
             content_length = val.trim().parse().ok();
         }
     }
-    let len = content_length
-        .ok_or_else(|| "no Content-Length header in response".to_string())?;
+    let len = content_length.ok_or_else(|| "no Content-Length header in response".to_string())?;
     let mut body = vec![0u8; len];
     reader
         .read_exact(&mut body)
@@ -1209,11 +1224,12 @@ async fn probe_stdio_mcp_local(
         .map_err(|e| format!("write initialize: {}", e))?;
 
     let mut reader = BufReader::new(stdout);
-    let init_resp: serde_json::Value = match timeout(deadline, mcp_read_framed_local(&mut reader)).await {
-        Err(_) => serde_json::json!({ "error": "timeout_reading_response" }),
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => serde_json::json!({ "error": "framing_error", "detail": e }),
-    };
+    let init_resp: serde_json::Value =
+        match timeout(deadline, mcp_read_framed_local(&mut reader)).await {
+            Err(_) => serde_json::json!({ "error": "timeout_reading_response" }),
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => serde_json::json!({ "error": "framing_error", "detail": e }),
+        };
 
     let mut tools_resp = serde_json::Value::Null;
     if include_tools_list {
@@ -1222,7 +1238,11 @@ async fn probe_stdio_mcp_local(
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
         });
-        let _ = timeout(deadline, mcp_write_framed_local(&mut stdin, &initialized_notif)).await;
+        let _ = timeout(
+            deadline,
+            mcp_write_framed_local(&mut stdin, &initialized_notif),
+        )
+        .await;
 
         let list = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1257,8 +1277,8 @@ fn cmd_mcp(sub: McpSub) -> anyhow::Result<()> {
     match sub {
         McpSub::Validate { config } => {
             let raw = std::fs::read_to_string(&config)?;
-            let v: serde_json::Value = serde_json::from_str(&raw)
-                .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+            let v: serde_json::Value =
+                serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
             validate_mcp_config_json_local(&v).map_err(|e| anyhow::anyhow!("{}", e))?;
             println!("OK: {}", config.display());
             Ok(())
@@ -1270,8 +1290,8 @@ fn cmd_mcp(sub: McpSub) -> anyhow::Result<()> {
             timeout_secs,
         } => {
             let raw = std::fs::read_to_string(&config)?;
-            let v: serde_json::Value = serde_json::from_str(&raw)
-                .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+            let v: serde_json::Value =
+                serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
             validate_mcp_config_json_local(&v).map_err(|e| anyhow::anyhow!("{}", e))?;
             let servers = v["mcpServers"].as_object().unwrap();
             let (srv_name, entry) = if let Some(n) = name.as_deref() {
@@ -1298,7 +1318,10 @@ fn cmd_mcp(sub: McpSub) -> anyhow::Result<()> {
                         .collect()
                 })
                 .unwrap_or_default();
-            println!("Probing MCP server {:?} (command={} args={:?})…", srv_name, program, args);
+            println!(
+                "Probing MCP server {:?} (command={} args={:?})…",
+                srv_name, program, args
+            );
             let rt = tokio::runtime::Runtime::new()?;
             let deadline = Duration::from_secs(timeout_secs.max(1));
             let out = rt
@@ -1420,8 +1443,8 @@ fn cmd_mcp_status(json: bool) -> anyhow::Result<()> {
                 return Ok(());
             }
             let raw = std::fs::read_to_string(&path)?;
-            let v: serde_json::Value = serde_json::from_str(&raw)
-                .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+            let v: serde_json::Value =
+                serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
             match validate_mcp_config_json_local(&v) {
                 Ok(()) => {
                     let count = v["mcpServers"].as_object().map(|o| o.len()).unwrap_or(0);
@@ -1755,10 +1778,7 @@ fn cmd_worktree(sub: WorktreeSub) -> anyhow::Result<()> {
                 .output()?;
             if wt.status.success() {
                 let wt_text = String::from_utf8_lossy(&wt.stdout).to_string();
-                let lines: Vec<&str> = wt_text
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .collect();
+                let lines: Vec<&str> = wt_text.lines().filter(|l| !l.trim().is_empty()).collect();
                 println!("worktree_count: {}", lines.len());
                 for line in lines {
                     println!("  {}", line);
@@ -1842,10 +1862,7 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
                     anyhow::bail!("Catalog install failed: {}", err);
                 }
                 let installed = j.get("id").and_then(|v| v.as_str()).unwrap_or(&id);
-                println!(
-                    "Installed plugin {} from catalog.",
-                    installed
-                );
+                println!("Installed plugin {} from catalog.", installed);
                 if let Some(msg) = j.get("message").and_then(|v| v.as_str()) {
                     println!("{}", msg);
                 }
@@ -1985,7 +2002,11 @@ fn akasha_data_dir() -> PathBuf {
 fn is_source_workspace_dir(path: &Path) -> bool {
     path.join("Cargo.toml").exists()
         && path.join("crates").is_dir()
-        && path.join("crates").join("akasha-cli").join("Cargo.toml").exists()
+        && path
+            .join("crates")
+            .join("akasha-cli")
+            .join("Cargo.toml")
+            .exists()
 }
 
 /// Detect whether the CLI is running from a source checkout.
@@ -2059,7 +2080,11 @@ fn cmd_paths() -> anyhow::Result<()> {
     );
     println!();
     println!("  Daemon (au lancement) :");
-    println!("    spec_dir              : {}{}", spec_path.display(), note);
+    println!(
+        "    spec_dir              : {}{}",
+        spec_path.display(),
+        note
+    );
     println!("    llm_router.yaml      : cherché d'abord dans data_dir, puis dans <spec_dir>/../llm_router.yaml");
     println!();
     println!("  Sous WSL/Linux : data_dir = ${{XDG_DATA_HOME:-~/.local/share}}/akasha sauf si AKASHA_DATA_DIR est défini.");
@@ -2365,7 +2390,9 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
                 anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
             })?;
             let compose_file = compose_dir.join("docker-compose.yml");
-            let cf = compose_file.to_str().ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            let cf = compose_file
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
             let out = Command::new("docker")
                 .args([
                     "compose",
@@ -2387,12 +2414,17 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        ServicesSub::Restart { service, compose_dir } => {
+        ServicesSub::Restart {
+            service,
+            compose_dir,
+        } => {
             let compose_dir = find_models_compose_dir(compose_dir.as_ref()).ok_or_else(|| {
                 anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
             })?;
             let compose_file = compose_dir.join("docker-compose.yml");
-            let cf = compose_file.to_str().ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            let cf = compose_file
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
             let out = Command::new("docker")
                 .args(["compose", "-f", cf, "restart", &service])
                 .current_dir(&compose_dir)
@@ -2412,7 +2444,9 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
                 anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
             })?;
             let compose_file = compose_dir.join("docker-compose.yml");
-            let cf = compose_file.to_str().ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            let cf = compose_file
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
             println!("Compose: {}", compose_dir.display());
             let out = Command::new("docker")
                 .args(["compose", "-f", cf, "ps", "-a"])
@@ -3003,11 +3037,9 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                         .timeout(std::time::Duration::from_secs(3600))
                         .build()
                         .map_err(|e| anyhow::anyhow!("HTTP client: {e}"))?;
-                    let dest = akasha_embedded_llm::download::download_model(
-                        &client,
-                        id.as_deref(),
-                    )
-                    .map_err(|e| anyhow::anyhow!(e))?;
+                    let dest =
+                        akasha_embedded_llm::download::download_model(&client, id.as_deref())
+                            .map_err(|e| anyhow::anyhow!(e))?;
                     println!(
                         "Embedded GGUF downloaded to {} (set AKASHA_EMBEDDED_BACKEND=llama_cpp or auto).",
                         dest.display()
@@ -3815,8 +3847,12 @@ command_timeout_secs: 60
     // --- 5. RAG / Memory ---
     println!("\n--- RAG & Memory ---");
     println!("  RAG : le dossier spec/ (et spec/runbooks/) du projet est utilisé par défaut.");
-    println!("  Memory : configurez via l'assistant de premier lancement (OnboardingWizard Tauri),");
-    println!("           `akasha doctor --fix`, ou le profil mémoire dans Paramètres avancés Tauri.");
+    println!(
+        "  Memory : configurez via l'assistant de premier lancement (OnboardingWizard Tauri),"
+    );
+    println!(
+        "           `akasha doctor --fix`, ou le profil mémoire dans Paramètres avancés Tauri."
+    );
 
     // --- 5b. Services Docker (optionnel) ---
     if !use_defaults {
@@ -4189,11 +4225,53 @@ fn embedded_tools_policy_example_value(data_dir: &Path) -> anyhow::Result<serde_
     Ok(serde_yaml::from_str(&s)?)
 }
 
+/// Human-facing doctor copy: long-term memory is stored in plaintext SQLite today.
+const DOCTOR_MEMORY_AT_REST_DESC: &str =
+    "Memory: stored unencrypted in `memory.db` (encryption not available).";
+
+fn doctor_memory_at_rest_check() -> (String, bool, String) {
+    (
+        "memory_at_rest".to_string(),
+        true,
+        DOCTOR_MEMORY_AT_REST_DESC.to_string(),
+    )
+}
+
+/// True when `AKASHA_MEMORY_ENCRYPT` is set in the process environment or in `akasha.env` (no effect on storage today).
+fn akasha_memory_encrypt_var_is_set(data_dir: &Path) -> bool {
+    if std::env::var("AKASHA_MEMORY_ENCRYPT")
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return true;
+    }
+    let path = data_dir.join("akasha.env");
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        let (map, _) = parse_env_file_content(&content);
+        return map
+            .get("AKASHA_MEMORY_ENCRYPT")
+            .is_some_and(|s| !s.trim().is_empty());
+    }
+    false
+}
+
+fn doctor_memory_encrypt_env_warning(data_dir: &Path) -> Option<(String, bool, String)> {
+    if akasha_memory_encrypt_var_is_set(data_dir) {
+        Some((
+            "memory_encrypt_env_ignored".to_string(),
+            false,
+            "Warning: AKASHA_MEMORY_ENCRYPT is set but has no effect today; memory remains stored unencrypted in memory.db."
+                .to_string(),
+        ))
+    } else {
+        None
+    }
+}
+
 /// Apply fixes for missing or minimal config when `akasha doctor --fix` is run.
 /// Templates are embedded at compile time (`embedded_spec`); user values are preserved via merge.
-/// When `encrypt_memory` is true, sets `AKASHA_MEMORY_ENCRYPT=1` in akasha.env (foundation for field-at-rest encryption).
 /// Returns a list of messages describing what was fixed.
-fn run_doctor_fixes(data_dir: &Path, encrypt_memory: bool) -> anyhow::Result<Vec<String>> {
+fn run_doctor_fixes(data_dir: &Path, _encrypt_memory: bool) -> anyhow::Result<Vec<String>> {
     let mut fixes = Vec::new();
 
     if !data_dir.exists() {
@@ -4220,14 +4298,12 @@ fn run_doctor_fixes(data_dir: &Path, encrypt_memory: bool) -> anyhow::Result<Vec
         let merged = akasha_core::merge_yaml_fill_missing(ex, user_v);
         let merged_str = serde_yaml::to_string(&merged)?;
         akasha_llm::RoutingConfig::from_yaml_str(&merged_str).map_err(|e| {
-            anyhow::anyhow!(
-                "llm_router.yaml: après fusion, structure invalide — {}.",
-                e
-            )
+            anyhow::anyhow!("llm_router.yaml: après fusion, structure invalide — {}.", e)
         })?;
         std::fs::write(&path, merged_str)?;
         fixes.push(if existed {
-            "llm_router.yaml: aligné sur l'exemple embarqué (valeurs existantes conservées).".to_string()
+            "llm_router.yaml: aligné sur l'exemple embarqué (valeurs existantes conservées)."
+                .to_string()
         } else {
             "llm_router.yaml: créé depuis l'exemple embarqué.".to_string()
         });
@@ -4252,11 +4328,15 @@ fn run_doctor_fixes(data_dir: &Path, encrypt_memory: bool) -> anyhow::Result<Vec
         let merged = akasha_core::merge_yaml_fill_missing(ex, user_v);
         let merged_str = serde_yaml::to_string(&merged)?;
         let _: akasha_tools::ToolsPolicy = serde_yaml::from_str(&merged_str).map_err(|e| {
-            anyhow::anyhow!("tools_policy.yaml: après fusion, structure invalide — {}.", e)
+            anyhow::anyhow!(
+                "tools_policy.yaml: après fusion, structure invalide — {}.",
+                e
+            )
         })?;
         std::fs::write(&path, merged_str)?;
         fixes.push(if existed {
-            "tools_policy.yaml: aligné sur l'exemple embarqué (valeurs existantes conservées).".to_string()
+            "tools_policy.yaml: aligné sur l'exemple embarqué (valeurs existantes conservées)."
+                .to_string()
         } else {
             "tools_policy.yaml: créé depuis l'exemple embarqué (chemins = data_dir).".to_string()
         });
@@ -4269,9 +4349,8 @@ fn run_doctor_fixes(data_dir: &Path, encrypt_memory: bool) -> anyhow::Result<Vec
         let ex: serde_yaml::Value = serde_yaml::from_str(embedded_spec::VOICE_ROUTER_EXAMPLE_YAML)?;
         let user_v: serde_yaml::Value = if existed {
             let s = std::fs::read_to_string(&path)?;
-            serde_yaml::from_str(&s).map_err(|e| {
-                anyhow::anyhow!("voice_router.yaml: fichier invalide — {}.", e)
-            })?
+            serde_yaml::from_str(&s)
+                .map_err(|e| anyhow::anyhow!("voice_router.yaml: fichier invalide — {}.", e))?
         } else {
             serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
         };
@@ -4279,7 +4358,8 @@ fn run_doctor_fixes(data_dir: &Path, encrypt_memory: bool) -> anyhow::Result<Vec
         let merged_str = serde_yaml::to_string(&merged)?;
         std::fs::write(&path, merged_str)?;
         fixes.push(if existed {
-            "voice_router.yaml: aligné sur l'exemple embarqué (valeurs existantes conservées).".to_string()
+            "voice_router.yaml: aligné sur l'exemple embarqué (valeurs existantes conservées)."
+                .to_string()
         } else {
             "voice_router.yaml: créé depuis l'exemple embarqué.".to_string()
         });
@@ -4337,45 +4417,15 @@ OLLAMA_HOST=http://localhost:11434
             &mut fixes,
         )?;
     }
-    let memory_encrypt_requested = encrypt_memory
-        || std::env::var("AKASHA_MEMORY_ENCRYPT")
-            .ok()
-            .as_deref()
-            == Some("1");
-    if memory_encrypt_requested {
-        doctor_fix_env_file(
-            &akasha_env_path,
-            "akasha.env",
-            &["AKASHA_MEMORY_ENCRYPT"],
-            "# Memory encryption foundation (S-MEM-05): field-at-rest path — SQLCipher memory.db OR per-row content+embedding AES-GCM (see spec/dev/roadmap/memory_encryption_rfc.md). Full SQLCipher integration is deferred pending bench.",
-            &mut fixes,
-        )?;
-        let env_content = std::fs::read_to_string(&akasha_env_path).unwrap_or_default();
-        let (env_map, _) = parse_env_file_content(&env_content);
-        if env_map.get("AKASHA_MEMORY_ENCRYPT").map(String::as_str) != Some("1") {
-            let mut out = env_content.trim_end().to_string();
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str("# Field-at-rest encryption spike: scripts/bench-memory-encryption.ps1\n");
-            out.push_str("AKASHA_MEMORY_ENCRYPT=1\n");
-            std::fs::write(&akasha_env_path, out)?;
-            fixes.push("akasha.env: set AKASHA_MEMORY_ENCRYPT=1.".to_string());
-        }
-        fixes.push(
-            "Memory encryption foundation enabled: AKASHA_MEMORY_ENCRYPT=1 (field-at-rest path documented in memory_encryption_rfc.md; run scripts/bench-memory-encryption.ps1 for SQLCipher spike steps).".to_string(),
-        );
-    }
-
     let agent_profile_path = data_dir.join("agent_profile.json");
     {
         let existed = agent_profile_path.exists();
-        let ex: serde_json::Value = serde_json::from_str(embedded_spec::AGENT_PROFILE_EXAMPLE_JSON)?;
+        let ex: serde_json::Value =
+            serde_json::from_str(embedded_spec::AGENT_PROFILE_EXAMPLE_JSON)?;
         let user_v: serde_json::Value = if existed {
             let s = std::fs::read_to_string(&agent_profile_path)?;
-            serde_json::from_str(&s).map_err(|e| {
-                anyhow::anyhow!("agent_profile.json: fichier invalide — {}.", e)
-            })?
+            serde_json::from_str(&s)
+                .map_err(|e| anyhow::anyhow!("agent_profile.json: fichier invalide — {}.", e))?
         } else {
             serde_json::json!({})
         };
@@ -4383,7 +4433,8 @@ OLLAMA_HOST=http://localhost:11434
         let json = serde_json::to_string_pretty(&merged)?;
         std::fs::write(&agent_profile_path, json)?;
         fixes.push(if existed {
-            "agent_profile.json: aligné sur le gabarit embarqué (valeurs existantes conservées).".to_string()
+            "agent_profile.json: aligné sur le gabarit embarqué (valeurs existantes conservées)."
+                .to_string()
         } else {
             "agent_profile.json: créé depuis le gabarit embarqué.".to_string()
         });
@@ -4398,7 +4449,10 @@ OLLAMA_HOST=http://localhost:11434
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_PORT);
-        if let Ok(resp) = client.get(format!("http://127.0.0.1:{}/api/doctor", port)).send() {
+        if let Ok(resp) = client
+            .get(format!("http://127.0.0.1:{}/api/doctor", port))
+            .send()
+        {
             if resp.status().is_success() {
                 if let Ok(j) = resp.json::<serde_json::Value>() {
                     if let Some(checks) = j.get("checks").and_then(|c| c.as_array()) {
@@ -4467,7 +4521,10 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
     // akasha.env (optional; validate format if present)
     let p = data_dir.join("akasha.env");
     let (ok, msg) = if !p.exists() {
-        (true, "akasha.env: missing (optional; defaults used)".to_string())
+        (
+            true,
+            "akasha.env: missing (optional; defaults used)".to_string(),
+        )
     } else {
         match std::fs::read_to_string(&p) {
             Ok(s) => {
@@ -4483,7 +4540,10 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
                         .join(", ");
                     (
                         false,
-                        format!("akasha.env: invalid line(s) (expected KEY=value): {}", preview),
+                        format!(
+                            "akasha.env: invalid line(s) (expected KEY=value): {}",
+                            preview
+                        ),
                     )
                 }
             }
@@ -4517,10 +4577,15 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
         .unwrap_or(DEFAULT_PORT);
     let cwd = std::env::current_dir().unwrap_or_default();
     let spec_dir_override = std::env::var_os("AKASHA_SPEC_DIR");
-    let source_checkout_checks =
-        doctor_uses_source_checkout_checks(&cwd);
+    let source_checkout_checks = doctor_uses_source_checkout_checks(&cwd);
 
     let data_dir = akasha_data_dir();
+    if fix && encrypt_memory && !json {
+        eprintln!(
+            "Warning: --encrypt-memory is ignored; {}",
+            DOCTOR_MEMORY_AT_REST_DESC
+        );
+    }
     if fix {
         let fixes = run_doctor_fixes(&data_dir, encrypt_memory)?;
         if !json && !fixes.is_empty() {
@@ -4592,6 +4657,11 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
 
     // Config file checks (existence + valid format)
     checks.extend(run_config_checks(&data_dir));
+
+    checks.push(doctor_memory_at_rest_check());
+    if let Some(warn) = doctor_memory_encrypt_env_warning(&data_dir) {
+        checks.push(warn);
+    }
 
     // Auto-triage: when daemon is up, sample LLM router summary + task queue depth.
     if daemon_healthy {
@@ -5014,5 +5084,46 @@ mod tests {
         assert!(desc.contains("10_data_model.yaml"));
 
         std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+
+    #[test]
+    fn doctor_memory_at_rest_check_describes_plaintext_storage() {
+        let (id, ok, desc) = doctor_memory_at_rest_check();
+        assert_eq!(id, "memory_at_rest");
+        assert!(ok);
+        assert_eq!(desc, DOCTOR_MEMORY_AT_REST_DESC);
+    }
+
+    #[test]
+    fn doctor_fix_does_not_enable_memory_encryption() {
+        let data_dir = make_temp_dir("doctor-no-mem-encrypt");
+        let fixes = run_doctor_fixes(&data_dir, true).unwrap();
+        let akasha_env = std::fs::read_to_string(data_dir.join("akasha.env")).unwrap();
+        assert!(
+            !fixes
+                .iter()
+                .any(|m| m.contains("encryption") || m.contains("AKASHA_MEMORY_ENCRYPT")),
+            "fixes must not claim memory encryption: {:?}",
+            fixes
+        );
+        assert!(!akasha_env.contains("AKASHA_MEMORY_ENCRYPT"));
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn doctor_warns_when_akasha_memory_encrypt_in_env_file() {
+        let data_dir = make_temp_dir("doctor-mem-env-warn");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("akasha.env"),
+            "AKASHA_PORT=3876\nAKASHA_MEMORY_ENCRYPT=1\n",
+        )
+        .unwrap();
+        let warn = doctor_memory_encrypt_env_warning(&data_dir).expect("warning");
+        assert_eq!(warn.0, "memory_encrypt_env_ignored");
+        assert!(!warn.1);
+        assert!(warn.2.contains("AKASHA_MEMORY_ENCRYPT"));
+        assert!(warn.2.contains("no effect"));
+        std::fs::remove_dir_all(data_dir).unwrap();
     }
 }
