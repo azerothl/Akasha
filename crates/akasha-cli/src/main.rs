@@ -3358,7 +3358,9 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     println!("Répertoire de données : {}\n", data_dir_str);
 
     if use_defaults {
-        println!("Mode --defaults : configuration minimale (Ollama uniquement).\n");
+        println!(
+            "Modèle par défaut : embarqué (local, sans Ollama). Ollama et les fournisseurs cloud restent optionnels.\n"
+        );
     }
 
     // --- 1. Provider LLM ---
