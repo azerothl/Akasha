@@ -750,7 +750,7 @@ fn prepare_plan(
                 .ok_or("LSP textDocument URI missing")?;
             if let Some(version) = document["version"].as_i64() {
                 if session.document_key(uri).and_then(|key|session.documents.get(&key))
-                    .is_none_or(|doc| i64::from(doc.version) != version)
+                    .is_some_and(|doc| i64::from(doc.version) != version)
                 {
                     return Err("LSP edit document version is stale".into());
                 }
@@ -823,6 +823,9 @@ fn prepare_plan(
         files,
     };
     let dir = plan_dir(data_dir)?;
+    if task.is_some() && serde_json::to_vec(&plan).map_err(|e|e.to_string())?.len()>48*1024 {
+        return Err("Rename preview exceeds the agent tool result budget; prepare and review this rename in the Studio editor before applying it".into());
+    }
     let mut active = 0;
     for entry in std::fs::read_dir(&dir)
         .map_err(|e| e.to_string())?

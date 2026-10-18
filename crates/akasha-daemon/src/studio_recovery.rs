@@ -51,6 +51,8 @@ pub(crate) struct Checkpoint {
     pub preferred_task_type: Option<String>,
     pub incognito: bool,
     pub round: u32,
+    #[serde(default)]
+    pub max_tool_rounds: Option<u32>,
     pub prompt: String,
     pub phase: String,
     pub waiting: Option<Value>,
@@ -117,6 +119,9 @@ pub(crate) fn request_resume(db: &Path, task: Uuid) -> Result<Checkpoint, String
     if checkpoint.agent != current.assigned_agent || checkpoint.project_id != project {
         return Err("checkpoint role/project differs from current task".into());
     }
+    let data_dir=db.parent().ok_or("task data directory missing")?;
+    let workspace=crate::studio_project_context::manifest_workspace(data_dir,&project,Some(task))?.canonicalize().map_err(|e|e.to_string())?;
+    if checkpoint.workspace.canonicalize().map_err(|_|"recorded workspace unavailable; restore it before retrying resume")?!=workspace {return Err("recorded workspace differs from current task workspace".into());}
     if !matches!(
         current.status,
         akasha_store::TaskStatus::Paused | akasha_store::TaskStatus::Interrupted
@@ -136,12 +141,17 @@ pub(crate) fn record_waiting(
     task: Uuid,
     phase: &str,
     waiting: Value,
+    snapshot: (&str, u32, u32, &crate::task_outcome::RunOutcome),
 ) -> Result<(), String> {
     let Some(mut checkpoint) = load(db, task, false)? else {
         return Err("checkpoint missing before human wait".into());
     };
     checkpoint.phase = phase.into();
     checkpoint.waiting = Some(waiting);
+    checkpoint.prompt=snapshot.0.to_owned();
+    checkpoint.round=snapshot.1;
+    checkpoint.max_tool_rounds=Some(snapshot.2);
+    checkpoint.outcome=snapshot.3.clone();
     save(db, &checkpoint)
 }
 pub(crate) fn mark_interrupted(db: &Path, task: Uuid) -> Result<(), String> {

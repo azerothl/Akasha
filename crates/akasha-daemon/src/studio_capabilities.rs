@@ -33,6 +33,10 @@ pub(crate) fn executable_available(program: &str) -> bool {
 }
 
 pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<StudioTool> {
+    let bounded=if name.starts_with("mcp_"){crate::mcp_runtime::prompt_tool_names(policy)}else{Default::default()};
+    tool_with_bound(policy,agent,name,&bounded)
+}
+fn tool_with_bound(policy: &ToolsPolicy, agent: &str, name: &str, prompt_names: &std::collections::HashSet<String>) -> Option<StudioTool> {
     if name.starts_with("mcp_") {
         let descriptor = crate::mcp_runtime::discovered_tool(name)?;
         let empty = policy.default_profile.as_ref().is_some_and(|profile| {
@@ -47,12 +51,7 @@ pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<Stud
             && role_allowed
             && policy.can_use_mcp_tool(&descriptor.server, &descriptor.tool)
             && std::env::var("AKASHA_MCP_TOOLS_ENABLED").ok().as_deref() != Some("0");
-        let candidates = crate::mcp_runtime::discovered_tools()
-            .into_iter()
-            .filter(|tool| policy.can_use_mcp_tool(&tool.server, &tool.tool))
-            .take(32)
-            .any(|tool| tool.name == name);
-        let bounded = candidates && descriptor.input_schema.to_string().len() <= 4096;
+        let bounded = prompt_names.contains(name);
         return Some(StudioTool {
             name: name.into(),
             description: descriptor.description,
@@ -185,15 +184,14 @@ pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<Stud
 }
 
 pub(crate) fn catalogue(policy: &ToolsPolicy, agent: &str) -> Vec<StudioTool> {
+    let bounded=crate::mcp_runtime::prompt_tool_names(policy);
     crate::api::AVAILABLE_TOOLS
         .iter()
         .map(|(name, _)| name.to_string())
         .chain(
-            crate::mcp_runtime::discovered_tools()
-                .into_iter()
-                .map(|tool| tool.name),
+            crate::mcp_runtime::discovered_names().into_iter(),
         )
-        .filter_map(|name| tool(policy, agent, &name))
+        .filter_map(|name| tool_with_bound(policy, agent, &name, &bounded))
         .collect()
 }
 

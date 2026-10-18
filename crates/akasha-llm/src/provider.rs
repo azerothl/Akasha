@@ -70,7 +70,11 @@ impl NativeCalls {
                 let index=call["index"].as_u64().ok_or_else(||ProviderError::Api("native call index missing".into()))? as usize;
                 if index>=32{return Err(ProviderError::Api("too many native calls".into()));}
                 let entry=self.0.entry(index).or_default();
-                if let Some(name)=call.pointer("/function/name").and_then(|v|v.as_str()){entry.0.push_str(name);}
+                if let Some(name)=call.pointer("/function/name").and_then(|v|v.as_str()){
+                    if entry.0!=name {
+                        if name.starts_with(&entry.0) {entry.0=name.into();} else {entry.0.push_str(name);}
+                    }
+                }
                 if let Some(arguments)=call.pointer("/function/arguments").and_then(|v|v.as_str()){entry.1.push_str(arguments);}
                 if entry.0.len()>128||self.0.values().map(|(_,arguments)|arguments.len()).sum::<usize>()>1024*1024{return Err(ProviderError::Api("native arguments exceed limit".into()));}
             }

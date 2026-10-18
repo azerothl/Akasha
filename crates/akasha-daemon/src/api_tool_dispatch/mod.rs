@@ -32,12 +32,7 @@ pub async fn execute_tool_call(
     args: &[String],
 ) -> (bool, String, Option<String>) {
     let decoded = if tool_name == "studio_call" {
-        match args
-            .first()
-            .ok_or("missing Studio envelope")
-            .and_then(|text| {
-                crate::studio_tool_contract::decode(text).map_err(|_| "invalid Studio envelope")
-            }) {
+        match if args.is_empty() {Err("missing Studio envelope".to_string())} else {crate::studio_tool_contract::decode(&args.join(" "))} {
             Ok(value) => Some(value),
             Err(error) => {
                 return (
