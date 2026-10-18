@@ -53,6 +53,9 @@ jobs:
           pip install jsonschema
           python scripts/validate-cookbook-recipes.py
 
+      - name: Validate feature registry
+        run: python scripts/validate-feature-registry.py
+
       - name: E2E tests (daemon + CLI binaries)
         env:
           RUN_E2E: "1"

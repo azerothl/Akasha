@@ -1,5 +1,15 @@
 # Nouveautés
 
+## Nouveautés 0.11.0
+
+- **Plateforme** : découpage `api.rs` (&lt; 8k lignes), boucle outils extraite (`api_tool_dispatch`, `api_llm_loop`)
+- **Embarqué** : `GET /api/capabilities`, protocole benches AR tier 1–2 (décision : conserver Qwen2.5-1.5B Q4_K_M par défaut CUDA)
+- **MCP** : runtime stdio + policy + surface CLI/UI opérateur (statut **Implemented**)
+- **Cockpit** : P6-B3 cron watch wakeups, P6-B4 inspect / cancel arbre subagents
+- **Interop akasha-os** : note skills/plugins ↔ modules OS, matrice `SKILL.md`, pilote `morning-brief`
+- **Companion** : APIs **LAN** daemon inchangées (pairing, discovery) — le matériel **ESP32 / avatar (FNK0104)** reste **hors livraison** ; voir registre `spec/feature_evolution_tracking.md`
+
+---
 
 ## Nouveautés 0.10.0
 
@@ -7,11 +17,9 @@
 - **Artefacts** : zip CPU (Candle) + CUDA / full CUDA (llama-cpp-4 + GGUF)
 - **Cockpit** : Active work, modes composer, Usage 7/30 j, pin/fork/dual-pane
 - **Life layer** : overnight, brief matinal Telegram, OAuth Connectors, schedules en langage naturel
-- **Companion LAN** : APIs daemon pour client ESP32 (pairing / discovery)
-
+- **Companion LAN** : APIs daemon pour un futur client ESP32 (pairing / discovery) — **pas** de firmware ni device livré avec la release
 
 ---
-
 
 ## Nouveautés 0.9.0
 
@@ -21,11 +29,9 @@
 - **Plugins canaux** : Matrix et CalDAV (sidecar) dans le catalogue public
 - **Code Studio** : `npx akasha-code-studio@0.9.0`
 
-
 ---
 
-## ## 14. Nouveautés depuis la version 0.7.0 (version 0.8.0)
-
+## Nouveautés depuis la version 0.7.0 (version 0.8.0)
 
 ### Mission autonome
 

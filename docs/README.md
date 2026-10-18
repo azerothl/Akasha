@@ -15,3 +15,7 @@ Ce dossier contient uniquement la documentation destinee aux utilisateurs finaux
 
 - Cette documentation couvre l'utilisation produit cote utilisateur final.
 - Les informations de developpement interne ne sont pas inclues dans ce dossier.
+
+## Registre des fonctionnalites (contributeurs)
+
+L'etat d'implementation et de documentation par bloc fonctionnel est suivi dans [`spec/feature_evolution_tracking.md`](../spec/feature_evolution_tracking.md) (source de verite). Avant chaque release mineure : y ajouter les preuves listees dans ce fichier et executer `python3 scripts/validate-feature-registry.py`.

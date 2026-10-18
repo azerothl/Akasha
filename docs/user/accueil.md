@@ -12,6 +12,7 @@ Bienvenue dans la documentation intégrée d'Akasha. Utilisez le menu à gauche 
 | Interfaces | TUI et application desktop : onglets, raccourcis |
 | Mission autonome | Heartbeats, objectifs de fond, rapports |
 | Données et mémoire | RAG utilisateur, mémoire, graphe projet |
+| Observabilité | `doctor`, métriques routeur, usage 7/30 j |
 | Workspace | Cookbook, Comparer, Recherche, Notes (v0.9) |
 | Skills, plugins et canaux | Extensions, galerie, Telegram, Matrix, etc. |
 | Dépannage | `akasha doctor`, problèmes fréquents |
