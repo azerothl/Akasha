@@ -2271,7 +2271,7 @@ pub(crate) async fn run_message_via_llm(
                                     }
                                 }
                             }
-                            if repository_rules_deferred && !matches!(actual_tool.as_str(), "read_file" | "grep_content" | "search_files" | "read_skill" | "list_skills" | "read_todos") {
+                            if repository_rules_deferred && !matches!(effective_role_tool, "read_file" | "grep_content" | "search_files" | "read_skill" | "list_skills" | "read_todos") {
                                 tool_results.push(format!("[{actual_tool}] deferred: read and apply the repository instructions supplied in this round before retrying the action"));
                                 continue;
                             }
@@ -2376,15 +2376,6 @@ pub(crate) async fn run_message_via_llm(
                         let approval_args: Vec<String> = if actual_tool.is_empty() && !tool_args.is_empty() {
                             std::iter::once(name.clone()).chain(tool_args.iter().cloned()).collect()
                         } else {tool_args.to_vec()};
-                        if let Some(definition) = skill_definition.as_ref().filter(|_| name != &actual_tool) {
-                            let metadata = serde_json::json!({"name":definition.name,"source_root":definition.source_root,"sha256":definition.sha256,"version":definition.version,"activation":"tool_alias"});
-                            if let Err(reason) = crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "skills", metadata.clone()) {
-                                run_outcome.termination = TerminationReason::ContextUnavailable;
-                                reply_text = reason;
-                                break 'tool_rounds;
-                            }
-                            let _ = store.insert_event(task_id, "skill_activated", Some(&metadata), &chrono::Utc::now().to_rfc3339());
-                        }
                         if exec.policy.requires_approval(effective_role_tool) {
                             let permission_mode = load_permission_mode(data_dir);
                             if permission_mode.mode == "allow_all" {
@@ -2671,6 +2662,15 @@ pub(crate) async fn run_message_via_llm(
                             )
                             .with_correlation(timeline_correlation),
                         );
+                        if let Some(definition) = skill_definition.as_ref().filter(|_| name != &actual_tool) {
+                            let metadata = serde_json::json!({"name":definition.name,"source_root":definition.source_root,"sha256":definition.sha256,"version":definition.version,"activation":"tool_alias"});
+                            if let Err(reason) = crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "skills", metadata.clone()) {
+                                run_outcome.termination = TerminationReason::ContextUnavailable;
+                                reply_text = reason;
+                                break 'tool_rounds;
+                            }
+                            let _ = store.insert_event(task_id, "skill_activated", Some(&metadata), &chrono::Utc::now().to_rfc3339());
+                        }
                         let (success, res, captured_image): (bool, String, Option<String>) =
                             if actual_tool == "ask_user" {
                                 // Human in the loop: register pending request, emit event, wait for user reply.
