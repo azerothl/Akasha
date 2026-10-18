@@ -35,12 +35,12 @@ fn create(
     policy: &akasha_tools::ToolsPolicy,
     mut body: PtyCreateBody,
 ) -> Result<Value, String> {
-    let live = PtyManager::studio()
-        .list_sessions()
-        .map_err(|e| e.to_string())?;
     let mut registered = owners()
         .lock()
         .map_err(|_| "terminal ownership lock unavailable")?;
+    let live = PtyManager::studio()
+        .list_sessions()
+        .map_err(|e| e.to_string())?;
     registered.retain(|id, _| live.iter().any(|session| session.session_id == *id));
     if registered
         .values()
