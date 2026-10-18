@@ -43,6 +43,7 @@ pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<Stud
         });
         let role_allowed = crate::studio_role_policy::allows_tool(agent, name);
         let allowed = !empty
+            && (policy.default_profile.is_none() || policy.allowed_tool_list().is_some_and(|tools| tools.iter().any(|tool| tool == name)))
             && role_allowed
             && policy.can_use_mcp_tool(&descriptor.server, &descriptor.tool)
             && std::env::var("AKASHA_MCP_TOOLS_ENABLED").ok().as_deref() != Some("0");

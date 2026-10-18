@@ -35,7 +35,7 @@ fn create(
     policy: &akasha_tools::ToolsPolicy,
     mut body: PtyCreateBody,
 ) -> Result<Value, String> {
-    let live = PtyManager::global()
+    let live = PtyManager::studio()
         .list_sessions()
         .map_err(|e| e.to_string())?;
     let mut registered = owners()
@@ -68,10 +68,10 @@ fn create(
         Uuid::new_v4()
     ));
     body.argv = Some(argv.clone());
-    let result = PtyManager::global()
+    let result = PtyManager::studio()
         .create(body)
         .map_err(|e| e.to_string())?;
-    let transcript = PtyManager::global()
+    let transcript = PtyManager::studio()
         .list_sessions()
         .ok()
         .and_then(|sessions| {
@@ -97,7 +97,7 @@ fn create(
 }
 
 fn scoped_list(project: &str, task: Option<Uuid>) -> Result<Value, String> {
-    let sessions = PtyManager::global()
+    let sessions = PtyManager::studio()
         .list_sessions()
         .map_err(|e| e.to_string())?;
     let registered = owners()
@@ -164,18 +164,18 @@ pub(crate) async fn agent_terminal(
         authorize(&project, Some(task), sid, &policy, sub == "write")?;
         let value = match sub {
             "read" => {
-                let output=PtyManager::global().read_output(sid,args.get(2).and_then(|n|n.parse().ok()).unwrap_or(8192)).map_err(|e|e.to_string())?;
-                let exit=PtyManager::global().list_sessions().ok().and_then(|sessions|sessions.into_iter().find(|session|session.session_id==*sid)).and_then(|session|session.exit_code);
+                let output=PtyManager::studio().read_output(sid,args.get(2).and_then(|n|n.parse().ok()).unwrap_or(8192)).map_err(|e|e.to_string())?;
+                let exit=PtyManager::studio().list_sessions().ok().and_then(|sessions|sessions.into_iter().find(|session|session.session_id==*sid)).and_then(|session|session.exit_code);
                 json!({"data_b64":output.data_b64,"bytes":output.bytes,"exit_code":exit})
             },
             "write" => {
                 let text = args.get(2..).unwrap_or_default().join(" ");
                 let body = if text.trim_start().starts_with('{') {serde_json::from_str::<PtyInputBody>(&text).map_err(|e| e.to_string())?} else {PtyInputBody {text:Some(text),bytes_b64:None}};
                 check_input(&body)?;
-                PtyManager::global().write_input(sid,body).map_err(|e| e.to_string())?; json!({"ok":true})
+                PtyManager::studio().write_input(sid,body).map_err(|e| e.to_string())?; json!({"ok":true})
             }
-            "resize" => {PtyManager::global().resize(sid,PtyResizeBody {cols:args.get(2).and_then(|n| n.parse::<u16>().ok()).unwrap_or(80).clamp(20,240),rows:args.get(3).and_then(|n| n.parse::<u16>().ok()).unwrap_or(24).clamp(5,100)}).map_err(|e| e.to_string())?;json!({"ok":true})}
-            "stop" => {archive(sid);PtyManager::global().close(sid).map_err(|e| e.to_string())?;owners().lock().map_err(|_| "terminal lock unavailable")?.remove(sid);json!({"ok":true})}
+            "resize" => {PtyManager::studio().resize(sid,PtyResizeBody {cols:args.get(2).and_then(|n| n.parse::<u16>().ok()).unwrap_or(80).clamp(20,240),rows:args.get(3).and_then(|n| n.parse::<u16>().ok()).unwrap_or(24).clamp(5,100)}).map_err(|e| e.to_string())?;json!({"ok":true})}
+            "stop" => {archive(sid);PtyManager::studio().close(sid).map_err(|e| e.to_string())?;owners().lock().map_err(|_| "terminal lock unavailable")?.remove(sid);json!({"ok":true})}
             _ => return Err("terminal_session start [JSON]|list|read <id>|write <id> {\"text\":\"command\\r\"}|resize <id> cols rows|stop <id>".into()),
         };
         Ok(value.to_string())
@@ -217,7 +217,7 @@ fn archive(id: &str) {
             "terminal_transcript",
             "text/plain",
             &bytes,
-            json!({"session_id":id,"program":owner.program,"truncated":truncated,"exit_code":PtyManager::global().list_sessions().ok().and_then(|sessions|sessions.into_iter().find(|session|session.session_id==id)).and_then(|session|session.exit_code)}),
+            json!({"session_id":id,"program":owner.program,"truncated":truncated,"exit_code":PtyManager::studio().list_sessions().ok().and_then(|sessions|sessions.into_iter().find(|session|session.session_id==id)).and_then(|session|session.exit_code)}),
         );
     }
 }
@@ -280,7 +280,7 @@ pub(crate) async fn close_project(project: &str) {
     for id in ids {
         let _ = tokio::task::spawn_blocking(move || {
             archive(&id);
-            let _ = PtyManager::global().close(&id);
+            let _ = PtyManager::studio().close(&id);
             if let Ok(mut map) = owners().lock() {
                 map.remove(&id);
             }
@@ -303,7 +303,7 @@ pub(crate) async fn close_task(task: Uuid) {
     for id in ids {
         let _ = tokio::task::spawn_blocking(move || {
             archive(&id);
-            let _ = PtyManager::global().close(&id);
+            let _ = PtyManager::studio().close(&id);
             if let Ok(mut map) = owners().lock() {
                 map.remove(&id);
             }
@@ -439,7 +439,7 @@ pub(crate) async fn handle_route(
         )?;
         match (method.as_str(), action.as_deref()) {
             ("GET", Some("output")) => serde_json::to_value(
-                PtyManager::global()
+                PtyManager::studio()
                     .snapshot_output(&sid, cursor, 8192)
                     .map_err(|e| e.to_string())?,
             )
@@ -448,7 +448,7 @@ pub(crate) async fn handle_route(
                 let input =
                     serde_json::from_value::<PtyInputBody>(parsed).map_err(|e| e.to_string())?;
                 check_input(&input)?;
-                PtyManager::global()
+                PtyManager::studio()
                     .write_input(&sid, input)
                     .map_err(|e| e.to_string())?;
                 Ok(json!({"ok":true}))
@@ -458,13 +458,13 @@ pub(crate) async fn handle_route(
                     serde_json::from_value::<PtyResizeBody>(parsed).map_err(|e| e.to_string())?;
                 size.cols = size.cols.clamp(20, 240);
                 size.rows = size.rows.clamp(5, 100);
-                PtyManager::global()
+                PtyManager::studio()
                     .resize(&sid, size)
                     .map_err(|e| e.to_string())?;
                 Ok(json!({"ok":true}))
             }
             ("DELETE", None) => {
-                PtyManager::global()
+                PtyManager::studio()
                     .close(&sid)
                     .map_err(|e| e.to_string())?;
                 owners()
