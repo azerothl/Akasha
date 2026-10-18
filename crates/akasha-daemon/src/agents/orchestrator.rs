@@ -48,6 +48,10 @@ enum OrchestrationState {
     Evaluating,
     Completed,
     Failed,
+    Paused,
+    Cancelled,
+    Interrupted,
+    WaitingUserInput,
 }
 
 fn stable_mode_enabled(message: &str) -> bool {
@@ -2596,22 +2600,25 @@ Do not only describe the files — execute the tools."#,
             }
             let all_done = children.iter().all(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Failed));
             if !all_done {
-                // Some children timed out without completing; treat the root task as failed.
-                let _ = store.update_status(root_task_id, TaskStatus::Failed);
+                // Persist timeout truth while preserving a concurrent operator stop.
+                let (status,outcome) = match store.finalize_outcome(root_task_id,TaskStatus::Failed,serde_json::json!({"schema_version":1,"termination_reason":"timeout","result":if children.iter().any(|child|child.status==TaskStatus::Completed){"partial"}else{"failed"},"reason":"Subtasks did not reach a terminal result before timeout","acceptance_verified":false,"verification":[],"subtasks":children.iter().map(|child|serde_json::json!({"task_id":child.id,"status":child.status})).collect::<Vec<_>>()})) {
+                    Ok(value)=>value,Err(error)=>{tracing::error!(%root_task_id,%error,"Cannot persist orchestration timeout");return;}
+                };
                 emit_timeline_once_for_task(
                     &bus,
                     Some(store_path_buf.as_path()),
                     root_task_id,
                     "task_completed",
-                    Some(serde_json::json!({ "status": "failed" })),
+                    Some(serde_json::json!({ "status": status.as_str(), "outcome":outcome })),
                 );
                 clear_task_milestones(root_task_id, None);
                 let _ = bus.send(
                     EventEnvelope::new(
-                        EventType::TaskFailed,
+                        match status {TaskStatus::Cancelled=>EventType::TaskCancelled,TaskStatus::Paused|TaskStatus::Interrupted|TaskStatus::WaitingUserInput=>EventType::TaskPaused,_=>EventType::TaskFailed},
                         Some(serde_json::json!({
                             "task_id": root_task_id.to_string(),
-                            "status": "failed",
+                            "status": status.as_str(),
+                            "outcome": outcome,
                             "subtasks": steps_count,
                             "model_used": Option::<String>::None
                         })),
@@ -3031,10 +3038,13 @@ Formatting rules (Markdown):
         emit_orchestration_state(
             &bus,
             root_task_id,
-            if root_status == TaskStatus::Completed {
-                OrchestrationState::Completed
-            } else {
-                OrchestrationState::Failed
+            match root_status {
+                TaskStatus::Completed => OrchestrationState::Completed,
+                TaskStatus::Paused => OrchestrationState::Paused,
+                TaskStatus::Cancelled => OrchestrationState::Cancelled,
+                TaskStatus::Interrupted => OrchestrationState::Interrupted,
+                TaskStatus::WaitingUserInput => OrchestrationState::WaitingUserInput,
+                _ => OrchestrationState::Failed,
             },
             Some(serde_json::json!({
                 "status": root_status.as_str(),
