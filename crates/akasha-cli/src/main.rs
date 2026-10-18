@@ -4229,12 +4229,83 @@ fn embedded_tools_policy_example_value(data_dir: &Path) -> anyhow::Result<serde_
 const DOCTOR_MEMORY_AT_REST_DESC: &str =
     "Memory: stored unencrypted in `memory.db` (encryption not available).";
 
-fn doctor_memory_at_rest_check() -> (String, bool, String) {
-    (
-        "memory_at_rest".to_string(),
-        true,
-        DOCTOR_MEMORY_AT_REST_DESC.to_string(),
-    )
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DoctorCheck {
+    id: String,
+    ok: bool,
+    description: String,
+    level: DoctorCheckLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorCheckLevel {
+    PassFail,
+    Info,
+}
+
+impl DoctorCheck {
+    fn pass_fail(id: impl Into<String>, ok: bool, description: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            ok,
+            description: description.into(),
+            level: DoctorCheckLevel::PassFail,
+        }
+    }
+
+    fn info(id: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            ok: true,
+            description: description.into(),
+            level: DoctorCheckLevel::Info,
+        }
+    }
+
+    fn status_label(&self) -> &'static str {
+        match self.level {
+            DoctorCheckLevel::Info => "INFO",
+            DoctorCheckLevel::PassFail => {
+                if self.ok {
+                    "OK"
+                } else {
+                    "MISSING"
+                }
+            }
+        }
+    }
+
+    /// Info-level checks are excluded from aggregate pass/fail (not failure, not warning).
+    fn affects_aggregate_ok(&self) -> bool {
+        self.level == DoctorCheckLevel::PassFail
+    }
+
+    fn to_json_value(&self) -> serde_json::Value {
+        match self.level {
+            DoctorCheckLevel::Info => serde_json::json!({
+                "id": self.id,
+                "level": "info",
+                "description": self.description,
+            }),
+            DoctorCheckLevel::PassFail => serde_json::json!({
+                "id": self.id,
+                "ok": self.ok,
+                "level": if self.ok { "pass" } else { "fail" },
+                "description": self.description,
+            }),
+        }
+    }
+}
+
+fn doctor_checks_all_ok(checks: &[DoctorCheck]) -> bool {
+    checks
+        .iter()
+        .filter(|c| c.affects_aggregate_ok())
+        .all(|c| c.ok)
+}
+
+fn doctor_memory_at_rest_check() -> DoctorCheck {
+    DoctorCheck::info("memory_at_rest", DOCTOR_MEMORY_AT_REST_DESC)
 }
 
 /// True when `AKASHA_MEMORY_ENCRYPT` is set in the process environment or in `akasha.env` (no effect on storage today).
@@ -4255,13 +4326,12 @@ fn akasha_memory_encrypt_var_is_set(data_dir: &Path) -> bool {
     false
 }
 
-fn doctor_memory_encrypt_env_warning(data_dir: &Path) -> Option<(String, bool, String)> {
+fn doctor_memory_encrypt_env_warning(data_dir: &Path) -> Option<DoctorCheck> {
     if akasha_memory_encrypt_var_is_set(data_dir) {
-        Some((
-            "memory_encrypt_env_ignored".to_string(),
+        Some(DoctorCheck::pass_fail(
+            "memory_encrypt_env_ignored",
             false,
-            "Warning: AKASHA_MEMORY_ENCRYPT is set but has no effect today; memory remains stored unencrypted in memory.db."
-                .to_string(),
+            "Warning: AKASHA_MEMORY_ENCRYPT is set but has no effect today; memory remains stored unencrypted in memory.db.",
         ))
     } else {
         None
@@ -4597,8 +4667,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
         }
     }
 
-    type CheckItem = (String, bool, String);
-    let mut checks: Vec<CheckItem> = Vec::new();
+    let mut checks: Vec<DoctorCheck> = Vec::new();
 
     let from_source_workspace = running_from_source_workspace();
 
@@ -4613,7 +4682,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
     } else {
         "Rust compiler (optional for prebuilt binaries)"
     };
-    checks.push(("rust".to_string(), rust_ok, rust_desc.to_string()));
+    checks.push(DoctorCheck::pass_fail("rust", rust_ok, rust_desc));
 
     // Check Node
     let node_installed = Command::new("node").arg("--version").output().is_ok();
@@ -4626,19 +4695,23 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
                 .to_string(),
         )
     };
-    checks.push(("node".to_string(), node_ok, node_desc));
+    checks.push(DoctorCheck::pass_fail("node", node_ok, node_desc));
 
     // Check daemon binary
     let daemon_ok = find_daemon_binary().is_some();
-    checks.push((
-        "daemon_binary".to_string(),
+    checks.push(DoctorCheck::pass_fail(
+        "daemon_binary",
         daemon_ok,
-        "akasha-daemon binary".to_string(),
+        "akasha-daemon binary",
     ));
 
     // Check spec directory
     let (spec_files_ok, spec_desc) = doctor_spec_check(spec_dir_override.as_deref(), &data_dir);
-    checks.push(("spec_files".to_string(), spec_files_ok, spec_desc));
+    checks.push(DoctorCheck::pass_fail(
+        "spec_files",
+        spec_files_ok,
+        spec_desc,
+    ));
 
     // Check daemon health (if running)
     let daemon_healthy = reqwest::blocking::Client::new()
@@ -4649,14 +4722,18 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
         .ok()
         .map(|body| body.contains("\"status\":\"ok\"") || body.contains("ok"))
         .unwrap_or(false);
-    checks.push((
-        "daemon_health".to_string(),
+    checks.push(DoctorCheck::pass_fail(
+        "daemon_health",
         daemon_healthy,
-        "Daemon health endpoint".to_string(),
+        "Daemon health endpoint",
     ));
 
     // Config file checks (existence + valid format)
-    checks.extend(run_config_checks(&data_dir));
+    checks.extend(
+        run_config_checks(&data_dir)
+            .into_iter()
+            .map(|(id, ok, desc)| DoctorCheck::pass_fail(id, ok, desc)),
+    );
 
     checks.push(doctor_memory_at_rest_check());
     if let Some(warn) = doctor_memory_encrypt_env_warning(&data_dir) {
@@ -4707,8 +4784,8 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
                             0.0
                         };
                         let fb_ok = !(total_req >= 10 && fb_rate > 0.25);
-                        checks.push((
-                            "triage_router_fallback".to_string(),
+                        checks.push(DoctorCheck::pass_fail(
+                            "triage_router_fallback",
                             fb_ok,
                             format!(
                                 "Router fallback ratio ≈ {:.2} ({} triggers / {} reqs; warn if >0.25 with ≥10 reqs)",
@@ -4716,8 +4793,8 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
                             ),
                         ));
                         let fail_ok = !(total_req >= 10 && fail_rate > 0.20);
-                        checks.push((
-                            "triage_llm_failures".to_string(),
+                        checks.push(DoctorCheck::pass_fail(
+                            "triage_llm_failures",
                             fail_ok,
                             format!(
                                 "LLM failure ratio ≈ {:.2} ({} failed / {} reqs; warn if >0.20 with ≥10 reqs)",
@@ -4742,8 +4819,8 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
                             .and_then(|x| x.as_u64())
                             .unwrap_or(0);
                         let queue_ok = pending < 80 && running < 40;
-                        checks.push((
-                            "triage_task_queue".to_string(),
+                        checks.push(DoctorCheck::pass_fail(
+                            "triage_task_queue",
                             queue_ok,
                             format!(
                                 "Task queue depth pending={} running={} (warn if pending≥80 or running≥40)",
@@ -4756,7 +4833,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
         }
     }
 
-    let all_ok = checks.iter().all(|(_, ok, _)| *ok);
+    let all_ok = doctor_checks_all_ok(&checks);
 
     let config_paths = serde_json::json!({
         "data_dir": data_dir.display().to_string(),
@@ -4768,9 +4845,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
 
     let health_payload = serde_json::json!({
         "ok": all_ok,
-        "checks": checks.iter().map(|(id, ok, desc)| {
-            serde_json::json!({ "id": id, "ok": ok, "description": desc })
-        }).collect::<Vec<_>>(),
+        "checks": checks.iter().map(DoctorCheck::to_json_value).collect::<Vec<_>>(),
         "config_paths": config_paths
     });
 
@@ -4821,9 +4896,8 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
     } else {
         println!("Akasha Doctor - System Diagnostics");
         println!("==================================");
-        for (_, ok, desc) in &checks {
-            let status = if *ok { "OK" } else { "MISSING" };
-            println!("  [{}] {}", status, desc);
+        for check in &checks {
+            println!("  [{}] {}", check.status_label(), check.description);
         }
         if !daemon_checks.is_empty() {
             println!();
@@ -5088,10 +5162,26 @@ mod tests {
 
     #[test]
     fn doctor_memory_at_rest_check_describes_plaintext_storage() {
-        let (id, ok, desc) = doctor_memory_at_rest_check();
-        assert_eq!(id, "memory_at_rest");
-        assert!(ok);
-        assert_eq!(desc, DOCTOR_MEMORY_AT_REST_DESC);
+        let check = doctor_memory_at_rest_check();
+        assert_eq!(check.id, "memory_at_rest");
+        assert_eq!(check.level, DoctorCheckLevel::Info);
+        assert_eq!(check.status_label(), "INFO");
+        assert_eq!(check.description, DOCTOR_MEMORY_AT_REST_DESC);
+        assert!(!check.affects_aggregate_ok());
+    }
+
+    #[test]
+    fn doctor_info_checks_do_not_affect_aggregate_ok() {
+        let checks = vec![
+            DoctorCheck::pass_fail("rust", true, "ok"),
+            doctor_memory_at_rest_check(),
+        ];
+        assert!(doctor_checks_all_ok(&checks));
+        let checks_fail = vec![
+            DoctorCheck::pass_fail("rust", false, "missing"),
+            doctor_memory_at_rest_check(),
+        ];
+        assert!(!doctor_checks_all_ok(&checks_fail));
     }
 
     #[test]
@@ -5120,10 +5210,11 @@ mod tests {
         )
         .unwrap();
         let warn = doctor_memory_encrypt_env_warning(&data_dir).expect("warning");
-        assert_eq!(warn.0, "memory_encrypt_env_ignored");
-        assert!(!warn.1);
-        assert!(warn.2.contains("AKASHA_MEMORY_ENCRYPT"));
-        assert!(warn.2.contains("no effect"));
+        assert_eq!(warn.id, "memory_encrypt_env_ignored");
+        assert!(!warn.ok);
+        assert_eq!(warn.level, DoctorCheckLevel::PassFail);
+        assert!(warn.description.contains("AKASHA_MEMORY_ENCRYPT"));
+        assert!(warn.description.contains("no effect"));
         std::fs::remove_dir_all(data_dir).unwrap();
     }
 }
