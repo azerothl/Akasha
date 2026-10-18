@@ -2236,7 +2236,11 @@ pub(crate) async fn run_message_via_llm(
                             } else if actual_tool == "read_file" {
                                 let (parts, _, _) = parse_read_file_args(tool_args);
                                 vec![parts.join(" ")]
-                            } else if matches!(actual_tool.as_str(), "rename_path" | "move_tree" | "file_diff" | "diff_unified" | "dir_compare") {
+                            } else if matches!(actual_tool.as_str(), "rename_path" | "move_tree") {
+                                let mut paths: Vec<String> = tool_args.first().cloned().into_iter().collect();
+                                if tool_args.len() > 1 { paths.push(tool_args[1..].join(" ")); }
+                                paths
+                            } else if matches!(actual_tool.as_str(), "file_diff" | "diff_unified" | "dir_compare") {
                                 tool_args.iter().take(2).cloned().collect()
                             } else if matches!(actual_tool.as_str(), "search_files" | "grep_content" | "edit_file" | "apply_patch" | "search_replace" | "delete_file") {
                                 tool_args.first().cloned().into_iter().collect()
