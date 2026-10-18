@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { E2E_WEB } from "./e2eDaemon";
 
 export type NoteMeta = {
   id: string;
@@ -14,6 +15,7 @@ export type NoteDocument = NoteMeta & {
 const DEFAULT_PORT = 3876;
 
 function daemonBase(port?: number) {
+  if (E2E_WEB) return "/__e2e_daemon";
   return `http://127.0.0.1:${port ?? DEFAULT_PORT}`;
 }
 
