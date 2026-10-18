@@ -1,5 +1,7 @@
 # Contrats Studio v1 — #157
 
+> Mise à jour après validation : voir [les parcours réels du 18 octobre](../quality/STUDIO_AGENTIC_VALIDATION_2026_10_18.md). Les mentions « aucun test » ci-dessous décrivent le lot initial, avant cette validation.
+
 La requête LLM porte un champ optionnel `tools`. OpenAI, OpenRouter et Azure Chat Completions le transmettent ; les autres transports conservent l’adaptateur textuel. Une fonction native `studio_call` accepte une enveloppe versionnée. L’accumulation SSE attend les arguments complets, borne leur taille et préserve UTF-8. Un appel incomplet ou invalide n’est pas converti en commande. Aucun provider réel appelé pour cette livraison.
 
 ```text

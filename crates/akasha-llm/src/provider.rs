@@ -101,6 +101,34 @@ fn normalize_native_completion(json:&serde_json::Value,text:String)->Result<Stri
     calls.finish(text,choice["finish_reason"].as_str())
 }
 
+#[cfg(test)]
+mod studio_native_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn delta(name: &str, arguments: &str) -> serde_json::Value {
+        json!({"tool_calls":[{"index":0,"function":{"name":name,"arguments":arguments}}]})
+    }
+
+    #[test]
+    fn fragments_are_assembled_before_exposing_unicode_arguments() {
+        let mut calls = NativeCalls::default();
+        calls.apply(&delta("studio_call", "{\"content\":\"é")).unwrap();
+        calls.apply(&delta("", "🙂\"}")).unwrap();
+        let result = calls.finish(String::new(), Some("tool_calls")).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(result.strip_prefix("TOOL_JSON: ").unwrap()).unwrap()["content"], "é🙂");
+    }
+
+    #[test]
+    fn truncated_or_unknown_native_calls_never_become_tool_lines() {
+        for (name, arguments, finish) in [("studio_call", "{}", "length"), ("studio_call", "{", "tool_calls"), ("unknown", "{}", "tool_calls"), ("studio_call", "[]", "tool_calls")] {
+            let mut calls = NativeCalls::default();
+            calls.apply(&delta(name, arguments)).unwrap();
+            assert!(calls.finish("do not execute partial prose".into(), Some(finish)).is_err());
+        }
+    }
+}
+
 fn ollama_think_enabled(level: Option<&str>) -> Option<bool> {
     // Ollama currently exposes a boolean `think` switch (not a graded budget).
     // We map levels conservatively to reduce runaway reasoning-only outputs:

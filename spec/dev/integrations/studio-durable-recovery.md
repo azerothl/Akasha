@@ -1,5 +1,7 @@
 # Reprise durable Studio — #158
 
+> Mise à jour après validation : voir [les parcours réels du 18 octobre](../quality/STUDIO_AGENTIC_VALIDATION_2026_10_18.md). Les mentions « aucun test » ci-dessous décrivent le lot initial, avant cette validation.
+
 Cette tranche prolonge le journal d’opérations de #157. Les checkpoints SQLite version 1 conservent tâche/projet/workspace/rôle, session, routage, incognito, tour, contexte de boucle, résultats de vérification et attente humaine. Le prompt est borné à 2 Mio ; un échec de sauvegarde arrête la progression avant le modèle suivant. Sauvegarde avant modèle, après outils et avant une attente humaine. Les arguments sensibles ne sont pas copiés dans le journal d’opérations (digest uniquement) ; le contexte privé de la tâche peut contenir des fichiers ou sorties déjà lus.
 
 Au démarrage, les exécutions et attentes humaines qui ont perdu leur processus passent à `interrupted`. Les reprises Studio exigent un checkpoint. Le bouton/API de reprise conserve la session et le budget de tours ; la boucle recharge les politiques, règles et skills courants. Le workspace enregistré doit correspondre au projet ou au worktree persistant validé. Si le worktree a disparu, la reprise échoue : aucun repli sur le dossier principal. Les états arrêtés ne sont pas remplacés par `running` lors d’une course avec l’annulation. Une exécution encore active doit finir de s’arrêter avant d’être reprise.

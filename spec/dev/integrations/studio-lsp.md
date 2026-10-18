@@ -1,5 +1,7 @@
 # Navigation sémantique — #159
 
+> Mise à jour après validation : voir [les parcours réels du 18 octobre](../quality/STUDIO_AGENTIC_VALIDATION_2026_10_18.md). Les mentions « aucun test » ci-dessous décrivent le lot initial, avant cette validation.
+
 Première tranche LSP stdio : TypeScript/JavaScript (`typescript-language-server --stdio`), Rust (`rust-analyzer`) et Python (`pyright-langserver --stdio`). Les exécutables doivent être préinstallés sur le PATH et autorisés par `allowed_commands` et les outils du profil. Rien n’est téléchargé. Le manifeste distingue ce prérequis d’un démarrage réussi ; `launch_checked:false` dans le statut est explicite. Les capacités sont négociées à l’initialisation et contrôlées à chaque opération.
 
 ## Contrats

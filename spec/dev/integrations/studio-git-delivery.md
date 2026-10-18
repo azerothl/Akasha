@@ -1,5 +1,7 @@
 # Livraison Git / GitHub / CI — #160
 
+> Mise à jour après validation : voir [les parcours réels du 18 octobre](../quality/STUDIO_AGENTIC_VALIDATION_2026_10_18.md). Les mentions « aucun test » ci-dessous décrivent le lot initial, avant cette validation.
+
 Première tranche Git et GitHub.com via Git et `gh` préinstallés, autorisés et authentifiés. Les API GitHub Enterprise/GitLab ne sont pas prises en charge. Le profil doit autoriser explicitement les nouveaux outils lorsqu’il utilise une liste restrictive.
 
 ## Outils et API
