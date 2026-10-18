@@ -789,6 +789,10 @@ pub(crate) fn normalize_response_tool_prefixes(response: &str) -> String {
 
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 pub(crate) fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
+    // JSON envelopes are parsed independently; never fall back to a lossy legacy interpretation.
+    if response.lines().any(|line|line.trim_start().starts_with("TOOL_JSON:")) {
+        return response.lines().filter_map(|line|line.trim_start().strip_prefix("TOOL_JSON:").map(|json|("studio_call".into(),vec![json.trim().into()]))).collect();
+    }
     let stripped = strip_redacted_reasoning_blocks(response);
     let dsml_norm = normalize_dsml_tool_calls(&stripped);
     let longcat_norm = normalize_longcat_tool_calls(&dsml_norm);
@@ -825,6 +829,9 @@ pub(crate) fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String
                     }
                 }
             }
+            let mut quoted=false;let mut escaped=false;
+            for character in rest.chars(){if escaped{escaped=false;continue;}if character=='\\'{escaped=true;}else if character=='"'{quoted=!quoted;}}
+            if quoted {out.push(("studio_call".into(),vec!["invalid incomplete legacy quotes".into()]));i+=1;continue;}
             // Split by whitespace, respecting double-quoted args (so run_command -H "Bearer $VAR" works)
             let parts: Vec<String> = split_whitespace_respecting_quotes(rest);
             if let Some((name, fixed_args)) = parts.split_first() {

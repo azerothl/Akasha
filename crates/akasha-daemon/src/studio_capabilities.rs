@@ -161,7 +161,7 @@ pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<Stud
     Some(StudioTool {
         name: name.into(),
         description: description.into(),
-        input_schema: serde_json::json!({"type":"array", "items":{"type":"string"}, "description":"Legacy TOOL argv; tool-specific path/content/JSON contract is described in description"}),
+        input_schema: crate::studio_tool_contract::argument_schema(name),
         announced: allowed && runnable,
         allowed,
         runnable,
@@ -195,7 +195,7 @@ pub(crate) fn announced_names(policy: &ToolsPolicy, agent: &str) -> Vec<String> 
 }
 
 pub(crate) fn prompt(policy: &ToolsPolicy, agent: &str) -> String {
-    catalogue(policy, agent)
+    let list=catalogue(policy, agent)
         .into_iter()
         .filter(|tool| tool.announced)
         .map(|tool| {
@@ -209,7 +209,8 @@ pub(crate) fn prompt(policy: &ToolsPolicy, agent: &str) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join(" ; ")
+        .join(" ; ");
+    format!("{list}\nStudio tool contract v1: prefer native studio_call or a single TOOL_JSON: {{\"schema_version\":1,\"operation_id\":\"UUID\",\"tool\":\"read_file\",\"arguments\":{{\"path\":\"workspace:/src/main.ts\"}}}} line. Files: path/content/expected_version (SHA-256 from read_file; missing for creation); edit_file also start_line/end_line. Commands: program,args,cwd. MCP: its native argument object. Other tools: argv array. Legacy TOOL remains supported, but existing files must be read before mutation; stale reads are refused. Reuse an operation_id only for the identical completed operation; never replay an unknown result.")
 }
 
 pub(crate) fn check(policy: &ToolsPolicy, agent: &str, name: &str) -> Result<(), String> {

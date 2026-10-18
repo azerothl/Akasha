@@ -390,6 +390,7 @@ User message:\n{}",
             message_capped
         );
         let req = CompletionRequest {
+            tools: None,
             prompt,
             max_tokens: Some(128),
             temperature: Some(0.0),

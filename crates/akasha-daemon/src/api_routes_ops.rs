@@ -123,6 +123,7 @@ if method == "POST" && path == "/api/chat/suggest-thread-title" {
         message
     );
     let req = CompletionRequest {
+        tools: None,
         prompt,
         max_tokens: Some(80),
         temperature: Some(0.3),
@@ -855,6 +856,7 @@ if method == "POST" && path == "/api/complete" {
         .unwrap_or("")
         .to_string();
     let req = akasha_llm::CompletionRequest {
+        tools: None,
         prompt,
         max_tokens: body
             .get("max_tokens")
@@ -959,6 +961,7 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
         summary
     );
     let req = akasha_llm::CompletionRequest {
+        tools: None,
         prompt,
         max_tokens: Some(512),
         temperature: Some(0.3),

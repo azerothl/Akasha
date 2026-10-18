@@ -641,7 +641,7 @@ pub(crate) async fn execute_tool_call_impl(
                 let key = normalize_apostrophes(&key);
                 let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
                 let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_id);
-                if let Some(ws) = workspace_store {
+                if let Some(ws) = workspace_store.filter(|_| !is_studio_workspace) {
                     let guard = ws.read().await;
                     // Prefer lineage root (where write_file stores); fall back to this task id.
                     let mem_map = guard
@@ -660,7 +660,7 @@ pub(crate) async fn execute_tool_call_impl(
                             }
                         }
                     }
-                } else {
+                } else if workspace_store.is_none() {
                     return (false, "[read_file] workspace paths require a workspace store.".to_string(), None);
                 }
                 let disk_path = strip_verbatim_prefix(
@@ -708,7 +708,8 @@ pub(crate) async fn execute_tool_call_impl(
                     }
                 };
             } else {
-                let p = Path::new(&path_str);
+                let resolved=resolve_tool_disk_path(&path_str,workspace_root);
+                let p = resolved.as_path();
                 if path_extension_is_pdf(p) && executor.policy.can_read(p) {
                     pdf_extract_message_from_disk(p, "read_file").await
                 } else {
@@ -819,6 +820,7 @@ pub(crate) async fn execute_tool_call_impl(
                             stderr.as_ref(),
                         )
                     };
+                    let msg=if is_studio_workspace {serde_json::json!({"output":msg,"exit_code":out.status.code()}).to_string()}else{msg};
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[run_command] failed: {}", e), None),
@@ -861,6 +863,7 @@ pub(crate) async fn execute_tool_call_impl(
                             stderr.as_ref(),
                         )
                     };
+                    let msg=if is_studio_workspace {serde_json::json!({"output":msg,"exit_code":out.status.code()}).to_string()}else{msg};
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[run_terminal] failed: {}", e), None),

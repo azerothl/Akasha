@@ -3517,6 +3517,7 @@ pub(crate) async fn compact_short_term_if_needed(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(2048);
     let req = CompletionRequest {
+        tools: None,
         prompt: summary_prompt,
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
@@ -3622,6 +3623,7 @@ Factual response in English.\n\n{}",
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(1024);
     let req = CompletionRequest {
+        tools: None,
         prompt: summary_prompt,
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
@@ -4450,6 +4452,7 @@ Output JSON only.",
         assistant_excerpt.chars().take(1_800).collect::<String>()
     );
     let req = CompletionRequest {
+        tools: None,
         prompt: user,
         max_tokens: Some(500),
         temperature: Some(0.05),
@@ -4560,6 +4563,7 @@ Use a short structure: context (1–2 sentences), root cause, files/lines from t
         ),
     };
     let req = CompletionRequest {
+        tools: None,
         prompt: user,
         max_tokens: Some(800),
         temperature: Some(0.15),
@@ -4885,6 +4889,7 @@ LAST_FAILED_FILES: {}\n",
             )
         };
         let req = CompletionRequest {
+            tools: None,
             prompt: user_block,
             max_tokens: Some(8192),
             temperature: Some(0.15),
@@ -5173,6 +5178,7 @@ The compiler output already signals what is wrong: apply a minimal fix with `TOO
             }
             if !focused_reads.is_empty() {
                 let fallback_req = CompletionRequest {
+                    tools: None,
                     prompt: format!(
                         "Build output:\n{}\n\nFocused file reads:\n{}\n\nReturn ONLY TOOL lines to fix the TS syntax/build errors now. \
 Use only: search_replace, edit_file, write_file, apply_patch, file_diff, delete_file, rename_path, move_tree. \

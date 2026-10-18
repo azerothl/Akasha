@@ -1617,6 +1617,9 @@ pub(crate) async fn run_message_via_llm(
                     );
                 }
             }
+            let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
+                tools_executor_snapshot.as_ref().map(|exec|vec![crate::studio_tool_contract::native_definition(crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect())])
+            }else{None};
             let request = CompletionRequest {
                 prompt: format!("{}{}", current_prompt, tool_instruction),
                 max_tokens: Some(completion_max_tokens),
@@ -1632,6 +1635,7 @@ pub(crate) async fn run_message_via_llm(
                 num_ctx: None,
                 num_gpu: None,
                 thinking_level: completion_thinking_level.clone(),
+                tools: native_tools,
             };
             // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
             // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -2172,6 +2176,15 @@ pub(crate) async fn run_message_via_llm(
                     .with_correlation(task_id),
                 );
                     for (name, args) in &lane_calls {
+                        let typed_call=if name=="studio_call" {
+                            match crate::studio_tool_contract::decode(&args.join(" ")) {
+                                Ok(call)=>Some(call),Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(serde_json::json!({"schema_version":1,"success":false,"error":error}).to_string());continue;}
+                            }
+                        }else{None};
+                        let native_envelope_args=args;
+                        let name=typed_call.as_ref().map(|call|&call.envelope.tool).unwrap_or(name);
+                        let args=typed_call.as_ref().map(|call|&call.argv).unwrap_or(args);
+
                         // Hot-reloaded permissions must constrain the next invocation of an active task.
                         let current_executor = if let Some(registry) = tools_executor.as_ref() {
                             registry.read().await.clone()
@@ -3102,8 +3115,8 @@ pub(crate) async fn run_message_via_llm(
                             } else {
                                 execute_tool_call(
                                     exec,
-                                    &actual_tool,
-                                    tool_args,
+                                    if typed_call.is_some(){"studio_call"}else{&actual_tool},
+                                    if typed_call.is_some(){native_envelope_args.as_slice()}else{tool_args},
                                     process_registry.as_ref(),
                                     long_term_client.as_ref(),
                                     task_id,
@@ -3121,7 +3134,7 @@ pub(crate) async fn run_message_via_llm(
                             };
                         if success { run_outcome.successful_tool_calls += 1; } else { run_outcome.failed_tool_calls += 1; }
                         if matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container") {
-                            run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::Value::Null, "source":"tool_executor"}));
+                            run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }
                         if let Some(img) = captured_image {
                             last_captured_image_base64 = Some(img.clone());
@@ -4114,6 +4127,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(2048);
                 let req = CompletionRequest {
+                    tools: None,
                     prompt: extract_prompt,
                     max_tokens: Some(extract_max_tokens),
                     temperature: Some(0.1),

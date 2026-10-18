@@ -42,7 +42,9 @@ pub async fn read_openai_compatible_sse_stream(
         return Err(ProviderError::Api(format!("{} {}", status, err_body)));
     }
 
+    let mut native_calls=crate::provider::NativeCalls::default();
     let mut pending = String::new();
+    let mut utf8_pending=Vec::new();
     let mut full_text = String::new();
     let mut reasoning_text = String::new();
     let mut last_usage: Option<TokenUsage> = None;
@@ -58,7 +60,11 @@ pub async fn read_openai_compatible_sse_stream(
             }
         })?;
         let Some(chunk) = chunk else { break };
-        pending.push_str(&String::from_utf8_lossy(&chunk));
+        utf8_pending.extend_from_slice(&chunk);
+        let valid=match std::str::from_utf8(&utf8_pending){Ok(text)=>text.len(),Err(error) if error.error_len().is_none()=>error.valid_up_to(),Err(_)=>return Err(ProviderError::Api("invalid stream UTF-8".into()))};
+        pending.push_str(std::str::from_utf8(&utf8_pending[..valid]).map_err(|_|ProviderError::Api("invalid UTF-8".into()))?);
+        utf8_pending.drain(..valid);
+        if pending.len()>2*1024*1024{return Err(ProviderError::Api("SSE event exceeds 2 MiB".into()));}
         while let Some(pos) = pending.find('\n') {
             let end = pos + 1;
             let line = pending[..pos].trim_end_matches('\r').trim().to_string();
@@ -107,12 +113,15 @@ pub async fn read_openai_compatible_sse_stream(
                     }
                 }
                 if let Some(delta) = c.get("delta") {
+                    native_calls.apply(delta)?;
+                    if delta.get("tool_calls").is_some(){let _=chunk_tx.send(String::new());}
                     apply_openai_delta(delta, &mut full_text, &mut reasoning_text, chunk_tx);
                 }
             }
         }
     }
 
+    if !utf8_pending.is_empty(){return Err(ProviderError::Api("incomplete stream UTF-8".into()));}
     if !pending.trim().is_empty() {
         let line = pending.trim();
         if line.starts_with("data:") {
@@ -125,7 +134,9 @@ pub async fn read_openai_compatible_sse_stream(
                         .and_then(|a| a.first())
                     {
                         if let Some(delta) = choice0.get("delta") {
-                            apply_openai_delta(delta, &mut full_text, &mut reasoning_text, chunk_tx);
+                            native_calls.apply(delta)?;
+                    if delta.get("tool_calls").is_some(){let _=chunk_tx.send(String::new());}
+                    apply_openai_delta(delta, &mut full_text, &mut reasoning_text, chunk_tx);
                         }
                     }
                 }
@@ -134,7 +145,7 @@ pub async fn read_openai_compatible_sse_stream(
     }
 
     Ok(CompletionResponse {
-        text: full_text,
+        text: native_calls.finish(full_text,finish_reason.as_deref())?,
         usage: last_usage,
         model_used: model_used.unwrap_or_else(|| model_fallback.to_string()),
         cost_usd: None,

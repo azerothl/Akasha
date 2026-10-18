@@ -785,6 +785,7 @@ mod tests {
             },
         );
         let request = CompletionRequest {
+            tools: None,
             prompt: "Hello".into(),
             max_tokens: Some(10),
             temperature: Some(0.0),
