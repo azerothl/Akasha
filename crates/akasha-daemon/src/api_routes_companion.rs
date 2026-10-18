@@ -187,7 +187,7 @@ fn notify_headline_from_title(title: &str) -> String {
         return t.to_string();
     }
     t.chars()
-        .take(NOTIFY_HEADLINE_MAX_CHARS)
+        .take(NOTIFY_HEADLINE_MAX_CHARS - 1)
         .chain("…".chars())
         .collect()
 }
@@ -252,25 +252,15 @@ fn build_snapshot(
         .unwrap_or_else(|| (String::new(), String::new()));
     let active = count_active_tasks(store_path);
     let notify = companion_notify_summary(store_path);
-    let unread = notify
-        .get("unread")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+    let unread = notify.get("unread").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let avatar_hint = if unread > 0 { "notify" } else { "idle" };
 
     let policy = load_presence_policy(data_dir);
     let quiet = in_quiet_hours(&policy.quiet_hours);
     let vad_enabled = policy.enabled && !quiet && stt;
     let devices = load_devices(data_dir);
-    let last_event_ts = devices
-        .last_presence_event
-        .as_ref()
-        .map(|e| e.ts.clone());
-    let presence_mode = if vad_enabled {
-        "hands_free"
-    } else {
-        "ptt"
-    };
+    let last_event_ts = devices.last_presence_event.as_ref().map(|e| e.ts.clone());
+    let presence_mode = if vad_enabled { "hands_free" } else { "ptt" };
 
     serde_json::json!({
         "schema_version": 1,
@@ -593,8 +583,13 @@ mod tests {
     fn notify_headline_truncates_long_title() {
         let long = "x".repeat(200);
         let h = notify_headline_from_title(&long);
-        assert!(h.chars().count() <= NOTIFY_HEADLINE_MAX_CHARS + 1);
+        assert!(h.chars().count() <= NOTIFY_HEADLINE_MAX_CHARS);
         assert!(h.ends_with('…'));
+
+        let emoji_long = "🎉".repeat(200);
+        let h_emoji = notify_headline_from_title(&emoji_long);
+        assert!(h_emoji.chars().count() <= NOTIFY_HEADLINE_MAX_CHARS);
+        assert!(h_emoji.ends_with('…'));
     }
 
     #[test]
