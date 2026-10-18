@@ -8,7 +8,10 @@ pub fn extract_text_from_mem(bytes: &[u8]) -> Result<String, String> {
     match catch_unwind(AssertUnwindSafe(|| pdf_extract::extract_text_from_mem(&bytes))) {
         Ok(Ok(text)) => Ok(text),
         Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err("PDF extraction panicked (malformed or hostile PDF)".to_string()),
+        Err(_) => {
+            tracing::warn!("panic caught during PDF extraction");
+            Err("Couldn't read this PDF (the file may be damaged or unsupported).".to_string())
+        }
     }
 }
 
