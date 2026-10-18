@@ -93,6 +93,23 @@ contenus. Les 45 paires mesurées ne constituent pas une certification globale.
 Les tickets doivent rester ouverts tant que leurs critères de validation
 restants ne sont pas satisfaits. Relier la PR et ses résultats CI à chacun.
 
+## Suivi CI de la PR #189 — 18 octobre 2026
+
+La première exécution GitHub Actions (39148820641) réussit les contrôles Rust
+et le build llama.cpp Linux. Le parcours UI compte 14 réussites et un échec :
+le test Calendrier cherche un onglet désormais masqué dans « Plus d’outils »
+en mode Simple.
+
+Le test ouvre maintenant ce menu, vérifie la visibilité puis la sélection
+du Calendrier et contrôle les packs Life layer. Ce parcours est couvert en
+français et en anglais, sans augmenter les délais ni ignorer de test.
+
+Après correction : build UI e2e réussi et 16 tests Playwright réussis localement.
+Cette exécution utilise le daemon publié 0.11.0 avec des données isolées et une
+configuration temporaire remplaçant uniquement son démarrage et son arrêt.
+La CI GitHub doit encore confirmer le résultat avec le daemon compilé de la PR.
+Les limites de validation native et matérielle décrites plus haut subsistent.
+
 ## Captures
 
 - [Recherche à 800 × 600](screenshots/ui-audit-2026-10-18/research-800.png)
