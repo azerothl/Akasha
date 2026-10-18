@@ -55,6 +55,12 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use uuid::Uuid;
 
+fn studio_tool_followup(request: &str, results: &str) -> String {
+    // The previous model reply is an executable proposal, not another request.
+    // Repeating it here primes text-tool models to emit the same operation again.
+    format!("[CURRENT Studio task]\n{request}\n\n[Recorded execution results, do not repeat successful operations]\n{results}\n\nContinue only unmet requirements. If the requested effects have succeeded, finish with a brief plain-text summary. A successful file write does not prove other checks passed. Do not emit the same write again. Failed or deferred operations are not completed; address their actual errors before claiming success.")
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 /// preferred_task_type_override: when set (e.g. system selector task_type), overrides routing/reminders vs. assigned_agent alone.
@@ -1618,7 +1624,11 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
             let request = CompletionRequest {
-                prompt: format!("{}{}", current_prompt, tool_instruction),
+                prompt: if code_studio_disk_task && round > 0 {
+                    format!("{}\n\n{}", tool_instruction, current_prompt)
+                } else {
+                    format!("{}{}", current_prompt, tool_instruction)
+                },
                 max_tokens: Some(completion_max_tokens),
                 temperature: Some(completion_temperature),
                 preferred_task_type,
@@ -3336,7 +3346,9 @@ pub(crate) async fn run_message_via_llm(
                     .filter(|(t, _)| t == "web_search")
                     .count();
                 // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
-                current_prompt = if round_had_ask_user {
+                current_prompt = if code_studio_disk_task && !round_had_ask_user {
+                    studio_tool_followup(&user_message, &results_blob)
+                } else if round_had_ask_user {
                     format!(
                     "User request (PRIMARY — you must still fulfill this): {}\n\nYour previous assistant reply:\n{}\n\nask_user step result (user's choice; may be unrelated to the primary request):\n{}\n\nContinue the task. If the PRIMARY request is not satisfied yet, you MUST emit TOOL: lines next (web_search, web_fetch, browser navigate + browser snapshot, etc.). Do not reply \"blocked\" or \"no information\" without trying web_search first. When the primary request is fully answered, reply in plain text only (no TOOL: lines).",
                     user_message, response, results_blob
@@ -4571,5 +4583,18 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             )
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod studio_followup_tests {
+    #[test]
+    fn execution_results_do_not_replay_the_model_proposal_or_force_completion() {
+        let prompt = super::studio_tool_followup("implement then verify", "write_file: saved; verification: failed");
+        assert!(prompt.contains("implement then verify"));
+        assert!(prompt.contains("verification: failed"));
+        assert!(prompt.contains("Failed or deferred operations are not completed"));
+        assert!(!prompt.contains("Your previous reply"));
+        assert!(!prompt.contains("No TOOL: lines"));
     }
 }
