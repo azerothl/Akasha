@@ -38,3 +38,9 @@ LSP exige des serveurs préinstallés et autorisés (TypeScript 5.6.3 utilisé d
 Correctifs supplémentaires : rollback conditionnel du résultat lors d'une reprise en file d'attente, garde d'activité jusqu'à la fin de l'agrégation, résultat structuré en timeout, absence de croissance récursive du contexte de reprise, diagnostic de démarrage impossible, filtrage des appels JSON dans le raisonnement, contrats mixtes legacy/JSON, erreurs LSP applicatives sans tuer le serveur, synchronisation incrémentale et diagnostics en attente dans l'enveloppe normale. Les règles/skills du manifeste utilisent le worktree persisté de la tâche ; les profils explicites restent stricts, y compris Kanban.
 
 La recette avec **Devstral via l'API OpenAI compatible d'Ollama** réussit sur le binaire corrigé (une écriture, contenu exact et diff vérifiés). Qwen a réussi un premier essai puis bouclé lors d'une répétition ; Qwen et LFM2 via le transport texte Ollama ne sont pas considérés fiables. #179 reste ouvert pour ces compatibilités et aucun échec modèle n'est effacé du rapport.
+
+### Répétitions et limites récentes
+
+La répétition de la recette Devstral a également terminé en `tool_loop` après écriture correcte. Les succès initiaux Qwen/Devstral ne suffisent donc pas à déclarer une configuration fiable. Les trois modèles restent suivis dans #179, avec leurs échecs publiés. Les parcours techniques passent séparément avec une fixture du protocole modèle ; ils ne démontrent pas la fiabilité d'un vrai modèle.
+
+Le dernier lot corrige aussi les lectures natives par fenêtres, le cadrage SSE sans saut de ligne, les noms natifs répétés, le budget durable avant les attentes humaines, l'identité déterministe des worktrees, la sérialisation des écritures de contexte, l'index Git sous index.lock et la vérification du SHA effectivement renvoyé par GitHub. Le brouillon de publication Code Studio #37 a été vérifié puis fermé sans fusion et sa branche supprimée.

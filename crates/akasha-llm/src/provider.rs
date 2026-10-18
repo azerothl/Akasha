@@ -124,6 +124,15 @@ mod studio_native_tests {
     }
 
     #[test]
+    fn repeated_native_function_name_is_not_concatenated() {
+        let mut calls=NativeCalls::default();
+        calls.apply(&delta("studio_","{")).unwrap();
+        calls.apply(&delta("call","\"content\":")).unwrap();
+        calls.apply(&delta("studio_call","\"ok\"}")).unwrap();
+        assert!(calls.finish(String::new(),Some("tool_calls")).unwrap().contains("ok"));
+    }
+
+    #[test]
     fn truncated_or_unknown_native_calls_never_become_tool_lines() {
         for (name, arguments, finish) in [("studio_call", "{}", "length"), ("studio_call", "{", "tool_calls"), ("unknown", "{}", "tool_calls"), ("studio_call", "[]", "tool_calls")] {
             let mut calls = NativeCalls::default();

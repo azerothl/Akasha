@@ -72,6 +72,15 @@ fn queued_resume_clears_and_conditionally_restores_outcome() {
 }
 
 #[test]
+fn an_earlier_failure_outcome_wins_over_another_failed_finalization() {
+    use akasha_store::{Task,TaskStatus,TaskStore};
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let id=Uuid::new_v4();running_task(&db,id);let store=TaskStore::open(&db).unwrap();
+    let (_,first)=store.finalize_outcome(id,TaskStatus::Failed,json!({"termination_reason":"watchdog","reason":"original timeout","result":"failed","acceptance_verified":false})).unwrap();
+    let (_,second)=store.finalize_outcome(id,TaskStatus::Failed,json!({"termination_reason":"provider_error","reason":"late provider failure","result":"failed"})).unwrap();
+    assert_eq!(first,second);
+}
+
+#[test]
 fn push_prerequisite_includes_github_cli_permission() {
     let dir=tempfile::tempdir().unwrap();let mut p=policy(dir.path());
     p.allowed_commands=vec!["git".into()];
@@ -250,11 +259,12 @@ fn checkpoint_round_session_wait_and_size_are_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("test.db");
     let task = Uuid::new_v4();
-    let mut cp = crate::studio_recovery::Checkpoint {schema_version:1,task_id:task,project_id:Uuid::new_v4().to_string(),workspace:dir.path().into(),agent:"studio_fullstack".into(),session_id:"same-session".into(),preferred_task_type:None,incognito:true,round:7,prompt:"private context".into(),phase:"before_model".into(),waiting:None,outcome:Default::default()};
+    let mut cp = crate::studio_recovery::Checkpoint {schema_version:1,task_id:task,project_id:Uuid::new_v4().to_string(),workspace:dir.path().into(),agent:"studio_fullstack".into(),session_id:"same-session".into(),preferred_task_type:None,incognito:true,round:7,max_tool_rounds:Some(10),prompt:"private context".into(),phase:"before_model".into(),waiting:None,outcome:Default::default()};
     crate::studio_recovery::save(&db, &cp).unwrap();
-    crate::studio_recovery::record_waiting(&db, task, "approval", json!({"tool":"git_push"})).unwrap();
+    crate::studio_recovery::record_waiting(&db, task, "approval", json!({"tool":"git_push"}),(&cp.prompt,8,20,&cp.outcome)).unwrap();
     let loaded = crate::studio_recovery::load(&db, task, false).unwrap().unwrap();
-    assert_eq!(loaded.round, 7);
+    assert_eq!(loaded.round, 8);
+    assert_eq!(loaded.max_tool_rounds,Some(20));
     assert_eq!(loaded.session_id, "same-session");
     assert_eq!(loaded.waiting.unwrap()["tool"], "git_push");
     cp.prompt = "x".repeat(2*1024*1024);

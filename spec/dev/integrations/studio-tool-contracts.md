@@ -21,3 +21,5 @@ Les mutations via shell, rename/move, connecteurs ou plugins gardent leurs garan
 `cargo check -p akasha-daemon --no-default-features --features embedded` sous Windows. Pas de nouveaux tests ni de suites locales exécutées. Recettes à réaliser avant clôture : native streaming/non-streaming et fallback, UTF-8 fractionné, JSON tronqué, conflit de fichier, création concurrente, ID dupliqué/différent, refus de rôle et annulation pendant attente.
 
 Référence officielle : <https://developers.openai.com/api/docs/guides/function-calling>.
+
+Les lectures typées/native acceptent path, full, ou offset_line + limit_lines (1..5000). Elles conservent la version du fichier complet et permettent de poursuivre une lecture tronquée. Les appels mixtes TOOL/TOOL_JSON restent dans l'ordre après retrait du raisonnement ; les notifications SSE finales sans saut de ligne gardent leur motif de terminaison.

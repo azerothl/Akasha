@@ -166,7 +166,7 @@ pub(crate) fn summary(db: &Path, task: Uuid) -> Result<Value, String> {
     let operations = crate::studio_tool_contract::recovery_summary(db, task)?;
     let children=akasha_store::TaskStore::open(db).map_err(|e|e.to_string())?.get_children(task).map_err(|e|e.to_string())?.into_iter().map(|child|json!({"task_id":child.id,"status":child.status.as_str(),"agent":child.assigned_agent})).collect::<Vec<_>>();
     Ok(
-        json!({"schema_version":1,"checkpoint":checkpoint.map(|c|json!({"schema_version":c.schema_version,"project_id":c.project_id,"workspace":c.workspace,"agent":c.agent,"session_id":c.session_id,"round":c.round,"phase":c.phase,"waiting":c.waiting})),"ledger":operations,"children":children,"execution_active":is_active(task)}),
+        json!({"schema_version":1,"checkpoint":checkpoint.map(|c|json!({"schema_version":c.schema_version,"project_id":c.project_id,"workspace":c.workspace,"agent":c.agent,"session_id":c.session_id,"round":c.round,"max_tool_rounds":c.max_tool_rounds,"phase":c.phase,"waiting":c.waiting})),"ledger":operations,"children":children,"execution_active":is_active(task)}),
     )
 }
 pub(crate) fn resolve(

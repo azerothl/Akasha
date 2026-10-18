@@ -384,6 +384,21 @@ pub async fn post_openai_chat_completions_stream(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn final_native_sse_frame_without_newline_keeps_finish_reason() {
+        use std::io::{BufRead,Write};
+        let server=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let address=server.local_addr().unwrap();
+        let worker=std::thread::spawn(move||{
+            let (stream,_)=server.accept().unwrap();let mut reader=std::io::BufReader::new(stream);
+            loop {let mut line=String::new();reader.read_line(&mut line).unwrap();if line=="\r\n"||line.is_empty(){break;}}
+            let body=r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"studio_call","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+            let mut stream=reader.into_inner();write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+        });
+        let response=reqwest::Client::new().get(format!("http://{address}")).send().await.unwrap();
+        let (tx,_rx)=std::sync::mpsc::channel();
+        let completed=super::read_openai_compatible_sse_stream(response,"fixture",&tx).await.unwrap();
+        assert_eq!(completed.done_reason.as_deref(),Some("tool_calls"));assert!(completed.text.starts_with("TOOL_JSON:"));worker.join().unwrap();
+    }
     use super::apply_openai_delta;
 
     #[test]

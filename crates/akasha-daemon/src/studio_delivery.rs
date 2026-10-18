@@ -11,6 +11,26 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 const OUTPUT_LIMIT: u64 = 4 * 1024 * 1024;
+struct OwnedIndexLock { path:Option<PathBuf>, file:Option<std::fs::File> }
+impl Drop for OwnedIndexLock {
+    fn drop(&mut self) {self.file.take();if let Some(path)=self.path.take(){let _=std::fs::remove_file(path);}}
+}
+async fn reconcile_selected_index(root:&Path,index_path:&Path,original:&str,branch_name:&str,commit:&str,selected:&HashSet<String>)->Result<(),String> {
+    let lock_path=PathBuf::from(format!("{}.lock",index_path.display()));
+    let file=std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path).map_err(|e|format!("index lock unavailable: {e}"))?;
+    let mut lock=OwnedIndexLock{path:Some(lock_path),file:Some(file)};
+    if file_hash(index_path)?!=original || branch(root).await?!=branch_name {return Err("Git index/checkout changed concurrently; reconcile selected paths manually".into());}
+    let tmp=tempfile::tempdir().map_err(|e|e.to_string())?;let index=tmp.path().join("index");
+    if index_path.is_file(){std::fs::copy(index_path,&index).map_err(|e|e.to_string())?;}else{git(root,args(&["read-tree","--empty"]),Some(&index)).await?.checked()?;}
+    let mut reset=args(&["reset","-q",commit,"--"]);reset.extend(selected.iter().cloned());
+    git(root,reset,Some(&index)).await?.checked()?;
+    if branch(root).await?!=branch_name {return Err("Git checkout changed during index reconciliation".into());}
+    let bytes=std::fs::read(index).map_err(|e|e.to_string())?;
+    let file=lock.file.as_mut().ok_or("index lock closed")?;file.write_all(&bytes).map_err(|e|e.to_string())?;file.sync_all().map_err(|e|e.to_string())?;
+    lock.file.take();let owned_path=lock.path.take().ok_or("index lock path missing")?;
+    if let Err(error)=std::fs::rename(&owned_path,index_path){let _=std::fs::remove_file(&owned_path);return Err(error.to_string());}
+    Ok(())
+}
 struct Output {
     code: Option<i32>,
     out: String,
@@ -581,23 +601,7 @@ pub(crate) async fn commit(
     if moved.code != Some(0) {
         return Err("Git ref changed concurrently; branch update refused".into());
     }
-    let mut warning = None;
-    if file_hash(&index_path).ok().as_ref() != Some(&original_index)
-        || self::branch(&root).await.ok().as_ref() != Some(&branch)
-    {
-        warning = Some(
-            "Git index/checkout changed concurrently; reconcile the selected paths manually"
-                .to_string(),
-        );
-    } else {
-        let mut reset = args(&["reset", "-q", "HEAD", "--"]);
-        reset.extend(request.paths.clone());
-        if let Err(error) = git(&root, reset, None).await.and_then(Output::checked) {
-            warning = Some(format!(
-                "Commit created; index reconciliation failed: {error}"
-            ));
-        }
-    }
+    let warning=reconcile_selected_index(&root,&index_path,&original_index,&branch,&commit,&seen).await.err().map(|error|format!("Commit created; index reconciliation needed: {error}"));
     Ok(
         json!({"schema_version":1,"success":warning.is_none(),"state":if warning.is_none(){"committed"}else{"committed_index_reconciliation_needed"},"commit":commit,"branch":branch,"paths":request.paths,"warning":warning,"published":false}),
     )
@@ -720,6 +724,20 @@ async fn existing_pr(
     }
     Ok(values.into_iter().next())
 }
+fn verified_pr(repo:&str,request:&PullRequest,pr:&Value,state:&str)->Value {
+    let observed=pr.pointer("/head/sha").and_then(Value::as_str);
+    let matches=observed==Some(request.expected_head.as_str());
+    json!({"schema_version":1,"success":matches,"state":state,"repository":repo,"branch":request.head,"commit":observed,"expected_commit":request.expected_head,"error":if matches{None}else{Some("pr_head_unverified_or_changed")},"result_unknown":observed.is_none(),"pr":{"number":pr["number"],"url":pr["html_url"],"draft":pr["draft"],"head":observed}})
+}
+#[cfg(test)]
+mod pr_head_tests {
+    #[test]
+    fn changed_pr_head_is_not_attested_as_the_requested_commit() {
+        let request=super::PullRequest {remote:"origin".into(),head:"feature".into(),base:"main".into(),expected_head:"expected".into(),title:"test".into(),body:String::new(),draft:true};
+        let value=super::verified_pr("owner/repo",&request,&serde_json::json!({"number":1,"html_url":"https://github.com/owner/repo/pull/1","head":{"sha":"changed"}}),"existing_pr");
+        assert_eq!(value["success"],false);assert_eq!(value["commit"],"changed");assert_eq!(value["expected_commit"],"expected");assert_eq!(value["result_unknown"],false);
+    }
+}
 pub(crate) async fn create_pr(
     data_dir: &Path,
     root: &Path,
@@ -754,7 +772,7 @@ pub(crate) async fn create_pr(
     }
     if let Some(pr) = existing_pr(&root, &repo, &request.head, &request.base).await? {
         return Ok(
-            json!({"schema_version":1,"success":true,"state":"existing_pr","repository":repo,"commit":request.expected_head,"branch":request.head,"pr":{"number":pr["number"],"url":pr["html_url"],"draft":pr["draft"]}}),
+            verified_pr(&repo,&request,&pr,"existing_pr"),
         );
     }
     let payload = json!({"head":request.head,"base":request.base,"title":request.title,"body":request.body,"draft":request.draft});
@@ -780,13 +798,13 @@ pub(crate) async fn create_pr(
             let value: Value = serde_json::from_str(&output.out)
                 .map_err(|_| "publication_result_unknown: invalid PR creation response")?;
             Ok(
-                json!({"schema_version":1,"success":true,"state":"pr_created","repository":repo,"branch":request.head,"commit":request.expected_head,"pr":{"number":value["number"],"url":value["html_url"],"draft":value["draft"]}}),
+                verified_pr(&repo,&request,&value,"pr_created"),
             )
         }
         _ => {
             if let Ok(Some(pr)) = existing_pr(&root, &repo, &request.head, &request.base).await {
                 return Ok(
-                    json!({"schema_version":1,"success":true,"state":"pr_recovered_after_uncertain_response","repository":repo,"branch":request.head,"commit":request.expected_head,"pr":{"number":pr["number"],"url":pr["html_url"],"draft":pr["draft"]}}),
+                    verified_pr(&repo,&request,&pr,"pr_recovered_after_uncertain_response"),
                 );
             }
             Ok(
