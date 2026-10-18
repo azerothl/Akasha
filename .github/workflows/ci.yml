@@ -116,6 +116,21 @@ jobs:
         working-directory: apps/akasha-ui
         run: npm run test:e2e
 
+  release-artifact-first-boot-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gh (release download)
+        run: type gh >/dev/null 2>&1 || sudo apt-get update && sudo apt-get install -y gh
+
+      - name: First-boot smoke (published Linux CPU zip)
+        env:
+          RELEASE_TAG: v0.11.0
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/smoke-release-artifact-linux.sh
+
   embedded-llama-cpp-linux:
     runs-on: ubuntu-latest
     continue-on-error: true
