@@ -2265,7 +2265,12 @@ pub(crate) async fn run_message_via_llm(
                             }
                         }
                         if code_studio_disk_task {
-                            let targets: Vec<String> = if matches!(actual_tool.as_str(), "write_file" | "write_code") {
+                            let targets: Vec<String> = if actual_tool=="lsp_apply_rename" {
+                                let targets=tool_args.first().and_then(|id|Uuid::parse_str(id).ok()).ok_or_else(||"LSP plan UUID required".to_string()).and_then(|id|crate::studio_lsp::plan_paths(data_dir_for_studio_flags,&tool_disk_workspace_root,task_id,id));
+                                match targets {Ok(paths)=>paths,Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(error);continue;}}
+                            } else if actual_tool=="git_commit" {
+                                serde_json::from_str::<crate::studio_delivery::Commit>(&tool_args.join(" ")).map(|request|request.paths).unwrap_or_default()
+                            } else if matches!(actual_tool.as_str(), "write_file" | "write_code") {
                                 crate::api::parse_write_file_request(tool_args).map(|(path,_)| path).into_iter().collect()
                             } else if actual_tool == "read_file" {
                                 let (parts, _, _) = parse_read_file_args(tool_args);
@@ -2403,9 +2408,10 @@ pub(crate) async fn run_message_via_llm(
                         );
                         // Phase 3.1: tools in require_approval need user confirmation before execution.
                         // Documentary CLI skills inherit command approval and scope, including their executable.
-                        let approval_args: Vec<String> = if actual_tool.is_empty() && !tool_args.is_empty() {
+                        let mut approval_args: Vec<String> = if actual_tool.is_empty() && !tool_args.is_empty() {
                             std::iter::once(name.clone()).chain(tool_args.iter().cloned()).collect()
                         } else {tool_args.to_vec()};
+                        if matches!(effective_role_tool,"git_commit"|"git_push"|"github_create_pr"|"lsp_apply_rename"|"terminal_session"){approval_args.insert(0,format!("workspace={}",tool_disk_workspace_root.display()));}
                         if let Some(definition) = skill_definition.as_ref().filter(|_| name != &actual_tool) {
                             let metadata = serde_json::json!({"name":definition.name,"source_root":definition.source_root,"sha256":definition.sha256,"version":definition.version,"activation":"tool_alias"});
                             if let Err(reason) = crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "skills", metadata.clone()) {
@@ -2469,9 +2475,12 @@ pub(crate) async fn run_message_via_llm(
                                     const APPROVAL_TIMEOUT_SECS: u64 = 300;
                                     // Redact write-like tool args entirely; truncate others to avoid leaking secrets/blobs.
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
-                                    let args_preview: String = if matches!(
+                                    let args_preview: String = if matches!(effective_role_tool,"git_commit"|"git_push"|"github_create_pr") {
+                                        let payload=serde_json::from_str::<serde_json::Value>(&tool_args.join(" ")).unwrap_or_default();
+                                        format!("workspace={} remote={} branch={} commit={}",tool_disk_workspace_root.display(),payload["remote"].as_str().unwrap_or("local"),payload.get("branch").or_else(||payload.get("head")).and_then(|v|v.as_str()).unwrap_or("current"),payload["expected_head"].as_str().unwrap_or("unavailable"))
+                                    } else if matches!(
                                         effective_role_tool,
-                                        "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file" | "terminal_session"
+                                        "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file" | "terminal_session" | "git_commit" | "github_create_pr"
                                     ) {
                                         "[redacted]".to_string()
                                     } else {
@@ -3174,6 +3183,8 @@ pub(crate) async fn run_message_via_llm(
                             };
                         if let Some(operation)=workflow_operation {if let Err(error)=operation.finish(success,&res){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Workflow result unknown: {error}");break 'tool_rounds;}}
                         if success { run_outcome.successful_tool_calls += 1; } else { run_outcome.failed_tool_calls += 1; }
+                        if serde_json::from_str::<serde_json::Value>(&res).ok().is_some_and(|value|value["result_unknown"]==true){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Operation result unknown; inspect effects and use explicit recovery before continuing. {res}");break 'tool_rounds;}
+
                         if matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container") {
                             run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }
@@ -3198,7 +3209,7 @@ pub(crate) async fn run_message_via_llm(
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                         let redacted_args: Vec<String> = if matches!(
                             actual_tool.as_str(),
-                            "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file" | "terminal_session"
+                            "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file" | "terminal_session" | "git_commit" | "github_create_pr"
                         ) {
                             vec!["[redacted for write-like tool]".to_string()]
                         } else {

@@ -182,6 +182,8 @@ pub(crate) fn resolve(
         akasha_store::TaskStatus::Paused
             | akasha_store::TaskStatus::Interrupted
             | akasha_store::TaskStatus::Failed
+            | akasha_store::TaskStatus::Completed
+            | akasha_store::TaskStatus::Cancelled
     ) {
         return Err("pause the task before resolving an unknown operation".into());
     }

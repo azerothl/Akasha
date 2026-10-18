@@ -73,7 +73,8 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
     }
     let mut expected = None;
     let argv = match envelope.tool.as_str() {
-        "read_file" | "write_file" | "write_code" | "edit_file" | "delete_file" | "apply_patch" => {
+        "read_file" | "write_file" | "write_code" | "edit_file" | "delete_file" | "apply_patch"
+        | "search_replace" => {
             let arg: FileArgs = serde_json::from_value(envelope.arguments.clone())
                 .map_err(|_| "invalid file arguments")?;
             if arg.path.trim().is_empty() || arg.path.contains(['\0', '\n', '\r']) {
@@ -113,7 +114,9 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
                         arg.content.ok_or("content required")?,
                     ]
                 }
-                "apply_patch" => vec![arg.path, arg.content.ok_or("patch content required")?],
+                "apply_patch" | "search_replace" => {
+                    vec![arg.path, arg.content.ok_or("patch content required")?]
+                }
                 _ => {
                     if arg.start_line.is_some() || arg.end_line.is_some() {
                         return Err("line range only applies to edit_file".into());
@@ -154,7 +157,10 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
             argv.extend(arg.args);
             argv
         }
-        name if name.starts_with("mcp_") || name == "lsp_query" => {
+        name if name.starts_with("mcp_")
+            || name == "lsp_query"
+            || crate::studio_delivery::is_delivery_tool(name) =>
+        {
             vec![envelope.arguments.to_string()]
         }
         _ => {
@@ -200,13 +206,64 @@ pub(crate) fn supports_typed(tool: &str) -> bool {
 }
 
 pub(crate) fn argument_schema(tool: &str) -> Value {
+    if crate::studio_delivery::is_delivery_tool(tool) {
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+        let fields: &[(&str, &str, bool)] = match tool {
+            "git_commit" => &[
+                ("paths", "array", true),
+                ("expected_versions", "object", true),
+                ("expected_head", "string", true),
+                ("message", "string", true),
+            ],
+            "git_push" => &[
+                ("remote", "string", true),
+                ("branch", "string", true),
+                ("expected_head", "string", true),
+                ("expected_remote_head", "string", true),
+            ],
+            "github_create_pr" => &[
+                ("remote", "string", true),
+                ("head", "string", true),
+                ("base", "string", true),
+                ("expected_head", "string", true),
+                ("title", "string", true),
+                ("body", "string", true),
+                ("draft", "boolean", false),
+            ],
+            "github_pr_status" => &[("remote", "string", false), ("number", "integer", false)],
+            _ => &[("remote", "string", false)],
+        };
+        for (name, kind, needed) in fields {
+            let mut schema = json!({"type":kind});
+            if *kind == "array" {
+                schema["items"] = json!({"type":"string"});
+                schema["maxItems"] = json!(128);
+            }
+            if *name == "expected_versions" {
+                schema["additionalProperties"] = json!({"type":"string"});
+            }
+            properties.insert((*name).into(), schema);
+            if *needed {
+                required.push(*name);
+            }
+        }
+        return json!({"type":"object","additionalProperties":false,"required":required,"properties":properties});
+    }
+
     if tool == "lsp_query" {
         return json!({"type":"object","additionalProperties":false,"required":["action","path"],"properties":{"action":{"type":"string","enum":["diagnostics","definition","references","rename"]},"path":{"type":"string","minLength":1},"position":{"type":"object","required":["line","character"],"additionalProperties":false,"properties":{"line":{"type":"integer","minimum":0},"character":{"type":"integer","minimum":0}}},"new_name":{"type":"string","maxLength":256},"text":{"type":"string"}}});
     }
 
     if matches!(
         tool,
-        "read_file" | "write_file" | "write_code" | "edit_file" | "apply_patch" | "delete_file"
+        "read_file"
+            | "write_file"
+            | "write_code"
+            | "edit_file"
+            | "apply_patch"
+            | "search_replace"
+            | "delete_file"
     ) {
         let mut required = vec!["path"];
         if is_file_mutation(tool) {
@@ -214,7 +271,7 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
         }
         if matches!(
             tool,
-            "write_file" | "write_code" | "edit_file" | "apply_patch"
+            "write_file" | "write_code" | "edit_file" | "apply_patch" | "search_replace"
         ) {
             required.push("content");
         }
@@ -239,7 +296,12 @@ pub(crate) fn native_definition(names: Vec<String>) -> Value {
 pub(crate) fn is_file_mutation(tool: &str) -> bool {
     matches!(
         tool,
-        "write_file" | "write_code" | "edit_file" | "delete_file" | "apply_patch"
+        "write_file"
+            | "write_code"
+            | "edit_file"
+            | "delete_file"
+            | "apply_patch"
+            | "search_replace"
     )
 }
 fn file_path(tool: &str, args: &[String]) -> Option<String> {
@@ -396,25 +458,27 @@ impl Operation {
                 |row| row.get(0),
             )
             .map_err(|e| e.to_string())?;
-        let inspection = matches!(
-            tool,
-            "read_file"
-                | "lsp_query"
-                | "list_dir"
-                | "search_files"
-                | "grep_content"
-                | "file_diff"
-                | "diff_unified"
-                | "dir_compare"
-                | "git_status"
-                | "git_diff"
-                | "git_log"
-                | "git_branches"
-                | "list_tools"
-        ) || tool == "terminal_session"
-            && args
-                .first()
-                .is_some_and(|sub| matches!(sub.as_str(), "read" | "list" | "stop"));
+        let inspection = matches!(tool, "git_delivery_status" | "github_pr_status")
+            || matches!(
+                tool,
+                "read_file"
+                    | "lsp_query"
+                    | "list_dir"
+                    | "search_files"
+                    | "grep_content"
+                    | "file_diff"
+                    | "diff_unified"
+                    | "dir_compare"
+                    | "git_status"
+                    | "git_diff"
+                    | "git_log"
+                    | "git_branches"
+                    | "list_tools"
+            )
+            || tool == "terminal_session"
+                && args
+                    .first()
+                    .is_some_and(|sub| matches!(sub.as_str(), "read" | "list" | "stop"));
         if unknown > 0 && !inspection {
             return Err("operation_result_unknown: only inspection is allowed until an operator resolves interrupted operations through /api/tasks/:id/recovery".into());
         }
@@ -494,8 +558,12 @@ impl Operation {
             }
         }
         let output = crate::tool_output::truncate_utf8_by_bytes(text, 64 * 1024).0;
-        let value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
-        transaction.execute("UPDATE studio_operations SET state='completed',result=?3,updated_at=?4 WHERE task=?1 AND operation=?2 AND state='started'",params![self.task.to_string(),self.id.to_string(),value.to_string(),chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+        let mut value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
+        let uncertain = serde_json::from_str::<Value>(text)
+            .ok()
+            .is_some_and(|value| value["result_unknown"] == true);
+        value["result_unknown"] = json!(uncertain);
+        transaction.execute("UPDATE studio_operations SET state=?5,result=?3,updated_at=?4 WHERE task=?1 AND operation=?2 AND state='started'",params![self.task.to_string(),self.id.to_string(),value.to_string(),chrono::Utc::now().to_rfc3339(),if uncertain{"started"}else{"completed"}]).map_err(|e|e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(value.to_string())
     }

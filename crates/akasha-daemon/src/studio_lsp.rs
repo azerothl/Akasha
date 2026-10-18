@@ -830,6 +830,41 @@ fn prepare_plan(
         json!({"status":"planned","artifact":artifact,"plan_id":plan.id,"expires_in_secs":7200,"files":plan.files.iter().map(|file|json!({"path":file.path,"expected_version":file.expected_version,"edit_count":file.edit_count,"before":file.before,"after":file.after})).collect::<Vec<_>>()}),
     )
 }
+pub(crate) fn plan_paths(
+    data_dir: &Path,
+    root: &Path,
+    task: Uuid,
+    id: Uuid,
+) -> Result<Vec<String>, String> {
+    let dir = plan_dir(data_dir)?;
+    let path = dir
+        .join(format!("{id}.json"))
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !path.starts_with(&dir) {
+        return Err("LSP plan path escapes data".into());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(8 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("LSP plan too large".into());
+    }
+    let plan: RenamePlan = serde_json::from_slice(&bytes).map_err(|_| "invalid LSP plan")?;
+    if plan.id != id
+        || plan.schema_version != 1
+        || plan.task_id != Some(task)
+        || plan.workspace != root.canonicalize().map_err(|e| e.to_string())?
+        || plan.files.len() > 32
+    {
+        return Err("LSP plan belongs to another task/workspace".into());
+    }
+    Ok(plan.files.into_iter().map(|file| file.path).collect())
+}
+
 fn atomic_write(path: &Path, text: &str) -> Result<(), String> {
     let mut tmp = tempfile::NamedTempFile::new_in(path.parent().ok_or("file parent missing")?)
         .map_err(|e| e.to_string())?;
@@ -980,7 +1015,12 @@ pub(crate) async fn route(
         },
         _ => Err("unsupported LSP route".into()),
     };
-    if result.as_ref().is_ok_and(|value|value["status"]=="applied"){close(&root).await;}
+    if result
+        .as_ref()
+        .is_ok_and(|value| value["status"] == "applied")
+    {
+        close(&root).await;
+    }
     Some(match result {
         Ok(value) => json_response("200 OK", &value.to_string()),
         Err(error) => json_response(

@@ -155,6 +155,7 @@ impl ToolsPolicy {
     /// `write_code` inherits approval rules from `write_file` when the latter is listed.
     pub fn requires_approval(&self, tool_name: &str) -> bool {
         let name = tool_name.trim().to_lowercase();
+        if matches!(name.as_str(),"git_push"|"github_create_pr"){return true;}
         if self
             .require_approval
             .iter()
@@ -162,7 +163,7 @@ impl ToolsPolicy {
         {
             return true;
         }
-        ((name == "terminal_session") && self.require_approval.iter().any(|a|a.trim().eq_ignore_ascii_case("run_command"))) || matches!(name.as_str(),"write_code"|"lsp_apply_rename")
+        ((name == "terminal_session") && self.require_approval.iter().any(|a|a.trim().eq_ignore_ascii_case("run_command"))) || matches!(name.as_str(),"write_code"|"lsp_apply_rename"|"git_commit")
             && self
                 .require_approval
                 .iter()
