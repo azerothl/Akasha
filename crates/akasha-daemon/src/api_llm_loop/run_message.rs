@@ -4487,12 +4487,16 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                 {
-                    let _ = crate::api_studio::studio_mark_ticket_ready_for_review(
-                        &tool_disk_workspace_root,
+                    let ticket_root = match store.lineage_root_studio_project_id(task_id).ok().flatten() {
+                        Some(project)=>crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags,&project).ok(),
+                        None=>Some(tool_disk_workspace_root.clone()),
+                    };
+                    if let Some(ticket_root)=ticket_root {let _ = crate::api_studio::studio_mark_ticket_ready_for_review(
+                        &ticket_root,
                         &ticket_id,
                         &task_id.to_string(),
                         "system",
-                    );
+                    );}
                 }
             }
         }

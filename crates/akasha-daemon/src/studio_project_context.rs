@@ -11,6 +11,8 @@ pub(crate) fn manifest_workspace(data_dir: &Path, project: &str, task: Option<uu
     for _ in 0..32 {
         let Some(id)=cursor else {return Ok(root);};
         if let Some(record)=records.iter().find(|record|record.task_id==id.to_string()) {
+            crate::studio_worktree::validate_record_paths(data_dir,record)?;
+            if record.root_task_id!=crate::api::workspace_lineage_root_task_id(id,Some(&data_dir.join("akasha.db"))).to_string() {return Err("worktree task ancestry mismatch".into());}
             let recorded_root=Path::new(&record.project_root).canonicalize().map_err(|e|e.to_string())?;
             if recorded_root!=root.canonicalize().map_err(|e|e.to_string())? {return Err("worktree project mismatch".into());}
             let path=Path::new(&record.worktree_path).canonicalize().map_err(|_|"task worktree unavailable")?;
@@ -156,13 +158,15 @@ pub(crate) fn record(
     record: serde_json::Value,
 ) -> Result<(), String> {
     use std::io::Write;
+    let lock=context_lock(data_dir,task)?;
+    let _guard=lock.lock().map_err(|_|"task context lock poisoned")?;
     if section != "rules" && section != "skills" {
         return Err("invalid context section".into());
     }
     let dir = data_dir.join("studio-task-context");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let file = dir.join(format!("{task}.json"));
-    let mut context = read(data_dir, task);
+    let mut context = read_unlocked(data_dir, task);
     if context.get("error").is_some() {
         return Err("Existing task context cannot be read safely".into());
     }
@@ -183,6 +187,18 @@ pub(crate) fn record(
 }
 
 pub(crate) fn read(data_dir: &Path, task: uuid::Uuid) -> serde_json::Value {
+    let Ok(lock)=context_lock(data_dir,task) else {return serde_json::json!({"error":"task_context_lock_unavailable"});};
+    let Ok(_guard)=lock.lock() else {return serde_json::json!({"error":"task_context_lock_poisoned"});};
+    read_unlocked(data_dir,task)
+}
+
+fn context_lock(data_dir: &Path, task: uuid::Uuid) -> Result<std::sync::Arc<std::sync::Mutex<()>>,String> {
+    static LOCKS:std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf,std::sync::Arc<std::sync::Mutex<()>>>>>=std::sync::OnceLock::new();
+    let key=data_dir.canonicalize().map_err(|e|e.to_string())?.join(format!("studio-task-context/{task}.json"));
+    Ok(LOCKS.get_or_init(Default::default).lock().map_err(|_|"context lock map poisoned")?.entry(key).or_insert_with(||std::sync::Arc::new(std::sync::Mutex::new(()))).clone())
+}
+
+fn read_unlocked(data_dir: &Path, task: uuid::Uuid) -> serde_json::Value {
     use std::io::Read;
     let file = data_dir
         .join("studio-task-context")
