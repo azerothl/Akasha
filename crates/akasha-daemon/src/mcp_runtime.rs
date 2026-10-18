@@ -54,9 +54,13 @@ pub fn discovered_tools() -> Vec<DiscoveredTool> {
         .unwrap_or_default()
 }
 pub fn discovered_tool(name: &str) -> Option<DiscoveredTool> {
-    discovered_tools()
-        .into_iter()
-        .find(|tool| tool.name == name)
+    tool_cache().read().ok()?.iter().find(|tool|tool.name==name).cloned()
+}
+pub fn discovered_names() -> Vec<String> {
+    tool_cache().read().map(|tools|tools.iter().map(|tool|tool.name.clone()).collect()).unwrap_or_default()
+}
+pub fn prompt_tool_names(policy: &akasha_tools::ToolsPolicy) -> std::collections::HashSet<String> {
+    tool_cache().read().map(|tools|tools.iter().filter(|tool|policy.can_use_mcp_tool(&tool.server,&tool.tool)&&tool.input_schema.to_string().len()<=4096).take(32).map(|tool|tool.name.clone()).collect()).unwrap_or_default()
 }
 
 fn has_external_ref(value: &Value, depth: usize) -> bool {
