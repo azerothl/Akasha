@@ -3146,7 +3146,13 @@ pub(crate) async fn run_message_via_llm(
                             run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }
                         if let Some(img) = captured_image {
-                            last_captured_image_base64 = Some(img.clone());
+                            // Studio browser PNGs are persisted and displayed by the
+                            // task evidence viewer. Keep vision input separate from
+                            // prose: embedding the data URI makes long binary strings
+                            // leak into Markdown clients that do not render it.
+                            if !code_studio_disk_task || actual_tool != "browser" {
+                                last_captured_image_base64 = Some(img.clone());
+                            }
                             if captured_media_suitable_for_vision_injection(&img) {
                                 let norm = normalize_captured_media_for_vision_turn(&img);
                                 if vision_payload_within_cap(&norm) {
