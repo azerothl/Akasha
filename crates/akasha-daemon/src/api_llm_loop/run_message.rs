@@ -502,7 +502,7 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         }
-        let studio_tool_list = if code_studio_disk_task {
+        let studio_tool_list = if code_studio_disk_task || crate::studio_role_policy::restricted_role(&assigned_agent) {
             Some(code_studio_tools_for_prompt(
                 allowed_tools.as_deref(),
                 assigned_agent.as_str(),
@@ -1290,6 +1290,9 @@ pub(crate) async fn run_message_via_llm(
             user_message
         )
     };
+    let mut run_outcome = crate::task_outcome::RunOutcome::default();
+    use crate::task_outcome::TerminationReason;
+    let restricted_studio_role = crate::studio_role_policy::restricted_role(&assigned_agent);
     let mut reply_text = String::new();
     let mut last_llm_model_used: Option<String> = None;
     let mut first_meaningful_progress_sent = false;
@@ -1435,6 +1438,8 @@ pub(crate) async fn run_message_via_llm(
             match store.get(task_id).ok().flatten().map(|t| t.status) {
                 Some(TaskStatus::Paused)
                 | Some(TaskStatus::Cancelled)
+                | Some(TaskStatus::Interrupted)
+                | Some(TaskStatus::WaitingUserInput)
                 | Some(TaskStatus::Failed) => {
                     break 'tool_rounds;
                 }
@@ -1482,6 +1487,7 @@ pub(crate) async fn run_message_via_llm(
                     .and_then(|s| s.parse::<f64>().ok())
                 {
                     if max_cost > 0.0 && session_cost >= max_cost {
+                        run_outcome.termination = TerminationReason::BudgetExhausted;
                         reply_text = "Budget dépassé pour cette session (AKASHA_MAX_COST_PER_SESSION_USD). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
                         break 'tool_rounds;
                     }
@@ -1491,6 +1497,7 @@ pub(crate) async fn run_message_via_llm(
                     .and_then(|s| s.parse::<u64>().ok())
                 {
                     if max_tokens > 0 && session_tokens >= max_tokens {
+                        run_outcome.termination = TerminationReason::BudgetExhausted;
                         reply_text = "Quota de tokens dépassé pour cette session (AKASHA_MAX_TOKENS_PER_SESSION). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
                         break 'tool_rounds;
                     }
@@ -1606,6 +1613,7 @@ pub(crate) async fn run_message_via_llm(
                         "Overall LLM timeout exceeded; aborting task"
                     );
                     stream_join.abort();
+                    run_outcome.termination = TerminationReason::Timeout;
                     reply_text = if accumulated.is_empty() {
                         format!("LLM response timed out after {} seconds.", llm_timeout_secs)
                     } else {
@@ -1722,6 +1730,7 @@ pub(crate) async fn run_message_via_llm(
             // Wrap stream_join.await with remaining overall budget; guard against zero remaining.
             let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
             let response = if remaining.is_zero() {
+                run_outcome.termination = TerminationReason::Timeout;
                 tracing::warn!(
                     timeout_secs = llm_timeout_secs,
                     "Overall LLM timeout on stream completion"
@@ -1795,11 +1804,13 @@ pub(crate) async fn run_message_via_llm(
                                 "error": e.to_string(),
                             }),
                         );
+                        run_outcome.termination = TerminationReason::ProviderError;
                         reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
                         break;
                     }
                     Ok(Err(join_err)) => {
                         tracing::warn!(error = %join_err, "Stream task join failed");
+                        run_outcome.termination = TerminationReason::ProviderError;
                         reply_text = if accumulated.is_empty() {
                             format!("LLM task error: {}", join_err)
                         } else {
@@ -1808,6 +1819,7 @@ pub(crate) async fn run_message_via_llm(
                         break;
                     }
                     Err(_timeout) => {
+                        run_outcome.termination = TerminationReason::Timeout;
                         tracing::warn!(
                             timeout_secs = llm_timeout_secs,
                             "Overall LLM timeout on stream completion"
@@ -2110,6 +2122,10 @@ pub(crate) async fn run_message_via_llm(
                     .with_correlation(task_id),
                 );
                     for (name, args) in &lane_calls {
+                        if matches!(store.get(task_id).ok().flatten().map(|t| t.status),
+                            Some(TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Interrupted | TaskStatus::WaitingUserInput | TaskStatus::Failed)) {
+                            break 'tool_rounds;
+                        }
                         // Phase D: resolve skill name to tool_ref (spec 33)
                         let actual_tool = match &skill_registry {
                             Some(reg) => reg
@@ -2121,6 +2137,20 @@ pub(crate) async fn run_message_via_llm(
                         };
                         let actual_tool = canonicalize_tool_name(&actual_tool);
                         let tool_args: &[String] = args.as_slice();
+                        let effective_role_tool = if actual_tool.is_empty() {
+                            if tool_args.is_empty() { "read_skill" } else { "run_command" }
+                        } else { actual_tool.as_str() };
+                        let invocation_role = store.get(task_id).ok().flatten().map(|t| t.assigned_agent);
+                        let role_check = invocation_role.as_deref().ok_or_else(|| "[studio] cannot resolve task role".to_string())
+                            .and_then(|role| crate::studio_role_policy::check(role, effective_role_tool, tool_args, Some(&tool_disk_workspace_root)));
+                        if let Err(reason) = role_check {
+                            run_outcome.failed_tool_calls += 1;
+                            let _ = bus.send(EventEnvelope::new(EventType::ToolInvoked, Some(serde_json::json!({
+                                "tool":effective_role_tool, "success":false, "reason":"role_policy_denied", "result_preview":reason
+                            }))).with_correlation(timeline_correlation));
+                            tool_results.push(reason);
+                            continue;
+                        }
                         // Hard guardrail: if read_file on this path was already truncated for this
                         // agent key, block repeated full-file reads and require chunked/windowed read.
                         if actual_tool.eq_ignore_ascii_case("read_file") {
@@ -2173,6 +2203,7 @@ pub(crate) async fn run_message_via_llm(
                                 .take(3)
                                 .all(|e| e.0 == last.0 && e.1 == last.1)
                             {
+                                run_outcome.termination = TerminationReason::ToolLoop;
                                 reply_text =
                                     "Loop detected: same tool and arguments repeated. Stopping."
                                         .to_string();
@@ -3013,6 +3044,10 @@ pub(crate) async fn run_message_via_llm(
                                 )
                                 .await
                             };
+                        if success { run_outcome.successful_tool_calls += 1; } else { run_outcome.failed_tool_calls += 1; }
+                        if matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container") {
+                            run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::Value::Null, "source":"tool_executor"}));
+                        }
                         if let Some(img) = captured_image {
                             last_captured_image_base64 = Some(img.clone());
                             if captured_media_suitable_for_vision_injection(&img) {
@@ -3400,6 +3435,7 @@ pub(crate) async fn run_message_via_llm(
                         None => true,
                     };
                     if should_stop {
+                        run_outcome.termination = TerminationReason::ToolRoundLimit;
                         reply_text = default_reply;
                         break;
                     }
@@ -3618,7 +3654,8 @@ pub(crate) async fn run_message_via_llm(
         }
     }
 
-    let mut reply_text = if reply_text.is_empty() {
+    let mut reply_text = if reply_text.trim().is_empty() {
+        if !run_outcome.failed() { run_outcome.termination = TerminationReason::ModelEmpty; }
         tracing::warn!("LLM returned empty text");
         "No response from the model. Check Ollama or your LLM provider.".to_string()
     } else {
@@ -3630,7 +3667,6 @@ pub(crate) async fn run_message_via_llm(
         reply_text
     };
     let task_status_snapshot = store.get(task_id).ok().flatten().map(|t| t.status);
-    let is_paused = matches!(task_status_snapshot, Some(TaskStatus::Paused));
     let halted_user = matches!(
         task_status_snapshot,
         Some(
@@ -3638,11 +3674,13 @@ pub(crate) async fn run_message_via_llm(
                 | TaskStatus::Cancelled
                 | TaskStatus::Interrupted
                 | TaskStatus::Failed
+                | TaskStatus::WaitingUserInput
         )
     );
     let mut studio_verify_error: Option<String> = None;
     let mut studio_autofix_applied = false;
-    if !halted_user && code_studio_disk_task {
+    // Planning/review must never execute project scripts or the mutating autofix path.
+    if !halted_user && code_studio_disk_task && !restricted_studio_role && !run_outcome.failed() {
         let max_passes: u32 = if is_session_recall {
             1
         } else {
@@ -3655,11 +3693,13 @@ pub(crate) async fn run_message_via_llm(
         };
         for pass in 0..max_passes {
             match crate::api_studio::studio_verify_after_agent_task(&tool_disk_workspace_root).await {
-                Ok(()) => {
+                Ok(executed) => {
+                    run_outcome.checks.push(serde_json::json!({"kind":"project_build", "status":if executed {"passed"} else {"not_run"}, "exit_code":if executed {Some(0)} else {None::<i32>}}));
                     studio_verify_error = None;
                     break;
                 }
                 Err(e) => {
+                    run_outcome.checks.push(serde_json::json!({"kind":"project_build", "status":"failed", "detail":e.chars().take(2000).collect::<String>()}));
                     studio_verify_error = Some(e.clone());
                     if pass + 1 >= max_passes {
                         break;
@@ -3744,6 +3784,15 @@ pub(crate) async fn run_message_via_llm(
                     tmo,
                 )
                 .await;
+                for criterion in &pay.criteria {
+                    let status = if matches!(criterion.kind, crate::api_studio::StudioCriterionKind::Manual) { "manual" }
+                        else if mech.is_empty() { "passed" } else { "not_confirmed" };
+                    run_outcome.checks.push(serde_json::json!({
+                        "kind":"acceptance", "id":criterion.id, "criterion_kind":criterion.kind,
+                        "status":status, "text":criterion.text,
+                        "exit_code":if status == "passed" && matches!(criterion.kind, crate::api_studio::StudioCriterionKind::CommandOk) {Some(0)} else {None::<i32>}
+                    }));
+                }
                 if !mech.is_empty() {
                     studio_verify_error = Some(format!(
                         "Échec critères d'acceptation (vérification automatique) :\n{}",
@@ -4120,7 +4169,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         || reply_lower.contains("refusée par l'utilisateur")
         || reply_lower.contains("action refusée")
         || reply_lower.contains("limite de tours d'outils atteinte");
-    if is_error_outcome {
+    if is_error_outcome || run_outcome.failed() {
         let _ = bus.send(
             EventEnvelope::new(
                 EventType::TaskEscalatedToHuman,
@@ -4212,6 +4261,22 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         );
     }
 
+    if studio_verify_error.is_some() { run_outcome.termination = TerminationReason::VerificationFailed; }
+    let proposed = if run_outcome.failed() { TaskStatus::Failed } else { TaskStatus::Completed };
+    let reason = if run_outcome.failed() {
+        Some(studio_verify_display_message.as_deref().unwrap_or(&reply_text).chars().take(2000).collect::<String>())
+    } else { None };
+    let (final_status, outcome) = match store.finalize_outcome(task_id, proposed, run_outcome.json(reason)) {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(%task_id, %error, "Cannot persist task outcome; completion not announced");
+            cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
+            notify_task_completion(&task_completion_registry, task_id).await;
+            return;
+        }
+    };
+    let task_status_snapshot = Some(final_status.clone());
+    let is_paused = matches!(final_status, TaskStatus::Paused | TaskStatus::WaitingUserInput);
     let final_event_type = if matches!(task_status_snapshot, Some(TaskStatus::Cancelled)) {
         EventType::TaskCancelled
     } else if is_paused {
@@ -4225,24 +4290,13 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     } else {
         EventType::TaskCompleted
     };
-    let final_status_str = if matches!(task_status_snapshot, Some(TaskStatus::Cancelled)) {
-        "cancelled"
-    } else if is_paused {
-        "paused"
-    } else if matches!(task_status_snapshot, Some(TaskStatus::Interrupted)) {
-        "interrupted"
-    } else if matches!(task_status_snapshot, Some(TaskStatus::Failed)) {
-        "failed"
-    } else if studio_verify_error.is_some() {
-        "failed"
-    } else {
-        "completed"
-    };
+    let final_status_str = final_status.as_str();
 
     let mut final_payload = serde_json::json!({
         "task_id": task_id.to_string(),
         "status": final_status_str,
-        "model_used": last_llm_model_used
+        "model_used": last_llm_model_used,
+        "outcome": outcome
     });
     if let Some(ref store) = task_usage_store {
         if let Some(u) = store.get_last_turn(task_id).await {
@@ -4273,6 +4327,9 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             obj.insert("reason".to_string(), serde_json::Value::String(reason_text));
         }
     }
+    if final_status_str == "failed" && final_payload.get("reason").is_none() {
+        final_payload["reason"] = outcome["reason"].clone();
+    }
     let failure_reason = final_payload.get("reason").cloned();
     let _ = bus.send(
         EventEnvelope::new(final_event_type, Some(final_payload)).with_correlation(task_id),
@@ -4282,7 +4339,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         Some(store_path.as_path()),
         task_id,
         "task_completed",
-        Some(serde_json::json!({ "status": final_status_str })),
+        Some(serde_json::json!({ "status": final_status_str, "outcome": outcome })),
     );
     if final_status_str == "completed" || final_status_str == "failed" {
         let hook_event = if final_status_str == "completed" {
@@ -4296,6 +4353,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             "status": final_status_str,
             "model_used": last_llm_model_used,
             "reply_preview": reply_text.chars().take(800).collect::<String>(),
+            "outcome": outcome,
         });
         if final_status_str == "failed" {
             if let (Some(obj), Some(reason)) = (hook_payload.as_object_mut(), failure_reason.as_ref()) {
@@ -4321,11 +4379,8 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     }
 
     // Phase 2 AI OS: do not overwrite Paused / Cancelled / Interrupted with Completed.
-    if !halted_user {
-        if studio_verify_error.is_some() {
-            let _ = store.update_status(task_id, TaskStatus::Failed);
-        } else {
-            let _ = store.update_status(task_id, TaskStatus::Completed);
+    if !matches!(final_status, TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Interrupted | TaskStatus::WaitingUserInput) {
+        if final_status == TaskStatus::Completed {
             if let Ok(events) = store.get_events(task_id) {
                 if let Some(ticket_id) = events
                     .iter()
@@ -4359,7 +4414,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         if is_root_task
             && !is_small_talk_fast_lane
             && !is_orchestrated_task_msg
-            && studio_verify_error.is_none()
+            && final_status == TaskStatus::Completed
         {
             if let Ok(st) = crate::session_state::merge(data_dir_sess, &session_id, |s| {
                 let fact = reply_text.chars().take(240).collect::<String>();
@@ -4418,11 +4473,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             }
         }
         if !is_small_talk_fast_lane {
-            let outcome_label = if studio_verify_error.is_some() {
-                "failed"
-            } else {
-                "completed"
-            };
+            let outcome_label = final_status.as_str();
             let summary_preview: String = if let Some(ref m) = studio_verify_display_message {
                 m.chars().take(300).collect()
             } else if let Some(ref e) = studio_verify_error {

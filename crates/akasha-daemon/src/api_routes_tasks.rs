@@ -409,7 +409,8 @@ pub(crate) async fn get_task_report(store_path: &Path, events: &EventsCache, id:
         "needs_review": needs_review,
         "failed": failed,
         "next_steps": next_steps,
-        "transcript_path": transcript
+        "transcript_path": transcript,
+        "outcome": store.get_outcome(id).ok().flatten()
     });
     json_response("200 OK", &body.to_string())
 }
@@ -1083,6 +1084,9 @@ pub(crate) async fn get_task_status(
         "todos": todos_json,
         "suggested_actions": suggested
     });
+    if let Ok(Some(outcome)) = store.get_outcome(id) {
+        body["outcome"] = outcome;
+    }
     if let Some(u) = todos_updated_at {
         body["todos_updated_at"] = serde_json::Value::String(u);
     }

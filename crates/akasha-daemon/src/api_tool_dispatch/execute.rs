@@ -47,36 +47,20 @@ pub(crate) async fn execute_tool_call_impl(
 ) -> (bool, String, Option<String>) {
     let is_studio_workspace =
         crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
-    let assigned_agent_for_task = if is_studio_workspace {
-        store_path
+    let task_for_role = store_path
             .and_then(|sp| TaskStore::open(sp).ok())
-            .and_then(|store| store.get(task_id).ok().flatten())
-            .map(|t| t.assigned_agent.to_ascii_lowercase())
-    } else {
-        None
-    };
-    if assigned_agent_for_task.as_deref() == Some("studio_reviewer") {
-        let blocked = matches!(
-            tool_name,
-            "write_file"
-                | "write_code"
-                | "delete_file"
-                | "rename_path"
-                | "move_tree"
-                | "edit_file"
-                | "apply_patch"
-                | "search_replace"
-                | "delegate_to_agent"
-        );
-        if blocked {
-            return (
-                false,
-                format!(
-                    "[{}] forbidden for `studio_reviewer`: review agent is read-only and must only validate then update ticket feedback/status.",
-                    tool_name
-                ),
-                None,
-            );
+            .and_then(|store| store.get(task_id).ok().flatten());
+    if task_for_role.as_ref().is_some_and(|task| matches!(task.status,
+        TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Interrupted | TaskStatus::WaitingUserInput | TaskStatus::Failed)) {
+        return (false, "[task] execution denied: task is stopped or waiting for input".into(), None);
+    }
+    let assigned_agent_for_task = task_for_role.map(|task| task.assigned_agent.to_ascii_lowercase());
+    if is_studio_workspace && assigned_agent_for_task.is_none() {
+        return (false, "[studio] cannot resolve task role; execution denied".into(), None);
+    }
+    if let Some(role) = assigned_agent_for_task.as_deref() {
+        if let Err(reason) = crate::studio_role_policy::check(role, tool_name, args, workspace_root) {
+            return (false, reason, None);
         }
     }
     if tool_name.starts_with("mcp_") {
@@ -2435,6 +2419,19 @@ pub(crate) async fn execute_tool_call_impl(
             }
         }
         "write_file" | "write_code" => {
+            if assigned_agent_for_task.as_deref() == Some("studio_planner") {
+                if !executor.policy.can_write(Path::new("CODE_STUDIO_PLAN.md")) {
+                    return (false, "[write_file] plan write denied by tools policy".into(), None);
+                }
+                return match crate::studio_role_policy::write_planner_plan(args, workspace_root) {
+                    Ok(path) => {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path,
+                            "workspace:/CODE_STUDIO_PLAN.md", &path).await;
+                        (true, "[write_file workspace:/CODE_STUDIO_PLAN.md] saved (disk).".into(), None)
+                    }
+                    Err(reason) => (false, reason, None),
+                };
+            }
             let code_only = matches!(tool_name, "write_code");
             let usage_tag = if code_only { "write_code" } else { "write_file" };
             let Some((path_str, content)) = parse_write_file_request(args) else {
