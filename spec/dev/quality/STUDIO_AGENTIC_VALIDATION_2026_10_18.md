@@ -30,3 +30,11 @@ Le modèle de `agentic-real.mjs` est une **fixture déterministe de protocole**,
 Aucun runner GPU n'est configuré : CUDA non exécuté. L'utilisateur a explicitement autorisé la fusion après contrôles CPU et parcours réels ; une CI GPU en attente n'est pas une validation GPU. Les contrôles CPU GitHub doivent être vérifiés sur les SHA publiés avant fusion.
 
 LSP exige des serveurs préinstallés et autorisés (TypeScript 5.6.3 utilisé dans le parcours), MCP est testé en stdio, livraison sur GitHub.com, aucun DAP ni sandbox système supplémentaire livré.
+
+## Corrections de revue et seconde validation
+
+394 tests daemon réussis (1 test PTY historique ignoré), 101 tests des bibliothèques et 23 parcours réels après traitement des revues automatiques. Les nouveaux scénarios couvrent les critères d'acceptation indépendants, l'absence d'accès PTY depuis les routes globales, le profil MCP et son budget après erreur de schéma, le retour à une URL autorisée, les destinations avec espaces, les fichiers ignorés dans un commit et une attente humaine au plafond de tours suivie d'un crash/reprise.
+
+Correctifs supplémentaires : rollback conditionnel du résultat lors d'une reprise en file d'attente, garde d'activité jusqu'à la fin de l'agrégation, résultat structuré en timeout, absence de croissance récursive du contexte de reprise, diagnostic de démarrage impossible, filtrage des appels JSON dans le raisonnement, contrats mixtes legacy/JSON, erreurs LSP applicatives sans tuer le serveur, synchronisation incrémentale et diagnostics en attente dans l'enveloppe normale. Les règles/skills du manifeste utilisent le worktree persisté de la tâche ; les profils explicites restent stricts, y compris Kanban.
+
+La recette avec **Devstral via l'API OpenAI compatible d'Ollama** réussit sur le binaire corrigé (une écriture, contenu exact et diff vérifiés). Qwen a réussi un premier essai puis bouclé lors d'une répétition ; Qwen et LFM2 via le transport texte Ollama ne sont pas considérés fiables. #179 reste ouvert pour ces compatibilités et aucun échec modèle n'est effacé du rapport.
