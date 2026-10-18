@@ -220,7 +220,7 @@ pub(crate) fn prompt(policy: &ToolsPolicy, agent: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ; ");
-    format!("{list}\nStudio tool contract v1: prefer native studio_call or a single TOOL_JSON: {{\"schema_version\":1,\"operation_id\":\"UUID\",\"tool\":\"read_file\",\"arguments\":{{\"path\":\"workspace:/src/main.ts\"}}}} line. Files: path/content/expected_version (SHA-256 from read_file; missing for creation); edit_file also start_line/end_line. Commands: program,args,cwd. MCP: its native argument object. Other tools: argv array. Legacy TOOL remains supported, but existing files must be read before mutation; stale reads are refused. Reuse an operation_id only for the identical completed operation; never replay an unknown result.")
+    format!("{list}\nStudio tool contract v1: prefer native studio_call or a single TOOL_JSON: {{\"schema_version\":1,\"operation_id\":\"UUID\",\"tool\":\"read_file\",\"arguments\":{{\"path\":\"workspace:/src/main.ts\"}}}} line. Files: path/content/expected_version (SHA-256 from read_file; missing for creation); edit_file also start_line/end_line. Commands: program,args,cwd. LSP query, delivery and MCP: their documented JSON argument object. Remaining tools: argv array. Legacy TOOL remains supported, but existing files must be read before mutation; stale reads are refused. Reuse an operation_id only for the identical completed operation; never replay an unknown result.")
 }
 
 pub(crate) fn check(policy: &ToolsPolicy, agent: &str, name: &str) -> Result<(), String> {

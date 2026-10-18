@@ -290,7 +290,7 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
 }
 
 pub(crate) fn native_definition(names: Vec<String>) -> Value {
-    json!({"type":"function","function":{"name":"studio_call","description":"Execute one versioned Studio tool. Reuse an operation_id only to retrieve the same operation result. Files use path/content/expected_version; commands use program/args/cwd; other tools use argv. Read a file before editing it. Creation requires expected_version=missing.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","operation_id","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"operation_id":{"type":"string","format":"uuid"},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}}}}})
+    json!({"type":"function","function":{"name":"studio_call","description":"Execute one versioned Studio tool. Reuse an operation_id only to retrieve the same operation result. Files use path/content/expected_version; commands use program/args/cwd. LSP query, delivery and MCP tools take their documented JSON object directly; remaining tools use argv. Read a file before editing it. Creation requires expected_version=missing.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","operation_id","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"operation_id":{"type":"string","format":"uuid"},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}}}}})
 }
 
 pub(crate) fn is_file_mutation(tool: &str) -> bool {
