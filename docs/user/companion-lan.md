@@ -105,7 +105,7 @@ Si `AKASHA_COMPANION_PAIR_SECRET` est **vide**, l’appairage est **ouvert** sur
 - `tasks.active` (tâches pending / queued / running / waiting user input)
 - `presence_mode` : `hands_free` si VAD effectif, sinon `ptt`
 - `vad_enabled`, bloc `presence` (paramètres + `quiet_now`)
-- `notify.unread` (toujours **0** dans l’implémentation actuelle), `avatar_hint` (`idle` ou `notify` si unread > 0)
+- bloc `notify` : `available` (même stockage que `/api/notifications`), `unread` (nombre de notifications daemon non lues), `headline` (`null` si `unread` = 0, sinon le **titre** de la plus récente non lue — jamais le corps — tronqué à 120 caractères) ; `avatar_hint` (`idle` ou `notify` si `unread` > 0)
 
 ```bash
 curl -sS "$DAEMON/api/companion/snapshot"
@@ -160,7 +160,7 @@ Commandes utiles : `akasha doctor`, page **Dépannage** de cette documentation.
 ## Limites connues (état du code)
 
 - **Aucun firmware ESP32 / avatar** n’est fourni avec Akasha ; seules les APIs daemon et la découverte UDP sont implémentées.
-- **`notify.unread`** et **`notify.headline`** dans le snapshot sont des placeholders (non alimentés).
+- Si le stockage des notifications est indisponible, `notify.available` vaut `false`, `notify.unread` reste **0** et `notify.headline` est `null`.
 - La découverte UDP ne transmet pas d’adresse IP : le client utilise l’IP source du datagramme de réponse ou une IP configurée manuellement.
 - Les routes **`/api/voice/*`** ne font pas partie du préfixe `/api/companion` ; un client voix doit les appeler séparément si besoin.
 - Spécification produit Companion complète : **à venir ([#174](https://github.com/azerothl/Akasha/issues/174))** ; le registre `spec/feature_evolution_tracking.md` distingue **Companion LAN** (API) et **matériel ESP32** (Planned).
