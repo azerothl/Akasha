@@ -113,7 +113,17 @@ pub(crate) async fn run_message_via_llm(
     incognito: bool,
 ) {
     let _active_execution=match crate::studio_recovery::ActiveRun::enter(task_id){Ok(guard)=>guard,Err(error)=>{tracing::warn!(%task_id,%error,"Duplicate task execution refused");return;}};
-    let started=TaskStore::open(&store_path).ok().and_then(|store|store.transition_if(task_id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running],TaskStatus::Running).ok()).unwrap_or(false);
+    let started=match TaskStore::open(&store_path).and_then(|store|store.transition_if(task_id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running],TaskStatus::Running)) {
+        Ok(started)=>started,
+        Err(error)=>{
+            let reason=format!("Cannot start task execution: {error}");
+            let outcome=serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":"failed","reason":reason,"status":"failed","verification":[],"acceptance_verified":false});
+            let persisted=TaskStore::open(&store_path).and_then(|store|store.finalize_outcome(task_id,TaskStatus::Failed,outcome.clone())).is_ok();
+            tracing::error!(%task_id,%error,persisted,"Task start persistence failed");
+            let _=bus.send(EventEnvelope::new(EventType::TaskFailed,Some(serde_json::json!({"task_id":task_id,"reason":reason,"outcome":outcome,"persisted":persisted}))).with_correlation(task_id));
+            notify_task_completion(&task_completion_registry,task_id).await;return;
+        }
+    };
     if !started {notify_task_completion(&task_completion_registry,task_id).await;return;}
 
     let _ = bus.send(
@@ -1470,9 +1480,11 @@ pub(crate) async fn run_message_via_llm(
                 max_tool_rounds = floor;
             }
         }
+        let mut resume_overlay=String::new();
         if let Some(checkpoint)=recovery_checkpoint.as_ref(){
             let ledger=match crate::studio_tool_contract::recovery_summary(&store_path,task_id){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
-            current_prompt=format!("[Historical checkpoint — apply CURRENT system/rules/permissions; do not replay operations]\n{}\n[Recorded operation results; unknown effects require operator resolution]\n{}\n[Pending human input at interruption: {}. Ask again; no old approval is restored.]\n[CURRENT task instructions]\n{}",checkpoint.prompt,ledger,checkpoint.waiting.as_ref().map(|v|v.to_string()).unwrap_or_else(||"none".into()),current_prompt);
+            resume_overlay=format!("[Resumed execution — apply CURRENT system/rules/permissions; do not replay operations]\n[Recorded operation results; unknown effects require operator resolution]\n{}\n[Pending human input at interruption: {}. Ask again; no old approval is restored.]\n[CURRENT task instructions]\n{}\n[Saved execution state]\n",ledger,checkpoint.waiting.as_ref().map(|v|v.to_string()).unwrap_or_else(||"none".into()),current_prompt);
+            current_prompt=checkpoint.prompt.clone();
             run_outcome=checkpoint.outcome.clone();run_outcome.termination=TerminationReason::Success;
         }
         let mut round = recovery_checkpoint.as_ref().map(|checkpoint|checkpoint.round).unwrap_or(0);
@@ -1529,10 +1541,14 @@ pub(crate) async fn run_message_via_llm(
                 }
             });
 
-        let mut resumed_limit_wait = recovery_checkpoint.as_ref().and_then(|c|c.waiting.as_ref()).filter(|v|v["tool_round_limit"] == true).cloned();
+        let mut resumed_limit_wait = recovery_checkpoint.as_ref().and_then(|checkpoint| {
+            checkpoint.waiting.as_ref().filter(|v|v["tool_round_limit"]==true).cloned()
+                .or_else(||(checkpoint.round>=max_tool_rounds).then(||serde_json::json!({"tool_round_limit":true,"max_tool_rounds":max_tool_rounds})))
+        });
         'tool_rounds: loop {
             if let Some(waiting) = resumed_limit_wait.take() {
                 max_tool_rounds = waiting["max_tool_rounds"].as_u64().map(|v|v as u32).unwrap_or(max_tool_rounds);
+                if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",waiting) {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
                 match studio_round_limit_choice(&human_input_store, &bus, task_id, round, max_tool_rounds).await.as_deref() {
                     Some("Continuer (+10 tours)") => max_tool_rounds = round.max(max_tool_rounds).saturating_add(10),
                     Some("Réinitialiser et continuer (+10 tours)") => { round=0; max_tool_rounds=max_tool_rounds.saturating_add(10); }
@@ -1684,9 +1700,9 @@ pub(crate) async fn run_message_via_llm(
             }else{None};
             let request = CompletionRequest {
                 prompt: if code_studio_disk_task && round > 0 {
-                    format!("{}\n\n{}", tool_instruction, current_prompt)
+                    format!("{}\n\n{}{}", tool_instruction, resume_overlay, current_prompt)
                 } else {
-                    format!("{}{}", current_prompt, tool_instruction)
+                    format!("{}{}{}", resume_overlay, current_prompt, tool_instruction)
                 },
                 max_tokens: Some(completion_max_tokens),
                 temperature: Some(completion_temperature),
