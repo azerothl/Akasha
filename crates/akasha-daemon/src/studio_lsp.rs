@@ -46,6 +46,23 @@ pub(crate) struct Query {
 fn hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
+fn canonical_document_uri(uri: &str) -> Option<PathBuf> {
+    url::Url::parse(uri).ok()?.to_file_path().ok()?.canonicalize().ok()
+}
+
+#[cfg(test)]
+mod uri_tests {
+    #[test]
+    fn alternate_uri_spelling_matches_the_open_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("space name.ts");
+        std::fs::write(&path, "const value = 1;").unwrap();
+        let uri = url::Url::from_file_path(&path).unwrap().to_string();
+        let alternate = if cfg!(windows) { uri.replace("C:", "c%3A").replace("E:", "e%3A") } else { uri.replace("space", "%73pace") };
+        assert_eq!(super::canonical_document_uri(&uri), super::canonical_document_uri(&alternate));
+        assert!(super::canonical_document_uri(&alternate).is_some());
+    }
+}
 fn read_text(path: &Path) -> Result<String, String> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)
@@ -190,6 +207,13 @@ async fn receive(reader: &mut BufReader<tokio::process::ChildStdout>) -> Result<
     serde_json::from_slice(&bytes).map_err(|_| "invalid LSP response JSON".into())
 }
 impl Session {
+    // Servers may percent-encode the drive colon and lowercase its letter on
+    // Windows. Match the actual file, rather than requiring identical URI text.
+    fn document_key(&self, uri: &str) -> Option<String> {
+        if self.documents.contains_key(uri) { return Some(uri.to_owned()); }
+        let path = canonical_document_uri(uri)?;
+        self.documents.keys().find(|key| canonical_document_uri(key).as_ref() == Some(&path)).cloned()
+    }
     async fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
         send(
             &mut self.stdin,
@@ -200,7 +224,8 @@ impl Session {
     async fn incoming(&mut self, message: Value) -> Result<Option<Value>, String> {
         if message["method"] == "textDocument/publishDiagnostics" {
             if let Some(uri) = message.pointer("/params/uri").and_then(Value::as_str) {
-                if let Some(document) = self.documents.get(uri) {
+                if let Some(key) = self.document_key(uri) {
+                    let document = &self.documents[&key];
                     let version = message.pointer("/params/version").and_then(Value::as_i64);
                     if version.is_none_or(|version| version == i64::from(document.version)) {
                         if let Some(list) = message
@@ -208,7 +233,7 @@ impl Session {
                             .and_then(Value::as_array)
                         {
                             self.diagnostics.insert(
-                                uri.into(),
+                                key,
                                 json!(list.iter().take(200).cloned().collect::<Vec<_>>()),
                             );
                         }
@@ -702,9 +727,7 @@ fn prepare_plan(
                 .as_str()
                 .ok_or("LSP textDocument URI missing")?;
             if let Some(version) = document["version"].as_i64() {
-                if session
-                    .documents
-                    .get(uri)
+                if session.document_key(uri).and_then(|key|session.documents.get(&key))
                     .is_none_or(|doc| i64::from(doc.version) != version)
                 {
                     return Err("LSP edit document version is stale".into());
@@ -731,9 +754,7 @@ fn prepare_plan(
         }
         let path = uri_path(root, &uri, policy, false)?;
         let before = read_text(&path)?;
-        if session
-            .documents
-            .get(&uri)
+        if session.document_key(&uri).and_then(|key|session.documents.get(&key))
             .is_some_and(|doc| doc.text != before)
         {
             return Err("Save all affected buffers before rename".into());
