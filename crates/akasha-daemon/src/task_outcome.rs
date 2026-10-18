@@ -1,7 +1,7 @@
 //! Explicit termination is independent of the prose returned by a model.
-use serde::Serialize;
+use serde::{Serialize,Deserialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TerminationReason {
     #[default]
@@ -16,7 +16,7 @@ pub(crate) enum TerminationReason {
     ContextUnavailable,
 }
 
-#[derive(Default)]
+#[derive(Default,Clone,Serialize,Deserialize)]
 pub(crate) struct RunOutcome {
     pub termination: TerminationReason,
     pub successful_tool_calls: u32,

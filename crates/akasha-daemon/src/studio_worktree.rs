@@ -392,6 +392,15 @@ pub async fn register_worktree(registry: &StudioWorktreeRegistry, state: StudioW
     registry.write().await.insert(state.task_id, state);
 }
 
+pub(crate) async fn restore_for_resume(data_dir:&Path,registry:&StudioWorktreeRegistry,task:Uuid,project:&str)->Result<Option<StudioWorktreeState>,String>{
+    let record=with_registry_read(data_dir,|records|records.iter().find(|record|record.task_id==task.to_string()).cloned());
+    let Some(record)=record else{return Ok(None);};
+    if record.project_id!=project || !matches!(record.lifecycle_state.as_str(),"active"|"awaiting_review"|"needs_user_resolution"){return Err("persisted worktree is not resumable".into());}
+    let state=state_from_record(data_dir,&record)?;
+    if !state.worktree_path.is_dir(){return Err("persisted worktree no longer exists".into());}
+    registry.write().await.insert(task,state.clone());Ok(Some(state))
+}
+
 pub async fn get_worktree_for_task(
     registry: &StudioWorktreeRegistry,
     task_id: Uuid,

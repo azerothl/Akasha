@@ -380,6 +380,16 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Conditional transitions preserve a concurrent cancellation or pause.
+    pub fn transition_if(&self,id:Uuid,expected:&[TaskStatus],status:TaskStatus)->anyhow::Result<bool>{
+        if expected.is_empty(){return Ok(false);}
+        let mut values=vec![status.as_str().to_string(),Utc::now().to_rfc3339(),id.to_string()];
+        values.extend(expected.iter().map(|value|value.as_str().to_string()));
+        let slots=(4..4+expected.len()).map(|n|format!("?{n}")).collect::<Vec<_>>().join(",");
+        let changed=self.conn.execute(&format!("UPDATE tasks SET status=?1,updated_at=?2,outcome_json=CASE WHEN ?1='running' THEN NULL ELSE outcome_json END WHERE id=?3 AND status IN ({slots})"),rusqlite::params_from_iter(values))?;
+        Ok(changed==1)
+    }
+
     /// Commit status and outcome together. A concurrent stop/watchdog failure wins over completion.
     pub fn finalize_outcome(
         &self, id: Uuid, proposed: TaskStatus, mut outcome: serde_json::Value,

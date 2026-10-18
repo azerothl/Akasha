@@ -93,9 +93,10 @@ pub(crate) async fn run_message_via_llm(
     studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
     incognito: bool,
 ) {
-    if let Ok(store) = TaskStore::open(&store_path) {
-        let _ = store.update_status(task_id, TaskStatus::Running);
-    }
+    let _active_execution=match crate::studio_recovery::ActiveRun::enter(task_id){Ok(guard)=>guard,Err(error)=>{tracing::warn!(%task_id,%error,"Duplicate task execution refused");return;}};
+    let started=TaskStore::open(&store_path).ok().and_then(|store|store.transition_if(task_id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running],TaskStatus::Running).ok()).unwrap_or(false);
+    if !started {notify_task_completion(&task_completion_registry,task_id).await;return;}
+
     let _ = bus.send(
         EventEnvelope::new(
             EventType::ProgressUpdate,
@@ -137,6 +138,24 @@ pub(crate) async fn run_message_via_llm(
         crate::api_studio::strip_embedded_acceptance_json(&message);
     let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
     let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+    macro_rules! abort_recovery {($reason:expr)=>{{
+        let reason=$reason.to_string();
+        if let Ok(store)=TaskStore::open(&store_path){let _=store.finalize_outcome(task_id,TaskStatus::Failed,serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":"failed","reason":reason,"verification":[],"acceptance_verified":false}));}
+        let _=bus.send(EventEnvelope::new(EventType::TaskFailed,Some(serde_json::json!({"task_id":task_id,"reason":reason}))).with_correlation(task_id));
+        cancel_task_watchdogs(&mut watchdog_cancel,&mut stall_cancel);notify_task_completion(&task_completion_registry,task_id).await;return;
+    }}}
+    let recovery_checkpoint=match crate::studio_recovery::load(&store_path,task_id,true){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
+    if let Some(checkpoint)=recovery_checkpoint.as_ref(){
+        let root=match crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags,&checkpoint.project_id).and_then(|path|path.canonicalize().map_err(|e|e.to_string())){Ok(path)=>path,Err(error)=>{abort_recovery!(error);}};
+        if !crate::studio::is_strictly_under_studio_root(&root,&crate::studio::studio_projects_base(data_dir_for_studio_flags)){abort_recovery!("Recorded project escapes Studio project storage");}
+        let expected=match checkpoint.workspace.canonicalize(){Ok(path)=>path,Err(error)=>{abort_recovery!(error);}};
+        if expected!=root {
+            match crate::studio_worktree::restore_for_resume(data_dir_for_studio_flags,&studio_worktree_registry,task_id,&checkpoint.project_id).await {
+                Ok(Some(state)) if state.worktree_path.canonicalize().ok().as_ref()==Some(&expected)=>{},
+                _=>{abort_recovery!("Cannot restore the recorded task worktree; project-root fallback refused");}
+            }
+        }
+    }
     let tool_disk_workspace_root: std::path::PathBuf = {
         if let Some(wt) = crate::studio_worktree::get_worktree_for_task(&studio_worktree_registry, task_id).await
         {
@@ -190,6 +209,10 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
+    if let Some(checkpoint)=recovery_checkpoint.as_ref(){
+        let project=TaskStore::open(&store_path).ok().and_then(|store|store.lineage_root_studio_project_id(task_id).ok().flatten());
+        if checkpoint.agent!=assigned_agent || project.as_deref()!=Some(&checkpoint.project_id) || checkpoint.workspace.canonicalize().ok()!=tool_disk_workspace_root.canonicalize().ok(){abort_recovery!("Checkpoint context no longer matches the task workspace, project or role");}
+    }
     let skill_registry = if code_studio_disk_task {
         match &skill_registry {
             Some(registry) => match registry.for_project(&tool_disk_workspace_root).await {
@@ -1429,7 +1452,12 @@ pub(crate) async fn run_message_via_llm(
                 max_tool_rounds = floor;
             }
         }
-        let mut round = 0u32;
+        if let Some(checkpoint)=recovery_checkpoint.as_ref(){
+            let ledger=match crate::studio_tool_contract::recovery_summary(&store_path,task_id){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
+            current_prompt=format!("[Historical checkpoint — apply CURRENT system/rules/permissions; do not replay operations]\n{}\n[Recorded operation results; unknown effects require operator resolution]\n{}\n[Pending human input at interruption: {}. Ask again; no old approval is restored.]\n[CURRENT task instructions]\n{}",checkpoint.prompt,ledger,checkpoint.waiting.as_ref().map(|v|v.to_string()).unwrap_or_else(||"none".into()),current_prompt);
+            run_outcome=checkpoint.outcome.clone();run_outcome.termination=TerminationReason::Success;
+        }
+        let mut round = recovery_checkpoint.as_ref().map(|checkpoint|checkpoint.round).unwrap_or(0);
         // Tours d'affilée avec uniquement des outils d'exploration (Code Studio).
         let mut studio_read_only_streak_rounds: u32 = 0;
         let mut social_snapshot_seen = false;
@@ -1617,6 +1645,13 @@ pub(crate) async fn run_message_via_llm(
                     );
                 }
             }
+            if code_studio_disk_task {
+                let project=TaskStore::open(&store_path).ok().and_then(|store|store.lineage_root_studio_project_id(task_id).ok().flatten());
+                let Some(project_id)=project else {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text="Studio project identity unavailable at checkpoint".into();break 'tool_rounds;};
+                let checkpoint=crate::studio_recovery::Checkpoint{schema_version:1,task_id,project_id,workspace:tool_disk_workspace_root.clone(),agent:assigned_agent.clone(),session_id:session_id.clone(),preferred_task_type:preferred_task_type_override.clone(),incognito,round,prompt:current_prompt.clone(),phase:"before_model".into(),waiting:None,outcome:run_outcome.clone()};
+                if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
+            }
+            if round>=max_tool_rounds {run_outcome.termination=TerminationReason::ToolRoundLimit;reply_text="Tool round budget already exhausted at checkpoint; start a new scoped task to continue.".into();break 'tool_rounds;}
             let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
                 tools_executor_snapshot.as_ref().map(|exec|vec![crate::studio_tool_contract::native_definition(crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect())])
             }else{None};
@@ -2502,6 +2537,7 @@ pub(crate) async fn run_message_via_llm(
                                             approval_request_id, task_id, effective_role_tool, err
                                         );
                                     }
+                                    if code_studio_disk_task {if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":actual_tool,"question":question,"choices":choices})){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
                                         question: question.clone(),
@@ -2666,6 +2702,9 @@ pub(crate) async fn run_message_via_llm(
                             )
                             .with_correlation(timeline_correlation),
                         );
+                        let workflow_operation=if code_studio_disk_task && matches!(actual_tool.as_str(),"delegate_to_agent"|"install_skill"|"uninstall_skill"|"write_todos"|"merge_todos"|"update_todo") {
+                            match crate::studio_tool_contract::WorkflowOperation::begin(&store_path,task_id,&actual_tool,tool_args){Ok(operation)=>Some(operation),Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(error);continue;}}
+                        }else{None};
                         let (success, res, captured_image): (bool, String, Option<String>) =
                             if actual_tool == "ask_user" {
                                 // Human in the loop: register pending request, emit event, wait for user reply.
@@ -2701,6 +2740,7 @@ pub(crate) async fn run_message_via_llm(
                                         if question.is_empty() {
                                             (false, format!("[ask_user] invalid JSON: question required. Got: {}", body.chars().take(100).collect::<String>()), None)
                                         } else {
+                                            if code_studio_disk_task {if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":"ask_user","question":question,"choices":choices})){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                             let (tx, rx) = tokio::sync::oneshot::channel();
                                             let pending = PendingHumanInput {
                                                 question: question.clone(),
@@ -3132,6 +3172,7 @@ pub(crate) async fn run_message_via_llm(
                                 )
                                 .await
                             };
+                        if let Some(operation)=workflow_operation {if let Err(error)=operation.finish(success,&res){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Workflow result unknown: {error}");break 'tool_rounds;}}
                         if success { run_outcome.successful_tool_calls += 1; } else { run_outcome.failed_tool_calls += 1; }
                         if matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container") {
                             run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
@@ -3398,6 +3439,9 @@ pub(crate) async fn run_message_via_llm(
                 };
                 if let Some(nudge) = studio_readonly_nudge {
                     current_prompt = format!("{nudge}\n\n{current_prompt}");
+                }
+                if code_studio_disk_task {
+                    if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.round=round;checkpoint.prompt=current_prompt.clone();checkpoint.phase="after_tools".into();checkpoint.waiting=None;checkpoint.outcome=run_outcome.clone();if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                 }
                 if round >= max_tool_rounds {
                     let response_for_user = response
@@ -4380,6 +4424,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     } else {
         EventType::TaskCompleted
     };
+    if code_studio_disk_task {if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.phase=final_status.as_str().into();checkpoint.outcome=run_outcome.clone();let _=crate::studio_recovery::save(&store_path,&checkpoint);}}
     let final_status_str = final_status.as_str();
 
     let mut final_payload = serde_json::json!({
