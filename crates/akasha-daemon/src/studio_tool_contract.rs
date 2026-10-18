@@ -154,7 +154,9 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
             argv.extend(arg.args);
             argv
         }
-        name if name.starts_with("mcp_") => vec![envelope.arguments.to_string()],
+        name if name.starts_with("mcp_") || name == "lsp_query" => {
+            vec![envelope.arguments.to_string()]
+        }
         _ => {
             let arg: Argv = serde_json::from_value(envelope.arguments.clone())
                 .map_err(|_| "this tool requires {argv:[string,...]}")?;
@@ -198,6 +200,10 @@ pub(crate) fn supports_typed(tool: &str) -> bool {
 }
 
 pub(crate) fn argument_schema(tool: &str) -> Value {
+    if tool == "lsp_query" {
+        return json!({"type":"object","additionalProperties":false,"required":["action","path"],"properties":{"action":{"type":"string","enum":["diagnostics","definition","references","rename"]},"path":{"type":"string","minLength":1},"position":{"type":"object","required":["line","character"],"additionalProperties":false,"properties":{"line":{"type":"integer","minimum":0},"character":{"type":"integer","minimum":0}}},"new_name":{"type":"string","maxLength":256},"text":{"type":"string"}}});
+    }
+
     if matches!(
         tool,
         "read_file" | "write_file" | "write_code" | "edit_file" | "apply_patch" | "delete_file"
@@ -303,6 +309,21 @@ fn version(path: &Path) -> Result<String, String> {
     }
 }
 
+pub(crate) async fn workspace_guard(
+    root: &Path,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let lock = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "workspace operation lock unavailable")?
+        .entry(root)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    Ok(lock.lock_owned().await)
+}
+
 pub(crate) struct Operation {
     db: PathBuf,
     task: Uuid,
@@ -323,17 +344,8 @@ impl Operation {
         policy: &akasha_tools::ToolsPolicy,
         typed: Option<&Decoded>,
     ) -> Result<Self, String> {
-        static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
-            OnceLock::new();
         let canonical = root.canonicalize().map_err(|e| e.to_string())?;
-        let lock = LOCKS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .map_err(|_| "workspace operation lock unavailable")?
-            .entry(canonical.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let lock = lock.lock_owned().await;
+        let lock = workspace_guard(&canonical).await?;
         let id = typed
             .map(|t| t.envelope.operation_id)
             .unwrap_or_else(Uuid::new_v4);
@@ -387,6 +399,7 @@ impl Operation {
         let inspection = matches!(
             tool,
             "read_file"
+                | "lsp_query"
                 | "list_dir"
                 | "search_files"
                 | "grep_content"

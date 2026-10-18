@@ -813,7 +813,7 @@ pub(crate) fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String
             let rest = rest.trim();
             // Preserve the MCP JSON object verbatim; shell-style quote splitting changes its keys/values.
             if let Some((name, json)) = rest.split_once(char::is_whitespace) {
-                if name.starts_with("mcp_") && tool_name_is_safe_identifier(name) {
+                if (name.starts_with("mcp_") || name=="lsp_query") && tool_name_is_safe_identifier(name) {
                     out.push((name.to_string(), vec![json.trim().to_string()]));
                     i += 1;
                     continue;

@@ -133,6 +133,11 @@ pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<Stud
             notes.push("preflight:no_allowed_command".into());
         }
     }
+    if matches!(name,"lsp_query"|"lsp_apply_rename") {
+        prerequisites.push("language_server_preinstalled_and_allowed_for_requested_language".into());
+        notes.push("LSP: TypeScript/JavaScript, Rust, Python; server capability checked at invocation".into());
+        if name=="lsp_query" && !["rust-analyzer","typescript-language-server","pyright-langserver"].iter().any(|program|policy.can_run_command(program)&&executable_available(program)){runnable=false;notes.push("preflight:no_lsp_server_available_or_allowed".into());}
+    }
     if name == "terminal_session" {
         prerequisites.push("authorized_interactive_executable_and_project_cwd".into());
         if policy.allowed_commands.is_empty() {

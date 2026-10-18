@@ -162,7 +162,7 @@ impl ToolsPolicy {
         {
             return true;
         }
-        ((name == "terminal_session") && self.require_approval.iter().any(|a|a.trim().eq_ignore_ascii_case("run_command"))) || name == "write_code"
+        ((name == "terminal_session") && self.require_approval.iter().any(|a|a.trim().eq_ignore_ascii_case("run_command"))) || matches!(name.as_str(),"write_code"|"lsp_apply_rename")
             && self
                 .require_approval
                 .iter()

@@ -1348,6 +1348,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("merge_todos", "merge_todos <payload> — ajoute des étapes (même format que write_todos) sans supprimer les existantes ; titres déjà présents ignorés (casse insensible)."),
     ("read_todos", "read_todos — retourne la liste des étapes (todos) de la tâche courante."),
     ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
+    ("lsp_query", "lsp_query <JSON {action:diagnostics|definition|references|rename,path,position:{line,character},new_name?,text?}> — serveur LSP préinstallé et autorisé ; positions UTF-16 à base zéro. Rename prépare un plan sans modifier le dépôt."),
+    ("lsp_apply_rename", "lsp_apply_rename <plan_uuid> — appliquer un plan LSP de cette tâche, versions et politique contrôlées ; inspecter le plan avant appel."),
     ("list_tools", "list_tools [name] — current task capabilities: permissions, availability, argument schemas. Refresh after MCP or policy changes."),
     ("list_skills", "list_skills — retourne la liste des skills installés (nom et description). Utiliser avant read_skill pour charger le détail d'un skill."),
     ("search_skills_catalog", "search_skills_catalog <query> [max] — rechercher dans la galerie Akasha_skills (skills.json distant)"),
@@ -1376,6 +1378,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
 /// `delegate_to_agent` n’est ajouté que pour `studio_project_manager` et seulement si la politique l’autorise.
 pub(crate) fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent: &str) -> Vec<String> {
     const STUDIO: &[&str] = &[
+        "lsp_query",
+        "lsp_apply_rename",
         "list_tools",
         "browser",
         "terminal_session",
@@ -5507,6 +5511,7 @@ pub async fn handle_api(
         path: path_only.to_string(),
     };
     crate::lifecycle_hooks::run_http_request_pre_hooks(data_dir, method, path_only).await;
+    if let Some(response)=crate::studio_lsp::route(method,path_only,body.as_deref(),data_dir,tools_executor).await{return response;}
     if let Some(response)=crate::studio_recovery::route(method,path_only,body.as_deref(),store_path){return response;}
     if let Some(response) = crate::studio_observation::handle_route(method, path_only, query_str, body.as_deref(), data_dir, tools_executor).await {
         return response;
