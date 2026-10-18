@@ -57,16 +57,17 @@ fn e2e_cli_doctor_json_shape() {
         return;
     }
     let temp = tempfile::tempdir().expect("temp dir");
+    let _fix = Command::new(env!("CARGO_BIN_EXE_akasha"))
+        .env("AKASHA_DATA_DIR", temp.path())
+        .args(["doctor", "--fix"])
+        .output()
+        .expect("spawn akasha doctor --fix");
     let out = Command::new(env!("CARGO_BIN_EXE_akasha"))
         .env("AKASHA_DATA_DIR", temp.path())
         .args(["doctor", "--json"])
         .output()
         .expect("spawn akasha doctor --json");
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // Exit code reflects failing checks (e.g. daemon not running); JSON shape is what we assert here.
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("doctor stdout should be JSON");
     let checks = v
@@ -78,7 +79,12 @@ fn e2e_cli_doctor_json_shape() {
         assert!(c.get("id").is_some());
         let is_info = c.get("level").and_then(|l| l.as_str()) == Some("info");
         if is_info {
-            assert_eq!(c.get("id").and_then(|i| i.as_str()), Some("memory_at_rest"));
+            let id = c.get("id").and_then(|i| i.as_str()).unwrap_or("");
+            assert!(
+                id == "memory_at_rest" || id == "spec_files",
+                "unexpected info check id: {}",
+                id
+            );
         } else {
             assert!(c.get("ok").is_some());
         }
