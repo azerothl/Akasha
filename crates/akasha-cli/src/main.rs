@@ -2062,7 +2062,7 @@ fn cmd_paths() -> anyhow::Result<()> {
     println!("    spec_dir              : {}{}", spec_path.display(), note);
     println!("    llm_router.yaml      : cherché d'abord dans data_dir, puis dans <spec_dir>/../llm_router.yaml");
     println!();
-    println!("  Par défaut : data_dir = ~/akasha (Linux/macOS) ou %%USERPROFILE%%\\akasha (Windows), sauf si AKASHA_DATA_DIR est défini.");
+    println!("  Par défaut : data_dir = ~/akasha (Linux/macOS) ou %USERPROFILE%\\akasha (Windows), sauf si AKASHA_DATA_DIR est défini.");
     println!();
     println!("  Pour utiliser la même config sous WSL que sous Windows, définir par exemple :");
     println!("    export AKASHA_DATA_DIR=/mnt/c/Users/VOTRE_USER/akasha");
