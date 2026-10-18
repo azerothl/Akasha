@@ -1,5 +1,7 @@
 # Validation réelle Studio — 18 octobre 2026
 
+> **Mise à jour #158 / #179 :** voir [la campagne finale de reprise et des modèles](https://github.com/azerothl/Akasha-code-studio/blob/codex/studio-semantic-delivery/docs/validation/agentic-recovery-models-2026-10-18.md). REC-01 à REC-09 sont exécutées, dont approbation interrompue, worktree déplacé, annulation concurrente, pause de commande, révocation de politique et délégation interrompue. 515 tests Rust, 21 unitaires UI, 32 Playwright et 38 parcours techniques réussis. Recettes LLM finales : Qwen 6/6, Devstral 3/6, LFM2 1/6 ; #179 reste bloquant. Les 12 PR restent ouvertes. Les résultats antérieurs ci-dessous sont historiques.
+
 Les validations postérieures à l'implémentation initiale des PR #162/#164/#166–#170 sont publiées dans [le rapport Code Studio](https://github.com/azerothl/Akasha-code-studio/blob/codex/studio-semantic-delivery/docs/validation/agentic-real-2026-10-18.md), avec le script reproductible `integration/agentic-real.mjs`, les rapports compacts et les captures.
 
 ## Résultats observés
@@ -23,7 +25,7 @@ Le modèle de `agentic-real.mjs` est une **fixture déterministe de protocole**,
 
 ## Limites et tickets conservés
 
-**#158 reste ouvert** : REC-04 à REC-09 doivent encore être exécutés par arrêt réel (attente humaine, worktree disparu, annulation/pause concurrentes, politique changée, délégation interrompue). Les tests unitaires ne remplacent pas ces recettes. Les racines de pipeline sans checkpoint Studio et les sessions PTY/navigateur/images en mémoire ne sont pas restaurées.
+**#158 reste ouvert jusqu’à intégration** : les validations manquantes REC-04 à REC-09 sont désormais exécutées dans la campagne finale liée en tête. Les corrections complémentaires sont dans #170 et Code Studio #35. Les racines de pipeline sans checkpoint Studio et les sessions PTY/navigateur/images en mémoire ne sont pas restaurées.
 
 **#143** conserve les évaluations transverses et **#145** les frontières worktree. **#179** suit la compatibilité de conclusion des modèles Ollama observée pendant cette validation.
 

@@ -32,3 +32,9 @@ Compilation Windows `cargo check -p akasha-daemon --no-default-features --featur
 | REC-07 | Pause pendant commande longue | Reprise refusée tant que l’ancien processus de boucle est actif |
 | REC-08 | Politique modifiée pendant arrêt | Nouveau refus appliqué au prochain appel |
 | REC-09 | Délégation interrompue | Enfants conservés et visibles, effet de délégation à inspecter |
+
+### Validation Windows du 18 octobre 2026
+
+REC-01 à REC-09 sont exécutées dans [la campagne de reprise et modèles](https://github.com/azerothl/Akasha-code-studio/blob/codex/studio-semantic-delivery/docs/validation/agentic-recovery-models-2026-10-18.md), avec rapport et script reproductibles. Les cas de crash arrêtent réellement le daemon ; les courses pause/annulation utilisent les vraies API et processus. Approbation interrompue : ancien ID refusé en 409 après reprise, nouvel accord requis. Une pause/annulation libère le canal humain pour ne pas retenir le worker. Le checkpoint conserve aussi les tours de conversation et l’objectif complet, indépendamment du titre tronqué de la tâche.
+
+Les PR restent ouvertes à cause des recettes Devstral/LFM2 en échec (#179). Ces validations ne restaurent pas les sessions PTY/navigateur ou images en mémoire et ne couvrent pas les racines de pipeline sans checkpoint Studio.
