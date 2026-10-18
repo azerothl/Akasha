@@ -1,0 +1,212 @@
+# Reusable per-platform build. Windows clients are supplied once by the caller.
+name: Build release artifact
+on:
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        required: true
+      target:
+        type: string
+        required: true
+      artifact_name:
+        type: string
+        required: true
+      ext:
+        type: string
+        default: ''
+      cuda:
+        type: boolean
+        default: false
+      daemon_features:
+        type: string
+        default: embedded,embeddings-tract,embedded-baguettotron
+      clients_artifact:
+        type: string
+        default: ''
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: "0"
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Start build measurement
+        run: python scripts/ci/report_build.py start
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.target }}
+
+      - name: Cache Cargo dependencies
+        id: cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          variant: release-${{ inputs.os }}-${{ inputs.target }}-${{ inputs.artifact_name }}
+          cuda: ${{ inputs.cuda }}
+
+      - name: Download shared Windows clients
+        if: inputs.clients_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.clients_artifact }}
+          path: target/${{ inputs.target }}/release
+
+      - name: Build CLI and TUI
+        if: inputs.clients_artifact == ''
+        run: |
+          cargo build --locked --timings --release --target ${{ inputs.target }} -p akasha-cli -p akasha-tui
+
+      - name: Build daemon (Linux)
+        if: inputs.os == 'ubuntu-latest'
+        run: |
+          cargo build --locked --timings --release --target ${{ inputs.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
+
+      # macOS: ort-sys has no prebuilt binaries for x86_64-apple-darwin (and can be fragile on aarch64). Use tract backend like Windows.
+      - name: Build daemon (macOS)
+        if: inputs.os == 'macos-latest'
+        run: |
+          cargo build --locked --timings --release --target ${{ inputs.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
+
+      - name: Install CUDA toolkit (Windows CUDA artifact)
+        if: inputs.cuda == true
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.9.1'
+
+      - name: Install LLVM and CMake (Windows CUDA artifact)
+        if: inputs.cuda == true
+        run: choco install llvm cmake -y
+
+      - name: Ensure patch.exe is on PATH (Windows CUDA artifact)
+        if: inputs.cuda == true
+        shell: pwsh
+        run: |
+          $gitUsrBin = Join-Path $env:ProgramFiles 'Git\usr\bin'
+          if (Test-Path $gitUsrBin) {
+            if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $gitUsrBin })) {
+              $gitUsrBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
+
+      - name: Build daemon (Windows CUDA)
+        if: inputs.cuda == true
+        shell: pwsh
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          ./scripts/build-windows-daemon-cuda.ps1 -Target ${{ inputs.target }} -Features "${{ inputs.daemon_features }}"
+
+      - name: Build daemon (Windows)
+        if: runner.os == 'Windows' && inputs.cuda != true
+        run: |
+          cargo build --locked --timings --release --target ${{ inputs.target }} -p akasha-daemon --no-default-features --features ${{ inputs.daemon_features }}
+
+      - name: Prepare artifact (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p staging/docs staging/scripts staging/spec
+          cp target/${{ inputs.target }}/release/akasha${{ inputs.ext }} staging/
+          cp target/${{ inputs.target }}/release/akasha-daemon${{ inputs.ext }} staging/
+          cp target/${{ inputs.target }}/release/akasha-tui${{ inputs.ext }} staging/
+          cp -r docs/user staging/docs/user
+          cp docs/user_guide_final.md staging/docs/user_guide.md
+          cp spec/tools_policy.example.yaml spec/voice_router.example.yaml spec/llm_router.example.yaml spec/embedded_models.json staging/spec/
+          cp scripts/install.sh scripts/setup.sh staging/scripts/
+          mkdir -p staging/playwright-runner
+          cp -R scripts/playwright-runner/. staging/playwright-runner/
+          rm -rf staging/playwright-runner/node_modules
+          chmod +x staging/* staging/scripts/install.sh staging/scripts/setup.sh
+
+      - name: Smoke test staging layout
+        if: runner.os != 'Windows'
+        run: bash scripts/smoke-release-staging.sh staging
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging, staging\docs, staging\scripts, staging\spec | Out-Null
+          Copy-Item "target/${{ inputs.target }}/release/akasha.exe" -Destination staging/
+          Copy-Item "target/${{ inputs.target }}/release/akasha-daemon.exe" -Destination staging/
+          Copy-Item "target/${{ inputs.target }}/release/akasha-tui.exe" -Destination staging/
+          Copy-Item -Recurse docs\user -Destination staging\docs\user -Force
+          Copy-Item docs/user_guide_final.md -Destination staging/docs/user_guide.md
+          Copy-Item spec\tools_policy.example.yaml, spec\voice_router.example.yaml, spec\llm_router.example.yaml, spec\embedded_models.json -Destination staging\spec\
+          Copy-Item scripts/install.ps1 -Destination staging/scripts/
+          Copy-Item scripts/setup.ps1 -Destination staging/scripts/
+          New-Item -ItemType Directory -Force -Path staging\playwright-runner | Out-Null
+          Copy-Item -Path scripts\playwright-runner\* -Destination staging\playwright-runner\ -Recurse -Force
+          Remove-Item -Recurse -Force staging\playwright-runner\node_modules -ErrorAction SilentlyContinue
+          if ('${{ inputs.cuda }}' -eq 'true') {
+            $cudaBin = Join-Path $env:CUDA_PATH 'bin'
+            foreach ($pat in @('cudart64_*.dll', 'cublas64_*.dll', 'cublasLt64_*.dll')) {
+              Get-ChildItem -Path $cudaBin -Filter $pat | Copy-Item -Destination staging/ -Force
+            }
+            Write-Host "Bundled CUDA runtime DLLs from $cudaBin into staging/"
+          }
+
+      - name: Smoke test staging layout
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          # CUDA daemon links nvcuda.dll (GPU driver); GitHub-hosted runners have no NVIDIA GPU.
+          AKASHA_SMOKE_SKIP_DAEMON: ${{ inputs.cuda == true && '1' || '' }}
+        run: ./scripts/smoke-release-staging.ps1 staging
+
+      - name: Audit CUDA loader compatibility
+        if: inputs.cuda
+        run: python scripts/ci/audit_cuda_portability.py staging --try-start
+      - name: Upload CUDA loader evidence
+        if: always() && inputs.cuda
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: portability-${{ inputs.artifact_name }}
+          path: cpu-cuda-portability.json
+          retention-days: 14
+
+      - name: Verify shared Windows client hashes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $manifest = Get-Content "target/${{ inputs.target }}/release/windows-clients.json" -Raw | ConvertFrom-Json
+          foreach ($client in $manifest.clients) {
+            $actual = (Get-FileHash -LiteralPath (Join-Path staging $client.name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $client.sha256) { throw "Client hash mismatch: $($client.name)" }
+          }
+          Copy-Item "target/${{ inputs.target }}/release/windows-clients.json" staging/
+
+      - name: Report build/cache
+        if: always()
+        env:
+          BUILD_JOB_STATUS: ${{ job.status }}
+          BUILD_FEATURES: ${{ inputs.daemon_features }}
+        run: python scripts/ci/report_build.py finish --cache-hit '${{ steps.cache.outputs.cache-hit }}' --features "$BUILD_FEATURES"
+        shell: bash
+
+      - name: Upload build measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: metrics-${{ inputs.artifact_name }}
+          path: |
+            ci-build-report.json
+            target/cargo-timings/
+          retention-days: 14
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: ${{ inputs.artifact_name }}
+          path: staging/
+          if-no-files-found: error
+          retention-days: 7

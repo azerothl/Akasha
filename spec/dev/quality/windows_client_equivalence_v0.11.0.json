@@ -1,0 +1,102 @@
+{
+  "akasha.exe": {
+    "variants": {
+      "cpu": {
+        "sha256": "024d2d2100790115d2b4d04ef410b1d860e2e105593ab5e76079cf41bc4c8071",
+        "bytes": 8092160,
+        "load_time_dlls": [
+          "advapi32.dll",
+          "api-ms-win-core-synch-l1-2-0.dll",
+          "api-ms-win-crt-heap-l1-1-0.dll",
+          "api-ms-win-crt-locale-l1-1-0.dll",
+          "api-ms-win-crt-math-l1-1-0.dll",
+          "api-ms-win-crt-runtime-l1-1-0.dll",
+          "api-ms-win-crt-stdio-l1-1-0.dll",
+          "api-ms-win-crt-string-l1-1-0.dll",
+          "bcrypt.dll",
+          "bcryptprimitives.dll",
+          "combase.dll",
+          "kernel32.dll",
+          "ntdll.dll",
+          "shell32.dll",
+          "vcruntime140.dll",
+          "ws2_32.dll"
+        ],
+        "version_output": "akasha 0.11.0"
+      },
+      "cuda": {
+        "sha256": "942c49d70532e4636b43048bd3782205e47cb80239e53d4a2876a1597c4ffdd1",
+        "bytes": 8096256,
+        "load_time_dlls": [
+          "advapi32.dll",
+          "api-ms-win-core-synch-l1-2-0.dll",
+          "api-ms-win-crt-heap-l1-1-0.dll",
+          "api-ms-win-crt-locale-l1-1-0.dll",
+          "api-ms-win-crt-math-l1-1-0.dll",
+          "api-ms-win-crt-runtime-l1-1-0.dll",
+          "api-ms-win-crt-stdio-l1-1-0.dll",
+          "api-ms-win-crt-string-l1-1-0.dll",
+          "bcrypt.dll",
+          "bcryptprimitives.dll",
+          "combase.dll",
+          "kernel32.dll",
+          "ntdll.dll",
+          "shell32.dll",
+          "vcruntime140.dll",
+          "ws2_32.dll"
+        ],
+        "version_output": "akasha 0.11.0"
+      }
+    },
+    "identical_bytes": false
+  },
+  "akasha-tui.exe": {
+    "variants": {
+      "cpu": {
+        "sha256": "b5477b65394b973c78204736c90c03c2ba94b0250c0535ea00047ac824d66350",
+        "bytes": 5393920,
+        "load_time_dlls": [
+          "advapi32.dll",
+          "api-ms-win-core-synch-l1-2-0.dll",
+          "api-ms-win-crt-heap-l1-1-0.dll",
+          "api-ms-win-crt-locale-l1-1-0.dll",
+          "api-ms-win-crt-math-l1-1-0.dll",
+          "api-ms-win-crt-runtime-l1-1-0.dll",
+          "api-ms-win-crt-stdio-l1-1-0.dll",
+          "bcrypt.dll",
+          "bcryptprimitives.dll",
+          "kernel32.dll",
+          "ntdll.dll",
+          "ole32.dll",
+          "shell32.dll",
+          "user32.dll",
+          "vcruntime140.dll",
+          "ws2_32.dll"
+        ]
+      },
+      "cuda": {
+        "sha256": "02c5a73696e325ca6812d019b573a0a2b657ffb6d9d8ad443c6dd8677ff022be",
+        "bytes": 5394432,
+        "load_time_dlls": [
+          "advapi32.dll",
+          "api-ms-win-core-synch-l1-2-0.dll",
+          "api-ms-win-crt-heap-l1-1-0.dll",
+          "api-ms-win-crt-locale-l1-1-0.dll",
+          "api-ms-win-crt-math-l1-1-0.dll",
+          "api-ms-win-crt-runtime-l1-1-0.dll",
+          "api-ms-win-crt-stdio-l1-1-0.dll",
+          "bcrypt.dll",
+          "bcryptprimitives.dll",
+          "kernel32.dll",
+          "ntdll.dll",
+          "ole32.dll",
+          "shell32.dll",
+          "user32.dll",
+          "vcruntime140.dll",
+          "ws2_32.dll"
+        ]
+      }
+    },
+    "identical_bytes": false
+  }
+}

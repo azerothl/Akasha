@@ -1,0 +1,102 @@
+{
+  "cpu": {
+    "archive": "akasha-windows-x86_64.zip",
+    "compressed_bytes": 32288871,
+    "uncompressed_bytes": 94267578,
+    "sha256": "ef49ba83085851e1da8e2889b249964993eef64c6da19b639fed1d3b8535998d"
+  },
+  "cuda": {
+    "archive": "akasha-windows-x86_64-cuda.zip",
+    "compressed_bytes": 610456251,
+    "uncompressed_bytes": 908260026,
+    "sha256": "56369172a98e3109247bdc6631e2b347a05517c8a163fb66e243d456f24d2a75"
+  },
+  "release_run": "https://github.com/azerothl/Akasha/actions/runs/36480940401",
+  "measured_at_utc": "2026-10-18T10:38:28.203157+00:00",
+  "baseline_jobs": [
+    {
+      "name": "verify-release-version",
+      "started_at": "2026-09-28T20:41:12Z",
+      "completed_at": "2026-09-28T20:41:18Z",
+      "conclusion": "success",
+      "elapsed_seconds": 6
+    },
+    {
+      "name": "build-tauri (windows-latest, akasha-ui-windows)",
+      "started_at": "2026-09-28T20:41:21Z",
+      "completed_at": "2026-09-28T20:50:05Z",
+      "conclusion": "success",
+      "elapsed_seconds": 524
+    },
+    {
+      "name": "build (windows-2022, x86_64-pc-windows-msvc, akasha-windows-x86_64-cuda, .exe, true, embedded,emb...",
+      "started_at": "2026-09-28T20:41:20Z",
+      "completed_at": "2026-09-28T21:27:52Z",
+      "conclusion": "success",
+      "elapsed_seconds": 2792
+    },
+    {
+      "name": "build (macos-latest, x86_64-apple-darwin, akasha-macos-x86_64)",
+      "started_at": "2026-09-28T20:41:26Z",
+      "completed_at": "2026-09-28T21:04:30Z",
+      "conclusion": "success",
+      "elapsed_seconds": 1384
+    },
+    {
+      "name": "build (ubuntu-latest, x86_64-unknown-linux-gnu, akasha-linux-x86_64)",
+      "started_at": "2026-09-28T20:41:20Z",
+      "completed_at": "2026-09-28T20:58:14Z",
+      "conclusion": "success",
+      "elapsed_seconds": 1014
+    },
+    {
+      "name": "build (macos-latest, aarch64-apple-darwin, akasha-macos-aarch64)",
+      "started_at": "2026-09-28T20:41:26Z",
+      "completed_at": "2026-09-28T21:06:46Z",
+      "conclusion": "success",
+      "elapsed_seconds": 1520
+    },
+    {
+      "name": "build-tauri (ubuntu-latest, akasha-ui-linux)",
+      "started_at": "2026-09-28T20:41:21Z",
+      "completed_at": "2026-09-28T20:48:09Z",
+      "conclusion": "success",
+      "elapsed_seconds": 408
+    },
+    {
+      "name": "build (windows-latest, x86_64-pc-windows-msvc, akasha-windows-x86_64, .exe, false, embedded,embed...",
+      "started_at": "2026-09-28T20:41:21Z",
+      "completed_at": "2026-09-28T21:07:20Z",
+      "conclusion": "success",
+      "elapsed_seconds": 1559
+    },
+    {
+      "name": "build-tauri (macos-latest, akasha-ui-macos)",
+      "started_at": "2026-09-28T20:41:27Z",
+      "completed_at": "2026-09-28T20:47:20Z",
+      "conclusion": "success",
+      "elapsed_seconds": 353
+    },
+    {
+      "name": "release",
+      "started_at": "2026-09-28T21:27:54Z",
+      "completed_at": "2026-09-28T21:31:00Z",
+      "conclusion": "success",
+      "elapsed_seconds": 186
+    },
+    {
+      "name": "deploy_site",
+      "started_at": "2026-09-28T21:31:03Z",
+      "completed_at": "2026-09-28T21:31:09Z",
+      "conclusion": "success",
+      "elapsed_seconds": 6
+    }
+  ],
+  "cache_usage_before": {
+    "full_name": "azerothl/Akasha",
+    "active_caches_size_in_bytes": 5056324727,
+    "active_caches_count": 6
+  },
+  "after_measurements": null,
+  "after_measurements_reason": "Implementation not yet executed on GitHub runners"
+}
