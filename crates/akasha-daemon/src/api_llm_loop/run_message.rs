@@ -3306,8 +3306,8 @@ pub(crate) async fn run_message_via_llm(
                 let results_blob = tool_results.join("\n");
                 let mut studio_readonly_nudge: Option<String> = None;
                 if code_studio_disk_task && !calls.is_empty() {
-                    let only_survey = calls.iter().all(|(name, _)| {
-                        let c = canonicalize_tool_name(&name.trim().to_string());
+                    let only_survey = calls.iter().all(|(name, args)| {
+                        let c = if name=="studio_call" {crate::studio_tool_contract::decode(&args.join(" ")).ok().map(|call|call.envelope.tool).unwrap_or_default()} else {canonicalize_tool_name(&name.trim().to_string())};
                         crate::api_studio::studio_survey_tool(&c)
                     });
                     if only_survey {

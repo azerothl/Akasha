@@ -133,6 +133,7 @@ pub async fn read_openai_compatible_sse_stream(
                         .and_then(|c| c.as_array())
                         .and_then(|a| a.first())
                     {
+                        if let Some(reason)=choice0.get("finish_reason").and_then(|v|v.as_str()).filter(|v|!v.is_empty()){finish_reason=Some(reason.to_owned());}
                         if let Some(delta) = choice0.get("delta") {
                             native_calls.apply(delta)?;
                     if delta.get("tool_calls").is_some(){let _=chunk_tx.send(String::new());}
