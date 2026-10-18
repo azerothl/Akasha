@@ -1656,14 +1656,7 @@ pub(crate) async fn run_message_via_llm(
                 tools_executor_snapshot.as_ref().map(|exec|vec![crate::studio_tool_contract::native_definition(crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect())])
             }else{None};
             let request = CompletionRequest {
-                // Keep the current execution state after the static catalogue. In
-                // text-tool providers the last instructions otherwise look like
-                // another request to emit the write that just succeeded.
-                prompt: if code_studio_disk_task {
-                    format!("{}\n\n{}", tool_instruction, current_prompt)
-                } else {
-                    format!("{}{}", current_prompt, tool_instruction)
-                },
+                prompt: format!("{}{}", current_prompt, tool_instruction),
                 max_tokens: Some(completion_max_tokens),
                 temperature: Some(completion_temperature),
                 preferred_task_type,
