@@ -332,6 +332,15 @@ impl NotificationStore {
         Ok(())
     }
 
+    pub fn unread_count(&self) -> anyhow::Result<u64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM notifications WHERE read = 0", [], |row| {
+                row.get(0)
+            })?;
+        Ok(n as u64)
+    }
+
     pub fn list(&self, unread_only: bool, limit: usize) -> anyhow::Result<Vec<NotificationRow>> {
         let sql = if unread_only {
             "SELECT id, type, title, body, read, task_id, created_at FROM notifications WHERE read = 0 ORDER BY created_at DESC LIMIT ?1"

@@ -1,7 +1,7 @@
 //! Companion device routes: snapshot, pairing, presence (Phase 4–5 / CMP-011…015).
 
 use crate::api_http::json_response;
-use akasha_store::{TaskStatus, TaskStore};
+use akasha_store::{NotificationStore, TaskStatus, TaskStore};
 use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -178,6 +178,47 @@ fn companion_auth_ok(data_dir: &Path, headers: &std::collections::HashMap<String
     file.devices.iter().any(|d| d.token == token)
 }
 
+const NOTIFY_HEADLINE_MAX_CHARS: usize = 120;
+
+/// Short summary for companion avatar badge — title only (no body / secrets).
+fn notify_headline_from_title(title: &str) -> String {
+    let t = title.trim();
+    if t.chars().count() <= NOTIFY_HEADLINE_MAX_CHARS {
+        return t.to_string();
+    }
+    t.chars()
+        .take(NOTIFY_HEADLINE_MAX_CHARS)
+        .chain("…".chars())
+        .collect()
+}
+
+/// Unread daemon notifications (`/api/notifications`, scheduler wakeups, etc.).
+fn companion_notify_summary(store_path: &Path) -> serde_json::Value {
+    match NotificationStore::open(store_path) {
+        Ok(store) => {
+            let unread = store.unread_count().unwrap_or(0).min(u32::MAX as u64) as u32;
+            let headline = if unread == 0 {
+                None
+            } else {
+                store
+                    .list(true, 1)
+                    .ok()
+                    .and_then(|rows| rows.first().map(|n| notify_headline_from_title(&n.title)))
+            };
+            serde_json::json!({
+                "available": true,
+                "unread": unread,
+                "headline": headline,
+            })
+        }
+        Err(_) => serde_json::json!({
+            "available": false,
+            "unread": 0,
+            "headline": serde_json::Value::Null,
+        }),
+    }
+}
+
 fn count_active_tasks(store_path: &Path) -> u32 {
     match TaskStore::open(store_path) {
         Ok(store) => store
@@ -210,8 +251,11 @@ fn build_snapshot(
         .primary_route_for_task_type("conversation")
         .unwrap_or_else(|| (String::new(), String::new()));
     let active = count_active_tasks(store_path);
-    let unread: u32 = 0;
-    let headline: Option<String> = None;
+    let notify = companion_notify_summary(store_path);
+    let unread = notify
+        .get("unread")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
     let avatar_hint = if unread > 0 { "notify" } else { "idle" };
 
     let policy = load_presence_policy(data_dir);
@@ -240,7 +284,7 @@ fn build_snapshot(
         },
         "voice": { "stt": stt, "tts": tts },
         "tasks": { "active": active },
-        "notify": { "unread": unread, "headline": headline },
+        "notify": notify,
         "avatar_hint": avatar_hint,
         "presence_mode": presence_mode,
         "vad_enabled": vad_enabled,
@@ -490,7 +534,68 @@ pub async fn try_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use akasha_store::NotificationRow;
     use std::collections::HashMap;
+
+    #[test]
+    fn notify_summary_reflects_unread_store() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let store_path = dir.path().join("tasks.db");
+        let _ = TaskStore::open(&store_path);
+        let store = NotificationStore::open(&store_path).expect("notifications");
+        let older = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let newer = chrono::Utc::now();
+        store
+            .insert(&NotificationRow {
+                id: uuid::Uuid::new_v4(),
+                type_: "agent_wakeup".into(),
+                title: "Ancien rappel".into(),
+                body: "secret body must not appear".into(),
+                read: true,
+                task_id: None,
+                created_at: older,
+            })
+            .unwrap();
+        store
+            .insert(&NotificationRow {
+                id: uuid::Uuid::new_v4(),
+                type_: "agent_wakeup".into(),
+                title: "Rappel agent".into(),
+                body: "do not leak".into(),
+                read: false,
+                task_id: None,
+                created_at: older + chrono::Duration::seconds(1),
+            })
+            .unwrap();
+        store
+            .insert(&NotificationRow {
+                id: uuid::Uuid::new_v4(),
+                type_: "agent_wakeup".into(),
+                title: "Plus récent".into(),
+                body: "sensitive".into(),
+                read: false,
+                task_id: None,
+                created_at: newer,
+            })
+            .unwrap();
+
+        let router = Arc::new(akasha_llm::LLMRouter::new(
+            akasha_llm::RoutingConfig::default_config(),
+        ));
+        let snap = build_snapshot(dir.path(), &store_path, &router);
+        assert_eq!(snap["notify"]["available"], true);
+        assert_eq!(snap["notify"]["unread"], 2);
+        assert_eq!(snap["notify"]["headline"], "Plus récent");
+        assert_eq!(snap["avatar_hint"], "notify");
+    }
+
+    #[test]
+    fn notify_headline_truncates_long_title() {
+        let long = "x".repeat(200);
+        let h = notify_headline_from_title(&long);
+        assert!(h.chars().count() <= NOTIFY_HEADLINE_MAX_CHARS + 1);
+        assert!(h.ends_with('…'));
+    }
 
     #[test]
     fn snapshot_shape_has_required_keys() {
@@ -507,6 +612,9 @@ mod tests {
         assert!(snap.get("voice").is_some());
         assert!(snap.get("tasks").is_some());
         assert!(snap.get("notify").is_some());
+        assert_eq!(snap["notify"]["available"], true);
+        assert_eq!(snap["notify"]["unread"], 0);
+        assert!(snap["notify"]["headline"].is_null());
         assert!(snap.get("avatar_hint").is_some());
         assert!(snap.get("llm").is_some());
         assert!(snap.get("presence_mode").is_some());
