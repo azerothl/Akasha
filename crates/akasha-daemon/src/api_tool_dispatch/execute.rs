@@ -2408,7 +2408,10 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "write_file" | "write_code" => {
             if assigned_agent_for_task.as_deref() == Some("studio_planner") {
-                if !executor.policy.can_write(Path::new("CODE_STUDIO_PLAN.md")) {
+                let Some(plan) = workspace_root.map(|root| strip_verbatim_prefix(root.join("CODE_STUDIO_PLAN.md"))) else {
+                    return (false, "[write_file] planner workspace missing".into(), None);
+                };
+                if !executor.policy.can_write(&plan) {
                     return (false, "[write_file] plan write denied by tools policy".into(), None);
                 }
                 return match crate::studio_role_policy::write_planner_plan(args, workspace_root) {
@@ -2441,6 +2444,29 @@ pub(crate) async fn execute_tool_call_impl(
                 );
             }
             if is_workspace_virtual_path(&path_str) {
+                // Studio workspaces are disk repositories. A memory-only update is
+                // never a successful Studio write; apply policy to the resolved path.
+                if is_studio_workspace {
+                    let Some(root) = workspace_root else {
+                        return (false, format!("[{usage_tag}] Studio disk workspace missing"), None);
+                    };
+                    let rewritten = rewrite_workspace_plan_path_str(&path_str, task_id, store_path);
+                    let disk_path = strip_verbatim_prefix(resolve_tool_disk_path(&rewritten, Some(root)));
+                    if !crate::studio::is_strictly_under_studio_root(&disk_path, root) {
+                        return (false, format!("[{usage_tag}] path escapes Studio workspace"), None);
+                    }
+                    if let Some(reason) = crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content) {
+                        return (false, format!("[{usage_tag}] {reason}"), None);
+                    }
+                    return match executor.write_file(&disk_path, &content).await {
+                        Ok(result) if result.success => {
+                            sync_workspace_store_from_disk(workspace_store, task_id, store_path, &rewritten, &disk_path).await;
+                            (true, format!("[{usage_tag} {}] saved (disk).", disk_path.display()), None)
+                        }
+                        Ok(result) => (false, format!("[{usage_tag}] {}", result.summary), None),
+                        Err(error) => (false, format!("[{usage_tag}] disk write failed: {error}"), None),
+                    };
+                }
                 match workspace_store {
                     Some(ws) => {
                         let key = path_str
