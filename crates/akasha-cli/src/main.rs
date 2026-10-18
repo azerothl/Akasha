@@ -643,10 +643,32 @@ fn doctor_uses_source_checkout_checks(cwd: &Path) -> bool {
     doctor_is_source_checkout(cwd)
 }
 
-const DOCTOR_SPEC_YAML_INFO_DESC: &str =
-    "Spec YAML 09/10 not in release bundle (optional; dev checkout uses repo spec/)";
 const DOCTOR_SPEC_YAML_DEV_MISSING_DESC: &str =
     "Spec YAML files missing (expected 09_event_model.yaml and 10_data_model.yaml in spec/)";
+
+/// `fr` or `en` from `AKASHA_LANG`, `LANG`, or `LC_ALL` (same order as daemon doctor).
+fn doctor_cli_locale_from_env() -> &'static str {
+    for key in ["AKASHA_LANG", "LANG", "LC_ALL"] {
+        if let Ok(v) = std::env::var(key) {
+            let lower = v.to_lowercase();
+            if lower.starts_with("fr") {
+                return "fr";
+            }
+            if lower.starts_with("en") {
+                return "en";
+            }
+        }
+    }
+    "fr"
+}
+
+fn doctor_spec_yaml_release_info_desc(locale: &str) -> &'static str {
+    if locale == "en" {
+        "Spec files: not included in this release (not needed to run Akasha)."
+    } else {
+        "Fichiers de spec : non inclus dans cette version (inutiles pour faire tourner Akasha)."
+    }
+}
 
 fn doctor_spec_check(
     spec_dir_override: Option<&OsStr>,
@@ -690,7 +712,10 @@ fn doctor_spec_check(
             ),
         );
     }
-    DoctorCheck::info("spec_files", DOCTOR_SPEC_YAML_INFO_DESC)
+    DoctorCheck::info(
+        "spec_files",
+        doctor_spec_yaml_release_info_desc(doctor_cli_locale_from_env()),
+    )
 }
 
 /// Daemon `/api/doctor` checks: `level: info` does not fail aggregate pass/fail.
@@ -5193,13 +5218,40 @@ mod tests {
         let orig_cwd = std::env::current_dir().expect("cwd");
         std::env::set_current_dir(&data_dir).expect("chdir");
         std::env::set_var("AKASHA_DATA_DIR", &data_dir);
+        std::env::set_var("LANG", "en_US.UTF-8");
         let check = doctor_spec_check(None, &data_dir, &data_dir);
         std::env::set_current_dir(orig_cwd).expect("chdir back");
         std::env::remove_var("AKASHA_DATA_DIR");
+        std::env::remove_var("LANG");
 
         assert_eq!(check.level, DoctorCheckLevel::Info);
-        assert_eq!(check.description, DOCTOR_SPEC_YAML_INFO_DESC);
+        assert_eq!(
+            check.description,
+            doctor_spec_yaml_release_info_desc("en")
+        );
         assert!(doctor_checks_all_ok(&[check]));
+
+        std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+
+    #[test]
+    fn doctor_spec_check_release_info_french_locale() {
+        let data_dir = make_temp_dir("doctor-spec-release-fr");
+        let spec_dir = data_dir.join("spec");
+        std::fs::create_dir_all(&spec_dir).unwrap();
+        let orig_cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&data_dir).expect("chdir");
+        std::env::set_var("AKASHA_DATA_DIR", &data_dir);
+        std::env::set_var("AKASHA_LANG", "fr");
+        let check = doctor_spec_check(None, &data_dir, &data_dir);
+        std::env::set_current_dir(orig_cwd).expect("chdir back");
+        std::env::remove_var("AKASHA_DATA_DIR");
+        std::env::remove_var("AKASHA_LANG");
+
+        assert_eq!(
+            check.description,
+            doctor_spec_yaml_release_info_desc("fr")
+        );
 
         std::fs::remove_dir_all(&data_dir).unwrap();
     }
