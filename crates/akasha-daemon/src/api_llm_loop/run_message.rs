@@ -3385,8 +3385,8 @@ pub(crate) async fn run_message_via_llm(
                 let results_blob = tool_results.join("\n");
                 let mut studio_readonly_nudge: Option<String> = None;
                 if code_studio_disk_task && !calls.is_empty() {
-                    let only_survey = calls.iter().all(|(name, _)| {
-                        let c = canonicalize_tool_name(&name.trim().to_string());
+                    let only_survey = calls.iter().all(|(name, args)| {
+                        let c = if name=="studio_call" {crate::studio_tool_contract::decode(&args.join(" ")).ok().map(|call|call.envelope.tool).unwrap_or_default()} else {canonicalize_tool_name(&name.trim().to_string())};
                         crate::api_studio::studio_survey_tool(&c)
                     });
                     if only_survey {
@@ -4541,12 +4541,16 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                 {
-                    let _ = crate::api_studio::studio_mark_ticket_ready_for_review(
-                        &tool_disk_workspace_root,
+                    let ticket_root = match store.lineage_root_studio_project_id(task_id).ok().flatten() {
+                        Some(project)=>crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags,&project).ok(),
+                        None=>Some(tool_disk_workspace_root.clone()),
+                    };
+                    if let Some(ticket_root)=ticket_root {let _ = crate::api_studio::studio_mark_ticket_ready_for_review(
+                        &ticket_root,
                         &ticket_id,
                         &task_id.to_string(),
                         "system",
-                    );
+                    );}
                 }
             }
         }

@@ -30,6 +30,12 @@ struct FileArgs {
     start_line: Option<u32>,
     #[serde(default)]
     end_line: Option<u32>,
+    #[serde(default)]
+    full: bool,
+    #[serde(default)]
+    offset_line: Option<u32>,
+    #[serde(default)]
+    limit_lines: Option<u32>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +89,7 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
                 return Err("invalid file path".into());
             }
             expected = arg.expected_version;
+            if envelope.tool!="read_file" && (arg.full||arg.offset_line.is_some()||arg.limit_lines.is_some()) {return Err("read window arguments require read_file".into());}
             match envelope.tool.as_str() {
                 "read_file" => {
                     if arg.content.is_some()
@@ -92,7 +99,16 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
                     {
                         return Err("read_file accepts path only".into());
                     }
-                    vec![arg.path]
+                    let mut argv=vec![arg.path];
+                    if arg.full {
+                        if arg.offset_line.is_some()||arg.limit_lines.is_some(){return Err("full and line window are mutually exclusive".into());}
+                        argv.push("--full".into());
+                    } else if arg.offset_line.is_some()||arg.limit_lines.is_some() {
+                        let offset=arg.offset_line.filter(|n|*n>0).ok_or("positive offset_line required")?;
+                        let limit=arg.limit_lines.filter(|n|*n>0&&*n<=5000).ok_or("limit_lines must be 1..5000")?;
+                        argv.extend([offset.to_string(),limit.to_string()]);
+                    }
+                    argv
                 }
                 "delete_file" => {
                     if arg.content.is_some() || arg.start_line.is_some() || arg.end_line.is_some() {
@@ -200,24 +216,13 @@ pub(crate) fn supports_typed(tool: &str) -> bool {
     )
 }
 
-pub(crate) fn argument_schema(tool: &str) -> Value {
-    if matches!(
-        tool,
-        "read_file" | "write_file" | "write_code" | "edit_file" | "apply_patch" | "delete_file"
-    ) {
-        let mut required = vec!["path"];
-        if is_file_mutation(tool) {
-            required.push("expected_version");
-        }
-        if matches!(
-            tool,
-            "write_file" | "write_code" | "edit_file" | "apply_patch"
-        ) {
-            required.push("content");
-        }
-        if tool == "edit_file" {
-            required.extend(["start_line", "end_line"]);
-        }
+pub(crate) fn argument_schema(tool:&str)->Value {
+    if tool=="read_file" {return json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1},"full":{"type":"boolean"},"offset_line":{"type":"integer","minimum":1},"limit_lines":{"type":"integer","minimum":1,"maximum":5000}}});}
+    if matches!(tool,"read_file"|"write_file"|"write_code"|"edit_file"|"apply_patch"|"delete_file") {
+        let mut required=vec!["path"];
+        if is_file_mutation(tool){required.push("expected_version");}
+        if matches!(tool,"write_file"|"write_code"|"edit_file"|"apply_patch"){required.push("content");}
+        if tool=="edit_file"{required.extend(["start_line","end_line"]);}
         json!({"type":"object","additionalProperties":false,"required":required,"properties":{"path":{"type":"string","minLength":1},"content":{"type":"string"},"expected_version":{"type":"string","description":"SHA-256 from read_file, or missing for creation"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}})
     } else if matches!(
         tool,
