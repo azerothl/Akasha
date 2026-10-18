@@ -112,7 +112,6 @@ pub(crate) async fn execute_tool_call_impl(
                 );
             }
         }
-        crate::mcp_budget::record_call(task_id);
         let args_json = if args.is_empty() {
             serde_json::json!({})
         } else {
@@ -121,6 +120,9 @@ pub(crate) async fn execute_tool_call_impl(
                 _ => return (false, format!("[{tool_name}] arguments must be one JSON object matching the discovered schema"), None),
             }
         };
+        let Some(descriptor) = crate::mcp_runtime::discovered_tool(tool_name) else {return (false,"MCP tool no longer discovered".into(),None);};
+        if let Err(error)=crate::mcp_runtime::validate_arguments(&descriptor,&args_json) {return (false,error,None);}
+        crate::mcp_budget::record_call(task_id);
         return match crate::mcp_runtime::call_discovered(tool_name, args_json).await {
             Ok(v) => {
                 let preview = v.to_string();
@@ -1868,8 +1870,8 @@ pub(crate) async fn execute_tool_call_impl(
                 let session = if let Some(mut s) = g.remove(&task_id) {
                     drop(g);
                     let res = s.send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "navigate", "params": { "url": url, "allow_http": true, "timeout_secs": action_timeout } })).await;
-                    // Always reinsert the session — a navigate failure doesn't mean the browser is dead.
-                    registry.write().await.insert(task_id, s);
+                    // Preserve application failures only while the IPC session remains reusable.
+                    if s.reusable() { registry.write().await.insert(task_id, s); }
                     res
                 } else {
                     drop(g);
@@ -1930,7 +1932,7 @@ pub(crate) async fn execute_tool_call_impl(
                 };
                 drop(g);
                 let resp = session.send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "snapshot" })).await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1970,7 +1972,7 @@ pub(crate) async fn execute_tool_call_impl(
                 let resp = session
                     .send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "screenshot", "params": { "full_page": false } }))
                     .await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2041,7 +2043,7 @@ pub(crate) async fn execute_tool_call_impl(
                 } else {serde_json::json!({})};
                 let Some(mut session)=registry.write().await.remove(&task_id) else {return (false,"[browser] Navigate first.".into(),None);};
                 let response=session.send_with_policy(&executor.policy,&serde_json::json!({"cmd":sub,"params":params})).await;
-                registry.write().await.insert(task_id,session);
+                if session.reusable() { registry.write().await.insert(task_id,session); }
                 match response {
                     Ok(response) if response["ok"]==true => {
                         let result=&response["result"];
@@ -2070,7 +2072,7 @@ pub(crate) async fn execute_tool_call_impl(
                         "params": { "selector": selector, "timeout_secs": action_timeout }
                     }))
                     .await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2115,7 +2117,7 @@ pub(crate) async fn execute_tool_call_impl(
                         "params": { "selector": sel, "value": value, "timeout_secs": action_timeout }
                     }))
                     .await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2156,7 +2158,7 @@ pub(crate) async fn execute_tool_call_impl(
                     })
                 };
                 let resp = session.send_with_policy(&executor.policy, &cmd).await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
