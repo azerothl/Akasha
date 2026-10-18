@@ -27,13 +27,16 @@ pub struct BrowserSession {
 }
 
 impl BrowserSession {
+    pub fn reusable(&mut self) -> bool {
+        self.stdin.is_some() && matches!(self._child.try_wait(), Ok(None))
+    }
     /// Configure policy for every action, including redirects and subresources.
     pub async fn send_with_policy(
         &mut self,
         policy: &akasha_tools::ToolsPolicy,
         cmd: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let configured = self.send_command(&serde_json::json!({"cmd":"configure_policy","params":{"allowed_domains":policy.browser_allowed_domains,"blocked_domains":policy.browser_blocked_domains}})).await?;
+        let configured = self.send_command(&serde_json::json!({"cmd":"configure_policy","params":{"allowed_domains":policy.browser_allowed_domains,"blocked_domains":policy.browser_blocked_domains,"next_command":cmd.get("cmd")}})).await?;
         if configured.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             return Err(configured
                 .get("error")

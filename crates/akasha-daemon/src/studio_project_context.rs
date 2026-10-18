@@ -2,6 +2,26 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+/// Use the task's persisted worktree, with the same bounded project identity.
+pub(crate) fn manifest_workspace(data_dir: &Path, project: &str, task: Option<uuid::Uuid>) -> Result<PathBuf, String> {
+    let root=crate::studio::resolve_studio_project_dir(data_dir,project).map_err(|e|e.to_string())?;
+    let records=crate::studio_worktree::list_project_worktrees(data_dir,project);
+    let store=akasha_store::TaskStore::open(&data_dir.join("akasha.db")).map_err(|e|e.to_string())?;
+    let mut cursor=task;
+    for _ in 0..32 {
+        let Some(id)=cursor else {return Ok(root);};
+        if let Some(record)=records.iter().find(|record|record.task_id==id.to_string()) {
+            let recorded_root=Path::new(&record.project_root).canonicalize().map_err(|e|e.to_string())?;
+            if recorded_root!=root.canonicalize().map_err(|e|e.to_string())? {return Err("worktree project mismatch".into());}
+            let path=Path::new(&record.worktree_path).canonicalize().map_err(|_|"task worktree unavailable")?;
+            if !crate::studio::is_strictly_under_studio_root(&path,&data_dir.join("studio-worktrees")) {return Err("task worktree outside registry root".into());}
+            return Ok(path);
+        }
+        cursor=store.get(id).map_err(|e|e.to_string())?.and_then(|row|row.parent_task_id);
+    }
+    Err("task ancestry exceeds manifest limit".into())
+}
+
 pub(crate) struct RepositoryRule {
     pub path: PathBuf,
     pub scope: PathBuf,
