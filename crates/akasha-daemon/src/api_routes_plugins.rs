@@ -651,7 +651,12 @@ if method == "GET" && path_only == "/api/tools/effective" {
                     Ok(mut manifest) => {
                         let pid = manifest["project_id"].as_str().unwrap_or_default();
                         let agent = manifest["agent"].as_str().unwrap_or_default().to_owned();
-                        let root = crate::studio::resolve_studio_project_dir(data_dir, pid).expect("preflight validated project");
+                        let task = manifest["task_id"].as_str().and_then(|id|Uuid::parse_str(id).ok());
+                        let root = match crate::studio_project_context::manifest_workspace(data_dir,pid,task) {
+                            Ok(root)=>root,
+                            Err(reason)=>return Some(json_response("409 Conflict", &serde_json::json!({"error":"task_workspace_unavailable","detail":reason}).to_string())),
+                        };
+                        manifest["workspace"] = serde_json::json!(root);
                         match skill_registry.for_project(&root).await {
                             Ok(scoped) => manifest["skills"] = serde_json::to_value(scoped.for_agent(&agent).await).unwrap_or_default(),
                             Err(reason) => return Some(json_response("409 Conflict", &serde_json::json!({"error":"project_skills_unavailable","detail":reason.to_string()}).to_string())),

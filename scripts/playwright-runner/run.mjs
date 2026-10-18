@@ -66,7 +66,7 @@ async function configurePolicy(params = {}) {
   for (const socket of sockets) if (!domainAllowed(socket.url())) { await socket.close({ code: 1008, reason: 'Domain policy changed' }).catch(() => {}); sockets.delete(socket); }
   if (page && !domainAllowed(page.url())) {
     await page.goto('about:blank');
-    throw new Error('Current page is no longer authorized; navigate to an allowed domain');
+    if (params.next_command !== 'navigate') throw new Error('Current page is no longer authorized; navigate to an allowed domain');
   }
 }
 

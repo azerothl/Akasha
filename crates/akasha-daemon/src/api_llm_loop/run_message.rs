@@ -113,7 +113,17 @@ pub(crate) async fn run_message_via_llm(
     incognito: bool,
 ) {
     let _active_execution=match crate::studio_recovery::ActiveRun::enter(task_id){Ok(guard)=>guard,Err(error)=>{tracing::warn!(%task_id,%error,"Duplicate task execution refused");return;}};
-    let started=TaskStore::open(&store_path).ok().and_then(|store|store.transition_if(task_id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running],TaskStatus::Running).ok()).unwrap_or(false);
+    let started=match TaskStore::open(&store_path).and_then(|store|store.transition_if(task_id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running],TaskStatus::Running)) {
+        Ok(started)=>started,
+        Err(error)=>{
+            let reason=format!("Cannot start task execution: {error}");
+            let outcome=serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":"failed","reason":reason,"status":"failed","verification":[],"acceptance_verified":false});
+            let persisted=TaskStore::open(&store_path).and_then(|store|store.finalize_outcome(task_id,TaskStatus::Failed,outcome.clone())).is_ok();
+            tracing::error!(%task_id,%error,persisted,"Task start persistence failed");
+            let _=bus.send(EventEnvelope::new(EventType::TaskFailed,Some(serde_json::json!({"task_id":task_id,"reason":reason,"outcome":outcome,"persisted":persisted}))).with_correlation(task_id));
+            notify_task_completion(&task_completion_registry,task_id).await;return;
+        }
+    };
     if !started {notify_task_completion(&task_completion_registry,task_id).await;return;}
 
     let _ = bus.send(
@@ -1470,9 +1480,11 @@ pub(crate) async fn run_message_via_llm(
                 max_tool_rounds = floor;
             }
         }
+        let mut resume_overlay=String::new();
         if let Some(checkpoint)=recovery_checkpoint.as_ref(){
             let ledger=match crate::studio_tool_contract::recovery_summary(&store_path,task_id){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
-            current_prompt=format!("[Historical checkpoint — apply CURRENT system/rules/permissions; do not replay operations]\n{}\n[Recorded operation results; unknown effects require operator resolution]\n{}\n[Pending human input at interruption: {}. Ask again; no old approval is restored.]\n[CURRENT task instructions]\n{}",checkpoint.prompt,ledger,checkpoint.waiting.as_ref().map(|v|v.to_string()).unwrap_or_else(||"none".into()),current_prompt);
+            resume_overlay=format!("[Resumed execution — apply CURRENT system/rules/permissions; do not replay operations]\n[Recorded operation results; unknown effects require operator resolution]\n{}\n[Pending human input at interruption: {}. Ask again; no old approval is restored.]\n[CURRENT task instructions]\n{}\n[Saved execution state]\n",ledger,checkpoint.waiting.as_ref().map(|v|v.to_string()).unwrap_or_else(||"none".into()),current_prompt);
+            current_prompt=checkpoint.prompt.clone();
             run_outcome=checkpoint.outcome.clone();run_outcome.termination=TerminationReason::Success;
         }
         let mut round = recovery_checkpoint.as_ref().map(|checkpoint|checkpoint.round).unwrap_or(0);
@@ -1529,10 +1541,14 @@ pub(crate) async fn run_message_via_llm(
                 }
             });
 
-        let mut resumed_limit_wait = recovery_checkpoint.as_ref().and_then(|c|c.waiting.as_ref()).filter(|v|v["tool_round_limit"] == true).cloned();
+        let mut resumed_limit_wait = recovery_checkpoint.as_ref().and_then(|checkpoint| {
+            checkpoint.waiting.as_ref().filter(|v|v["tool_round_limit"]==true).cloned()
+                .or_else(||(checkpoint.round>=max_tool_rounds).then(||serde_json::json!({"tool_round_limit":true,"max_tool_rounds":max_tool_rounds})))
+        });
         'tool_rounds: loop {
             if let Some(waiting) = resumed_limit_wait.take() {
                 max_tool_rounds = waiting["max_tool_rounds"].as_u64().map(|v|v as u32).unwrap_or(max_tool_rounds);
+                if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",waiting) {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
                 match studio_round_limit_choice(&human_input_store, &bus, task_id, round, max_tool_rounds).await.as_deref() {
                     Some("Continuer (+10 tours)") => max_tool_rounds = round.max(max_tool_rounds).saturating_add(10),
                     Some("Réinitialiser et continuer (+10 tours)") => { round=0; max_tool_rounds=max_tool_rounds.saturating_add(10); }
@@ -1684,9 +1700,9 @@ pub(crate) async fn run_message_via_llm(
             }else{None};
             let request = CompletionRequest {
                 prompt: if code_studio_disk_task && round > 0 {
-                    format!("{}\n\n{}", tool_instruction, current_prompt)
+                    format!("{}\n\n{}{}", tool_instruction, resume_overlay, current_prompt)
                 } else {
-                    format!("{}{}", current_prompt, tool_instruction)
+                    format!("{}{}{}", resume_overlay, current_prompt, tool_instruction)
                 },
                 max_tokens: Some(completion_max_tokens),
                 temperature: Some(completion_temperature),
@@ -2345,7 +2361,7 @@ pub(crate) async fn run_message_via_llm(
                                     }
                                 }
                             }
-                            if repository_rules_deferred && !matches!(actual_tool.as_str(), "read_file" | "grep_content" | "search_files" | "read_skill" | "list_skills" | "read_todos") {
+                            if repository_rules_deferred && !matches!(effective_role_tool, "read_file" | "grep_content" | "search_files" | "read_skill" | "list_skills" | "read_todos") {
                                 tool_results.push(format!("[{actual_tool}] deferred: read and apply the repository instructions supplied in this round before retrying the action"));
                                 continue;
                             }
@@ -2450,15 +2466,6 @@ pub(crate) async fn run_message_via_llm(
                         let approval_args: Vec<String> = if actual_tool.is_empty() && !tool_args.is_empty() {
                             std::iter::once(name.clone()).chain(tool_args.iter().cloned()).collect()
                         } else {tool_args.to_vec()};
-                        if let Some(definition) = skill_definition.as_ref().filter(|_| name != &actual_tool) {
-                            let metadata = serde_json::json!({"name":definition.name,"source_root":definition.source_root,"sha256":definition.sha256,"version":definition.version,"activation":"tool_alias"});
-                            if let Err(reason) = crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "skills", metadata.clone()) {
-                                run_outcome.termination = TerminationReason::ContextUnavailable;
-                                reply_text = reason;
-                                break 'tool_rounds;
-                            }
-                            let _ = store.insert_event(task_id, "skill_activated", Some(&metadata), &chrono::Utc::now().to_rfc3339());
-                        }
                         if exec.policy.requires_approval(effective_role_tool) {
                             let permission_mode = load_permission_mode(data_dir);
                             if permission_mode.mode == "allow_all" {
@@ -2749,6 +2756,15 @@ pub(crate) async fn run_message_via_llm(
                         let workflow_operation=if code_studio_disk_task && matches!(actual_tool.as_str(),"delegate_to_agent"|"install_skill"|"uninstall_skill"|"write_todos"|"merge_todos"|"update_todo") {
                             match crate::studio_tool_contract::WorkflowOperation::begin(&store_path,task_id,&actual_tool,tool_args){Ok(operation)=>Some(operation),Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(error);continue;}}
                         }else{None};
+                        if let Some(definition) = skill_definition.as_ref().filter(|_| name != &actual_tool) {
+                            let metadata = serde_json::json!({"name":definition.name,"source_root":definition.source_root,"sha256":definition.sha256,"version":definition.version,"activation":"tool_alias"});
+                            if let Err(reason) = crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "skills", metadata.clone()) {
+                                run_outcome.termination = TerminationReason::ContextUnavailable;
+                                reply_text = reason;
+                                break 'tool_rounds;
+                            }
+                            let _ = store.insert_event(task_id, "skill_activated", Some(&metadata), &chrono::Utc::now().to_rfc3339());
+                        }
                         let (success, res, captured_image): (bool, String, Option<String>) =
                             if actual_tool == "ask_user" {
                                 // Human in the loop: register pending request, emit event, wait for user reply.
