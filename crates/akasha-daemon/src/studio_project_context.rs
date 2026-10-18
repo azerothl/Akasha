@@ -132,6 +132,23 @@ pub(crate) fn rules_for_path(
     Ok(rules)
 }
 
+/// Prepend scoped instructions before recursive search results reach the model.
+pub(crate) fn rules_for_results(root: &Path, paths: &[PathBuf], policy: &akasha_tools::ToolsPolicy, data_dir: &Path, task: uuid::Uuid) -> Result<String, String> {
+    let mut seen=std::collections::HashSet::new();
+    let mut prompt=String::new();
+    for path in paths {
+        for rule in rules_for_path(root,&path.to_string_lossy(),policy)? {
+            if seen.insert((rule.path.clone(),rule.sha256.clone())) {
+                let body=rule.prompt();
+                if prompt.len()+body.len()>64*1024 {return Err("Scoped search instructions exceed 64 KiB; narrow the search directory".into());}
+                record(data_dir,task,"rules",rule.metadata())?;
+                prompt.push_str(&body);
+            }
+        }
+    }
+    Ok(prompt)
+}
+
 pub(crate) fn record(
     data_dir: &Path,
     task: uuid::Uuid,
