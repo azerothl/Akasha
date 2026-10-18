@@ -1889,6 +1889,15 @@ pub(crate) async fn run_message_via_llm(
             let response =
                 crate::api_llm_stream::choose_merged_response_for_tools(&response, &accumulated);
 
+            // An empty generation is a terminal provider outcome. In particular, the
+            // Studio PM delegation/promise guards must not turn it into another round
+            // whose later prose would hide the original failure.
+            if response.trim().is_empty() {
+                run_outcome.termination = TerminationReason::ModelEmpty;
+                reply_text = String::new();
+                break 'tool_rounds;
+            }
+
             if let Some(intent) = small_talk_intent {
                 if response_looks_off_topic_for_small_talk(&response) {
                     if is_small_talk_fast_lane && small_talk_off_topic_retries < 1 {
