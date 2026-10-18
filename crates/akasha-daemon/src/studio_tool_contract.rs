@@ -320,6 +320,11 @@ impl Operation {
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
         let lock = lock.lock_owned().await;
+        let task_status = akasha_store::TaskStore::open(db).map_err(|e|e.to_string())?
+            .get(task).map_err(|e|e.to_string())?.ok_or("Studio task missing after workspace lock")?.status;
+        if matches!(task_status,akasha_store::TaskStatus::Failed|akasha_store::TaskStatus::Cancelled|akasha_store::TaskStatus::Paused|akasha_store::TaskStatus::Interrupted|akasha_store::TaskStatus::WaitingUserInput) {
+            return Err("task stopped or waiting while acquiring workspace lock".into());
+        }
         let id = typed
             .map(|t| t.envelope.operation_id)
             .unwrap_or_else(Uuid::new_v4);
