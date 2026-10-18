@@ -113,6 +113,11 @@ pub struct PtySessionInner {
 }
 
 impl PtyManager {
+    /// Studio sessions are never exposed by the legacy global terminal routes.
+    pub(crate) fn studio() -> &'static Self {
+        static STUDIO: OnceLock<PtyManager> = OnceLock::new();
+        STUDIO.get_or_init(|| PtyManager { sessions: Mutex::new(HashMap::new()) })
+    }
     pub fn global() -> &'static Self {
         static G: OnceLock<PtyManager> = OnceLock::new();
         G.get_or_init(|| PtyManager {
@@ -420,8 +425,9 @@ impl PtyManager {
         REAPER.get_or_init(|| {
             std::thread::spawn(|| loop {
                 std::thread::sleep(Duration::from_secs(15));
+                for manager in [PtyManager::global(), PtyManager::studio()] {
                 let mut to_close = Vec::new();
-                if let Ok(map) = PtyManager::global().sessions.lock() {
+                if let Ok(map) = manager.sessions.lock() {
                     for (id, s) in map.iter() {
                         let idle = s
                             .last_activity
@@ -435,7 +441,8 @@ impl PtyManager {
                     }
                 }
                 for id in to_close {
-                    let _ = PtyManager::global().close(&id);
+                    let _ = manager.close(&id);
+                }
                 }
             });
         });

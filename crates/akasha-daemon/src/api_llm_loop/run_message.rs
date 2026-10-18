@@ -195,9 +195,8 @@ pub(crate) async fn run_message_via_llm(
         }
         }
     };
-    let code_studio_disk_task = tool_disk_workspace_root
-        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags))
-        || TaskStore::open(&store_path).ok()
+    // A path shape is not a project identity. Match the dispatcher/ledger gate.
+    let code_studio_disk_task = TaskStore::open(&store_path).ok()
             .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten()).is_some();
     let studio_disk_system_append = {
         let proj_base = crate::studio::studio_projects_base(data_dir_for_studio_flags);
@@ -2289,7 +2288,11 @@ pub(crate) async fn run_message_via_llm(
                             } else if actual_tool == "read_file" {
                                 let (parts, _, _) = parse_read_file_args(tool_args);
                                 vec![parts.join(" ")]
-                            } else if matches!(actual_tool.as_str(), "rename_path" | "move_tree" | "file_diff" | "diff_unified" | "dir_compare") {
+                            } else if matches!(actual_tool.as_str(), "rename_path" | "move_tree") {
+                                let mut paths: Vec<String> = tool_args.first().cloned().into_iter().collect();
+                                if tool_args.len() > 1 { paths.push(tool_args[1..].join(" ")); }
+                                paths
+                            } else if matches!(actual_tool.as_str(), "file_diff" | "diff_unified" | "dir_compare") {
                                 tool_args.iter().take(2).cloned().collect()
                             } else if matches!(actual_tool.as_str(), "search_files" | "grep_content" | "edit_file" | "apply_patch" | "search_replace" | "delete_file") {
                                 tool_args.first().cloned().into_iter().collect()
@@ -3937,20 +3940,21 @@ pub(crate) async fn run_message_via_llm(
                 let tmo = crate::api_studio::studio_project_verify_timeout_sec(
                     tool_disk_workspace_root.as_path(),
                 );
-                let mech = crate::api_studio::run_mechanical_acceptance_checks(
-                    tool_disk_workspace_root.as_path(),
-                    pay,
-                    tmo,
-                )
-                .await;
+                let mut mech = Vec::new();
                 for criterion in &pay.criteria {
+                    let errors = crate::api_studio::run_mechanical_acceptance_checks(
+                        tool_disk_workspace_root.as_path(),
+                        &crate::api_studio::StudioAcceptancePayload { criteria: vec![criterion.clone()] },
+                        tmo,
+                    ).await;
                     let status = if matches!(criterion.kind, crate::api_studio::StudioCriterionKind::Manual) { "manual" }
-                        else if mech.is_empty() { "passed" } else { "not_confirmed" };
+                        else if errors.is_empty() { "passed" } else { "failed" };
                     run_outcome.checks.push(serde_json::json!({
                         "kind":"acceptance", "id":criterion.id, "criterion_kind":criterion.kind,
                         "status":status, "text":criterion.text,
                         "exit_code":if status == "passed" && matches!(criterion.kind, crate::api_studio::StudioCriterionKind::CommandOk) {Some(0)} else {None::<i32>}
                     }));
+                    mech.extend(errors);
                 }
                 if !mech.is_empty() {
                     studio_verify_error = Some(format!(
