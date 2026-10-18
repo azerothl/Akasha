@@ -215,11 +215,16 @@ impl Session {
         self.documents.keys().find(|key| canonical_document_uri(key).as_ref() == Some(&path)).cloned()
     }
     async fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
-        send(
+        let result = send(
             &mut self.stdin,
             json!({"jsonrpc":"2.0","method":method,"params":params}),
         )
-        .await
+        .await;
+        if result.is_err() {
+            self.healthy = false;
+            let _ = self.child.kill().await;
+        }
+        result
     }
     async fn incoming(&mut self, message: Value) -> Result<Option<Value>, String> {
         if message["method"] == "textDocument/publishDiagnostics" {
