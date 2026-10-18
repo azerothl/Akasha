@@ -16,6 +16,11 @@ fn call(tool: &str, args: Value, id: Uuid) -> contracts::Decoded {
     contracts::decode(&json!({"schema_version":1,"operation_id":id,"tool":tool,"arguments":args}).to_string()).unwrap()
 }
 
+fn running_task(db: &Path, id: Uuid) {
+    let now=chrono::Utc::now();
+    akasha_store::TaskStore::open(db).unwrap().insert(&akasha_store::Task{id,parent_task_id:None,status:akasha_store::TaskStatus::Running,assigned_agent:"studio_fullstack".into(),created_at:now,updated_at:now,initial_message:None,studio_project_id:Some("validation".into())}).unwrap();
+}
+
 #[test]
 fn outcome_does_not_invent_acceptance() {
     let mut run = crate::task_outcome::RunOutcome::default();
@@ -73,6 +78,24 @@ fn push_prerequisite_includes_github_cli_permission() {
     let row=crate::studio_capabilities::tool(&p,"studio_project_manager","git_push").unwrap();
     assert!(!row.runnable);
     assert!(row.notes.iter().any(|n|n.contains("github_cli_unavailable_or_denied")));
+}
+
+#[tokio::test]
+async fn cancellation_while_waiting_for_workspace_lock_prevents_operation() {
+    use akasha_store::{Task, TaskStatus, TaskStore};
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let store=TaskStore::open(&db).unwrap();
+    let first=Uuid::new_v4();let second=Uuid::new_v4();let now=chrono::Utc::now();
+    for id in [first,second] {store.insert(&Task{id,parent_task_id:None,status:TaskStatus::Running,assigned_agent:"studio_fullstack".into(),created_at:now,updated_at:now,initial_message:None,studio_project_id:Some("validation".into())}).unwrap();}
+    std::fs::write(dir.path().join("read.txt"),"read only").unwrap();
+    let p=policy(dir.path());let args=vec!["workspace:/read.txt".into()];
+    let held=contracts::Operation::begin(&db,first,"read_file",&args,dir.path(),&p,None).await.unwrap();
+    let copied_db=db.clone();let copied_root=dir.path().to_path_buf();
+    let waiting=tokio::spawn(async move {contracts::Operation::begin(&copied_db,second,"read_file",&args,&copied_root,&p,None).await});
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+    store.update_status(second,TaskStatus::Cancelled).unwrap();drop(held);
+    let error=waiting.await.unwrap().err().unwrap();assert!(error.contains("stopped"));
+    assert_eq!(contracts::recovery_summary(&db,second).unwrap()["operations"].as_array().unwrap().len(),0);
 }
 
 #[test]
@@ -163,6 +186,7 @@ async fn stale_files_and_unread_existing_files_are_refused() {
     let db = dir.path().join("test.db");
     let p = policy(dir.path());
     let task = Uuid::new_v4();
+    running_task(&db,task);
     let path = dir.path().join("a.txt");
     std::fs::write(&path, "before").unwrap();
     let write = call("write_file", json!({"path":"a.txt","content":"after","expected_version":"missing"}), Uuid::new_v4());
@@ -182,6 +206,7 @@ async fn completed_operation_is_cached_and_changed_arguments_denied() {
     let db = dir.path().join("test.db");
     let p = policy(dir.path());
     let task = Uuid::new_v4();
+    running_task(&db,task);
     let id = Uuid::new_v4();
     let decoded = call("run_command", json!({"program":"node","args":["-v"]}), id);
     let op = contracts::Operation::begin(&db, task, "run_command", &decoded.argv, dir.path(), &p, Some(&decoded)).await.unwrap();
@@ -199,6 +224,7 @@ async fn interrupted_operation_blocks_mutations_but_allows_inspection() {
     let db = dir.path().join("test.db");
     let p = policy(dir.path());
     let task = Uuid::new_v4();
+    running_task(&db,task);
     let decoded = call("run_command", json!({"program":"node","args":["effect.js"]}), Uuid::new_v4());
     drop(contracts::Operation::begin(&db, task, "run_command", &decoded.argv, dir.path(), &p, Some(&decoded)).await.unwrap());
     assert!(contracts::Operation::begin(&db, task, "run_command", &decoded.argv, dir.path(), &p, Some(&decoded)).await.is_err());
