@@ -105,7 +105,7 @@ Si `AKASHA_COMPANION_PAIR_SECRET` est **vide**, l’appairage est **ouvert** sur
 - `tasks.active` (tâches pending / queued / running / waiting user input)
 - `presence_mode` : `hands_free` si VAD effectif, sinon `ptt`
 - `vad_enabled`, bloc `presence` (paramètres + `quiet_now`)
-- bloc `notify` : `available` (même stockage que `/api/notifications`), `unread` (nombre de notifications daemon non lues), `headline` (`null` si `unread` = 0, sinon le **titre** de la plus récente non lue — jamais le corps — tronqué à 120 caractères) ; `avatar_hint` (`idle` ou `notify` si `unread` > 0)
+- bloc `notify` : `available` (même stockage que `/api/notifications`), `unread` (nombre de notifications daemon non lues), `headline` (`null` si `unread` = 0, sinon le **titre** de la plus récente non lue — jamais le corps — tronqué à 120 caractères, ellipse comprise) ; `avatar_hint` (`idle`, ou `notify` dès qu'il y a au moins une notification non lue)
 
 ```bash
 curl -sS "$DAEMON/api/companion/snapshot"
