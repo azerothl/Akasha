@@ -144,7 +144,7 @@ Feuille de route agents/outils/skills : [spec/33_agents_tools_orchestrator_skill
 | Variable | Description | Défaut |
 |----------|-------------|--------|
 | `AKASHA_PORT` | Port du daemon | 3876 |
-| `AKASHA_DATA_DIR` | Répertoire de données (vault, plugins, config) | %LOCALAPPDATA%\akasha / ~/.local/share/akasha |
+| `AKASHA_DATA_DIR` | Répertoire de données (vault, plugins, config) | %USERPROFILE%\akasha (Windows) / ~/akasha (Linux/macOS) |
 | `AKASHA_LOG` | Niveau de log (trace, debug, info, warn, error) | info |
 | `AKASHA_MAX_RESPONSE_TOKENS` | Tokens max pour les réponses chat | 4096 |
 | `AKASHA_MAX_CONTEXT_TOKENS` | Contexte max (déclenchement compaction mémoire court terme) | 8192 |

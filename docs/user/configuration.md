@@ -1,6 +1,6 @@
 # Configuration
 
-## ## 2. Où se trouve la configuration
+## 2. Où se trouve la configuration
 
 
 Tous les fichiers de configuration sont dans le **répertoire de données** (data_dir). Pour connaître son emplacement :
@@ -35,7 +35,7 @@ L'onglet **Doc** des interfaces charge le guide depuis **`docs/user_guide.md`** 
 
 ---
 
-## ## 2bis. Exemples et référence exhaustive des propriétés de configuration
+## 2bis. Exemples et référence exhaustive des propriétés de configuration
 
 
 Cette section complète la vue d’ensemble de la section 2 avec des **exemples de fichiers** et un **tableau exhaustif des propriétés** que vous pouvez définir dans les fichiers de configuration utilisateur.
@@ -288,7 +288,7 @@ Propriétés supportées :
 
 ---
 
-## ## 5. Variables d'environnement utiles
+## 5. Variables d'environnement utiles
 
 
 | Variable | Description | Défaut |
@@ -312,7 +312,7 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 
 ---
 
-## ## 8. Politique des outils (tools_policy.yaml)
+## 8. Politique des outils (tools_policy.yaml)
 
 
 Le fichier **tools_policy.yaml** dans le data_dir contrôle ce que l'agent peut faire sur votre machine :

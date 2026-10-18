@@ -24,7 +24,7 @@
 
 ---
 
-## ## 14. Nouveautés depuis la version 0.7.0 (version 0.8.0)
+## 14. Nouveautés depuis la version 0.7.0 (version 0.8.0)
 
 
 ### Mission autonome
