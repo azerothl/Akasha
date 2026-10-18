@@ -762,7 +762,7 @@ pub fn studio_project_summary_prefix(project_root: &Path) -> Option<String> {
 pub fn studio_code_mode_message_prefix(mode: &str) -> Option<String> {
     match mode.trim().to_lowercase().as_str() {
         "plan" => Some(
-            "[Mode Code Studio — PLANIFICATION : priorité analyse et mise à jour de CODE_STUDIO_PLAN.md ; pas d’implémentation ni commandes mutatrices sauf demande explicite.]\n\n"
+            "[Mode Code Studio — PLANIFICATION : rôle studio_planner, lecture du dépôt et seule écriture de CODE_STUDIO_PLAN.md. Shell, implémentation, extensions et délégation désactivés. Passer en mode implémentation pour modifier les sources.]\n\n"
                 .to_string(),
         ),
         "implement" => Some(

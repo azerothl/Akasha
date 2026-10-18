@@ -5,7 +5,7 @@ use crate::api::{
     agent_role_system_prompt, available_tools_instruction, available_tools_instruction_exact,
     build_image_markdown, build_session_recap_reply, cancel_task_watchdogs,
     canonicalize_tool_name, captured_media_suitable_for_vision_injection,
-    classify_small_talk_message, code_studio_tools_for_prompt, compact_short_term_if_needed,
+    classify_small_talk_message, compact_short_term_if_needed,
     compute_message_intent_flags, detect_session_recall_intent, do_install_skill,
     do_uninstall_skill, embedded_tools_instruction_hint, ensure_no_open_code_block,
     execute_tool_call, extract_semaphore, extract_x_profile_handle, insert_task_tracking_event,
@@ -171,7 +171,9 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let code_studio_disk_task = tool_disk_workspace_root
-        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags));
+        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags))
+        || TaskStore::open(&store_path).ok()
+            .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten()).is_some();
     let studio_disk_system_append = {
         let proj_base = crate::studio::studio_projects_base(data_dir_for_studio_flags);
         if tool_disk_workspace_root.starts_with(proj_base) {
@@ -188,6 +190,24 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
+    let skill_registry = if code_studio_disk_task {
+        match &skill_registry {
+            Some(registry) => match registry.for_project(&tool_disk_workspace_root).await {
+                Ok(scoped) => Some(Arc::new(scoped)),
+                Err(error) => {
+                    let reason = format!("Cannot load project skills: {error}");
+                    if let Ok(store) = TaskStore::open(&store_path) {
+                        let _ = store.finalize_outcome(task_id, TaskStatus::Failed, serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":"failed","reason":reason,"verification":[],"acceptance_verified":false}));
+                    }
+                    let _ = bus.send(EventEnvelope::new(EventType::TaskFailed, Some(serde_json::json!({"task_id":task_id,"reason":reason}))).with_correlation(task_id));
+                    cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
+                    notify_task_completion(&task_completion_registry, task_id).await;
+                    return;
+                }
+            },
+            None => None,
+        }
+    } else { skill_registry };
     let role_agent_for_system_prompt =
         if preferred_task_type_override.as_deref() == Some("image_generation") {
             "image_generation"
@@ -503,10 +523,7 @@ pub(crate) async fn run_message_via_llm(
             }
         }
         let studio_tool_list = if code_studio_disk_task || crate::studio_role_policy::restricted_role(&assigned_agent) {
-            Some(code_studio_tools_for_prompt(
-                allowed_tools.as_deref(),
-                assigned_agent.as_str(),
-            ))
+            tools_executor_snapshot.as_ref().map(|executor| crate::studio_capabilities::announced_names(&executor.policy, &assigned_agent))
         } else {
             None
         };
@@ -524,11 +541,11 @@ pub(crate) async fn run_message_via_llm(
         if code_studio_disk_task {
             let skills_part_studio = match &skill_registry {
                 Some(reg) => {
-                    let list = reg.list().await;
+                    let list = reg.for_agent(&assigned_agent).await;
                     if list.is_empty() {
                         String::new()
                     } else {
-                        let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+                        let names: Vec<String> = list.iter().map(|s| format!("{}: {}", s.name, s.description)).collect();
                         format!(
                             " ; Skills (n’utiliser que si pertinent pour ce dépôt ; sinon ignorer) : {}",
                             names.join(", ")
@@ -572,7 +589,7 @@ pub(crate) async fn run_message_via_llm(
         } else {
         let (skills_part, skills_rule) = match &skill_registry {
             Some(reg) => {
-                let list = reg.list().await;
+                let list = reg.for_agent(&assigned_agent).await;
                 if list.is_empty() {
                     (String::new(), String::new())
                 } else {
@@ -580,7 +597,7 @@ pub(crate) async fn run_message_via_llm(
                         .iter()
                         .map(|s| format!("{} ({})", s.name, s.description))
                         .collect();
-                    let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+                    let names: Vec<String> = list.iter().map(|s| format!("{}: {}", s.name, s.description)).collect();
                     let part = format!(
                         " ; Skills (use skill name as tool): {}",
                         skills_desc.join(", ")
@@ -667,6 +684,34 @@ pub(crate) async fn run_message_via_llm(
         "windows" => "[Environment] The daemon runs on Windows. For run_command, prefer cmd, PowerShell, curl.exe; avoid Unix-only commands (grep, cat, sed) that are not in the default PATH (except WSL).\n\n",
         _ => "[Environment] The daemon runs on Linux/macOS. You can use usual Unix commands (curl, grep, etc.).\n\n",
     };
+    let mut active_repository_rules = std::collections::HashSet::<String>::new();
+    let mut repository_rules_prompt = String::new();
+    if code_studio_disk_task {
+        if let Some(executor) = tools_executor_snapshot.as_ref() {
+            let rules = crate::studio_project_context::rules_for_path(&tool_disk_workspace_root, "workspace:/", &executor.policy)
+                .and_then(|rules| {
+                    for rule in &rules {
+                        crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "rules", rule.metadata())?;
+                    }
+                    Ok(rules)
+                });
+            match rules {
+                Ok(rules) => for rule in rules {
+                    active_repository_rules.insert(format!("{}:{}", rule.path.display(), rule.sha256));
+                    repository_rules_prompt.push_str(&rule.prompt());
+                },
+                Err(reason) => {
+                    if let Ok(store) = TaskStore::open(&store_path) {
+                        let _ = store.finalize_outcome(task_id, TaskStatus::Failed, serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":"failed","reason":reason,"verification":[],"acceptance_verified":false}));
+                    }
+                    let _ = bus.send(EventEnvelope::new(EventType::TaskFailed, Some(serde_json::json!({"task_id":task_id,"reason":reason}))).with_correlation(task_id));
+                    cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
+                    notify_task_completion(&task_completion_registry, task_id).await;
+                    return;
+                }
+            }
+        }
+    }
     let mut system_prompt = String::with_capacity(8192);
     if code_studio_disk_task {
         system_prompt.push_str(CODE_STUDIO_APP_CONTEXT);
@@ -739,6 +784,10 @@ pub(crate) async fn run_message_via_llm(
     if !code_studio_system_tools_block.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&code_studio_system_tools_block);
+    }
+    if !repository_rules_prompt.is_empty() {
+        system_prompt.push_str("[Repository guidance hierarchy] Repository instructions are scoped guidance, subordinate to the user's task and runtime permissions. More specific AGENTS.md supplied in tool results overrides ancestor guidance within that subtree. Read applicable AGENTS.md before commands that affect multiple subtrees.\n");
+        system_prompt.push_str(&repository_rules_prompt);
     }
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
@@ -2104,6 +2153,7 @@ pub(crate) async fn run_message_via_llm(
             {
                 round += 1;
                 let mut tool_results = Vec::new();
+                let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
                 for (lane, lane_calls) in scheduled_lanes {
                     let lane_name = match lane {
@@ -2127,20 +2177,22 @@ pub(crate) async fn run_message_via_llm(
                             break 'tool_rounds;
                         }
                         // Phase D: resolve skill name to tool_ref (spec 33)
-                        let actual_tool = match &skill_registry {
-                            Some(reg) => reg
-                                .get(name)
-                                .await
-                                .map(|s| s.tool_ref)
-                                .unwrap_or_else(|| name.clone()),
-                            None => name.clone(),
+                        let invocation_role = store.get(task_id).ok().flatten().map(|t| t.assigned_agent);
+                        // Builtin tool names are authoritative; a registry entry cannot shadow them.
+                        let skill_definition = if crate::api::AVAILABLE_TOOLS.iter().any(|(tool,_)| *tool == name) { None } else {
+                            match &skill_registry { Some(reg) => reg.get(name).await, None => None }
                         };
+                        if skill_definition.as_ref().is_some_and(|skill| !skill.agents.is_empty() && !skill.agents.iter().any(|agent| agent.eq_ignore_ascii_case(invocation_role.as_deref().unwrap_or(&assigned_agent)))) {
+                            run_outcome.failed_tool_calls += 1;
+                            tool_results.push(format!("[skill] {name} is not available for {assigned_agent}"));
+                            continue;
+                        }
+                        let actual_tool = skill_definition.as_ref().map(|s| s.tool_ref.clone()).unwrap_or_else(|| name.clone());
                         let actual_tool = canonicalize_tool_name(&actual_tool);
                         let tool_args: &[String] = args.as_slice();
                         let effective_role_tool = if actual_tool.is_empty() {
                             if tool_args.is_empty() { "read_skill" } else { "run_command" }
                         } else { actual_tool.as_str() };
-                        let invocation_role = store.get(task_id).ok().flatten().map(|t| t.assigned_agent);
                         let role_check = invocation_role.as_deref().ok_or_else(|| "[studio] cannot resolve task role".to_string())
                             .and_then(|role| crate::studio_role_policy::check(role, effective_role_tool, tool_args, Some(&tool_disk_workspace_root)));
                         if let Err(reason) = role_check {
@@ -2150,6 +2202,56 @@ pub(crate) async fn run_message_via_llm(
                             }))).with_correlation(timeline_correlation));
                             tool_results.push(reason);
                             continue;
+                        }
+                        if code_studio_disk_task {
+                            if let Err(reason) = crate::studio_capabilities::check(&exec.policy, invocation_role.as_deref().unwrap_or(&assigned_agent), effective_role_tool) {
+                                run_outcome.failed_tool_calls += 1;
+                                let _ = bus.send(EventEnvelope::new(EventType::ToolInvoked, Some(serde_json::json!({"tool":effective_role_tool,"success":false,"reason":"capability_unavailable","result_preview":reason}))).with_correlation(timeline_correlation));
+                                tool_results.push(reason);
+                                continue;
+                            }
+                        }
+                        if code_studio_disk_task {
+                            let targets: Vec<String> = if matches!(actual_tool.as_str(), "write_file" | "write_code") {
+                                crate::api::parse_write_file_request(tool_args).map(|(path,_)| path).into_iter().collect()
+                            } else if actual_tool == "read_file" {
+                                let (parts, _, _) = parse_read_file_args(tool_args);
+                                vec![parts.join(" ")]
+                            } else if matches!(actual_tool.as_str(), "rename_path" | "move_tree" | "file_diff" | "diff_unified" | "dir_compare") {
+                                tool_args.iter().take(2).cloned().collect()
+                            } else if matches!(actual_tool.as_str(), "search_files" | "grep_content" | "edit_file" | "apply_patch" | "search_replace" | "delete_file") {
+                                tool_args.first().cloned().into_iter().collect()
+                            } else { Vec::new() };
+                            for path in targets {
+                                match crate::studio_project_context::rules_for_path(&tool_disk_workspace_root, &path, &exec.policy) {
+                                    Ok(rules) => for rule in rules {
+                                        let key = format!("{}:{}", rule.path.display(), rule.sha256);
+                                        if !active_repository_rules.contains(&key) {
+                                            match crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "rules", rule.metadata()) {
+                                                Ok(()) => {
+                                                    active_repository_rules.insert(key);
+                                                    tool_results.push(rule.prompt());
+                                                    repository_rules_deferred = true;
+                                                }
+                                                Err(reason) => {
+                                                    run_outcome.termination = TerminationReason::ContextUnavailable;
+                                                    reply_text = reason;
+                                                    break 'tool_rounds;
+                                                }
+                                            }
+                                        }
+                                    },
+                                    Err(reason) => {
+                                        run_outcome.termination = TerminationReason::ContextUnavailable;
+                                        reply_text = reason;
+                                        break 'tool_rounds;
+                                    }
+                                }
+                            }
+                            if repository_rules_deferred && !matches!(actual_tool.as_str(), "read_file" | "grep_content" | "search_files" | "read_skill" | "list_skills" | "read_todos") {
+                                tool_results.push(format!("[{actual_tool}] deferred: read and apply the repository instructions supplied in this round before retrying the action"));
+                                continue;
+                            }
                         }
                         // Hard guardrail: if read_file on this path was already truncated for this
                         // agent key, block repeated full-file reads and require chunked/windowed read.
@@ -2247,22 +2349,35 @@ pub(crate) async fn run_message_via_llm(
                             .with_correlation(task_id),
                         );
                         // Phase 3.1: tools in require_approval need user confirmation before execution.
-                        if exec.policy.requires_approval(&actual_tool) {
+                        // Documentary CLI skills inherit command approval and scope, including their executable.
+                        let approval_args: Vec<String> = if actual_tool.is_empty() && !tool_args.is_empty() {
+                            std::iter::once(name.clone()).chain(tool_args.iter().cloned()).collect()
+                        } else {tool_args.to_vec()};
+                        if let Some(definition) = skill_definition.as_ref().filter(|_| name != &actual_tool) {
+                            let metadata = serde_json::json!({"name":definition.name,"source_root":definition.source_root,"sha256":definition.sha256,"version":definition.version,"activation":"tool_alias"});
+                            if let Err(reason) = crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "skills", metadata.clone()) {
+                                run_outcome.termination = TerminationReason::ContextUnavailable;
+                                reply_text = reason;
+                                break 'tool_rounds;
+                            }
+                            let _ = store.insert_event(task_id, "skill_activated", Some(&metadata), &chrono::Utc::now().to_rfc3339());
+                        }
+                        if exec.policy.requires_approval(effective_role_tool) {
                             let permission_mode = load_permission_mode(data_dir);
                             if permission_mode.mode == "allow_all" {
                                 // Global session mode bypasses interactive approval prompts.
                             } else {
-                            let scope_key = tool_scope_key(&actual_tool, &tool_args);
+                            let scope_key = tool_scope_key(effective_role_tool, &approval_args);
                             let state = crate::permissions_center::load(data_dir);
                             let mut already_granted = false;
                             if let Some(decision) =
-                                crate::permissions_center::lookup(&actual_tool, &scope_key, &state)
+                                crate::permissions_center::lookup(effective_role_tool, &scope_key, &state)
                             {
                                 match decision.mode {
                                     crate::permissions_center::DecisionMode::AllowPersistent => {
                                         already_granted = true;
                                         let payload = serde_json::json!({
-                                            "tool": actual_tool,
+                                            "tool": effective_role_tool,
                                             "scope": scope_key,
                                             "approved": true,
                                             "mode": "allow_persistent",
@@ -2279,7 +2394,7 @@ pub(crate) async fn run_message_via_llm(
                                                 .to_string(),
                                         );
                                         let payload = serde_json::json!({
-                                            "tool": actual_tool,
+                                            "tool": effective_role_tool,
                                             "scope": scope_key,
                                             "approved": false,
                                             "mode": "deny_persistent",
@@ -2302,12 +2417,12 @@ pub(crate) async fn run_message_via_llm(
                                     // Redact write-like tool args entirely; truncate others to avoid leaking secrets/blobs.
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(
-                                        actual_tool.as_str(),
+                                        effective_role_tool,
                                         "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
                                     ) {
                                         "[redacted]".to_string()
                                     } else {
-                                        let truncated: Vec<String> = tool_args
+                                        let truncated: Vec<String> = approval_args
                                             .iter()
                                             .take(3)
                                             .map(|a| {
@@ -2323,8 +2438,8 @@ pub(crate) async fn run_message_via_llm(
                                                 }
                                             })
                                             .collect();
-                                        let suffix = if tool_args.len() > 3 {
-                                            format!(" … ({} args)", tool_args.len())
+                                        let suffix = if approval_args.len() > 3 {
+                                            format!(" … ({} args)", approval_args.len())
                                         } else {
                                             String::new()
                                         };
@@ -2332,7 +2447,7 @@ pub(crate) async fn run_message_via_llm(
                                     };
                                     let question = format!(
                                         "Approuver l'action : {} — {} ?",
-                                        actual_tool, args_preview
+                                        effective_role_tool, args_preview
                                     );
                                     let choices = vec![
                                         "Approuver".to_string(),
@@ -2344,10 +2459,10 @@ pub(crate) async fn run_message_via_llm(
                                     let queue_req = crate::permissions_queue::PermissionQueueRequest {
                                         id: approval_request_id.clone(),
                                         task_id: task_id.to_string(),
-                                        tool: actual_tool.clone(),
+                                        tool: effective_role_tool.to_string(),
                                         scope: scope_key.clone(),
-                                        action: actual_tool.clone(),
-                                        description: format!("{} {}", actual_tool, args_preview),
+                                        action: effective_role_tool.to_string(),
+                                        description: format!("{} {}", effective_role_tool, args_preview),
                                         rationale: format!(
                                             "Outil sensible (confirmation requise) pour la tâche {}",
                                             task_id
@@ -2366,7 +2481,7 @@ pub(crate) async fn run_message_via_llm(
                                     if let Err(err) = crate::permissions_queue::upsert_request(data_dir, queue_req) {
                                         eprintln!(
                                             "failed to persist permission queue request {} for task {} (tool {}): {}",
-                                            approval_request_id, task_id, actual_tool, err
+                                            approval_request_id, task_id, effective_role_tool, err
                                         );
                                     }
                                     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2399,7 +2514,7 @@ pub(crate) async fn run_message_via_llm(
                                         .with_correlation(task_id),
                                     );
                                     let approval_payload = serde_json::json!({
-                                        "tool": actual_tool,
+                                        "tool": effective_role_tool,
                                         "args_redacted": args_preview,
                                         "task_id": task_id.to_string(),
                                         "request_id": approval_request_id.clone()
@@ -2426,7 +2541,7 @@ pub(crate) async fn run_message_via_llm(
                                             }
                                             let expired_payload = serde_json::json!({
                                                 "task_id": task_id.to_string(),
-                                                "tool": actual_tool,
+                                                "tool": effective_role_tool,
                                                 "request_id": approval_request_id.clone(),
                                             });
                                             let _ = crate::permissions_queue::update_status(
@@ -2472,7 +2587,7 @@ pub(crate) async fn run_message_via_llm(
                                         });
                                         state.decisions.push(crate::permissions_center::PermissionDecision {
                                             id: Uuid::new_v4().to_string(),
-                                            tool: actual_tool.clone(),
+                                            tool: effective_role_tool.to_string(),
                                             scope: scope_key.clone(),
                                             mode: crate::permissions_center::DecisionMode::AllowPersistent,
                                             created_at: chrono::Utc::now().to_rfc3339(),
@@ -2483,7 +2598,7 @@ pub(crate) async fn run_message_via_llm(
                                     if !granted {
                                         tool_results.push("Action refusée par l'utilisateur (approbation requise).".to_string());
                                         let payload = serde_json::json!({
-                                            "tool": actual_tool,
+                                            "tool": effective_role_tool,
                                             "approved": false
                                         });
                                         let _ = bus.send(
@@ -2914,7 +3029,7 @@ pub(crate) async fn run_message_via_llm(
                             } else if actual_tool == "list_skills" {
                                 match &skill_registry {
                                     Some(reg) => {
-                                        let list = reg.list().await;
+                                        let list = reg.for_agent(invocation_role.as_deref().unwrap_or(&assigned_agent)).await;
                                         let summary: Vec<String> = list
                                             .iter()
                                             .map(|s| format!("{}: {}", s.name, s.description))
@@ -2936,37 +3051,14 @@ pub(crate) async fn run_message_via_llm(
                                     ),
                                 }
                             } else if actual_tool == "read_skill" {
-                                let skill_name =
-                                    tool_args.get(0).map(String::as_str).unwrap_or("").trim();
-                                if skill_name.is_empty() {
-                                    (
-                                        false,
-                                        "[read_skill] usage: read_skill <name>".to_string(),
-                                        None,
-                                    )
-                                } else {
-                                    match &skill_registry {
-                                        Some(reg) => {
-                                            if let Some(body) = reg.get_body(skill_name).await {
-                                                (
-                                                    true,
-                                                    format!(
-                                                        "[read_skill {}] Instructions:\n{}",
-                                                        skill_name, body
-                                                    ),
-                                                    None,
-                                                )
-                                            } else {
-                                                (false, format!("[read_skill] skill '{}' not found or has no body.", skill_name), None)
-                                            }
-                                        }
-                                        None => (
-                                            false,
-                                            "[read_skill] skill registry not available."
-                                                .to_string(),
-                                            None,
-                                        ),
-                                    }
+                                let skill_name = tool_args.first().map(String::as_str).unwrap_or("");
+                                let resource = tool_args.get(1).map(String::as_str);
+                                match &skill_registry {
+                                    Some(registry) => match crate::studio_project_context::activate_skill(registry, skill_name, invocation_role.as_deref().unwrap_or(&assigned_agent), resource, &store_path, task_id).await {
+                                        Ok(body) => (true, body, None),
+                                        Err(reason) => (false, reason, None),
+                                    },
+                                    None => (false, "[read_skill] registry unavailable".into(), None),
                                 }
                             } else if actual_tool.is_empty() {
                                 // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
@@ -2994,34 +3086,12 @@ pub(crate) async fn run_message_via_llm(
                                     .await;
                                     (s, r, None)
                                 } else {
-                                    // No args: inject SKILL.md body as context for next round (doc-only)
                                     match &skill_registry {
-                                        Some(reg) => {
-                                            if let Some(body) = reg.get_body(name).await {
-                                                (
-                                                    true,
-                                                    format!(
-                                                        "[Skill: {}] Instructions:\n{}",
-                                                        name, body
-                                                    ),
-                                                    None,
-                                                )
-                                            } else {
-                                                (
-                                                    false,
-                                                    format!(
-                                                        "[Skill: {}] No instructions body.",
-                                                        name
-                                                    ),
-                                                    None,
-                                                )
-                                            }
-                                        }
-                                        None => (
-                                            false,
-                                            "Skill registry not available.".to_string(),
-                                            None,
-                                        ),
+                                        Some(registry) => match crate::studio_project_context::activate_skill(registry, name, invocation_role.as_deref().unwrap_or(&assigned_agent), None, &store_path, task_id).await {
+                                            Ok(body) => (true, body, None),
+                                            Err(reason) => (false, reason, None),
+                                        },
+                                        None => (false, "[read_skill] registry unavailable".into(), None),
                                     }
                                 }
                             } else {
@@ -4380,7 +4450,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
 
     // Phase 2 AI OS: do not overwrite Paused / Cancelled / Interrupted with Completed.
     if !matches!(final_status, TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Interrupted | TaskStatus::WaitingUserInput) {
-        if final_status == TaskStatus::Completed {
+        if final_status == TaskStatus::Completed && !restricted_studio_role {
             if let Ok(events) = store.get_events(task_id) {
                 if let Some(ticket_id) = events
                     .iter()

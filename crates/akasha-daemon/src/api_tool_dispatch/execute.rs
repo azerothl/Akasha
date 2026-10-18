@@ -45,8 +45,14 @@ pub(crate) async fn execute_tool_call_impl(
     workspace_root: Option<&std::path::Path>,
     session_id: Option<&str>,
 ) -> (bool, String, Option<String>) {
-    let is_studio_workspace =
-        crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
+    let studio_project_id = store_path.and_then(|sp| TaskStore::open(sp).ok())
+        .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten());
+    let studio_ticket_workspace = studio_project_id.as_deref().and_then(|pid| {
+        let data_dir = store_path?.parent()?;
+        let root = crate::studio::resolve_studio_project_dir(data_dir, pid).ok()?;
+        (root.is_dir() && crate::studio::is_strictly_under_studio_root(&root, &crate::studio::studio_projects_base(data_dir))).then_some(root)
+    }).or_else(|| crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root));
+    let is_studio_workspace = studio_project_id.is_some() || studio_ticket_workspace.is_some();
     let task_for_role = store_path
             .and_then(|sp| TaskStore::open(sp).ok())
             .and_then(|store| store.get(task_id).ok().flatten());
@@ -61,6 +67,11 @@ pub(crate) async fn execute_tool_call_impl(
     if let Some(role) = assigned_agent_for_task.as_deref() {
         if let Err(reason) = crate::studio_role_policy::check(role, tool_name, args, workspace_root) {
             return (false, reason, None);
+        }
+        if is_studio_workspace {
+            if let Err(reason) = crate::studio_capabilities::check(&executor.policy, role, tool_name) {
+                return (false, reason, None);
+            }
         }
     }
     if tool_name.starts_with("mcp_") {
@@ -125,7 +136,7 @@ pub(crate) async fn execute_tool_call_impl(
     let studio_ticket_tool_ok = matches!(
         tool_name,
         "studio_list_tickets" | "studio_create_ticket" | "studio_update_ticket"
-    ) && crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
+    ) && studio_ticket_workspace.is_some();
     let can_use_named_tool =
         executor.policy.can_use_tool(tool_name) || studio_ticket_tool_ok;
     let can_use_plugin_call =
@@ -427,7 +438,7 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "studio_list_tickets" => {
             let Some(root) =
-                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+                studio_ticket_workspace.clone()
             else {
                 return (
                     false,
@@ -458,7 +469,7 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "studio_create_ticket" => {
             let Some(root) =
-                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+                studio_ticket_workspace.clone()
             else {
                 return (
                     false,
@@ -490,7 +501,7 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "studio_update_ticket" => {
             let Some(root) =
-                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+                studio_ticket_workspace.clone()
             else {
                 return (
                     false,
