@@ -1696,7 +1696,10 @@ pub(crate) async fn run_message_via_llm(
             }
             if round>=max_tool_rounds {run_outcome.termination=TerminationReason::ToolRoundLimit;reply_text="Tool round budget already exhausted at checkpoint; start a new scoped task to continue.".into();break 'tool_rounds;}
             let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
-                tools_executor_snapshot.as_ref().map(|exec|vec![crate::studio_tool_contract::native_definition(crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect())])
+                tools_executor_snapshot.as_ref().and_then(|exec| {
+                    let names:Vec<String>=crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect();
+                    (!names.is_empty()).then(||vec![crate::studio_tool_contract::native_definition(names)])
+                })
             }else{None};
             let request = CompletionRequest {
                 prompt: if code_studio_disk_task && round > 0 {
