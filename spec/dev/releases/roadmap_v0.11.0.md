@@ -336,4 +336,4 @@ flowchart LR
 
 - **v0.9.0** : premier artefact CUDA Windows ; fixes CI / DLL — [internal_release_0.9.md](internal_release_0.9.md).
 - **v0.10.0** : first-use embarqué, full CUDA, R0, cockpit P6 A1–A4, life layer P7, refactor L0–L6 — tag publié.
-- **v0.11.0** *(publiée 2026-09-28)* : maturité embarqué (benches AR, `/api/capabilities`), plateforme (`api.rs` &lt;8k, MCP), cockpit P6 B3/B4, dette doc P7 must, **P9 interop akasha-os** ; Rbitnet/DLM no-go renouvelé ; GPU smoke / benches live / sync Akasha_app = suivis opérateur post-tag.
+- **v0.11.0** *(publiée 2026-09-28)* : maturité embarqué (benches AR, `/api/capabilities`), plateforme (refactor `api.rs` sous ~8k lignes — boucle outils `api_tool_dispatch` / `api_llm_loop`, MCP), cockpit P6 B3/B4, dette doc P7 must, **P9 interop akasha-os** ; Rbitnet/DLM no-go renouvelé ; GPU smoke / benches live / sync Akasha_app = suivis opérateur post-tag.

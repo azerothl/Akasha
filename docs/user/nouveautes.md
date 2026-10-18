@@ -2,12 +2,11 @@
 
 ## Nouveautés 0.11.0
 
-- **Plateforme** : découpage `api.rs` (&lt; 8k lignes), boucle outils extraite (`api_tool_dispatch`, `api_llm_loop`)
-- **Embarqué** : `GET /api/capabilities`, protocole benches AR tier 1–2 (décision : conserver Qwen2.5-1.5B Q4_K_M par défaut CUDA)
-- **MCP** : runtime stdio + policy + surface CLI/UI opérateur (statut **Implemented**)
-- **Cockpit** : P6-B3 cron watch wakeups, P6-B4 inspect / cancel arbre subagents
-- **Interop akasha-os** : note skills/plugins ↔ modules OS, matrice `SKILL.md`, pilote `morning-brief`
-- **Companion** : APIs **LAN** daemon inchangées (pairing, discovery) — le matériel **ESP32 / avatar (FNK0104)** reste **hors livraison** ; voir registre `spec/feature_evolution_tracking.md`
+- **Modèle embarqué** : le daemon expose un statut plus précis sur ce que votre modèle local prend en charge (texte, vision, preuves de compatibilité) ; le modèle CUDA proposé par défaut à l’installation reste **Qwen2.5-1.5B**, comme en 0.10.
+- **Serveurs MCP** : connectez des outils externes via `mcp.json`, validez-les avec `akasha mcp validate` / `probe` / `status`, et contrôlez quels serveurs l’agent peut utiliser dans `tools_policy.yaml` (voir **Configuration**, §8bis).
+- **Cockpit** : surveillez la fin d’une tâche planifiée (cron) et déclenchez un wakeup agent (Paramètres → Life layer) ; dans **Travail actif**, inspectez et annulez un arbre de sous-tâches en cours.
+- **Skills** : format `SKILL.md` compatible avec akasha-os (produit distinct) — page **Extensions vs akasha-os** et exemple partagé type brief matinal.
+- **Companion** : aucun boîtier ESP32 ni avatar livré avec cette version ; le daemon conserve les API réseau local (appairage, découverte) pour un futur client.
 
 ---
 
