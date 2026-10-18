@@ -1627,11 +1627,11 @@ async fn get_task_human_input(task_id: String, port: Option<u16>) -> Result<serd
 
 /// Human in the loop: POST /api/tasks/:id/human-reply — submit user response to unblock the agent.
 #[tauri::command]
-async fn post_task_human_reply(task_id: String, response: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+async fn post_task_human_reply(task_id: String, response: String, request_id: Option<String>, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/tasks/{}/human-reply", daemon_base_url(port), task_id);
     let client = http_client();
-    let body = serde_json::json!({ "response": response });
+    let body = serde_json::json!({ "response": response, "request_id": request_id });
     let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));

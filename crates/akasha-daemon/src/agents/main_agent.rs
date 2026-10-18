@@ -390,6 +390,8 @@ User message:\n{}",
             message_capped
         );
         let req = CompletionRequest {
+            require_tool: false,
+            conversation: None,
             tools: None,
             prompt,
             max_tokens: Some(128),

@@ -1254,6 +1254,7 @@ pub async fn run_delegation_handler(
 
 /// Pending "human in the loop" request: agent is waiting for the user to answer.
 pub struct PendingHumanInput {
+    pub request_id: Option<String>,
     pub question: String,
     pub context: String,
     pub choices: Option<Vec<String>>,
@@ -3535,6 +3536,8 @@ pub(crate) async fn compact_short_term_if_needed(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(2048);
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: summary_prompt,
         max_tokens: Some(summary_max_tokens),
@@ -3641,6 +3644,8 @@ Factual response in English.\n\n{}",
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(1024);
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: summary_prompt,
         max_tokens: Some(summary_max_tokens),
@@ -4470,6 +4475,8 @@ Output JSON only.",
         assistant_excerpt.chars().take(1_800).collect::<String>()
     );
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: user,
         max_tokens: Some(500),
@@ -4581,6 +4588,8 @@ Use a short structure: context (1–2 sentences), root cause, files/lines from t
         ),
     };
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: user,
         max_tokens: Some(800),
@@ -4907,6 +4916,8 @@ LAST_FAILED_FILES: {}\n",
             )
         };
         let req = CompletionRequest {
+            require_tool: false,
+            conversation: None,
             tools: None,
             prompt: user_block,
             max_tokens: Some(8192),
@@ -5196,6 +5207,8 @@ The compiler output already signals what is wrong: apply a minimal fix with `TOO
             }
             if !focused_reads.is_empty() {
                 let fallback_req = CompletionRequest {
+                    require_tool: false,
+                    conversation: None,
                     tools: None,
                     prompt: format!(
                         "Build output:\n{}\n\nFocused file reads:\n{}\n\nReturn ONLY TOOL lines to fix the TS syntax/build errors now. \

@@ -1181,6 +1181,8 @@ async fn llm_complete(
     task_type: &str,
 ) -> Option<String> {
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt,
         max_tokens: Some(max_tokens),

@@ -8,6 +8,7 @@ pub(crate) enum TerminationReason {
     Success,
     ModelEmpty,
     ToolLoop,
+    ToolError,
     BudgetExhausted,
     ProviderError,
     Timeout,

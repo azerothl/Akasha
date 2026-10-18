@@ -2045,7 +2045,7 @@ function App() {
     return heuristicToolBatchSummary(names);
   }, [runningTaskEvents, runningTaskChips]);
   /** Human in the loop: when the agent asks for user input, we store question/context/choices per task_id. */
-  const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[] }>>({});
+  const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[]; request_id?: string }>>({});
   /** Task id for which the human-input modal is open (null = closed). */
   const [humanInputModalTaskId, setHumanInputModalTaskId] = useState<string | null>(null);
   /** Device bridge: pending request from agent (camera, mic, etc.) for UI to fulfill. */
@@ -2755,7 +2755,7 @@ function App() {
   const fetchPendingHumanInput = useCallback(async () => {
     if (!health?.ok) return;
     try {
-      const data = await invoke<{ pending?: Array<{ task_id: string; question: string; context?: string; choices?: string[] }> }>(
+      const data = await invoke<{ pending?: Array<{ task_id: string; question: string; context?: string; choices?: string[]; request_id?: string }> }>(
         "get_pending_human_input",
         { port: DAEMON_PORT }
       );
@@ -2767,6 +2767,7 @@ function App() {
               question: p.question ?? "",
               context: p.context ?? "",
               choices: p.choices,
+              request_id: p.request_id,
             };
           }
           return next;
@@ -6146,7 +6147,7 @@ function App() {
                       className="human-input-choice-btn"
                       onClick={async () => {
                         try {
-                          await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: choice, port: DAEMON_PORT });
+                          await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, requestId: pendingHumanInput[humanInputModalTaskId]?.request_id, response: choice, port: DAEMON_PORT });
                           setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
                           setHumanInputModalTaskId(null);
                           setHumanInputFreeText("");
@@ -6178,7 +6179,7 @@ function App() {
                     const text = humanInputFreeText.trim();
                     if (!text) return;
                     try {
-                      await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: text, port: DAEMON_PORT });
+                      await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, requestId: pendingHumanInput[humanInputModalTaskId]?.request_id, response: text, port: DAEMON_PORT });
                       setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
                       setHumanInputModalTaskId(null);
                       setHumanInputFreeText("");
@@ -6639,7 +6640,7 @@ function App() {
                         className="message-ask-user-choice-tag"
                         onClick={async () => {
                           try {
-                            await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, response: choice, port: DAEMON_PORT });
+                            await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, requestId: pendingHumanInput[pendingTaskIdForReply]?.request_id, response: choice, port: DAEMON_PORT });
                             setPendingHumanInput((prev) => {
                               const next = { ...prev };
                               delete next[pendingTaskIdForReply];
@@ -6937,7 +6938,7 @@ function App() {
                           className="chat-inline-human-reply-choice-btn"
                           onClick={async () => {
                             try {
-                              await invoke("post_task_human_reply", { taskId: pendingTaskId, response: choice, port: DAEMON_PORT });
+                              await invoke("post_task_human_reply", { taskId: pendingTaskId, requestId: pendingHumanInput[pendingTaskId]?.request_id, response: choice, port: DAEMON_PORT });
                               setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
                               setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
                               setInlineHumanReplyText("");
@@ -6976,7 +6977,7 @@ function App() {
                           const text = inlineHumanReplyText.trim();
                           if (!text) return;
                           try {
-                            await invoke("post_task_human_reply", { taskId: pendingTaskId, response: text, port: DAEMON_PORT });
+                            await invoke("post_task_human_reply", { taskId: pendingTaskId, requestId: pendingHumanInput[pendingTaskId]?.request_id, response: text, port: DAEMON_PORT });
                             setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
                             setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
                             setInlineHumanReplyText("");

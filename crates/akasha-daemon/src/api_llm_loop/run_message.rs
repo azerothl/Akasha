@@ -61,17 +61,11 @@ async fn studio_round_limit_choice(store: &Option<HumanInputStore>, bus: &EventB
     let context = format!("La tâche a utilisé {round} tours d'outils (max {max}). Une reprise exige une nouvelle décision ; aucune ancienne approbation n'est réutilisée.");
     let choices = vec!["Continuer (+10 tours)".to_string(), "Réinitialiser et continuer (+10 tours)".to_string(), "Arrêter".to_string()];
     let (tx, rx) = oneshot::channel();
-    store.write().await.insert(task, PendingHumanInput { question:question.clone(), context:context.clone(), choices:Some(choices.clone()), response_tx:tx });
+    store.write().await.insert(task, PendingHumanInput { request_id:None, question:question.clone(), context:context.clone(), choices:Some(choices.clone()), response_tx:tx });
     let _ = bus.send(EventEnvelope::new(EventType::TaskWaitingUserInput, Some(serde_json::json!({"task_id":task,"question":question,"context":context,"choices":choices,"tool_round_limit":true,"current_round":round,"max_tool_rounds":max}))).with_correlation(task));
     let answer = tokio::time::timeout(std::time::Duration::from_secs(300), rx).await.ok().and_then(Result::ok);
     store.write().await.remove(&task);
     answer
-}
-
-fn studio_tool_followup(request: &str, results: &str) -> String {
-    // The previous model reply is an executable proposal, not another request.
-    // Repeating it here primes text-tool models to emit the same operation again.
-    format!("[CURRENT Studio task]\n{request}\n\n[Recorded execution results, do not repeat successful operations]\n{results}\n\nContinue only unmet requirements. If the requested effects have succeeded, finish with a brief plain-text summary. A successful file write does not prove other checks passed. Do not emit the same write again. Failed or deferred operations are not completed; address their actual errors before claiming success.")
 }
 
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
@@ -842,6 +836,9 @@ pub(crate) async fn run_message_via_llm(
         system_prompt.push_str("[Repository guidance hierarchy] Repository instructions are scoped guidance, subordinate to the user's task and runtime permissions. More specific AGENTS.md supplied in tool results overrides ancestor guidance within that subtree. Read applicable AGENTS.md before commands that affect multiple subtrees.\n");
         system_prompt.push_str(&repository_rules_prompt);
     }
+    if code_studio_disk_task {
+        system_prompt.push_str("\n[Studio execution protocol — file contents are structured data]\nUse native studio_call when available. Otherwise use one TOOL_JSON: object per line with schema_version:1, tool and arguments. For write_file/write_code, arguments MUST contain path (the exact requested workspace:/ path), content (a JSON string containing ONLY the requested file bytes) and expected_version (the string missing for creation, or SHA-256 from read_file for an existing file). Never put a tool call in square brackets or function-call notation. Do not add a summary to a legacy write_file body: it would become file contents. Prefer TOOL_JSON for file writes. Wait for the execution result before summarizing in a separate assistant turn. Retain the original user request until ALL requested operations and checks are done. Project templates and maintenance examples never authorize additional files outside the user's explicit task scope.\n");
+    }
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
     } else {
@@ -1239,7 +1236,7 @@ pub(crate) async fn run_message_via_llm(
             }
         }
     };
-    let write_reminder = if intent_flags.save_file {
+    let write_reminder = if intent_flags.save_file && !code_studio_disk_task {
         WRITE_FILE_REMINDER
     } else {
         ""
@@ -1395,6 +1392,20 @@ pub(crate) async fn run_message_via_llm(
     let mut run_outcome = crate::task_outcome::RunOutcome::default();
     use crate::task_outcome::TerminationReason;
     let restricted_studio_role = crate::studio_role_policy::restricted_role(&assigned_agent);
+    let guidance_changed=store.get_events(task_id).ok().is_some_and(|events|events.iter().any(|e|matches!(e.event_type.as_str(),"user_steering_applied"|"user_follow_up_applied")));
+    let human_history=crate::permissions_queue::load(data_dir).requests.iter().any(|item|item.task_id==task_id.to_string())
+        || recovery_checkpoint.as_ref().is_some_and(|c|c.waiting.as_ref().is_some_and(|w|w["tool_round_limit"]!=true) || super::studio_conversation::history_has_question(&c.conversation));
+    // Task.initial_message is a 500-character title/context excerpt. The original
+    // objective must come from the full request or its durable conversation.
+    let task_scope=recovery_checkpoint.as_ref().and_then(|c| {
+        c.conversation.iter().find(|m|matches!(&m.role,akasha_llm::MessageRole::User) && m.content.contains("[Current user request — task scope]"))
+            .map(|m|m.content.as_str()).or_else(||c.prompt.contains("[Current user request — task scope]").then_some(c.prompt.as_str()))
+    }).unwrap_or(&user_message).to_string();
+    let mut scope_unchanged=!guidance_changed && !human_history;
+    let mut explicit_file_goals=if code_studio_disk_task && !restricted_studio_role && !message.contains("[Délégation obligatoire (Code Studio") && !guidance_changed && !human_history {
+        super::studio_completion::file_goals(&task_scope)
+    } else {vec![]};
+
     let mut reply_text = String::new();
     let mut last_llm_model_used: Option<String> = None;
     let mut first_meaningful_progress_sent = false;
@@ -1482,6 +1493,7 @@ pub(crate) async fn run_message_via_llm(
                 max_tool_rounds = floor;
             }
         }
+        let mut conversation = recovery_checkpoint.as_ref().map(|c|c.conversation.clone()).unwrap_or_default();
         let mut resume_overlay=String::new();
         if let Some(checkpoint)=recovery_checkpoint.as_ref(){
             let ledger=match crate::studio_tool_contract::recovery_summary(&store_path,task_id){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
@@ -1520,6 +1532,7 @@ pub(crate) async fn run_message_via_llm(
         let mut studio_zero_tool_promise_nags = 0u32;
         let mut studio_unparsed_tool_marker_nags = 0u32;
         let mut studio_pm_mandatory_delegate_nags = 0u32;
+        let mut physical_completion_retries=0u32;
         let mut last_captured_image_base64: Option<String> = None;
         // Images from tools (browser screenshot, camera, generate_image) queued for the next CompletionRequest for multimodal models.
         let mut pending_completion_image_urls: Option<Vec<String>> = None;
@@ -1551,7 +1564,7 @@ pub(crate) async fn run_message_via_llm(
         'tool_rounds: loop {
             if let Some(waiting) = resumed_limit_wait.take() {
                 max_tool_rounds = waiting["max_tool_rounds"].as_u64().map(|v|v as u32).unwrap_or(max_tool_rounds);
-                if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",waiting,(&current_prompt,round,max_tool_rounds,&run_outcome)) {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
+                if let Err(error)={crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",waiting,(&current_prompt,round,max_tool_rounds,&run_outcome))} {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
                 match studio_round_limit_choice(&human_input_store, &bus, task_id, round, max_tool_rounds).await.as_deref() {
                     Some("Continuer (+10 tours)") => max_tool_rounds = round.max(max_tool_rounds).saturating_add(10),
                     Some("Réinitialiser et continuer (+10 tours)") => { round=0; max_tool_rounds=max_tool_rounds.saturating_add(10); }
@@ -1571,6 +1584,7 @@ pub(crate) async fn run_message_via_llm(
             if let Some(ref sq) = steering_queue {
                 let steering_items = sq.drain_steering(task_id).await;
                 for item in steering_items {
+                    explicit_file_goals.clear();scope_unchanged=false;
                     let steer_text = format!(
                         "[Steering — instruction utilisateur à appliquer maintenant]\n{}",
                         item.text
@@ -1694,7 +1708,7 @@ pub(crate) async fn run_message_via_llm(
             if code_studio_disk_task {
                 let project=TaskStore::open(&store_path).ok().and_then(|store|store.lineage_root_studio_project_id(task_id).ok().flatten());
                 let Some(project_id)=project else {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text="Studio project identity unavailable at checkpoint".into();break 'tool_rounds;};
-                let checkpoint=crate::studio_recovery::Checkpoint{schema_version:1,task_id,project_id,workspace:tool_disk_workspace_root.clone(),agent:assigned_agent.clone(),session_id:session_id.clone(),preferred_task_type:preferred_task_type_override.clone(),incognito,round,max_tool_rounds:Some(max_tool_rounds),prompt:current_prompt.clone(),phase:"before_model".into(),waiting:None,outcome:run_outcome.clone()};
+                let checkpoint=crate::studio_recovery::Checkpoint{schema_version:1,task_id,project_id,workspace:tool_disk_workspace_root.clone(),agent:assigned_agent.clone(),session_id:session_id.clone(),preferred_task_type:preferred_task_type_override.clone(),incognito,round,max_tool_rounds:Some(max_tool_rounds),prompt:current_prompt.clone(),conversation:conversation.clone(),phase:"before_model".into(),waiting:None,outcome:run_outcome.clone()};
                 if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
             }
             if round>=max_tool_rounds {run_outcome.termination=TerminationReason::ToolRoundLimit;reply_text="Tool round budget already exhausted at checkpoint; start a new scoped task to continue.".into();break 'tool_rounds;}
@@ -1705,14 +1719,22 @@ pub(crate) async fn run_message_via_llm(
                 })
             }else{None};
             let request = CompletionRequest {
-                prompt: if code_studio_disk_task && round > 0 {
-                    format!("{}\n\n{}{}", tool_instruction, resume_overlay, current_prompt)
+                require_tool: code_studio_disk_task && super::studio_conversation::explicit_file_request(&user_message)
+                    && (matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code")
+                        || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
+                    && run_outcome.successful_tool_calls == 0
+                    && native_tools.as_ref().is_some_and(|tools|tools[0].pointer("/function/parameters/properties/tool/enum").and_then(|v|v.as_array()).is_some_and(|names|names.iter().any(|name|matches!(name.as_str(),Some("write_file"|"write_code"|"edit_file"|"search_replace"|"apply_patch"))))),
+                conversation: code_studio_disk_task.then(||conversation.clone()),
+                prompt: if code_studio_disk_task {
+                    format!("{}{}", resume_overlay, current_prompt)
                 } else {
                     format!("{}{}{}", resume_overlay, current_prompt, tool_instruction)
                 },
                 max_tokens: Some(completion_max_tokens),
                 temperature: Some(completion_temperature),
                 preferred_task_type,
+                // Studio's system block already contains the effective catalogue.
+                // Repeating it doubles the context and its executable examples.
                 system_prompt: system_prompt.clone(),
                 image_data_urls: merged_image_data_urls,
                 top_p: None,
@@ -1727,6 +1749,7 @@ pub(crate) async fn run_message_via_llm(
             };
             // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
             // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
+            let delivered_prompt = request.prompt.clone();
             let (stream_tx, std_rx) = std::sync::mpsc::channel::<String>();
             let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             std::thread::Builder::new()
@@ -2014,7 +2037,7 @@ pub(crate) async fn run_message_via_llm(
             }
 
             let parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
-                let calls = parse_tool_calls(&response);
+                let calls = if code_studio_disk_task {super::studio_conversation::parse_calls(&response)} else {parse_tool_calls(&response)};
                 if calls.is_empty() {
                     None
                 } else {
@@ -2055,6 +2078,40 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
             let no_parseable_tools_this_round = parsed_tool_calls.is_none();
+            if code_studio_disk_task && no_parseable_tools_this_round
+                && run_outcome.successful_tool_calls == 0 && run_outcome.failed_tool_calls == 0
+                && super::studio_conversation::explicit_file_request(&user_message)
+                && tools_executor_snapshot.as_ref().is_some_and(|e|policy_allows_primary_disk_write(&e.policy))
+            {
+                if studio_zero_tool_promise_nags >= 3 {
+                    run_outcome.termination=TerminationReason::ToolError;
+                    reply_text="No tool operation was executed for the explicit file request; model claims of file creation are not validated.".into();
+                    break 'tool_rounds;
+                }
+                studio_zero_tool_promise_nags += 1;
+                current_prompt.push_str("\n[Execution still missing] No tool operation has run. A statement that files were created is not a tool execution. Execute the original requested file operation now with native studio_call or the structured JSON tool branch (schema_version, tool, arguments including path/content/expected_version). Do not return a final response until the actual tool result confirms the requested effects.\n");
+                continue;
+            }
+            if code_studio_disk_task && no_parseable_tools_this_round && !explicit_file_goals.is_empty() {
+                let current=if let Some(executor)=tools_executor.as_ref(){Some(executor.read().await.clone())}else{tools_executor_snapshot.clone()};
+                if let Some(executor)=current {
+                    let checks={
+                        let _guard=match crate::studio_tool_contract::workspace_guard(&tool_disk_workspace_root).await {Ok(guard)=>guard,Err(error)=>{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}};
+                        super::studio_completion::check_files(&tool_disk_workspace_root,&executor.policy,&explicit_file_goals)
+                    };
+                    let pending=checks.iter().filter(|c|c["status"]=="failed").filter_map(|c|c["path"].as_str()).map(str::to_owned).collect::<Vec<_>>();
+                    run_outcome.checks.retain(|c|c["kind"]!="requested_file");run_outcome.checks.extend(checks.clone());
+                    insert_task_tracking_event(&store_path,task_id,"studio_explicit_files_checked",serde_json::json!({"checks":checks}));
+                    if !pending.is_empty() {
+                        if physical_completion_retries>=3 {run_outcome.termination=TerminationReason::VerificationFailed;reply_text=format!("Explicitly requested files are still missing: {}",pending.join(", "));break 'tool_rounds;}
+                        physical_completion_retries+=1;
+                        if !delivered_prompt.is_empty(){conversation.push(akasha_llm::ConversationMessage::user(delivered_prompt.clone()));}
+                        conversation.push(akasha_llm::ConversationMessage::assistant(response.clone()));
+                        current_prompt=format!("[Pending physical deliverables] The final response is premature: these explicitly requested files do not exist in the task workspace: {}. Complete the ORIGINAL user request with the available tools and current permissions. Do not repeat confirmed operations on other files. Presence alone does not validate file contents or other requested checks.\nOriginal user request:\n{}",pending.join(", "),super::studio_conversation::user_request(&task_scope));
+                        continue;
+                    }
+                }
+            }
             let response_plain = response
                 .lines()
                 .filter(|l| !l.trim_start().starts_with("TOOL:"))
@@ -2602,9 +2659,10 @@ pub(crate) async fn run_message_via_llm(
                                             approval_request_id, task_id, effective_role_tool, err
                                         );
                                     }
-                                    if code_studio_disk_task {if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":actual_tool,"question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome)){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
+                                    if code_studio_disk_task {if let Err(error)={explicit_file_goals.clear();scope_unchanged=false;crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":actual_tool,"question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome))}{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
+                                        request_id:Some(approval_request_id.clone()),
                                         question: question.clone(),
                                         context: format!(
                                             "Outil sensible (nécessite confirmation) : {}",
@@ -2680,6 +2738,7 @@ pub(crate) async fn run_message_via_llm(
                                             "Refuser".to_string()
                                         }
                                     };
+                                    if matches!(TaskStore::open(&store_path).ok().and_then(|s|s.get(task_id).ok().flatten()).map(|t|t.status),Some(TaskStatus::Paused|TaskStatus::Cancelled|TaskStatus::Interrupted|TaskStatus::Failed)) {break 'tool_rounds;}
                                     let granted = answer.eq_ignore_ascii_case("Approuver")
                                         || answer.eq_ignore_ascii_case("Toujours autoriser");
                                     let queue_status = if granted {
@@ -2814,9 +2873,10 @@ pub(crate) async fn run_message_via_llm(
                                         if question.is_empty() {
                                             (false, format!("[ask_user] invalid JSON: question required. Got: {}", body.chars().take(100).collect::<String>()), None)
                                         } else {
-                                            if code_studio_disk_task {if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":"ask_user","question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome)){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
+                                            if code_studio_disk_task {if let Err(error)={explicit_file_goals.clear();scope_unchanged=false;crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":"ask_user","question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome))}{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                             let (tx, rx) = tokio::sync::oneshot::channel();
                                             let pending = PendingHumanInput {
+                                                request_id:None,
                                                 question: question.clone(),
                                                 context: context.clone(),
                                                 choices: choices.clone(),
@@ -2856,6 +2916,7 @@ pub(crate) async fn run_message_via_llm(
                                                 Ok(Err(_)) => {
                                                     let mut g = store.write().await;
                                                     g.remove(&task_id);
+                                                    if matches!(TaskStore::open(&store_path).ok().and_then(|s|s.get(task_id).ok().flatten()).map(|t|t.status),Some(TaskStatus::Paused|TaskStatus::Cancelled|TaskStatus::Interrupted|TaskStatus::Failed)) {break 'tool_rounds;}
                                                     (
                                                         false,
                                                         "[ask_user] Channel closed.".to_string(),
@@ -3247,7 +3308,9 @@ pub(crate) async fn run_message_via_llm(
                                 .await
                             };
                         if let Some(operation)=workflow_operation {if let Err(error)=operation.finish(success,&res){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Workflow result unknown: {error}");break 'tool_rounds;}}
-                        if success { run_outcome.successful_tool_calls += 1; } else { run_outcome.failed_tool_calls += 1; }
+                        if success {
+                            run_outcome.successful_tool_calls += 1;
+                        } else { run_outcome.failed_tool_calls += 1; }
                         if serde_json::from_str::<serde_json::Value>(&res).ok().is_some_and(|value|value["result_unknown"]==true){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Operation result unknown; inspect effects and use explicit recovery before continuing. {res}");break 'tool_rounds;}
 
                         if matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container") {
@@ -3396,6 +3459,12 @@ pub(crate) async fn run_message_via_llm(
                     }
                 }
                 let results_blob = tool_results.join("\n");
+                if code_studio_disk_task {
+                    if !delivered_prompt.trim().is_empty() {conversation.push(akasha_llm::ConversationMessage::user(delivered_prompt.clone()));}
+                    conversation.extend(super::studio_conversation::tool_turn(&response, &results_blob, round, if scope_unchanged {&task_scope}else{""}));
+                    // Current policy/context is reloaded on resume, then kept once in the transcript.
+                    resume_overlay.clear();
+                }
                 let mut studio_readonly_nudge: Option<String> = None;
                 if code_studio_disk_task && !calls.is_empty() {
                     let only_survey = calls.iter().all(|(name, args)| {
@@ -3468,8 +3537,8 @@ pub(crate) async fn run_message_via_llm(
                     .filter(|(t, _)| t == "web_search")
                     .count();
                 // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
-                current_prompt = if code_studio_disk_task && !round_had_ask_user {
-                    studio_tool_followup(&user_message, &results_blob)
+                current_prompt = if code_studio_disk_task {
+                    String::new()
                 } else if round_had_ask_user {
                     format!(
                     "User request (PRIMARY — you must still fulfill this): {}\n\nYour previous assistant reply:\n{}\n\nask_user step result (user's choice; may be unrelated to the primary request):\n{}\n\nContinue the task. If the PRIMARY request is not satisfied yet, you MUST emit TOOL: lines next (web_search, web_fetch, browser navigate + browser snapshot, etc.). Do not reply \"blocked\" or \"no information\" without trying web_search first. When the primary request is fully answered, reply in plain text only (no TOOL: lines).",
@@ -3525,7 +3594,7 @@ pub(crate) async fn run_message_via_llm(
                     current_prompt = format!("{nudge}\n\n{current_prompt}");
                 }
                 if code_studio_disk_task {
-                    if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.round=round;checkpoint.prompt=current_prompt.clone();checkpoint.phase="after_tools".into();checkpoint.waiting=None;checkpoint.outcome=run_outcome.clone();if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
+                    if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.round=round;checkpoint.prompt=current_prompt.clone();checkpoint.conversation=conversation.clone();checkpoint.phase="after_tools".into();checkpoint.waiting=None;checkpoint.outcome=run_outcome.clone();if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                 }
                 if round >= max_tool_rounds {
                     let response_for_user = response
@@ -3586,7 +3655,7 @@ pub(crate) async fn run_message_via_llm(
 
                     // When human_input_store is available, ask user whether to continue (+10 rounds), reset and continue, or stop.
                     if code_studio_disk_task {
-                        if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",serde_json::json!({"tool_round_limit":true,"question":"Continue tool rounds?","current_round":round,"max_tool_rounds":max_tool_rounds}),(&current_prompt,round,max_tool_rounds,&run_outcome)) { run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds; }
+                        if let Err(error)={crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",serde_json::json!({"tool_round_limit":true,"question":"Continue tool rounds?","current_round":round,"max_tool_rounds":max_tool_rounds}),(&current_prompt,round,max_tool_rounds,&run_outcome))} { run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds; }
                     }
                     let should_stop = match studio_round_limit_choice(&human_input_store,&bus,task_id,round,max_tool_rounds).await.as_deref() {
                         Some("Continuer (+10 tours)") => { max_tool_rounds=max_tool_rounds.saturating_add(10); false }
@@ -3777,6 +3846,7 @@ pub(crate) async fn run_message_via_llm(
                 let follow_items = sq.drain_follow_up(task_id).await;
                 if !follow_items.is_empty() && !is_subagent {
                     for item in follow_items {
+                    explicit_file_goals.clear();scope_unchanged=false;
                         let fu = format!(
                             "[Follow-up — poursuivre après le travail en cours]\n{}",
                             item.text
@@ -4199,6 +4269,8 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(2048);
                 let req = CompletionRequest {
+                    require_tool: false,
+                    conversation: None,
                     tools: None,
                     prompt: extract_prompt,
                     max_tokens: Some(extract_max_tokens),
@@ -4423,6 +4495,23 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         );
     }
 
+    if code_studio_disk_task && !run_outcome.failed() && run_outcome.failed_tool_calls > 0 && run_outcome.successful_tool_calls == 0 {
+        run_outcome.termination = TerminationReason::ToolError;
+        reply_text = "No tool operation succeeded; the requested effects are not validated.\n".to_string() + &reply_text;
+    }
+    if code_studio_disk_task && !explicit_file_goals.is_empty() {
+        if let Some(registry)=tools_executor.as_ref() {
+            let executor=registry.read().await.clone();
+            match crate::studio_tool_contract::workspace_guard(&tool_disk_workspace_root).await {
+                Ok(_guard)=>{
+                    let checks=super::studio_completion::check_files(&tool_disk_workspace_root,&executor.policy,&explicit_file_goals);
+                    if checks.iter().any(|c|c["status"]=="failed") && !run_outcome.failed() {run_outcome.termination=TerminationReason::VerificationFailed;reply_text="Explicitly requested files are missing after task verification.".into();}
+                    run_outcome.checks.retain(|c|c["kind"]!="requested_file");run_outcome.checks.extend(checks);
+                },
+                Err(error)=>{if !run_outcome.failed(){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;}},
+            }
+        }
+    }
     if studio_verify_error.is_some() { run_outcome.termination = TerminationReason::VerificationFailed; }
     let proposed = if run_outcome.failed() { TaskStatus::Failed } else { TaskStatus::Completed };
     let reason = if run_outcome.failed() {
@@ -4659,18 +4748,5 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             )
             .await;
         }
-    }
-}
-
-#[cfg(test)]
-mod studio_followup_tests {
-    #[test]
-    fn execution_results_do_not_replay_the_model_proposal_or_force_completion() {
-        let prompt = super::studio_tool_followup("implement then verify", "write_file: saved; verification: failed");
-        assert!(prompt.contains("implement then verify"));
-        assert!(prompt.contains("verification: failed"));
-        assert!(prompt.contains("Failed or deferred operations are not completed"));
-        assert!(!prompt.contains("Your previous reply"));
-        assert!(!prompt.contains("No TOOL: lines"));
     }
 }

@@ -40,6 +40,8 @@ pub async fn maybe_run_hierarchical_compaction(
             .join("\n\n")
     );
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: l1_prompt,
         max_tokens: Some(512),
@@ -210,6 +212,8 @@ pub async fn run_lt_rollup_with_llm(client: &LongTermMemoryClient, llm_router: O
             chunk_lines
         );
         let req = CompletionRequest {
+            require_tool: false,
+            conversation: None,
             tools: None,
             prompt,
             max_tokens: Some(500),

@@ -81,6 +81,8 @@ async fn run_fact_extract(
         job.content.chars().take(2000).collect::<String>()
     );
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt,
         max_tokens: Some(256),

@@ -37,9 +37,38 @@ fn outcome_does_not_invent_acceptance() {
 }
 
 #[test]
+fn native_schema_teaches_file_versions_and_filters_tool_variants() {
+    let definition=contracts::native_definition(vec!["write_file".into(),"read_file".into(),"git_status".into()]);
+    let schema=&definition["function"]["parameters"];
+    let compiled=jsonschema::JSONSchema::compile(schema).unwrap();
+    let valid=json!({"schema_version":1,"tool":"write_file","arguments":{"path":"workspace:/a.md","content":"exact","expected_version":"missing"}});
+    assert!(compiled.is_valid(&valid));
+    let mut missing=valid.clone();missing["arguments"].as_object_mut().unwrap().remove("expected_version");
+    assert!(!compiled.is_valid(&missing));
+    assert!(compiled.is_valid(&json!({"schema_version":1,"tool":"git_status","arguments":{"argv":["workspace:/"]}})));
+    assert!(!compiled.is_valid(&json!({"schema_version":1,"tool":"run_command","arguments":{"program":"node","args":[]}})));
+    let decoded=contracts::decode(&valid.to_string()).unwrap();
+    let other=contracts::decode(&valid.to_string()).unwrap();
+    assert_ne!(decoded.envelope.operation_id,other.envelope.operation_id);
+}
+
+#[test]
+fn cancellation_after_resume_preparation_cannot_transition_back_to_queued() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("task.db");let id=Uuid::new_v4();
+    running_task(&db,id);
+    let store=akasha_store::TaskStore::open(&db).unwrap();
+    store.update_status(id,akasha_store::TaskStatus::Interrupted).unwrap();
+    let prepared=store.get(id).unwrap().unwrap();
+    assert_eq!(prepared.status,akasha_store::TaskStatus::Interrupted);
+    store.update_status(id,akasha_store::TaskStatus::Cancelled).unwrap();
+    assert!(!store.transition_if(id,&[akasha_store::TaskStatus::Interrupted,akasha_store::TaskStatus::Paused],akasha_store::TaskStatus::Queued).unwrap());
+    assert_eq!(store.get(id).unwrap().unwrap().status,akasha_store::TaskStatus::Cancelled);
+}
+
+#[test]
 fn every_abnormal_termination_is_failure() {
     use crate::task_outcome::{RunOutcome, TerminationReason::*};
-    for termination in [ModelEmpty, ToolLoop, BudgetExhausted, ProviderError, Timeout, ToolRoundLimit, VerificationFailed, ContextUnavailable] {
+    for termination in [ModelEmpty, ToolLoop, ToolError, BudgetExhausted, ProviderError, Timeout, ToolRoundLimit, VerificationFailed, ContextUnavailable] {
         assert!(RunOutcome { termination, ..Default::default() }.failed());
     }
 }
@@ -259,13 +288,18 @@ fn checkpoint_round_session_wait_and_size_are_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("test.db");
     let task = Uuid::new_v4();
-    let mut cp = crate::studio_recovery::Checkpoint {schema_version:1,task_id:task,project_id:Uuid::new_v4().to_string(),workspace:dir.path().into(),agent:"studio_fullstack".into(),session_id:"same-session".into(),preferred_task_type:None,incognito:true,round:7,max_tool_rounds:Some(10),prompt:"private context".into(),phase:"before_model".into(),waiting:None,outcome:Default::default()};
+    let mut cp = crate::studio_recovery::Checkpoint {schema_version:1,task_id:task,project_id:Uuid::new_v4().to_string(),workspace:dir.path().into(),agent:"studio_fullstack".into(),session_id:"same-session".into(),preferred_task_type:None,incognito:true,round:7,max_tool_rounds:Some(10),prompt:"private context".into(),conversation:vec![],phase:"before_model".into(),waiting:None,outcome:Default::default()};
+    crate::studio_recovery::save(&db, &cp).unwrap();
+    cp.conversation.push(akasha_llm::ConversationMessage::user("original requirement".into()));
+    cp.conversation.push(akasha_llm::ConversationMessage::assistant("TOOL: read_file workspace:/a.md".into()));
     crate::studio_recovery::save(&db, &cp).unwrap();
     crate::studio_recovery::record_waiting(&db, task, "approval", json!({"tool":"git_push"}),(&cp.prompt,8,20,&cp.outcome)).unwrap();
     let loaded = crate::studio_recovery::load(&db, task, false).unwrap().unwrap();
     assert_eq!(loaded.round, 8);
     assert_eq!(loaded.max_tool_rounds,Some(20));
     assert_eq!(loaded.session_id, "same-session");
+    assert_eq!(loaded.conversation.len(),2);
+    assert_eq!(loaded.conversation[0].content,"original requirement");
     assert_eq!(loaded.waiting.unwrap()["tool"], "git_push");
     cp.prompt = "x".repeat(2*1024*1024);
     assert!(crate::studio_recovery::save(&db, &cp).is_err());

@@ -54,6 +54,8 @@ pub(crate) struct Checkpoint {
     #[serde(default)]
     pub max_tool_rounds: Option<u32>,
     pub prompt: String,
+    #[serde(default)]
+    pub conversation: Vec<akasha_llm::ConversationMessage>,
     pub phase: String,
     pub waiting: Option<Value>,
     pub outcome: crate::task_outcome::RunOutcome,

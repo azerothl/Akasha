@@ -2,6 +2,8 @@
 
 pub mod classifier;
 pub mod config;
+mod conversation;
+pub use conversation::{ConversationMessage, MessageRole};
 pub mod discovery;
 pub mod fallback;
 pub mod metrics;

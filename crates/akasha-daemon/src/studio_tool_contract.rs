@@ -13,6 +13,7 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub(crate) struct Envelope {
     pub schema_version: u32,
+    #[serde(default = "Uuid::new_v4")]
     pub operation_id: Uuid,
     pub tool: String,
     pub arguments: Value,
@@ -310,7 +311,23 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
 }
 
 pub(crate) fn native_definition(names: Vec<String>) -> Value {
-    json!({"type":"function","function":{"name":"studio_call","description":"Execute one versioned Studio tool. Reuse an operation_id only to retrieve the same operation result. Files use path/content/expected_version; commands use program/args/cwd. LSP query, delivery and MCP tools take their documented JSON object directly; remaining tools use argv. Read a file before editing it. Creation requires expected_version=missing.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","operation_id","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"operation_id":{"type":"string","format":"uuid"},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}}}}})
+    let path=json!({"type":"string","description":"Exact requested workspace:/ relative path"});
+    let version=json!({"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"REQUIRED: literal missing for a NEW file; SHA-256 from read_file for an EXISTING file. Never omit."});
+    let groups=[
+        (vec!["write_file","write_code"],json!({"type":"object","additionalProperties":false,"required":["path","content","expected_version"],"properties":{"path":path,"content":{"type":"string","description":"Exact file content; no code fences or call punctuation"},"expected_version":version}})),
+        (vec!["read_file"],json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":path,"full":{"type":"boolean"},"offset_line":{"type":"integer","minimum":1},"limit_lines":{"type":"integer","minimum":1,"maximum":5000}}})),
+        (vec!["edit_file"],json!({"type":"object","additionalProperties":false,"required":["path","content","expected_version","start_line","end_line"],"properties":{"path":path,"content":{"type":"string"},"expected_version":version,"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}})),
+        (vec!["run_command"],json!({"type":"object","additionalProperties":false,"required":["program","args"],"properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"}}})),
+    ];
+    let mut variants=vec![];
+    let mut remaining=names.clone();
+    for (tools,schema) in groups {
+        let tools:Vec<_>=tools.into_iter().filter(|name|names.iter().any(|n|n==name)).collect();
+        remaining.retain(|name|!tools.contains(&name.as_str()));
+        if !tools.is_empty() {variants.push(json!({"properties":{"tool":{"enum":tools},"arguments":schema}}));}
+    }
+    if !remaining.is_empty() {variants.push(json!({"properties":{"tool":{"enum":remaining},"arguments":{"type":"object","description":"For LSP/delivery/MCP, the documented JSON object. For other tools, {argv:[string,...]}.","properties":{"argv":{"type":"array","items":{"type":"string"}}}}}}));}
+    json!({"type":"function","function":{"name":"studio_call","description":"Execute one Studio tool. The runtime assigns operation IDs; do not invent one. The tool-specific argument schema is mandatory. For write_file/write_code creation, explicitly pass expected_version: missing. Existing files must be read before mutation.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}},"oneOf":variants}}})
 }
 
 pub(crate) fn is_file_mutation(tool: &str) -> bool {
@@ -349,7 +366,7 @@ fn connection(path: &Path) -> Result<Connection, String> {
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn bounded_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+pub(crate) fn bounded_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let path = crate::api::resolve_tool_disk_path(raw, Some(&root));
     if path
@@ -585,6 +602,10 @@ impl Operation {
         }
         let output = crate::tool_output::truncate_utf8_by_bytes(text, 64 * 1024).0;
         let mut value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
+        if self.tool == "read_file" && !success && value["file_version"] == "missing" {
+            value["error_code"]=json!("file_not_found");
+            value["retry_hint"]=json!("The file does not exist. Repeating read_file with another window/full cannot create it. If the ORIGINAL user request asks you to create this file, use write_file with expected_version: missing and the requested content. Otherwise report that it is absent; do not create unrelated files.");
+        }
         let uncertain = serde_json::from_str::<Value>(text)
             .ok()
             .is_some_and(|value| value["result_unknown"] == true);

@@ -519,7 +519,7 @@ pub(crate) async fn cancel_task(store_path: &Path, id: Uuid, main_agent: &crate:
     };
     let cancellable = matches!(
         task.status,
-        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
+        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running | TaskStatus::Paused | TaskStatus::Interrupted | TaskStatus::WaitingUserInput
     );
     if !cancellable {
         let body = serde_json::json!({
@@ -529,8 +529,10 @@ pub(crate) async fn cancel_task(store_path: &Path, id: Uuid, main_agent: &crate:
         });
         return json_response("400 Bad Request", &body.to_string());
     }
-    if store.update_status(id, TaskStatus::Cancelled).is_err() {
-        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    match store.transition_if(id, &[TaskStatus::Pending, TaskStatus::Queued, TaskStatus::Running, TaskStatus::Paused, TaskStatus::Interrupted, TaskStatus::WaitingUserInput], TaskStatus::Cancelled) {
+        Ok(true) => {},
+        Ok(false) => return json_response("409 Conflict", r#"{"error":"task_changed_before_cancel"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     }
     let _ = main_agent.bus().send(
         EventEnvelope::new(
@@ -699,8 +701,10 @@ pub(crate) async fn pause_task(store_path: &Path, id: Uuid, main_agent: &crate::
         });
         return json_response("400 Bad Request", &body.to_string());
     }
-    if store.update_status(id, TaskStatus::Paused).is_err() {
-        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    match store.transition_if(id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running,TaskStatus::WaitingUserInput],TaskStatus::Paused) {
+        Ok(true)=>{},
+        Ok(false)=>return json_response("409 Conflict",r#"{"error":"task_changed_before_pause"}"#),
+        Err(_)=>return json_response("500 Internal Server Error",r#"{"error":"store"}"#),
     }
     let _ = main_agent.bus().send(
         EventEnvelope::new(
@@ -2190,7 +2194,9 @@ if method == "POST" && path == "/api/message" {
     let ack_message = build_ack_message(&message);
     // Capture the raw user message for code-RAG retrieval before any prefixes are injected.
     let raw_user_message = message.clone();
-    let mut message_for_llm = message;
+    let mut message_for_llm = if studio_disk_root.is_some() {
+        format!("[Current user request — task scope]\n{message}\n[End current user request]\n\nRespect the exact requested paths and contents. Project templates and examples are context; do not modify them unless this request requires it.")
+    } else { message };
     if let Some(mode) = message_delivery_mode.as_deref() {
         if mode == "steering" || mode == "follow_up" {
             message_for_llm = format!(
@@ -2424,6 +2430,7 @@ if method == "GET" && path == "/api/pending-human-input" {
             .map(|(id, p)| {
                 serde_json::json!({
                     "task_id": id.to_string(),
+                    "request_id": p.request_id,
                     "question": p.question,
                     "context": p.context,
                     "choices": p.choices
@@ -2441,16 +2448,27 @@ if path.starts_with("/api/tasks/") {
     if let Some(&id_str) = parts.first() {
         if let Ok(id) = Uuid::parse_str(id_str) {
             if method == "POST" && parts.get(1) == Some(&"cancel") {
-                return Some(cancel_task(store_path, id, main_agent).await);
+                let response=cancel_task(store_path,id,main_agent).await;
+                if response.starts_with("HTTP/1.1 200 ") {if let Some(waits)=human_input_store.as_ref(){waits.write().await.remove(&id);}}
+                return Some(response);
             }
             if method == "POST" && parts.get(1) == Some(&"cancel-tree") {
-                return Some(cancel_task_tree(store_path, id, main_agent).await);
+                let response=cancel_task_tree(store_path,id,main_agent).await;
+                if response.starts_with("HTTP/1.1 200 ") {
+                    if let (Some(waits),Ok(store))=(human_input_store.as_ref(),TaskStore::open(store_path)) {
+                        let ids=collect_task_tree_ids(&store,id);let mut pending=waits.write().await;
+                        for task in ids {pending.remove(&task);}
+                    }
+                }
+                return Some(response);
             }
             if method == "GET" && parts.get(1) == Some(&"children") {
                 return Some(get_task_children(store_path, id).await);
             }
             if method == "POST" && parts.get(1) == Some(&"pause") {
-                return Some(pause_task(store_path, id, main_agent).await);
+                let response=pause_task(store_path,id,main_agent).await;
+                if response.starts_with("HTTP/1.1 200 ") {if let Some(waits)=human_input_store.as_ref(){waits.write().await.remove(&id);}}
+                return Some(response);
             }
             if method == "POST" && parts.get(1) == Some(&"resume") {
                 return Some(resume_task(store_path, id, main_agent).await);
@@ -2498,6 +2516,7 @@ if path.starts_with("/api/tasks/") {
                     if let Some(pending) = g.get(&id) {
                         let body = serde_json::json!({
                             "task_id": id.to_string(),
+                            "request_id": pending.request_id,
                             "question": pending.question,
                             "context": pending.context,
                             "choices": pending.choices
@@ -2509,6 +2528,7 @@ if path.starts_with("/api/tasks/") {
             }
             // Human in the loop: POST user reply to unblock the agent
             if method == "POST" && parts.get(1) == Some(&"human-reply") {
+                let request_id = body.as_deref().and_then(|b|serde_json::from_slice::<serde_json::Value>(b).ok()).and_then(|v|v["request_id"].as_str().map(str::to_owned));
                 let response_text = body
                     .as_deref()
                     .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
@@ -2517,6 +2537,9 @@ if path.starts_with("/api/tasks/") {
                 if let Some(ref store) = human_input_store {
                     let pending = {
                         let mut g = store.write().await;
+                        if g.get(&id).is_some_and(|pending| pending.request_id.is_some() && pending.request_id != request_id) {
+                            return Some(json_response("409 Conflict",r#"{"error":"stale_approval_request","detail":"Send the request_id from the current human-input question."}"#));
+                        }
                         g.remove(&id)
                     };
                     if let Some(pending) = pending {
