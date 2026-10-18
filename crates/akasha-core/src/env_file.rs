@@ -18,9 +18,7 @@ pub enum EnvFileParseError {
 impl fmt::Display for EnvFileParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EnvFileParseError::NotKeyValue => {
-                f.write_str("expected KEY=value or export KEY=value")
-            }
+            EnvFileParseError::NotKeyValue => f.write_str("expected KEY=value or export KEY=value"),
             EnvFileParseError::EmptyKey => f.write_str("empty key before '='"),
             EnvFileParseError::KeyContainsWhitespace => {
                 f.write_str("key contains whitespace (invalid)")
@@ -79,16 +77,14 @@ pub fn env_file_line_entry(line: &str) -> Option<(String, String)> {
         return None;
     }
     let assignment = strip_export_prefix(trimmed);
-    assignment
-        .split_once('=')
-        .and_then(|(k, v)| {
-            let key = k.trim();
-            if key.is_empty() || key.contains(char::is_whitespace) {
-                None
-            } else {
-                Some((key.to_string(), unquote_value(v)))
-            }
-        })
+    assignment.split_once('=').and_then(|(k, v)| {
+        let key = k.trim();
+        if key.is_empty() || key.contains(char::is_whitespace) {
+            None
+        } else {
+            Some((key.to_string(), unquote_value(v)))
+        }
+    })
 }
 
 /// Log warnings for invalid env file lines (line number + reason only; never log values).
@@ -103,8 +99,20 @@ pub fn warn_env_file_parse_errors(file_label: &str, errors: &[(usize, EnvFilePar
     }
 }
 
+/// Env keys that must not be applied from disk (bootstrap path is fixed before files load).
+pub const ENV_FILE_SKIP_KEYS: &[&str] = &["AKASHA_DATA_DIR"];
+
 /// Load `connectors.env` then `akasha.env` from `data_dir` into the process environment.
+///
+/// Variables present in the process **before** any file is read keep priority over both files.
+/// Between files, `akasha.env` (loaded second) overrides values from `connectors.env`.
 pub fn apply_data_dir_env_files(data_dir: &Path) {
+    use std::collections::HashSet;
+
+    let pre_existing: HashSet<String> = std::env::vars_os()
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+
     for file_label in ["connectors.env", "akasha.env"] {
         let path = data_dir.join(file_label);
         let content = match std::fs::read_to_string(&path) {
@@ -114,8 +122,15 @@ pub fn apply_data_dir_env_files(data_dir: &Path) {
         let (map, errors) = parse_env_file_content(&content);
         warn_env_file_parse_errors(file_label, &errors);
         for (k, v) in map {
-            // Do not override variables already set (e.g. CLI `akasha start` applies file then shell).
-            if std::env::var_os(&k).is_none() {
+            if ENV_FILE_SKIP_KEYS.iter().any(|skip| *skip == k) {
+                tracing::warn!(
+                    env_file = file_label,
+                    key = k.as_str(),
+                    "ignoring env file assignment for bootstrap key (set in the shell before starting the daemon)"
+                );
+                continue;
+            }
+            if !pre_existing.contains(&k) {
                 std::env::set_var(k, v);
             }
         }
@@ -221,5 +236,59 @@ export OLLAMA_HOST='http://localhost:11434'
             Some("FOO")
         );
         assert!(env_file_line_key("# nope").is_none());
+    }
+
+    #[test]
+    fn apply_data_dir_env_akasha_overrides_connectors() {
+        let key = "AKASHA_ENV_FILE_TEST_OVERRIDE";
+        let _ = std::env::remove_var(key);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("connectors.env"),
+            format!("{key}=from_connectors\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("akasha.env"),
+            format!("{key}=from_akasha\n"),
+        )
+        .unwrap();
+        apply_data_dir_env_files(dir.path());
+        assert_eq!(std::env::var(key).ok().as_deref(), Some("from_akasha"));
+        let _ = std::env::remove_var(key);
+    }
+
+    #[test]
+    fn apply_data_dir_env_preserves_pre_existing_process_env() {
+        let key = "AKASHA_ENV_FILE_TEST_PREEXIST";
+        std::env::set_var(key, "from_process");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("connectors.env"),
+            format!("{key}=from_connectors\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("akasha.env"),
+            format!("{key}=from_akasha\n"),
+        )
+        .unwrap();
+        apply_data_dir_env_files(dir.path());
+        assert_eq!(std::env::var(key).ok().as_deref(), Some("from_process"));
+        let _ = std::env::remove_var(key);
+    }
+
+    #[test]
+    fn apply_data_dir_env_skips_akasha_data_dir_from_file() {
+        let key = "AKASHA_DATA_DIR";
+        let _ = std::env::remove_var(key);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("akasha.env"),
+            format!("{key}=/other/data\n"),
+        )
+        .unwrap();
+        apply_data_dir_env_files(dir.path());
+        assert!(std::env::var_os(key).is_none());
     }
 }

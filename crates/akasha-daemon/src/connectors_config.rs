@@ -13,10 +13,7 @@ pub const CONNECTOR_KEYS: &[(&str, &str)] = &[
 ];
 
 /// Non-secret env keys stored in connectors.env.
-pub const CONNECTOR_ENV_CONFIG_KEYS: &[&str] = &[
-    "AKASHA_TELEGRAM_NOTIFY_CHAT_ID",
-    "HA_BASE_URL",
-];
+pub const CONNECTOR_ENV_CONFIG_KEYS: &[&str] = &["AKASHA_TELEGRAM_NOTIFY_CHAT_ID", "HA_BASE_URL"];
 
 /// Vault keys for connector secrets (never returned in API responses).
 pub const CONNECTOR_VAULT_KEYS: &[&str] = &[
@@ -67,31 +64,16 @@ fn load_or_init_lines(data_dir: &Path) -> Vec<String> {
 fn upsert_env_line(lines: &mut Vec<String>, key: &str, value: &str) {
     let new_line = format!("{}={}", key, value);
     for line in lines.iter_mut() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') || trimmed.is_empty() {
-            continue;
-        }
-        if let Some((k, _)) = trimmed.split_once('=') {
-            if k.trim() == key {
-                *line = new_line.clone();
-                return;
-            }
+        if akasha_core::env_file_line_key(line).as_deref() == Some(key) {
+            *line = new_line.clone();
+            return;
         }
     }
     lines.push(new_line);
 }
 
 fn remove_env_line(lines: &mut Vec<String>, key: &str) {
-    lines.retain(|line| {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') || trimmed.is_empty() {
-            return true;
-        }
-        trimmed
-            .split_once('=')
-            .map(|(k, _)| k.trim() != key)
-            .unwrap_or(true)
-    });
+    lines.retain(|line| akasha_core::env_file_line_key(line).as_deref() != Some(key));
 }
 
 /// One connector row for GET /api/connectors.
@@ -367,7 +349,11 @@ mod tests {
         )
         .unwrap();
         let map = read_env_file(dir.path());
-        assert_eq!(map.get("AKASHA_TELEGRAM_NOTIFY_CHAT_ID").map(String::as_str), Some("12345"));
+        assert_eq!(
+            map.get("AKASHA_TELEGRAM_NOTIFY_CHAT_ID")
+                .map(String::as_str),
+            Some("12345")
+        );
     }
 
     #[test]
@@ -386,5 +372,40 @@ mod tests {
             ha_base_url(dir.path()).as_deref(),
             Some("http://127.0.0.1:8123")
         );
+    }
+
+    #[test]
+    fn upsert_replaces_export_prefixed_line() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("connectors.env"),
+            "export AKASHA_SLACK_ENABLED=0\n",
+        )
+        .unwrap();
+        write_connectors_enabled(dir.path(), false, true, false, false).unwrap();
+        let content = fs::read_to_string(dir.path().join("connectors.env")).unwrap();
+        assert!(content.contains("AKASHA_SLACK_ENABLED=1"));
+        assert!(!content.contains("export AKASHA_SLACK_ENABLED=0"));
+    }
+
+    #[test]
+    fn remove_clears_export_prefixed_ha_base_url() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("connectors.env"),
+            "export HA_BASE_URL=http://127.0.0.1:8123\n",
+        )
+        .unwrap();
+        apply_connectors_update(
+            dir.path(),
+            &ConnectorsUpdate {
+                ha_base_url: Some("".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ha_base_url(dir.path()), None);
+        let content = fs::read_to_string(dir.path().join("connectors.env")).unwrap();
+        assert!(!content.contains("HA_BASE_URL"));
     }
 }
