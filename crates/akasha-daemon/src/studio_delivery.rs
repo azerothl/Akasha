@@ -195,6 +195,8 @@ fn selected_path(
     raw: &str,
     policy: &akasha_tools::ToolsPolicy,
 ) -> Result<PathBuf, String> {
+    let normalized = raw.replace('\\', "/");
+    let raw = normalized.as_str();
     if raw.is_empty()
         || raw.contains(['\0', '\r', '\n', ':'])
         || Path::new(raw)
@@ -444,10 +446,11 @@ pub(crate) async fn commit(
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
     for raw in &request.paths {
-        if !seen.insert(raw.clone()) {
+        let path = selected_path(&root, raw, policy)?;
+        let normalized=path.strip_prefix(&root).map_err(|_|"selected path outside repository")?.components().map(|part|part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+        if !seen.insert(normalized) {
             return Err("duplicate selected path".into());
         }
-        let path = selected_path(&root, raw, policy)?;
         let expected = request
             .expected_versions
             .get(raw)
@@ -489,11 +492,15 @@ pub(crate) async fn commit(
     };
     git(&root, read_tree, Some(&index)).await?.checked()?;
     let mut add = args(&["add", "--"]);
-    add.extend(request.paths.iter().cloned());
+    add.extend(paths.iter().map(|path|path.strip_prefix(&root).unwrap().components().map(|part|part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")));
     git(&root, add, Some(&index)).await?.checked()?;
     for (path, raw) in paths.iter().zip(&request.paths) {
         if file_hash(path)? != request.expected_versions[raw] {
             return Err("selected file changed during staging".into());
+        }
+        if path.is_file() {
+            let relative=path.strip_prefix(&root).map_err(|_|"selected path outside repository")?.components().map(|part|part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+            git(&root,args(&["ls-files","--error-unmatch","--",&relative]),Some(&index)).await?.checked().map_err(|_|format!("selected file was not staged: {relative}"))?;
         }
     }
     let diff = git(
