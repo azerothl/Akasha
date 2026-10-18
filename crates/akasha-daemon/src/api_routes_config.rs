@@ -140,16 +140,9 @@ if method == "GET" && path == "/api/config" {
     let env_path = data_dir.join("akasha.env");
     let mut vars = std::collections::HashMap::new();
     if let Ok(s) = std::fs::read_to_string(&env_path) {
-        for line in s.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                let v = v.trim().trim_matches('"').trim_matches('\'').to_string();
-                vars.insert(k.trim().to_string(), v);
-            }
-        }
+        let (map, errors) = akasha_core::parse_env_file_content(&s);
+        akasha_core::warn_env_file_parse_errors("akasha.env", &errors);
+        vars = map;
     }
     let body_json = serde_json::to_string(&serde_json::json!({ "vars": vars }))
         .unwrap_or_else(|_| "{}".into());
@@ -190,7 +183,7 @@ if method == "POST" && path == "/api/config" {
             let new_line = format!("{}={}", k, v);
             let mut found = false;
             for line in lines.iter_mut() {
-                if line.trim_start().starts_with(&format!("{}=", k)) {
+                if akasha_core::env_file_line_key(line).as_deref() == Some(k.as_str()) {
                     *line = new_line.clone();
                     found = true;
                     break;

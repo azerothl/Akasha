@@ -36,7 +36,9 @@ fn read_env_file(data_dir: &Path) -> HashMap<String, String> {
         return HashMap::new();
     }
     let content = std::fs::read_to_string(&path).unwrap_or_default();
-    akasha_core::env_file::parse_env_file_content(&content).0
+    let (map, errors) = akasha_core::env_file::parse_env_file_content(&content);
+    akasha_core::env_file::warn_env_file_parse_errors("connectors.env", &errors);
+    map
 }
 
 fn write_env_file(data_dir: &Path, lines: &[String]) -> anyhow::Result<()> {
