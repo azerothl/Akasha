@@ -80,3 +80,8 @@ Le parseur reconnaît aussi « 400 mots au maximum », « do not exceed », « l
 ### Budget et blocs longs
 
 Le plafond final est vérifié aussi pour les rapports dégradés sans page consultée : un dépassement résiduel après révision produit une erreur explicite. Les titres génériques utilisent uniquement le budget restant après sélection du contenu. Les longs paragraphes sont répartis entre phrases complètes pour les audits bornés. Les tableaux et les assertions indivisibles restent entiers ; si un tel bloc dépasse encore la capacité de contrôle, la recherche échoue explicitement plutôt que publier une assertion non contrôlée. 54 tests Rust Recherche réussis.
+
+
+### Références Markdown et preuves normalisées
+
+Les références Markdown sont résolues avec le parseur sur le document complet avant la séparation des blocs : chaque affirmation conserve ainsi sa destination pour le contrôle de ses preuves. L’expansion des tableaux conserve également les autres citations vérifiées dont les espaces avaient été normalisés sur plusieurs lignes sources. Deux régressions supplémentaires : 56 tests Rust Recherche réussis.
