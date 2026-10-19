@@ -95,3 +95,8 @@ Le découpage utilise les limites des blocs du parseur Markdown et conserve les 
 ### Débits et limites par unité
 
 Le parseur écarte les nombres de mots suivis de « per », « par » ou « / » : un débit de génération ou une limite par élément ne devient pas une contrainte sur la longueur totale du rapport. Les tests couvrent aussi la coexistence d’un débit et d’une véritable limite de réponse ; 59 tests Rust Recherche réussis.
+
+
+### Priorité des passages hors tableau
+
+Les passages ordinaires conservent exactement leur ordre de sélection par l’extracteur ; ils ne sont plus triés selon leur position dans la page. L’enrichissement en ordre source est réservé aux tableaux sélectionnés. 60 tests Rust Recherche réussis, dont la conservation des citations normalisées lors d’une expansion réelle de tableau.

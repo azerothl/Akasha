@@ -950,6 +950,11 @@ fn verified_source_evidence(parsed: &serde_json::Value, content: &str) -> Option
 /// Match row labels to literal question terms; retain all rows if no target is
 /// named. Include nearby notation and cost legends, excluding unrelated types.
 fn complete_selected_tables(evidence: &str, content: &str, goal: &str) -> String {
+    // Ordinary passages are already verified and ranked by the extractor.
+    // Source ordering is needed only for expanding an actual selected table.
+    if !evidence.lines().any(|line| line.trim_start().starts_with('|')) {
+        return evidence.to_string();
+    }
     let tokens = |text: &str| text.split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|word| word.len() >= 2).map(str::to_lowercase).collect::<HashSet<_>>();
     let goal_terms = tokens(goal);
@@ -1905,9 +1910,16 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_evidence_keeps_extractor_priority_instead_of_page_order() {
+        let page = "Earlier secondary context with sufficient length.\nLater key passage with the most relevant finding.";
+        let selected = "Later key passage with the most relevant finding.\nEarlier secondary context with sufficient length.";
+        assert_eq!(super::complete_selected_tables(selected, page, "finding"), selected);
+    }
+
+    #[test]
     fn table_expansion_preserves_other_whitespace_normalized_quotes() {
-        let page = "An exact sentence with useful evidence.\nAnother verified quotation spans\nseveral source lines without changing meaning.";
-        let evidence = "An exact sentence with useful evidence.\nAnother verified quotation spans several source lines without changing meaning.";
+        let page = "| Type | Cost |\n| Sample | O(n) |\nAn exact sentence with useful evidence.\nAnother verified quotation spans\nseveral source lines without changing meaning.";
+        let evidence = "| Type | Cost |\nAn exact sentence with useful evidence.\nAnother verified quotation spans several source lines without changing meaning.";
         let expanded = super::complete_selected_tables(evidence, page, "compare");
         assert!(expanded.contains("An exact sentence with useful evidence."));
         assert!(expanded.contains("Another verified quotation spans several source lines without changing meaning."));
