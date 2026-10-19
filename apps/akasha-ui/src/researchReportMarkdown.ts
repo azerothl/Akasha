@@ -50,7 +50,7 @@ export function linkNumericCitations(markdown: string, sources: ResearchSourceRe
     const n = i + 1;
     const url = normalizeUrl(sources[i].url);
     if (!url) continue;
-    const label = (sources[i].title || `Source ${n}`).replace(/[\[\]]/g, "");
+    const label = (sources[i].title || `Source ${n}`).replace(/[[\]]/g, "");
     const re = new RegExp(`\\[${n}\\](?!\\()`, "g");
     out = out.replace(re, `[${label}](${url})`);
   }

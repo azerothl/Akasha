@@ -91,7 +91,7 @@ export function CreateTaskDialog({
           setError(t("tasks.create_schedule_fields_required"));
           return;
         }
-        let body: Record<string, unknown> = {
+        const body: Record<string, unknown> = {
           name,
           description: desc,
           enabled: true,
