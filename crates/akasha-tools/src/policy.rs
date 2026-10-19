@@ -320,8 +320,10 @@ impl ToolsPolicy {
             .and_then(|n| n.to_str())
             .unwrap_or(&name)
             .to_string();
+        let normalize=|value:String| {if cfg!(windows) {value.strip_suffix(".exe").unwrap_or(&value).to_owned()}else{value}};
+        let name=normalize(name);let name_base=normalize(name_base);
         if self.blocked_commands.iter().any(|b| {
-            let b = b.trim().to_lowercase();
+            let b = normalize(b.trim().to_lowercase());
             name_base == b || name.ends_with(&b)
         }) {
             return false;
@@ -330,7 +332,7 @@ impl ToolsPolicy {
             return true;
         }
         self.allowed_commands.iter().any(|allowed| {
-            let a = allowed.trim().to_lowercase();
+            let a = normalize(allowed.trim().to_lowercase());
             name_base == a || name.ends_with(&a)
         })
     }
@@ -1133,5 +1135,15 @@ mod tests {
         };
         assert!(p.requires_approval("write_code"));
         assert!(!p.requires_approval("write_file"));
+    }
+}
+
+#[cfg(all(test,windows))]
+mod windows_executable_alias_regressions {
+    use super::*;
+    #[test] fn exe_aliases_share_allow_and_deny_decisions() {
+        let mut policy=ToolsPolicy {allowed_commands:vec!["cmd".into()],..Default::default()};
+        assert!(policy.can_run_command("cmd.exe"));policy.blocked_commands=vec!["cmd.exe".into()];assert!(!policy.can_run_command("cmd"));
+        policy.blocked_commands.clear();policy.allowed_commands=vec!["powershell.exe".into()];assert!(policy.can_run_command("powershell"));
     }
 }
