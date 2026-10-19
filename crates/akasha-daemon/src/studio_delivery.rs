@@ -102,6 +102,37 @@ fn isolated_identity_config(identity:&[(String,String)])->Result<tempfile::Named
     Ok(file)
 }
 
+fn isolate_gh_configuration(command:&mut Command,path:&Path,token:Option<&str>) {
+    command.env("GH_CONFIG_DIR",path).env("GH_HOST","github.com").env_remove("GH_DEBUG").env_remove("GITHUB_TOKEN").env_remove("GH_TOKEN");
+    if let Some(token)=token {command.env("GH_TOKEN",token);}
+}
+async fn github_token(root:&Path)->Result<Option<String>,String> {
+    for key in ["GH_TOKEN","GITHUB_TOKEN"] {
+        if let Ok(value)=std::env::var(key) {if !value.trim().is_empty(){return Ok(Some(value));}}
+    }
+    // auth token only reads local credentials/keyring; never perform a request
+    // through the inherited routing config. Import the token in memory only.
+    let executable=resolve_program(root,"gh",&std::env::var_os("PATH").unwrap_or_default())?;
+    let mut command=Command::new(executable);isolate_git_configuration(&mut command);
+    command.args(["auth","token","--hostname","github.com"]).env("GH_PROMPT_DISABLED","1").env("GH_NO_UPDATE_NOTIFIER","1").stdin(std::process::Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let output=tokio::time::timeout(std::time::Duration::from_secs(10),command.output()).await.map_err(|_|"GitHub credential lookup timed out")?.map_err(|_|"GitHub credential lookup unavailable")?;
+    if !output.status.success(){return Ok(None);}
+    if output.stdout.len()>16*1024{return Err("GitHub credential lookup exceeded limit".into());}
+    let token=String::from_utf8(output.stdout).map_err(|_|"invalid GitHub credential encoding")?.trim().to_owned();
+    if token.is_empty(){return Ok(None);}if token.contains(['\r','\n','\0']){return Err("invalid GitHub credential".into());}Ok(Some(token))
+}
+#[cfg(test)]
+mod gh_config_isolation_tests {
+    #[test]
+    fn inherited_socket_config_is_not_used_and_credentials_stay_in_memory() {
+        let config=tempfile::tempdir().unwrap();let mut command=super::Command::new("gh");command.env("GH_CONFIG_DIR","hostile-config").env("GH_HOST","unapproved.invalid").env("GH_DEBUG","api").env("GITHUB_TOKEN","wrong-token");
+        super::isolate_gh_configuration(&mut command,config.path(),Some("test-token"));
+        let env=command.as_std().get_envs().map(|(k,v)|(k.to_string_lossy().to_string(),v.map(|s|s.to_string_lossy().to_string()))).collect::<std::collections::BTreeMap<_,_>>();
+        assert_eq!(env["GH_CONFIG_DIR"].as_deref(),config.path().to_str());assert_eq!(env["GH_HOST"].as_deref(),Some("github.com"));assert_eq!(env["GH_TOKEN"].as_deref(),Some("test-token"));assert_eq!(env["GITHUB_TOKEN"],None);assert_eq!(env["GH_DEBUG"],None);assert_eq!(std::fs::read_dir(config.path()).unwrap().count(),0);
+    }
+}
 async fn run(
     root: &Path,
     program: &str,
@@ -113,8 +144,12 @@ async fn run(
     // Keep only inert author metadata from the user's global config. Network,
     // helper, include and command settings never reach the execution config.
     let identity=if program=="git" { safe_global_identity(&executable) } else { Vec::new() };
+    let publication_auth=program=="gh" || args.iter().any(|arg|matches!(arg.as_str(),"push"|"ls-remote"));
+    let token=if publication_auth {github_token(root).await?} else {None};
+    let _gh_config=tempfile::tempdir().map_err(|_|"could not isolate GitHub configuration")?;
     let mut command = Command::new(executable);
     isolate_git_configuration(&mut command);
+    isolate_gh_configuration(&mut command,_gh_config.path(),token.as_deref());
     let _identity_config=isolated_identity_config(&identity)?;
     command.env("GIT_CONFIG_GLOBAL",_identity_config.path());
     command.env("GIT_DIR",git_environment_path(&git_dir)).env("GIT_COMMON_DIR",git_environment_path(&common_dir)).env("GIT_WORK_TREE",git_environment_path(root));
