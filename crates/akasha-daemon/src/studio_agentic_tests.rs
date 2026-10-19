@@ -364,3 +364,43 @@ async fn scoped_studio_write_reaches_disk_and_records_disk_version() {
     assert_eq!(std::fs::read_to_string(root.join("proof.txt")).unwrap(), "real disk");
     assert_ne!(serde_json::from_str::<Value>(&result).unwrap()["file_version"], "missing");
 }
+
+#[test]
+fn terminal_status_updates_always_have_unverified_outcomes_and_matching_failure_keeps_details() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");
+    for status in [akasha_store::TaskStatus::Failed,akasha_store::TaskStatus::Interrupted,akasha_store::TaskStatus::Cancelled] {
+        let id=Uuid::new_v4();running_task(&db,id);let store=akasha_store::TaskStore::open(&db).unwrap();
+        store.update_status(id,status.clone()).unwrap();let outcome=store.get_outcome(id).unwrap().unwrap();
+        assert_eq!(outcome["status"],status.as_str());assert_eq!(outcome["acceptance_verified"],false);
+        if status==akasha_store::TaskStatus::Failed {
+            let (_,detail)=store.finalize_outcome(id,status,json!({"termination_reason":"model_empty","result":"partial","verification":[],"acceptance_verified":false})).unwrap();
+            assert_eq!(detail["termination_reason"],"model_empty");assert_eq!(detail["result"],"partial");
+        }
+    }
+}
+
+#[tokio::test]
+async fn cached_read_rechecks_revoked_paths_and_command_output_is_plain_and_truncation_explicit() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("task.db");let task=Uuid::new_v4();running_task(&db,task);let mut p=policy(dir.path());
+    std::fs::write(dir.path().join("a.txt"),"text").unwrap();
+    let read=contracts::decode(&json!({"schema_version":1,"operation_id":Uuid::new_v4(),"tool":"read_file","arguments":{"path":"workspace:/a.txt"}}).to_string()).unwrap();
+    let op=contracts::Operation::begin(&db,task,"read_file",&read.argv,dir.path(),&p,Some(&read)).await.unwrap();op.finish(true,"text").unwrap();
+    p.allowed_read_paths=vec!["Z:/not-allowed".into()];
+    assert!(contracts::Operation::begin(&db,task,"read_file",&read.argv,dir.path(),&p,Some(&read)).await.is_err());
+    let p=policy(dir.path());
+    let cmd=contracts::decode(&json!({"schema_version":1,"tool":"run_command","arguments":{"program":"git","args":["status"]}}).to_string()).unwrap();
+    let op=contracts::Operation::begin(&db,task,"run_command",&cmd.argv,dir.path(),&p,Some(&cmd)).await.unwrap();
+    let result:Value=serde_json::from_str(&op.finish(true,&json!({"output":"hello","exit_code":0}).to_string()).unwrap()).unwrap();
+    assert_eq!(result["output"],"hello");assert_eq!(result["exit_code"],0);
+    let op=contracts::Operation::begin(&db,task,"read_file",&read.argv,dir.path(),&p,None).await.unwrap();
+    let result:Value=serde_json::from_str(&op.finish(true,&"a".repeat(70000)).unwrap()).unwrap();assert_eq!(result["truncated"],true);
+}
+
+#[tokio::test]
+async fn operator_delivery_accepts_stopped_tasks_while_agent_operations_stay_blocked() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("task.db");let id=Uuid::new_v4();running_task(&db,id);let p=policy(dir.path());
+    akasha_store::TaskStore::open(&db).unwrap().update_status(id,akasha_store::TaskStatus::Failed).unwrap();
+    let args=vec!["{}".into()];
+    assert!(contracts::Operation::begin(&db,id,"git_commit",&args,dir.path(),&p,None).await.is_err());
+    let op=contracts::Operation::begin_operator(&db,id,"git_commit",&args,dir.path(),&p,None).await.unwrap();op.finish(false,"test only").unwrap();
+}

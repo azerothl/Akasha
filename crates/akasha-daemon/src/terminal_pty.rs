@@ -381,7 +381,10 @@ impl PtyManager {
         }
         if let Ok(mut h) = inner.reader.lock() {
             if let Some(j) = h.take() {
-                // A descendant may retain the slave; release the master without waiting on a blocked reader.
+                // Let the killed shell's buffered output reach the transcript, bounded
+                // because a descendant may retain the slave indefinitely.
+                let until=std::time::Instant::now()+std::time::Duration::from_secs(2);
+                while !j.is_finished() && std::time::Instant::now()<until {std::thread::sleep(std::time::Duration::from_millis(10));}
                 if j.is_finished() {
                     let _ = j.join();
                 }

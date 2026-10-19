@@ -21,7 +21,7 @@ fn owners() -> &'static Mutex<HashMap<String, Owner>> {
 
 pub(crate) fn default_shell() -> Vec<String> {
     if cfg!(windows) {
-        vec!["cmd".into(), "/D".into(), "/Q".into()]
+        vec!["cmd.exe".into(), "/D".into(), "/Q".into()]
     } else {
         vec!["/bin/sh".into(), "-i".into()]
     }
@@ -175,7 +175,7 @@ pub(crate) async fn agent_terminal(
                 PtyManager::studio().write_input(sid,body).map_err(|e| e.to_string())?; json!({"ok":true})
             }
             "resize" => {PtyManager::studio().resize(sid,PtyResizeBody {cols:args.get(2).and_then(|n| n.parse::<u16>().ok()).unwrap_or(80).clamp(20,240),rows:args.get(3).and_then(|n| n.parse::<u16>().ok()).unwrap_or(24).clamp(5,100)}).map_err(|e| e.to_string())?;json!({"ok":true})}
-            "stop" => {archive(sid);PtyManager::studio().close(sid).map_err(|e| e.to_string())?;owners().lock().map_err(|_| "terminal lock unavailable")?.remove(sid);json!({"ok":true})}
+            "stop" => {PtyManager::studio().close(sid).map_err(|e| e.to_string())?;archive(sid);owners().lock().map_err(|_| "terminal lock unavailable")?.remove(sid);json!({"ok":true})}
             _ => return Err("terminal_session start [JSON]|list|read <id>|write <id> {\"text\":\"command\\r\"}|resize <id> cols rows|stop <id>".into()),
         };
         Ok(value.to_string())
@@ -228,17 +228,17 @@ pub(crate) fn available_shells(policy: &akasha_tools::ToolsPolicy) -> Vec<Value>
             (
                 "cmd",
                 "Invite de commandes",
-                vec!["cmd".into(), "/D".into(), "/Q".into()],
+                vec!["cmd.exe".into(), "/D".into(), "/Q".into()],
             ),
             (
                 "powershell",
                 "Windows PowerShell",
-                vec!["powershell".into(), "-NoLogo".into(), "-NoProfile".into()],
+                vec!["powershell.exe".into(), "-NoLogo".into(), "-NoProfile".into()],
             ),
             (
                 "pwsh",
                 "PowerShell",
-                vec!["pwsh".into(), "-NoLogo".into(), "-NoProfile".into()],
+                vec!["pwsh.exe".into(), "-NoLogo".into(), "-NoProfile".into()],
             ),
         ]
     } else {
@@ -279,8 +279,8 @@ pub(crate) async fn close_project(project: &str) {
         .unwrap_or_default();
     for id in ids {
         let _ = tokio::task::spawn_blocking(move || {
-            archive(&id);
             let _ = PtyManager::studio().close(&id);
+            archive(&id);
             if let Ok(mut map) = owners().lock() {
                 map.remove(&id);
             }
@@ -302,8 +302,8 @@ pub(crate) async fn close_task(task: Uuid) {
         .unwrap_or_default();
     for id in ids {
         let _ = tokio::task::spawn_blocking(move || {
-            archive(&id);
             let _ = PtyManager::studio().close(&id);
+            archive(&id);
             if let Ok(mut map) = owners().lock() {
                 map.remove(&id);
             }

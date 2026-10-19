@@ -58,7 +58,7 @@ fn tool_with_bound(policy: &ToolsPolicy, agent: &str, name: &str, prompt_names: 
             input_schema: descriptor.input_schema,
             announced: allowed && bounded,
             allowed,
-            runnable: allowed && bounded,
+            runnable: allowed,
             requires_user_approval: policy.requires_approval(name),
             rule_sources: vec![
                 format!("mcp_server:{}", descriptor.server),

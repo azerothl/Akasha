@@ -60,7 +60,7 @@ pub fn discovered_names() -> Vec<String> {
     tool_cache().read().map(|tools|tools.iter().map(|tool|tool.name.clone()).collect()).unwrap_or_default()
 }
 pub fn prompt_tool_names(policy: &akasha_tools::ToolsPolicy) -> std::collections::HashSet<String> {
-    tool_cache().read().map(|tools|tools.iter().filter(|tool|policy.can_use_mcp_tool(&tool.server,&tool.tool)&&tool.input_schema.to_string().len()<=4096).take(32).map(|tool|tool.name.clone()).collect()).unwrap_or_default()
+    tool_cache().read().map(|tools|tools.iter().filter(|tool|policy.can_use_mcp_tool(&tool.server,&tool.tool)&&(policy.default_profile.is_none() || policy.allowed_tool_list().is_some_and(|names|names.contains(&tool.name)))&&tool.input_schema.to_string().len()<=4096).take(32).map(|tool|tool.name.clone()).collect()).unwrap_or_default()
 }
 
 fn has_external_ref(value: &Value, depth: usize) -> bool {
@@ -523,7 +523,14 @@ pub async fn start_stdio_server(data_dir: &Path, server: &str) -> Result<Value, 
 
     let mut reader = BufReader::new(stdout);
     let initialized =
-        tokio::time::timeout(std::time::Duration::from_secs(20), read_framed(&mut reader))
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            for _ in 0..64 {
+                let message=read_framed(&mut reader).await?;
+                if message["id"]==1 {return Ok::<Value,String>(message);}
+                if message.get("id").is_some(){return Err("unexpected MCP initialize response ID".into());}
+            }
+            Err("MCP initialize notification limit exceeded".into())
+        })
             .await
             .map_err(|_| "MCP initialize timeout")??;
     if initialized.get("error").is_some()
@@ -586,19 +593,15 @@ pub async fn start_stdio_server(data_dir: &Path, server: &str) -> Result<Value, 
 async fn read_framed<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
 ) -> Result<Value, String> {
-    let mut body = Vec::new();
-    let n = (&mut *reader)
-        .take(8 * 1024 * 1024 + 1)
-        .read_until(b'\n', &mut body)
-        .await
-        .map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Err("MCP connection closed".into());
+    for _ in 0..64 {
+        let mut body=Vec::new();
+        let n=(&mut *reader).take(8*1024*1024+1).read_until(b'\n',&mut body).await.map_err(|e|e.to_string())?;
+        if n==0 {return Err("MCP connection closed".into());}
+        if n>8*1024*1024 || !body.ends_with(b"\n") {return Err("MCP response exceeds limit or is not newline delimited".into());}
+        if body.iter().all(u8::is_ascii_whitespace) {continue;}
+        return serde_json::from_slice(&body).map_err(|_|"invalid MCP JSON response".into());
     }
-    if n > 8 * 1024 * 1024 || !body.ends_with(b"\n") {
-        return Err("MCP response exceeds limit or is not newline delimited".into());
-    }
-    serde_json::from_slice(&body).map_err(|_| "invalid MCP JSON response".into())
+    Err("MCP excessive blank lines".into())
 }
 
 async fn rpc_request(state: &mut StdioState, method: &str, params: Value) -> Result<Value, String> {

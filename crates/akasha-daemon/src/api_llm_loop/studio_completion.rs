@@ -126,6 +126,23 @@ pub(super) fn check_files(
     }).collect()
 }
 
+/// Final content validation also covers partial edits and patches, without changing files.
+pub(super) fn check_deliverables(root:&Path, policy:&akasha_tools::ToolsPolicy, goals:&[String], literals:&[(String,String)]) -> Vec<Value> {
+    let mut checks=check_files(root,policy,goals);
+    for check in &mut checks {
+        if check["status"]!="passed" {continue;}
+        let Some((_,expected))=literals.iter().find(|(path,_)|check["path"]==*path) else {continue;};
+        let content=crate::studio_tool_contract::bounded_path(root,check["path"].as_str().unwrap_or_default()).ok().and_then(|path| {
+            use std::io::Read;
+            let mut bytes=String::new();std::fs::File::open(path).ok()?.take(1024*1024+1).read_to_string(&mut bytes).ok()?;Some(bytes.replace("\r\n","\n"))
+        });
+        let passed=content.as_ref().is_some_and(|text|text==expected || text==&format!("{expected}\n"));
+        check["status"]=json!(if passed {"passed"}else{"failed"});
+        check["detail"]=json!(if passed {"requested literal content verified"}else{"requested literal content differs or cannot be read"});
+    }
+    checks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +216,18 @@ mod tests {
             .contains("content not certified"));
         assert_eq!(checks[1]["status"], "failed");
         assert_eq!(checks[2]["status"], "manual");
+    }
+}
+
+#[cfg(test)]
+mod final_literal_regressions {
+    use super::*;
+    #[test] fn partial_edits_cannot_pass_by_file_presence_alone() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("config.txt");
+        let policy=akasha_tools::ToolsPolicy {allowed_read_paths:vec![dir.path().display().to_string()],..Default::default()};let goals=vec!["config.txt".into()];let literals=vec![("config.txt".into(),"Token=Value".into())];
+        std::fs::write(&path,"token=value").unwrap();
+        assert_eq!(check_deliverables(dir.path(),&policy,&goals,&literals)[0]["status"],"failed");
+        std::fs::write(&path,"Token=Value\n").unwrap();
+        assert_eq!(check_deliverables(dir.path(),&policy,&goals,&literals)[0]["status"],"passed");
     }
 }

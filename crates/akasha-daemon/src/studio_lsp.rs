@@ -116,7 +116,7 @@ fn relative(root: &Path, path: &Path) -> Result<String, String> {
 }
 fn server(path: &Path) -> Result<(&'static str, &'static str, Vec<&'static str>), String> {
     match path.extension().and_then(|v| v.to_str()).unwrap_or("") {
-        "ts" => Ok(("typescript", "typescript-language-server", vec!["--stdio"])),
+        "ts" | "mts" | "cts" => Ok(("typescript", "typescript-language-server", vec!["--stdio"])),
         "tsx" => Ok((
             "typescriptreact",
             "typescript-language-server",
@@ -232,7 +232,7 @@ impl Session {
                 if let Some(key) = self.document_key(uri) {
                     let document = &self.documents[&key];
                     let version = message.pointer("/params/version").and_then(Value::as_i64);
-                    if version.is_none_or(|version| version == i64::from(document.version)) {
+                    if version.is_some_and(|version| version == i64::from(document.version)) || version.is_none() && document.version==1 {
                         if let Some(list) = message
                             .pointer("/params/diagnostics")
                             .and_then(Value::as_array)
@@ -365,11 +365,9 @@ async fn start(
     {
         return Err(format!("LSP server unavailable or denied: {program}. Install/configure it explicitly; no automatic install."));
     }
-    let executable = if cfg!(windows) && program != "rust-analyzer" {
-        format!("{program}.cmd")
-    } else {
-        program.into()
-    };
+    let suffixes=if cfg!(windows) {vec![".exe",".cmd",".bat",".com",""]}else{vec![""]};
+    let executable=std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).filter(|dir|dir.is_absolute()).flat_map(|dir|suffixes.iter().map(move |suffix|dir.join(format!("{program}{suffix}")))).find(|path|path.is_file()).and_then(|path|path.canonicalize().ok()).ok_or("LSP executable missing from absolute PATH directories")?;
+    if executable.starts_with(root) {return Err("workspace-controlled LSP executable refused".into());}
     let mut command = Command::new(executable);
     command
         .args(args)

@@ -374,7 +374,7 @@ impl TaskStore {
     pub fn update_status(&self, id: Uuid, status: TaskStatus) -> anyhow::Result<()> {
         let now = Utc::now();
         self.conn.execute(
-            "UPDATE tasks SET status = ?1, updated_at = ?2, outcome_json = CASE WHEN ?1 IN ('running','queued') THEN NULL ELSE outcome_json END WHERE id = ?3",
+            "UPDATE tasks SET status = ?1, updated_at = ?2, outcome_json = CASE WHEN ?1 IN ('running','queued') THEN NULL WHEN ?1 IN ('failed','interrupted','cancelled','paused','completed') AND outcome_json IS NULL THEN json_object('schema_version',1,'status',?1,'termination_reason',?1,'result',CASE WHEN ?1='completed' THEN 'succeeded' WHEN ?1='failed' THEN 'failed' ELSE 'stopped' END,'acceptance_verified',json('false'),'verification',json('[]'),'generic_status_outcome',json('true')) ELSE outcome_json END WHERE id = ?3",
             rusqlite::params![status.as_str(), now.to_rfc3339(), id.to_string()],
         )?;
         Ok(())
@@ -386,7 +386,7 @@ impl TaskStore {
         let mut values=vec![status.as_str().to_string(),Utc::now().to_rfc3339(),id.to_string()];
         values.extend(expected.iter().map(|value|value.as_str().to_string()));
         let slots=(4..4+expected.len()).map(|n|format!("?{n}")).collect::<Vec<_>>().join(",");
-        let changed=self.conn.execute(&format!("UPDATE tasks SET status=?1,updated_at=?2,outcome_json=CASE WHEN ?1 IN ('running','queued') THEN NULL ELSE outcome_json END WHERE id=?3 AND status IN ({slots})"),rusqlite::params_from_iter(values))?;
+        let changed=self.conn.execute(&format!("UPDATE tasks SET status=?1,updated_at=?2,outcome_json=CASE WHEN ?1 IN ('running','queued') THEN NULL WHEN ?1 IN ('failed','interrupted','cancelled','paused','completed') AND outcome_json IS NULL THEN json_object('schema_version',1,'status',?1,'termination_reason',?1,'result',CASE WHEN ?1='completed' THEN 'succeeded' WHEN ?1='failed' THEN 'failed' ELSE 'stopped' END,'acceptance_verified',json('false'),'verification',json('[]'),'generic_status_outcome',json('true')) ELSE outcome_json END WHERE id=?3 AND status IN ({slots})"),rusqlite::params_from_iter(values))?;
         Ok(changed==1)
     }
 
@@ -398,10 +398,10 @@ impl TaskStore {
         let (previous,previous_outcome): (String,Option<String>) = tx.query_row("SELECT status,outcome_json FROM tasks WHERE id = ?1", [id.to_string()], |r| Ok((r.get(0)?,r.get(1)?)))?;
         let previous = TaskStatus::from_str(&previous);
         let status = if matches!(previous, TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Paused | TaskStatus::Interrupted | TaskStatus::WaitingUserInput) {
-            if let Some(saved)=previous_outcome.and_then(|raw|serde_json::from_str(&raw).ok()) {
-                outcome=saved;
+            if let Some(saved)=previous_outcome.and_then(|raw|serde_json::from_str::<serde_json::Value>(&raw).ok()) {
+                if previous != proposed || saved["generic_status_outcome"]!=true {outcome=saved;}
                 outcome["acceptance_verified"]=serde_json::json!(false);
-            } else {
+            } else if previous != proposed {
                 outcome["termination_reason"] = serde_json::json!(previous.as_str());
                 outcome["reason"] = serde_json::json!("Task stopped before finalization; existing status preserved.");
                 outcome["result"] = serde_json::json!(if previous == TaskStatus::Failed { "failed" } else { "stopped" });

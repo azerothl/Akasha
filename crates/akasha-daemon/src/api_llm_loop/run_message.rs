@@ -181,7 +181,7 @@ pub(crate) async fn run_message_via_llm(
             }
         }
     }
-    let tool_disk_workspace_root: std::path::PathBuf = {
+    let mut tool_disk_workspace_root: std::path::PathBuf = {
         if let Some(wt) = crate::studio_worktree::get_worktree_for_task(&studio_worktree_registry, task_id).await
         {
             wt.worktree_path
@@ -214,6 +214,11 @@ pub(crate) async fn run_message_via_llm(
         }
         }
     };
+    if let Some(project)=TaskStore::open(&store_path).ok().and_then(|s|s.lineage_root_studio_project_id(task_id).ok().flatten()) {
+        tool_disk_workspace_root=match crate::studio_project_context::manifest_workspace(data_dir_for_studio_flags,&project,Some(task_id)) {
+            Ok(root)=>root,Err(error)=>{abort_recovery!(error);}
+        };
+    }
     // A path shape is not a project identity. Match the dispatcher/ledger gate.
     let code_studio_disk_task = TaskStore::open(&store_path).ok()
             .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten()).is_some();
@@ -1812,7 +1817,7 @@ pub(crate) async fn run_message_via_llm(
                 };
                 match tokio::time::timeout(idle, tok_rx.recv()).await {
                     Ok(Some(chunk)) => {
-                        if !first_meaningful_progress_sent && !chunk.trim().is_empty() {
+                        if !first_meaningful_progress_sent {
                             first_meaningful_progress_sent = true;
                             meaningful_progress_flag
                                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2121,7 +2126,7 @@ pub(crate) async fn run_message_via_llm(
                 if let Some(executor)=current {
                     let checks={
                         let _guard=match crate::studio_tool_contract::workspace_guard(&tool_disk_workspace_root).await {Ok(guard)=>guard,Err(error)=>{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}};
-                        super::studio_completion::check_files(&tool_disk_workspace_root,&executor.policy,&explicit_file_goals)
+                        super::studio_completion::check_deliverables(&tool_disk_workspace_root,&executor.policy,&explicit_file_goals,if scope_unchanged {&explicit_file_literals}else{&[]})
                     };
                     let pending=checks.iter().filter(|c|c["status"]=="failed").filter_map(|c|c["path"].as_str()).map(str::to_owned).collect::<Vec<_>>();
                     run_outcome.checks.retain(|c|c["kind"]!="requested_file");run_outcome.checks.extend(checks.clone());
@@ -2131,7 +2136,7 @@ pub(crate) async fn run_message_via_llm(
                         physical_completion_retries+=1;
                         if !delivered_prompt.is_empty(){conversation.push(akasha_llm::ConversationMessage::user(delivered_prompt.clone()));}
                         conversation.push(akasha_llm::ConversationMessage::assistant(response.clone()));
-                        current_prompt=format!("[Pending physical deliverables] The final response is premature: these explicitly requested files do not exist in the task workspace: {}. Complete the ORIGINAL user request with the available tools and current permissions. Do not repeat confirmed operations on other files. Presence alone does not validate file contents or other requested checks.\nOriginal user request:\n{}",pending.join(", "),super::studio_conversation::user_request(&task_scope));
+                        current_prompt=format!("[Pending physical deliverables] The final response is premature: these explicitly requested files are missing or do not match their required literal content: {}. Complete the ORIGINAL user request with the available tools and current permissions. Do not repeat confirmed operations on other files. Presence alone does not validate file contents or other requested checks.\nOriginal user request:\n{}",pending.join(", "),super::studio_conversation::user_request(&task_scope));
                         continue;
                     }
                 }
@@ -2575,6 +2580,12 @@ pub(crate) async fn run_message_via_llm(
                         let mut approval_args: Vec<String> = if actual_tool.is_empty() && !tool_args.is_empty() {
                             std::iter::once(name.clone()).chain(tool_args.iter().cloned()).collect()
                         } else {tool_args.to_vec()};
+                        let delivery_approval_identity = if matches!(effective_role_tool,"git_commit"|"git_push"|"github_create_pr") {
+                            match crate::studio_delivery::approval_identity(&tool_disk_workspace_root,effective_role_tool,&approval_args).await {
+                                Ok(identity)=>{approval_args.push(identity.clone());Some(identity)},
+                                Err(error)=>{tool_results.push(format!("Delivery approval unavailable: {error}"));continue;}
+                            }
+                        }else{None};
                         if exec.policy.requires_approval(effective_role_tool) {
                             let permission_mode = load_permission_mode(data_dir);
                             if permission_mode.mode == "allow_all" {
@@ -2630,8 +2641,7 @@ pub(crate) async fn run_message_via_llm(
                                     // Redact write-like tool args entirely; truncate others to avoid leaking secrets/blobs.
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(effective_role_tool,"git_commit"|"git_push"|"github_create_pr") {
-                                        let payload=serde_json::from_str::<serde_json::Value>(&tool_args.join(" ")).unwrap_or_default();
-                                        format!("workspace={} remote={} branch={} commit={}",tool_disk_workspace_root.display(),payload["remote"].as_str().unwrap_or("local"),payload.get("branch").or_else(||payload.get("head")).and_then(|v|v.as_str()).unwrap_or("current"),payload["expected_head"].as_str().unwrap_or("unavailable"))
+                                        delivery_approval_identity.clone().unwrap_or_default()
                                     } else if matches!(
                                         effective_role_tool,
                                         "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file" | "terminal_session" | "git_commit" | "github_create_pr"
@@ -2700,7 +2710,7 @@ pub(crate) async fn run_message_via_llm(
                                             approval_request_id, task_id, effective_role_tool, err
                                         );
                                     }
-                                    if code_studio_disk_task {if let Err(error)={explicit_file_goals.clear();scope_unchanged=false;crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":actual_tool,"question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome))}{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
+                                    if code_studio_disk_task {if let Err(error)={crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":actual_tool,"question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome))}{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
                                         request_id:Some(approval_request_id.clone()),
@@ -2867,7 +2877,7 @@ pub(crate) async fn run_message_via_llm(
                             )
                             .with_correlation(timeline_correlation),
                         );
-                        if let Some(definition) = skill_definition.as_ref().filter(|_| name != &actual_tool) {
+                        if let Some(definition) = skill_definition.as_ref().filter(|_| name != &actual_tool && !(actual_tool.is_empty() && tool_args.is_empty())) {
                             let metadata = serde_json::json!({"name":definition.name,"source_root":definition.source_root,"sha256":definition.sha256,"version":definition.version,"activation":"tool_alias"});
                             if let Err(reason) = crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "skills", metadata.clone()) {
                                 run_outcome.termination = TerminationReason::ContextUnavailable;
@@ -2879,6 +2889,11 @@ pub(crate) async fn run_message_via_llm(
                         let workflow_operation=if code_studio_disk_task && matches!(actual_tool.as_str(),"delegate_to_agent"|"install_skill"|"uninstall_skill"|"write_todos"|"merge_todos"|"update_todo") {
                             match crate::studio_tool_contract::WorkflowOperation::begin(&store_path,task_id,&actual_tool,tool_args){Ok(operation)=>Some(operation),Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(error);continue;}}
                         }else{None};
+                        if let Some(expected)=delivery_approval_identity.as_ref() {
+                            if crate::studio_delivery::approval_identity(&tool_disk_workspace_root,effective_role_tool,tool_args).await.as_ref().ok()!=Some(expected) {
+                                tool_results.push("Delivery destination changed after approval; request fresh approval.".into());continue;
+                            }
+                        }
                         let (success, res, captured_image): (bool, String, Option<String>) =
                             if actual_tool == "ask_user" {
                                 // Human in the loop: register pending request, emit event, wait for user reply.
@@ -3349,13 +3364,19 @@ pub(crate) async fn run_message_via_llm(
                                 .await
                             };
                         if let Some(operation)=workflow_operation {if let Err(error)=operation.finish(success,&res){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Workflow result unknown: {error}");break 'tool_rounds;}}
+                        if success && matches!(actual_tool.as_str(),"grep_content"|"search_files") {
+                            let context=crate::studio_project_context::read(data_dir_for_studio_flags,task_id);
+                            if let Some(rules)=context["rules"].as_array() {for rule in rules {
+                                if let (Some(path),Some(hash))=(rule["path"].as_str(),rule["sha256"].as_str()) {active_repository_rules.insert(format!("{path}:{hash}"));}
+                            }}
+                        }
                         if success {
                             run_outcome.successful_tool_calls += 1;
                         } else { run_outcome.failed_tool_calls += 1; }
                         if serde_json::from_str::<serde_json::Value>(&res).ok().is_some_and(|value|value["result_unknown"]==true){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Operation result unknown; inspect effects and use explicit recovery before continuing. {res}");break 'tool_rounds;}
 
-                        if matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container") {
-                            run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
+                        if matches!(effective_role_tool, "run_command" | "run_terminal" | "run_in_container") {
+                            run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":effective_role_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }
                         if let Some(img) = captured_image {
                             // Studio browser PNGs are persisted and displayed by the
@@ -4550,7 +4571,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             let executor=registry.read().await.clone();
             match crate::studio_tool_contract::workspace_guard(&tool_disk_workspace_root).await {
                 Ok(_guard)=>{
-                    let checks=super::studio_completion::check_files(&tool_disk_workspace_root,&executor.policy,&explicit_file_goals);
+                    let checks=super::studio_completion::check_deliverables(&tool_disk_workspace_root,&executor.policy,&explicit_file_goals,if scope_unchanged {&explicit_file_literals}else{&[]});
                     if checks.iter().any(|c|c["status"]=="failed") && !run_outcome.failed() {run_outcome.termination=TerminationReason::VerificationFailed;reply_text="Explicitly requested files are missing after task verification.".into();}
                     run_outcome.checks.retain(|c|c["kind"]!="requested_file");run_outcome.checks.extend(checks);
                 },

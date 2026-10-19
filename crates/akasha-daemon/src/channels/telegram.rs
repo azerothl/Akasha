@@ -7,8 +7,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tracing::{info, warn};
 
-fn telegram_hitl_pending() -> &'static Mutex<HashMap<i64, String>> {
-    static P: OnceLock<Mutex<HashMap<i64, String>>> = OnceLock::new();
+fn telegram_hitl_pending() -> &'static Mutex<HashMap<i64, (String, Option<String>)>> {
+    static P: OnceLock<Mutex<HashMap<i64, (String, Option<String>)>>> = OnceLock::new();
     P.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -425,9 +425,9 @@ pub async fn run_telegram_bot(
             } else {
                 None
             };
-            if let Some(task_id) = hitl_reply {
+            if let Some((task_id, request_id)) = hitl_reply {
                 let reply_url = format!("{}/api/tasks/{}/human-reply", daemon_base_url, task_id);
-                let body = serde_json::json!({ "response": payload });
+                let body = serde_json::json!({ "response": payload, "request_id": request_id });
                 match client.post(&reply_url).json(&body).send().await {
                         Ok(r) if r.status().is_success() => {
                             let _ = send_telegram(
@@ -520,7 +520,7 @@ pub async fn run_telegram_bot(
                                 )
                                 .await;
                                 if let Ok(mut pending) = telegram_hitl_pending().lock() {
-                                    pending.insert(chat_id, task_id.clone());
+                                    pending.insert(chat_id, (task_id.clone(),hi_json["request_id"].as_str().map(str::to_owned)));
                                 }
                                 break "En attente de votre réponse (human-in-the-loop).".to_string();
                             }

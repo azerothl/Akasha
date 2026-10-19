@@ -4826,6 +4826,7 @@ KNOWN_TS_ERRORS:\n{}\n",
     let exec = tools_executor.read().await.clone();
     let mut any_write_success = false;
     let mut follow_up = String::new();
+    let mut autofix_rules=std::collections::HashSet::<String>::new();
     let mut short_or_no_tool_retries = 0u32;
     let mut writes_ok_count = 0u32;
     /// Nudge only when the same file is read repeatedly without an intervening write (exploration stays allowed across many files).
@@ -4849,6 +4850,9 @@ KNOWN_TS_ERRORS:\n{}\n",
         let not_module_paths = extract_ts2306_not_module_paths(verify_log, 12);
         for p in &not_module_paths {
             let as_path = std::path::Path::new(p);
+            // Deterministic repairs cannot interpret repository instructions.
+            if crate::studio_project_context::rules_for_path(tool_disk_root,p,&exec.policy).map_or(true,|rules|!rules.is_empty()) {continue;}
+
             if !as_path.starts_with(tool_disk_root) {
                 continue;
             }
@@ -5003,6 +5007,9 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                     None => name.clone(),
                 };
                 let actual_tool = canonicalize_tool_name(&actual_tool);
+                let actual_tool=if actual_tool=="studio_call" {
+                    match crate::studio_tool_contract::decode(&args.join(" ")) {Ok(decoded)=>decoded.envelope.tool,Err(error)=>{round_results.push(error);continue;}}
+                }else{actual_tool};
                 last_tool = actual_tool.clone();
                 if !STUDIO_VERIFY_AUTOFIX_TOOLS
                     .iter()
@@ -5032,9 +5039,21 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                     )
                     .with_correlation(timeline_correlation),
                 );
+                let decoded=if name=="studio_call" {crate::studio_tool_contract::decode(&args.join(" ")).ok()}else{None};
+                let target_args=decoded.as_ref().map(|d|d.argv.as_slice()).unwrap_or(args);
+                let mut defer=false;
+                for path in crate::studio_tool_contract::paths_for_tool(&actual_tool,target_args) {
+                    match crate::studio_project_context::rules_for_path(tool_disk_root,&path,&exec.policy) {
+                        Ok(rules)=>for rule in rules {
+                            if autofix_rules.insert(format!("{}:{}",rule.path.display(),rule.sha256)) {first_user.push_str(&rule.prompt());defer=true;}
+                        },
+                        Err(error)=>{round_results.push(error);defer=true;}
+                    }
+                }
+                if defer {round_results.push("Repository instructions loaded; propose the repair again under these rules.".into());continue;}
                 let (success, res, _cap) = execute_tool_call(
                     &exec,
-                    &actual_tool,
+                    if name=="studio_call" {"studio_call"}else{&actual_tool},
                     args,
                     process_registry,
                     long_term_client,
@@ -5256,6 +5275,8 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 ) {
                                     continue;
                                 }
+                                if exec.policy.requires_approval(&actual_tool) {continue;}
+                                if crate::studio_tool_contract::paths_for_tool(&actual_tool,args).iter().any(|path|crate::studio_project_context::rules_for_path(tool_disk_root,path,&exec.policy).map_or(true,|rules|rules.iter().any(|rule|!autofix_rules.contains(&format!("{}:{}",rule.path.display(),rule.sha256))))) {continue;}
                                 let (success, _res, _cap) = execute_tool_call(
                                     &exec,
                                     &actual_tool,

@@ -335,22 +335,7 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
 }
 
 pub(crate) fn native_definition(names: Vec<String>) -> Value {
-    let path=json!({"type":"string","description":"Exact requested workspace:/ relative path"});
-    let version=json!({"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"REQUIRED: literal missing for a NEW file; SHA-256 from read_file for an EXISTING file. Never omit."});
-    let groups=[
-        (vec!["write_file","write_code"],json!({"type":"object","additionalProperties":false,"required":["path","content","expected_version"],"properties":{"path":path,"content":{"type":"string","description":"Exact file content; no code fences or call punctuation"},"expected_version":version}})),
-        (vec!["read_file"],json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":path,"full":{"type":"boolean"},"offset_line":{"type":"integer","minimum":1,"default":1,"description":"First line, default 1 when omitted"},"limit_lines":{"type":"integer","minimum":1,"maximum":5000,"default":500,"description":"Number of lines, default 500 when omitted"}}})),
-        (vec!["edit_file"],json!({"type":"object","additionalProperties":false,"required":["path","content","expected_version","start_line","end_line"],"properties":{"path":path,"content":{"type":"string"},"expected_version":version,"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}})),
-        (vec!["run_command"],json!({"type":"object","additionalProperties":false,"required":["program","args"],"properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"}}})),
-    ];
-    let mut variants=vec![];
-    let mut remaining=names.clone();
-    for (tools,schema) in groups {
-        let tools:Vec<_>=tools.into_iter().filter(|name|names.iter().any(|n|n==name)).collect();
-        remaining.retain(|name|!tools.contains(&name.as_str()));
-        if !tools.is_empty() {variants.push(json!({"properties":{"tool":{"enum":tools},"arguments":schema}}));}
-    }
-    if !remaining.is_empty() {variants.push(json!({"properties":{"tool":{"enum":remaining},"arguments":{"type":"object","description":"For LSP/delivery/MCP, the documented JSON object. For other tools, {argv:[string,...]}.","properties":{"argv":{"type":"array","items":{"type":"string"}}}}}}));}
+    let variants: Vec<Value> = names.iter().map(|name| json!({"properties":{"tool":{"enum":[name]},"arguments":argument_schema(name)}})).collect();
     json!({"type":"function","function":{"name":"studio_call","description":"Execute one Studio tool. The runtime assigns operation IDs; do not invent one. The tool-specific argument schema is mandatory. For write_file/write_code creation, explicitly pass expected_version: missing. Existing files must be read before mutation.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}},"oneOf":variants}}})
 }
 
@@ -365,6 +350,14 @@ pub(crate) fn is_file_mutation(tool: &str) -> bool {
             | "search_replace"
     )
 }
+pub(crate) fn paths_for_tool(tool:&str,args:&[String])->Vec<String> {
+    if matches!(tool,"rename_path"|"move_tree") {return args.iter().take(2).cloned().collect();}
+    if tool=="read_file" {let (parts,_,_)=crate::api::parse_read_file_args(args);return vec![parts.join(" ")];}
+    if matches!(tool,"write_file"|"write_code") {return crate::api::parse_write_file_request(args).map(|(path,_)|vec![path]).unwrap_or_default();}
+    if matches!(tool,"edit_file"|"apply_patch"|"search_replace"|"delete_file"|"file_diff") {return args.first().cloned().into_iter().collect();}
+    vec![]
+}
+
 fn file_path(tool: &str, args: &[String]) -> Option<String> {
     if matches!(tool, "write_file" | "write_code") {
         crate::api::parse_write_file_request(args).map(|(path, _)| path)
@@ -467,11 +460,19 @@ impl Operation {
         policy: &akasha_tools::ToolsPolicy,
         typed: Option<&Decoded>,
     ) -> Result<Self, String> {
+        Self::begin_inner(db,task,tool,args,root,policy,typed,false).await
+    }
+    pub(crate) async fn begin_operator(db:&Path,task:Uuid,tool:&str,args:&[String],root:&Path,policy:&akasha_tools::ToolsPolicy,typed:Option<&Decoded>)->Result<Self,String> {
+        if !matches!(tool,"git_commit"|"git_push"|"github_create_pr") {return Err("operator delivery tool required".into());}
+        Self::begin_inner(db,task,tool,args,root,policy,typed,true).await
+    }
+    async fn begin_inner(db:&Path,task:Uuid,tool:&str,args:&[String],root:&Path,policy:&akasha_tools::ToolsPolicy,typed:Option<&Decoded>,operator:bool)->Result<Self,String> {
         let canonical = root.canonicalize().map_err(|e| e.to_string())?;
         let lock = workspace_guard(&canonical).await?;
         let task_status = akasha_store::TaskStore::open(db).map_err(|e|e.to_string())?
             .get(task).map_err(|e|e.to_string())?.ok_or("Studio task missing after workspace lock")?.status;
-        if matches!(task_status,akasha_store::TaskStatus::Failed|akasha_store::TaskStatus::Cancelled|akasha_store::TaskStatus::Paused|akasha_store::TaskStatus::Interrupted|akasha_store::TaskStatus::WaitingUserInput) {
+        if operator && matches!(task_status,akasha_store::TaskStatus::Pending|akasha_store::TaskStatus::Queued|akasha_store::TaskStatus::Running|akasha_store::TaskStatus::WaitingUserInput) {return Err("operator delivery requires a stopped task".into());}
+        if !operator && matches!(task_status,akasha_store::TaskStatus::Failed|akasha_store::TaskStatus::Cancelled|akasha_store::TaskStatus::Paused|akasha_store::TaskStatus::Interrupted|akasha_store::TaskStatus::WaitingUserInput) {
             return Err("task stopped or waiting while acquiring workspace lock".into());
         }
 
@@ -495,6 +496,14 @@ impl Operation {
             )
             .optional()
             .map_err(|e| e.to_string())?;
+        // Cached evidence is still subject to today's argument-level policy.
+        if matches!(tool,"run_command"|"run_terminal"|"run_command_background") && args.first().is_none_or(|program|!policy.can_run_command(program)) {
+            return Err("cached/current command denied by current policy".into());
+        }
+        for raw in paths_for_tool(tool,args) {
+            let path=bounded_path(&canonical,&raw)?;let plain=crate::api::strip_verbatim_prefix(path);
+            if !policy.can_read(&plain) || is_file_mutation(tool) && !policy.can_write(&plain) {return Err("cached/current path denied by current policy".into());}
+        }
         if let Some((old_digest, state, result)) = old {
             if old_digest != fingerprint {
                 return Err("operation_id reused with different arguments".into());
@@ -590,7 +599,7 @@ impl Operation {
                     "file_read_required: read the existing file before modifying it".into(),
                 );
             }
-            if expected != before {
+            if expected.as_ref().map(|s|s.to_ascii_lowercase()) != before {
                 return Err("stale_file_version: file changed since it was read; read it again before retrying".into());
             }
         }
@@ -624,8 +633,12 @@ impl Operation {
                 transaction.execute("INSERT INTO studio_file_versions(task,path,version) VALUES(?1,?2,?3) ON CONFLICT(task,path) DO UPDATE SET version=excluded.version",params![self.task.to_string(),path.display().to_string(),version]).map_err(|e|e.to_string())?;
             }
         }
-        let output = crate::tool_output::truncate_utf8_by_bytes(text, 64 * 1024).0;
+        let command_result=if matches!(self.tool.as_str(),"run_command"|"run_terminal") {serde_json::from_str::<Value>(text).ok()}else{None};
+        let plain=command_result.as_ref().and_then(|v|v["output"].as_str()).unwrap_or(text);
+        let (output,_,truncated) = crate::tool_output::truncate_utf8_by_bytes(plain, 64 * 1024);
         let mut value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
+        value["truncated"]=json!(truncated);
+        if truncated {value["output"]=json!(format!("{}\n[Output truncated at 64 KiB; use bounded reads to inspect remaining data.]",value["output"].as_str().unwrap_or_default()));}
         if self.tool == "read_file" && !success && value["file_version"] == "missing" {
             value["error_code"]=json!("file_not_found");
             value["retry_hint"]=json!("The file does not exist. Repeating read_file with another window/full cannot create it. If the ORIGINAL user request asks you to create this file, use write_file with expected_version: missing and the requested content. Otherwise report that it is absent; do not create unrelated files.");
@@ -702,8 +715,22 @@ impl WorkflowOperation {
         })
     }
     pub(crate) fn finish(self, success: bool, text: &str) -> Result<(), String> {
+        // Failed delegation is not evidence that the child stopped. Keep the
+        // operation unresolved until explicit inspection/recovery.
+        if self.tool=="delegate_to_agent" && !success {return Err("delegation result uncertain; inspect child tasks before recovery".into());}
         let result = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"output":crate::tool_output::truncate_utf8_by_bytes(text,64*1024).0});
         connection(&self.db)?.execute("UPDATE studio_operations SET state='completed',result=?3,updated_at=?4 WHERE task=?1 AND operation=?2 AND state='started'",params![self.task.to_string(),self.id.to_string(),result.to_string(),chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod native_schema_regressions {
+    use super::*;
+    #[test] fn every_native_variant_uses_the_decoder_schema() {
+        for tool in ["delete_file","search_replace","apply_patch","git_push","github_create_pr","lsp_query","read_file"] {
+            let definition=native_definition(vec![tool.into()]);
+            assert_eq!(definition["function"]["parameters"]["oneOf"][0]["properties"]["arguments"],argument_schema(tool));
+        }
     }
 }

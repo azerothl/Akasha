@@ -19,12 +19,12 @@ async fn reconcile_selected_index(root:&Path,index_path:&Path,original:&str,bran
     let lock_path=PathBuf::from(format!("{}.lock",index_path.display()));
     let file=std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path).map_err(|e|format!("index lock unavailable: {e}"))?;
     let mut lock=OwnedIndexLock{path:Some(lock_path),file:Some(file)};
-    if file_hash(index_path)?!=original || branch(root).await?!=branch_name {return Err("Git index/checkout changed concurrently; reconcile selected paths manually".into());}
+    if file_hash(index_path)?!=original || branch(root).await?!=branch_name || head(root).await?!=commit {return Err("Git index/checkout changed concurrently; reconcile selected paths manually".into());}
     let tmp=tempfile::tempdir().map_err(|e|e.to_string())?;let index=tmp.path().join("index");
     if index_path.is_file(){std::fs::copy(index_path,&index).map_err(|e|e.to_string())?;}else{git(root,args(&["read-tree","--empty"]),Some(&index)).await?.checked()?;}
     let mut reset=args(&["reset","-q",commit,"--"]);reset.extend(selected.iter().cloned());
     git(root,reset,Some(&index)).await?.checked()?;
-    if branch(root).await?!=branch_name {return Err("Git checkout changed during index reconciliation".into());}
+    if branch(root).await?!=branch_name || head(root).await?!=commit {return Err("Git HEAD/checkout changed during index reconciliation".into());}
     let bytes=std::fs::read(index).map_err(|e|e.to_string())?;
     let file=lock.file.as_mut().ok_or("index lock closed")?;file.write_all(&bytes).map_err(|e|e.to_string())?;file.sync_all().map_err(|e|e.to_string())?;
     lock.file.take();let owned_path=lock.path.take().ok_or("index lock path missing")?;
@@ -120,7 +120,30 @@ async fn run(
         err: String::from_utf8_lossy(&err).into_owned(),
     })
 }
+fn unsafe_config_key(key:&str) -> bool {
+    let key=key.to_ascii_lowercase();
+    key.starts_with("filter.") || key.starts_with("credential.") || key.starts_with("url.")
+        || key.starts_with("include.") || key.starts_with("includeif.")
+        || key=="core.sshcommand" || key=="core.gitproxy" || key=="core.attributesfile"
+        || key=="core.worktree" || key=="extensions.worktreeconfig"
+        || key.starts_with("remote.") && (key.ends_with(".uploadpack") || key.ends_with(".receivepack") || key.ends_with(".vcs") || key.ends_with(".proxy"))
+}
+
+/// Approval identity includes the canonical workspace and the actual publication destination.
+pub(crate) async fn approval_identity(root:&Path,tool:&str,argv:&[String]) -> Result<String,String> {
+    let root=root.canonicalize().map_err(|e|e.to_string())?;
+    let payload:Value=serde_json::from_str(&argv.join(" ")).map_err(|e|e.to_string())?;
+    let repo=if matches!(tool,"git_push"|"github_create_pr") {remote_repo(&root,payload["remote"].as_str().unwrap_or("origin")).await?}else{"local".into()};
+    Ok(json!({"workspace":root,"repository":repo,"tool":tool,"arguments":payload}).to_string())
+}
+
 async fn git(root: &Path, args: Vec<String>, index: Option<&Path>) -> Result<Output, String> {
+    // Config inspection does not execute helpers. Reject repository-controlled
+    // launchers before any delivery Git command (including read-only preflight).
+    let config = run(root, "git", ["config", "--local", "--no-includes", "--name-only", "--list"].iter().map(|x|x.to_string()).collect(), None).await?;
+    if config.code == Some(0) && config.out.lines().any(unsafe_config_key) {
+        return Err("repository Git helper/include configuration is unsupported for delivery".into());
+    }
     let hooks = tempfile::tempdir().map_err(|e| e.to_string())?;
     let mut argv = vec![
         "--literal-pathspecs".into(),
@@ -640,11 +663,18 @@ pub(crate) async fn push(
     if remote_head(&root, &request.remote, &request.branch).await? != request.expected_remote_head {
         return Err("remote branch changed; inspect before push".into());
     }
+    if request.expected_remote_head!="missing" {
+        if git(&root,args(&["merge-base","--is-ancestor",&request.expected_remote_head,&request.expected_head]),None).await?.code!=Some(0) {
+            return Err("push requires locally verified fast-forward ancestry; fetch and inspect before retrying".into());
+        }
+    }
+    let lease=format!("--force-with-lease=refs/heads/{}:{}",request.branch,if request.expected_remote_head=="missing" {""}else{&request.expected_remote_head});
     let reference = format!("{}:refs/heads/{}", request.expected_head, request.branch);
     let result = git(
         &root,
         args(&[
             "push",
+            &lease,
             "--porcelain",
             "--no-follow-tags",
             "--recurse-submodules=no",
@@ -1154,7 +1184,7 @@ pub(crate) async fn route(
             ))
         }
     };
-    let operation = match crate::studio_tool_contract::Operation::begin(
+    let operation = match crate::studio_tool_contract::Operation::begin_operator(
         &db,
         operator.task_id,
         action,
@@ -1198,4 +1228,13 @@ pub(crate) async fn route(
         }
     };
     Some(json_response("200 OK", &response.to_string()))
+}
+
+#[cfg(test)]
+mod helper_config_regressions {
+    use super::*;
+    #[test] fn rejects_repository_process_launchers_and_includes() {
+        for key in ["filter.evil.clean","credential.helper","core.sshCommand","url.https://evil/.insteadOf","include.path","includeIf.gitdir:foo.path","remote.origin.receivepack"] {assert!(unsafe_config_key(key),"{key}");}
+        for key in ["core.repositoryformatversion","core.bare","remote.origin.url","branch.main.merge","user.name"] {assert!(!unsafe_config_key(key),"{key}");}
+    }
 }
