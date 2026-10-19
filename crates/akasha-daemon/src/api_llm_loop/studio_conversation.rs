@@ -69,35 +69,7 @@ pub(super) fn user_request(message: &str) -> &str {
 pub(super) fn requires_file_effect(message:&str,agent:&str)->bool {
     explicit_file_request(message) && matches!(agent,"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code"|"studio_project_manager")
 }
-pub(super) fn explicit_file_request(message: &str) -> bool {
-    let request = user_request(message).to_lowercase();
-    let imperative = request.split_whitespace().next().is_some_and(|word| {
-        matches!(
-            word,
-            "crée"
-                | "créer"
-                | "cree"
-                | "écris"
-                | "ecris"
-                | "enregistre"
-                | "modifie"
-                | "ajoute"
-                | "create"
-                | "write"
-                | "save"
-                | "modify"
-                | "update"
-                | "add"
-        )
-    });
-    imperative
-        && [
-            "fichier", "file", "projet", "project", ".md", ".rs", ".ts", ".js", ".py", ".json",
-            ".txt",
-        ]
-        .iter()
-        .any(|hint| request.contains(hint))
-}
+pub(super) fn explicit_file_request(message: &str) -> bool {crate::studio_file_effects::has_request(user_request(message))}
 
 fn function_response_without_leading_reasoning(response: &str) -> &str {
     let mut function_response = response.trim_start();

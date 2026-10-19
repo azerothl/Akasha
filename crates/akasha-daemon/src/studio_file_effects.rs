@@ -1,0 +1,902 @@
+//! Scoped filesystem evidence. A tool name alone never attests a requested edit.
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    io::Read,
+    path::{Path, PathBuf},
+};
+use uuid::Uuid;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum EndState {
+    Present,
+    Absent,
+    RenameDestination,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Goal {
+    path: String,
+    end: EndState,
+    baseline: String,
+    changed: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Rename {
+    source: String,
+    target: String,
+    verified: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Scope {
+    version: u32,
+    key: String,
+    request: String,
+    started_at: String,
+    goals: Vec<Goal>,
+    renames: Vec<Rename>,
+}
+pub(crate) fn implementation_role(agent: &str) -> bool {
+    matches!(
+        agent,
+        "studio_scaffold"
+            | "studio_frontend"
+            | "studio_backend"
+            | "studio_fullstack"
+            | "code"
+            | "studio_project_manager"
+    )
+}
+fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
+    let path = r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;!?"`]+)"#;
+    let pattern = format!(
+        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
+    );
+    let re = regex::Regex::new(&pattern).unwrap();
+    let mut outside = vec![true; request.len() + 1];
+    let mut quote = None;
+    for (i, c) in request.char_indices() {
+        outside[i] = quote.is_none();
+        if matches!(c, '`' | '"')
+            || c == '\''
+                && (quote == Some(c) || request[..i].chars().last().is_none_or(char::is_whitespace))
+        {
+            if quote == Some(c) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(c);
+            }
+        }
+    }
+    re.captures_iter(request)
+        .filter_map(|cap| {
+            let verb = cap.name("verb")?;
+            if !outside[verb.start()] {
+                return None;
+            }
+            let raw = cap.name("source")?.as_str();
+            let clean = |s: &str| {
+                if let Some(first) = s.chars().next().filter(|c| matches!(c, '`' | '"' | '\'')) {
+                    if s.ends_with(first) && s.len() > 1 {
+                        return s[1..s.len() - 1].to_string();
+                    }
+                }
+                s.trim_end_matches(['.', ',', ';', ':', '!', '?'])
+                    .to_string()
+            };
+            let source = clean(raw);
+            let verb = verb.as_str().to_lowercase();
+            let verb = verb.strip_suffix(['r', 'z']).unwrap_or(&verb).to_string();
+            let filesystem = matches!(
+                verb.as_str(),
+                "delete"
+                    | "remove"
+                    | "unlink"
+                    | "rename"
+                    | "move"
+                    | "supprime"
+                    | "efface"
+                    | "renomme"
+                    | "d\u{e9}place"
+                    | "deplace"
+            );
+            if !filesystem
+                && !raw.starts_with(['`', '"', '\''])
+                && !source.contains(['.', '/', '\\'])
+                && !cap
+                    .name("det")
+                    .is_some_and(|v| v.as_str().contains("file") || v.as_str().contains("fichier"))
+            {
+                return None;
+            }
+            let target = cap.name("target").map(|m| clean(m.as_str()));
+            if matches!(
+                verb.as_str(),
+                "rename" | "move" | "renomme" | "d\u{e9}place" | "deplace"
+            ) && target.is_none()
+            {
+                return None;
+            }
+            Some((verb, source, target))
+        })
+        .collect()
+}
+pub(crate) fn has_request(request: &str) -> bool {
+    !parsed(request).is_empty()
+}
+fn key(request: &str, root: &Path) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(format!("{}\n{request}", root.display()).as_bytes())
+    )
+}
+fn database(db: &Path) -> Result<rusqlite::Connection, String> {
+    let c = rusqlite::Connection::open(db).map_err(|e| e.to_string())?;
+    c.busy_timeout(std::time::Duration::from_secs(10))
+        .map_err(|e| e.to_string())?;
+    c.execute_batch("CREATE TABLE IF NOT EXISTS studio_file_effect_scopes(task TEXT PRIMARY KEY, state TEXT NOT NULL)").map_err(|e|e.to_string())?;
+    Ok(c)
+}
+fn persist(db: &Path, task: Uuid, scope: &Scope) -> Result<(), String> {
+    database(db)?.execute("INSERT INTO studio_file_effect_scopes(task,state) VALUES(?1,?2) ON CONFLICT(task) DO UPDATE SET state=excluded.state",rusqlite::params![task.to_string(),serde_json::to_string(scope).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+fn state(path: &Path, budget: &mut (u64, usize)) -> Result<String, String> {
+    budget.1 += 1;
+    if budget.1 > 4096 {
+        return Err("file-effect snapshot exceeds 4096 entries".into());
+    }
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("missing".into()),
+        Err(e) => return Err(e.to_string()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err("symlink effect targets require explicit inspection".into());
+    }
+    let mut hash = Sha256::new();
+    if metadata.is_dir() {
+        let mut entries = std::fs::read_dir(path)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            let name = name.to_str().ok_or("non UTF-8 effect path unsupported")?;
+            hash.update(name.len().to_le_bytes());
+            hash.update(name.as_bytes());
+            hash.update(state(&entry.path(), budget)?.as_bytes());
+        }
+        return Ok(format!("directory:{:x}", hash.finalize()));
+    }
+    if !metadata.is_file() {
+        return Err("unsupported file-effect target".into());
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        budget.0 += n as u64;
+        if budget.0 > 64 * 1024 * 1024 {
+            return Err("file-effect snapshot exceeds 64 MiB".into());
+        }
+        hash.update(&buffer[..n]);
+    }
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o777
+    };
+    #[cfg(not(unix))]
+    let mode = u32::from(metadata.permissions().readonly());
+    Ok(format!("file:{mode}:{:x}", hash.finalize()))
+}
+pub(crate) fn capture_paths(paths: &[PathBuf]) -> Result<BTreeMap<String, String>, String> {
+    let mut budget = (0, 0);
+    paths
+        .iter()
+        .map(|p| Ok((p.to_string_lossy().to_string(), state(p, &mut budget)?)))
+        .collect()
+}
+pub(crate) fn scoped_paths(
+    db: &Path,
+    task: Uuid,
+    root: &Path,
+    policy: &akasha_tools::ToolsPolicy,
+) -> Result<Vec<PathBuf>, String> {
+    let c = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    let exists:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='studio_file_effect_scopes')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if !exists {
+        return Ok(vec![]);
+    }
+    let raw = match c.query_row(
+        "SELECT state FROM studio_file_effect_scopes WHERE task=?1",
+        [task.to_string()],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(raw) => raw,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(vec![]),
+        Err(e) => return Err(e.to_string()),
+    };
+    let scope: Scope = serde_json::from_str(&raw).map_err(|_| "invalid file-effect state")?;
+    scope
+        .paths()
+        .iter()
+        .map(|p| {
+            let p = crate::studio_tool_contract::bounded_path(root, &p.to_string_lossy())?;
+            if !policy.can_read(&p) {
+                return Err("file-effect target read denied".into());
+            }
+            Ok(p)
+        })
+        .collect()
+}
+pub(crate) fn receipt_effects(before: &BTreeMap<String, String>) -> Result<Value, String> {
+    let after = capture_paths(&before.keys().map(PathBuf::from).collect::<Vec<_>>())?;
+    Ok(json!(before
+        .iter()
+        .map(|(path, version)| json!({"path":path,"before":version,"after":after[path]}))
+        .collect::<Vec<_>>()))
+}
+fn missing(value: &str) -> bool {
+    value == "missing"
+}
+impl Scope {
+    fn paths(&self) -> Vec<PathBuf> {
+        self.goals.iter().map(|g| PathBuf::from(&g.path)).collect()
+    }
+    fn observe(&mut self, before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) {
+        for goal in &mut self.goals {
+            if let (Some(a), Some(b)) = (before.get(&goal.path), after.get(&goal.path)) {
+                if a != b {
+                    goal.changed = true;
+                }
+            }
+        }
+        for rename in &mut self.renames {
+            if let (Some(a), Some(b), Some(c)) = (
+                before.get(&rename.source),
+                after.get(&rename.source),
+                after.get(&rename.target),
+            ) {
+                if !missing(a) && missing(b) && a == c {
+                    rename.verified = true;
+                }
+            }
+        }
+    }
+    fn receipt(&mut self, value: &Value) {
+        if value["success"] != true || value["result_unknown"] == true {
+            return;
+        }
+        let mut before = BTreeMap::new();
+        let mut after = BTreeMap::new();
+        for effect in value["file_effects"].as_array().into_iter().flatten() {
+            if let (Some(path), Some(a), Some(b)) = (
+                effect["path"].as_str(),
+                effect["before"].as_str(),
+                effect["after"].as_str(),
+            ) {
+                if self.goals.iter().any(|g| g.path == path) {
+                    before.insert(path.to_owned(), a.to_owned());
+                    after.insert(path.to_owned(), b.to_owned());
+                }
+            }
+        }
+        self.observe(&before, &after);
+    }
+    fn verified(&self, current: &BTreeMap<String, String>) -> bool {
+        !self.goals.is_empty()
+            && self.goals.iter().all(|g| {
+                current.get(&g.path).is_some_and(|v| match g.end {
+                    EndState::Present => g.changed && !missing(v) && *v != g.baseline,
+                    EndState::Absent => g.changed && missing(v),
+                    EndState::RenameDestination => {
+                        !missing(v)
+                            && self
+                                .renames
+                                .iter()
+                                .any(|r| r.target == g.path && r.verified)
+                    }
+                })
+            })
+            && self.renames.iter().all(|r| r.verified)
+    }
+    fn outcome(
+        &self,
+        outcome: &mut crate::task_outcome::RunOutcome,
+        current: &BTreeMap<String, String>,
+    ) {
+        outcome
+            .checks
+            .retain(|v| v["kind"] != "requested_file_effects");
+        outcome.checks.push(json!({"kind":"requested_file_effects","status":if self.verified(current){"passed"}else{"pending"},"confirmed":self.verified(current),"scope":self}));
+    }
+}
+fn from_outcome(outcome: &crate::task_outcome::RunOutcome) -> Result<Option<Scope>, String> {
+    outcome
+        .checks
+        .iter()
+        .find(|v| v["kind"] == "requested_file_effects")
+        .map(|v| {
+            serde_json::from_value(v["scope"].clone())
+                .map_err(|_| "invalid scoped file-effect checkpoint".to_owned())
+        })
+        .transpose()
+}
+fn paths_for_request(
+    root: &Path,
+    request: &str,
+    policy: &akasha_tools::ToolsPolicy,
+) -> Result<(Vec<Goal>, Vec<Rename>), String> {
+    let mut goals: Vec<Goal> = vec![];
+    let mut renames = vec![];
+    let resolve = |raw: &str| -> Result<String, String> {
+        let p = crate::studio_tool_contract::bounded_path(root, raw)?;
+        if !policy.can_read(&p) {
+            return Err("file-effect target read denied".into());
+        }
+        Ok(p.to_string_lossy().to_string())
+    };
+    let mut set = |path: String, end: EndState| {
+        if let Some(g) = goals.iter_mut().find(|g| g.path == path) {
+            g.end = end;
+        } else {
+            goals.push(Goal {
+                path,
+                end,
+                baseline: String::new(),
+                changed: false,
+            });
+        }
+    };
+    for (verb, source, target) in parsed(request) {
+        let source = resolve(&source)?;
+        if let Some(target) = target.filter(|_| {
+            matches!(
+                verb.as_str(),
+                "rename" | "move" | "renomme" | "d\u{e9}place" | "deplace"
+            )
+        }) {
+            let target = resolve(&target)?;
+            set(source.clone(), EndState::Absent);
+            set(target.clone(), EndState::RenameDestination);
+            renames.push(Rename {
+                source,
+                target,
+                verified: false,
+            });
+        } else {
+            set(
+                source,
+                if matches!(
+                    verb.as_str(),
+                    "delete" | "remove" | "unlink" | "supprime" | "efface"
+                ) {
+                    EndState::Absent
+                } else {
+                    EndState::Present
+                },
+            );
+        }
+    }
+    if goals.len() > 32 {
+        return Err("file-effect request exceeds 32 paths; split the task".into());
+    }
+    Ok((goals, renames))
+}
+pub(crate) fn refresh(
+    db: &Path,
+    task: Uuid,
+    root: &Path,
+    request: &str,
+    agent: &str,
+    policy: &akasha_tools::ToolsPolicy,
+    outcome: &mut crate::task_outcome::RunOutcome,
+) -> Result<(), String> {
+    if !implementation_role(agent) {
+        outcome
+            .checks
+            .retain(|v| v["kind"] != "requested_file_effects");
+        return Ok(());
+    }
+    let expected_key = key(request, root);
+    let c = database(db)?;
+    let stored = c.query_row(
+        "SELECT state FROM studio_file_effect_scopes WHERE task=?1",
+        [task.to_string()],
+        |r| r.get::<_, String>(0),
+    );
+    let mut scope = match stored {
+        Ok(raw) => {
+            let s: Scope = serde_json::from_str(&raw).map_err(|_| "invalid file-effect state")?;
+            if s.version != 1
+                || s.key != expected_key
+                || s.goals
+                    .iter()
+                    .map(|g| (g.path.clone(), g.end.clone()))
+                    .collect::<Vec<_>>()
+                    != paths_for_request(root, &s.request, policy)?
+                        .0
+                        .into_iter()
+                        .map(|g| (g.path, g.end))
+                        .collect::<Vec<_>>()
+            {
+                return Err(
+                    "file-effect request identity changed; inspect and start a newly scoped task"
+                        .into(),
+                );
+            }
+            s
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            let (goals, renames) = paths_for_request(root, request, policy)?;
+            if goals.is_empty() {
+                return Ok(());
+            }
+            let mut s = Scope {
+                version: 1,
+                key: expected_key,
+                request: request.into(),
+                started_at: chrono::Utc::now().to_rfc3339(),
+                goals,
+                renames,
+            };
+            let versions = capture_paths(&s.paths())?;
+            for g in &mut s.goals {
+                g.baseline = versions[&g.path].clone();
+            }
+            s
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    // Restore completed effects lost between an operation receipt and a checkpoint.
+    let _ = crate::studio_tool_contract::recovery_summary(db, task)?;
+    let c = rusqlite::Connection::open(db).map_err(|e| e.to_string())?;
+    let mut stmt=c.prepare("WITH RECURSIVE lineage(id) AS (SELECT ?1 UNION SELECT t.id FROM tasks t JOIN lineage p ON t.parent_task_id=p.id WHERE t.status='completed') SELECT result FROM studio_operations WHERE task IN (SELECT id FROM lineage) AND state='completed' AND updated_at>=?2").map_err(|e|e.to_string())?;
+    let records = stmt
+        .query_map(rusqlite::params![task.to_string(), scope.started_at], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .map_err(|e| e.to_string())?;
+    for raw in records {
+        if let Some(value) = raw
+            .map_err(|e| e.to_string())?
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        {
+            scope.receipt(&value);
+        }
+    }
+    let current = capture_paths(&scope.paths())?;
+    persist(db, task, &scope)?;
+    scope.outcome(outcome, &current);
+    Ok(())
+}
+pub(crate) fn human_reply(
+    db: &Path,
+    task: Uuid,
+    root: &Path,
+    original: &str,
+    question: &str,
+    reply: &str,
+    agent: &str,
+    policy: &akasha_tools::ToolsPolicy,
+    outcome: &mut crate::task_outcome::RunOutcome,
+) -> Result<(), String> {
+    if !implementation_role(agent) {
+        return Ok(());
+    }
+    let mut request = if has_request(reply) {
+        Some(reply.to_owned())
+    } else if matches!(
+        reply.trim().to_lowercase().as_str(),
+        "yes" | "oui" | "continue" | "continuer"
+    ) && has_request(question)
+    {
+        Some(question.to_owned())
+    } else {
+        None
+    };
+    if request.is_none()
+        && regex::Regex::new(r"(?i)\b(?:path|filename|nom|chemin)\b|file name|quel fichier")
+            .unwrap()
+            .is_match(question)
+    {
+        if let Some(scope) = from_outcome(outcome)? {
+            let raw = reply.trim();
+            let path = raw.trim_matches(['`', '"']);
+            if scope.goals.len() == 1
+                && scope.renames.is_empty()
+                && path.contains(['.', '/', '\\'])
+                && (!path.chars().any(char::is_whitespace) || raw.starts_with(['`', '"']))
+                && !path.contains(['\r', '\n', '`'])
+            {
+                request = Some(format!(
+                    "{} `{path}`",
+                    if scope.goals[0].end == EndState::Absent {
+                        "Delete"
+                    } else {
+                        "Modify"
+                    }
+                ));
+            }
+        }
+    }
+    let Some(request) = request else {
+        return Ok(());
+    };
+    let (goals, renames) = paths_for_request(root, &request, policy)?;
+    if goals.is_empty() {
+        return Ok(());
+    }
+    let mut scope = Scope {
+        version: 1,
+        key: key(original, root),
+        request,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        goals,
+        renames,
+    };
+    let current = capture_paths(&scope.paths())?;
+    for goal in &mut scope.goals {
+        goal.baseline = current[&goal.path].clone();
+    }
+    persist(db, task, &scope)?;
+    scope.outcome(outcome, &current);
+    Ok(())
+}
+pub(crate) fn before(
+    _outcome: &crate::task_outcome::RunOutcome,
+    _tool: &str,
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    Ok(None)
+}
+pub(crate) fn after(
+    db: &Path,
+    task: Uuid,
+    outcome: &mut crate::task_outcome::RunOutcome,
+    before: Option<&BTreeMap<String, String>>,
+    receipt: &str,
+) -> Result<(), String> {
+    let Some(mut scope) = from_outcome(outcome)? else {
+        return Ok(());
+    };
+    let current = capture_paths(&scope.paths())?;
+    let _ = before;
+    if let Ok(value) = serde_json::from_str::<Value>(receipt) {
+        scope.receipt(&value);
+    }
+    persist(db, task, &scope)?;
+    scope.outcome(outcome, &current);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn policy(root: &Path) -> akasha_tools::ToolsPolicy {
+        akasha_tools::ToolsPolicy {
+            allowed_read_paths: vec![root.display().to_string()],
+            allowed_write_paths: vec![root.display().to_string()],
+            ..Default::default()
+        }
+    }
+    fn scope(root: &Path, request: &str) -> Scope {
+        let (goals, renames) = paths_for_request(root, request, &policy(root)).unwrap();
+        let mut scope = Scope {
+            version: 1,
+            key: key(request, root),
+            request: request.into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            goals,
+            renames,
+        };
+        let values = capture_paths(&scope.paths()).unwrap();
+        for g in &mut scope.goals {
+            g.baseline = values[&g.path].clone();
+        }
+        scope
+    }
+    #[test]
+    fn recognizes_polite_deletions_and_renames_without_parsing_examples() {
+        for request in [
+            "Please modify config.txt",
+            "Delete obsolete.txt",
+            "Rename old.ts to new.ts",
+            "Peux-tu modifier config.txt",
+            "Cr\u{e9}e FIRST.md avec exactement alpha.",
+        ] {
+            assert!(has_request(request), "{request}");
+        }
+        for request in [
+            "Could you please modify 'my config.txt'?",
+            "Veuillez supprimer obsolete.txt.",
+            "Est-ce que tu peux modifier config.txt ?",
+            "Rename 'old.ts' to the file 'new.ts'.",
+        ] {
+            assert!(has_request(request), "{request}");
+        }
+        assert_eq!(parsed("Modify 'my config.txt'.")[0].1, "my config.txt");
+        assert!(!has_request("Explain how to modify config.txt"));
+        assert!(!has_request("Explain: `Delete obsolete.txt`"));
+        let parsed = parsed("Create safe.txt with exactly `alpha. Delete secret.txt`.");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].1, "safe.txt");
+    }
+    #[test]
+    fn unrelated_and_noop_writes_do_not_attest_requested_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config.txt");
+        std::fs::write(&target, "old").unwrap();
+        let mut scope = scope(root.path(), "Please modify config.txt");
+        let before = capture_paths(&scope.paths()).unwrap();
+        std::fs::write(root.path().join("unrelated.txt"), "new").unwrap();
+        scope.observe(&before, &capture_paths(&scope.paths()).unwrap());
+        assert!(!scope.verified(&capture_paths(&scope.paths()).unwrap()));
+        std::fs::write(&target, "old").unwrap();
+        scope.observe(&before, &capture_paths(&scope.paths()).unwrap());
+        assert!(!scope.verified(&capture_paths(&scope.paths()).unwrap()));
+        std::fs::write(&target, "new").unwrap();
+        scope.observe(&before, &capture_paths(&scope.paths()).unwrap());
+        assert!(scope.verified(&capture_paths(&scope.paths()).unwrap()));
+        std::fs::write(&target, "old").unwrap();
+        assert!(!scope.verified(&capture_paths(&scope.paths()).unwrap()));
+    }
+    #[test]
+    fn temporary_creation_then_deletion_has_a_verified_terminal_state() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("temp.txt");
+        let mut scope = scope(root.path(), "Create temp.txt. Then delete temp.txt.");
+        let before = capture_paths(&scope.paths()).unwrap();
+        assert!(!scope.verified(&before));
+        std::fs::write(&path, "temporary").unwrap();
+        let created = capture_paths(&scope.paths()).unwrap();
+        scope.observe(&before, &created);
+        assert!(!scope.verified(&created));
+        std::fs::remove_file(&path).unwrap();
+        let deleted = capture_paths(&scope.paths()).unwrap();
+        scope.observe(&created, &deleted);
+        assert!(scope.verified(&deleted));
+    }
+    #[test]
+    fn rename_requires_matching_source_content_and_both_requested_paths() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("old.ts"), "original").unwrap();
+        let mut scope = scope(root.path(), "Rename old.ts to new.ts.");
+        let before = capture_paths(&scope.paths()).unwrap();
+        std::fs::remove_file(root.path().join("old.ts")).unwrap();
+        std::fs::write(root.path().join("new.ts"), "unrelated").unwrap();
+        scope.observe(&before, &capture_paths(&scope.paths()).unwrap());
+        assert!(!scope.verified(&capture_paths(&scope.paths()).unwrap()));
+        std::fs::write(root.path().join("old.ts"), "original").unwrap();
+        std::fs::remove_file(root.path().join("new.ts")).unwrap();
+        std::fs::rename(root.path().join("old.ts"), root.path().join("new.ts")).unwrap();
+        scope.observe(&before, &capture_paths(&scope.paths()).unwrap());
+        assert!(scope.verified(&capture_paths(&scope.paths()).unwrap()));
+    }
+    #[test]
+    fn completed_scoped_receipt_restores_a_lost_checkpoint_effect() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("task.db");
+        let task = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        akasha_store::TaskStore::open(&db)
+            .unwrap()
+            .insert(&akasha_store::Task {
+                id: task,
+                parent_task_id: None,
+                status: akasha_store::TaskStatus::Running,
+                assigned_agent: "studio_fullstack".into(),
+                created_at: now,
+                updated_at: now,
+                initial_message: None,
+                studio_project_id: None,
+            })
+            .unwrap();
+        let path = root.path().join("config.txt");
+        std::fs::write(&path, "old").unwrap();
+        let policy = policy(root.path());
+        let mut outcome = crate::task_outcome::RunOutcome::default();
+        refresh(
+            &db,
+            task,
+            root.path(),
+            "Modify config.txt",
+            "studio_fullstack",
+            &policy,
+            &mut outcome,
+        )
+        .unwrap();
+        assert!(!outcome.confirmed_file_mutation());
+        let before = capture_paths(&[path.clone()]).unwrap();
+        std::fs::write(&path, "new").unwrap();
+        let receipt = json!({"success":true,"file_effects":receipt_effects(&before).unwrap()});
+        rusqlite::Connection::open(&db).unwrap().execute("INSERT INTO studio_operations(task,operation,version,tool,digest,state,result,updated_at) VALUES(?1,'write',1,'write_file','test','completed',?2,'now')",rusqlite::params![task.to_string(),receipt.to_string()]).unwrap();
+        let mut restored = crate::task_outcome::RunOutcome::default();
+        refresh(
+            &db,
+            task,
+            root.path(),
+            "Modify config.txt",
+            "studio_fullstack",
+            &policy,
+            &mut restored,
+        )
+        .unwrap();
+        assert!(restored.confirmed_file_mutation());
+        let restored: crate::task_outcome::RunOutcome =
+            serde_json::from_str(&serde_json::to_string(&restored).unwrap()).unwrap();
+        assert!(restored.confirmed_file_mutation());
+    }
+    #[test]
+    fn directory_versions_capture_real_changes_and_roles_are_scoped() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let initial = capture_paths(&[folder.clone()]).unwrap();
+        std::fs::write(folder.join("a.txt"), "value").unwrap();
+        assert_ne!(initial, capture_paths(&[folder]).unwrap());
+        assert!(!implementation_role("studio_planner"));
+        assert!(!implementation_role("studio_reviewer"));
+    }
+    #[test]
+    fn explicit_human_scope_change_drops_previous_path_attestations() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("task.db");
+        let task = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        akasha_store::TaskStore::open(&db)
+            .unwrap()
+            .insert(&akasha_store::Task {
+                id: task,
+                parent_task_id: None,
+                status: akasha_store::TaskStatus::Running,
+                assigned_agent: "studio_fullstack".into(),
+                created_at: now,
+                updated_at: now,
+                initial_message: None,
+                studio_project_id: None,
+            })
+            .unwrap();
+        std::fs::write(root.path().join("first.txt"), "old").unwrap();
+        std::fs::write(root.path().join("second.txt"), "old").unwrap();
+        let policy = policy(root.path());
+        let mut outcome = crate::task_outcome::RunOutcome::default();
+        refresh(
+            &db,
+            task,
+            root.path(),
+            "Modify first.txt",
+            "studio_fullstack",
+            &policy,
+            &mut outcome,
+        )
+        .unwrap();
+        human_reply(
+            &db,
+            task,
+            root.path(),
+            "Modify first.txt",
+            "Which path?",
+            "Modify second.txt",
+            "studio_fullstack",
+            &policy,
+            &mut outcome,
+        )
+        .unwrap();
+        refresh(
+            &db,
+            task,
+            root.path(),
+            "Modify first.txt",
+            "studio_fullstack",
+            &policy,
+            &mut outcome,
+        )
+        .unwrap();
+        let scope = from_outcome(&outcome).unwrap().unwrap();
+        assert!(scope.goals[0].path.ends_with("second.txt"));
+        assert!(!outcome.confirmed_file_mutation());
+    }
+
+    #[tokio::test]
+    async fn scoped_receipts_are_measured_under_the_operation_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("task.db");
+        let task = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        akasha_store::TaskStore::open(&db)
+            .unwrap()
+            .insert(&akasha_store::Task {
+                id: task,
+                parent_task_id: None,
+                status: akasha_store::TaskStatus::Running,
+                assigned_agent: "studio_fullstack".into(),
+                created_at: now,
+                updated_at: now,
+                initial_message: None,
+                studio_project_id: None,
+            })
+            .unwrap();
+        let path = root.path().join("config.txt");
+        std::fs::write(&path, "old").unwrap();
+        let policy = policy(root.path());
+        let mut outcome = crate::task_outcome::RunOutcome::default();
+        refresh(
+            &db,
+            task,
+            root.path(),
+            "Modify config.txt",
+            "studio_fullstack",
+            &policy,
+            &mut outcome,
+        )
+        .unwrap();
+        let read = crate::studio_tool_contract::Operation::begin(
+            &db,
+            task,
+            "read_file",
+            &["workspace:/config.txt".into()],
+            root.path(),
+            &policy,
+            None,
+        )
+        .await
+        .unwrap();
+        read.finish(true, "old").unwrap();
+        let noop = crate::studio_tool_contract::Operation::begin(
+            &db,
+            task,
+            "write_file",
+            &["workspace:/config.txt".into(), "old".into()],
+            root.path(),
+            &policy,
+            None,
+        )
+        .await
+        .unwrap();
+        std::fs::write(&path, "old").unwrap();
+        noop.finish(true, "unchanged").unwrap();
+        refresh(
+            &db,
+            task,
+            root.path(),
+            "Modify config.txt",
+            "studio_fullstack",
+            &policy,
+            &mut outcome,
+        )
+        .unwrap();
+        assert!(!outcome.confirmed_file_mutation());
+        let write = crate::studio_tool_contract::Operation::begin(
+            &db,
+            task,
+            "write_file",
+            &["workspace:/config.txt".into(), "new".into()],
+            root.path(),
+            &policy,
+            None,
+        )
+        .await
+        .unwrap();
+        std::fs::write(&path, "new").unwrap();
+        let receipt: Value = serde_json::from_str(&write.finish(true, "updated").unwrap()).unwrap();
+        assert!(!receipt["file_effects"].as_array().unwrap().is_empty());
+        refresh(
+            &db,
+            task,
+            root.path(),
+            "Modify config.txt",
+            "studio_fullstack",
+            &policy,
+            &mut outcome,
+        )
+        .unwrap();
+        assert!(outcome.confirmed_file_mutation());
+    }
+}

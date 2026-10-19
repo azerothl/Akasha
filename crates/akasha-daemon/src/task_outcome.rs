@@ -26,12 +26,8 @@ pub(crate) struct RunOutcome {
 }
 
 impl RunOutcome {
-    pub fn confirmed_file_mutation(&self)->bool {self.checks.iter().any(|c|c["kind"]=="file_mutation" && c["status"]=="passed")}
-    pub fn record_file_mutation(&mut self,tool:&str) {
-        if crate::studio_tool_contract::is_confirmable_file_mutation(tool) && !self.confirmed_file_mutation() {
-            self.checks.push(serde_json::json!({"kind":"file_mutation","tool":tool,"status":"passed","source":"confirmed_operation_receipt"}));
-        }
-    }
+    pub fn confirmed_file_mutation(&self)->bool {self.checks.iter().any(|c|c["kind"]=="requested_file_effects" && c["confirmed"]==true)}
+    pub fn requires_file_effect(&self)->bool {self.checks.iter().any(|c|c["kind"]=="requested_file_effects")}
     pub fn failed(&self) -> bool {
         self.termination != TerminationReason::Success
     }

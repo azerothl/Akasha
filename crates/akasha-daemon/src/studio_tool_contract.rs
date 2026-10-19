@@ -510,6 +510,7 @@ pub(crate) struct Operation {
     tool: String,
     path: Option<PathBuf>,
     before: Option<String>,
+    effect_before: std::collections::BTreeMap<String,String>,
     _lock: tokio::sync::OwnedMutexGuard<()>,
     pub cached: Option<(bool, String)>,
 }
@@ -596,6 +597,7 @@ impl Operation {
                 tool: tool.into(),
                 path: None,
                 before: None,
+                effect_before: Default::default(),
                 _lock: lock,
                 cached: Some((
                     value["success"].as_bool().unwrap_or(false),
@@ -666,7 +668,7 @@ impl Operation {
                 if value["success"]==true && value["result_unknown"]!=true && value["file_version"].as_str()==before.as_deref() && before.is_some() {
                     value["replayed"]=json!(true);
                     value["retry_hint"]=json!("Identical write already confirmed and current file version verified; no new disk effect. Continue with the next requested operation or conclude after all checks.");
-                    return Ok(Self{db:db.into(),task,id,tool:tool.into(),path:None,before:None,_lock:lock,cached:Some((true,value.to_string()))});
+                    return Ok(Self{db:db.into(),task,id,tool:tool.into(),path:None,before:None,effect_before:Default::default(),_lock:lock,cached:Some((true,value.to_string()))});
                 }
             }
         }
@@ -694,6 +696,11 @@ impl Operation {
                 return Err("stale_file_version: file changed since it was read; read it again before retrying".into());
             }
         }
+        let mut effect_paths=if is_file_mutation(tool){path.iter().cloned().collect::<Vec<_>>()}else{Vec::new()};
+        if matches!(tool,"rename_path"|"move_tree"){effect_paths=paths_for_tool(tool,args).iter().map(|raw|bounded_path(root,raw)).collect::<Result<Vec<_>,_>>()?;}
+        if tool=="lsp_apply_rename" {if let Some(id)=args.first().and_then(|s|Uuid::parse_str(s).ok()){effect_paths=crate::studio_lsp::plan_paths(db.parent().ok_or("task data directory missing")?,root,task,id)?.iter().map(|p|bounded_path(root,p)).collect::<Result<Vec<_>,_>>()?;}}
+        if is_confirmable_file_mutation(tool)||matches!(tool,"run_command"|"run_terminal"|"run_in_container"|"terminal_session") {effect_paths.extend(crate::studio_file_effects::scoped_paths(db,task,root,policy)?);}
+        let effect_before=crate::studio_file_effects::capture_paths(&effect_paths)?;
         transaction.execute("INSERT INTO studio_operations(task,operation,version,tool,digest,state,updated_at) VALUES(?1,?2,1,?3,?4,'started',?5)",params![task.to_string(),id.to_string(),tool,fingerprint,chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(Self {
@@ -703,6 +710,7 @@ impl Operation {
             tool: tool.into(),
             path,
             before,
+            effect_before,
             _lock: lock,
             cached: None,
         })
@@ -728,6 +736,7 @@ impl Operation {
         let plain=command_result.as_ref().and_then(|v|v["output"].as_str()).unwrap_or(text);
         let (output,_,truncated) = crate::tool_output::truncate_utf8_by_bytes(plain, 64 * 1024);
         let mut value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
+        value["file_effects"]=crate::studio_file_effects::receipt_effects(&self.effect_before)?;
         value["truncated"]=json!(truncated);
         if truncated {value["output"]=json!(format!("{}\n[Output truncated at 64 KiB; use bounded reads to inspect remaining data.]",value["output"].as_str().unwrap_or_default()));}
         if self.tool == "read_file" && !success && value["file_version"] == "missing" {
@@ -746,18 +755,6 @@ impl Operation {
 
 pub(crate) fn is_confirmable_file_mutation(tool:&str)->bool {
     is_file_mutation(tool) || matches!(tool,"rename_path"|"move_tree"|"lsp_apply_rename")
-}
-pub(crate) fn confirmed_file_mutation(db:&Path,task:Uuid)->Result<Option<String>,String> {
-    let connection=connection(db)?;
-    // Only completed children can attest an effect for a delegating parent.
-    let mut statement=connection.prepare("WITH RECURSIVE lineage(id) AS (SELECT ?1 UNION SELECT t.id FROM tasks t JOIN lineage p ON t.parent_task_id=p.id WHERE t.status='completed') SELECT tool,result FROM studio_operations WHERE task IN (SELECT id FROM lineage) AND state='completed'").map_err(|e|e.to_string())?;
-    let mut rows=statement.query([task.to_string()]).map_err(|e|e.to_string())?;
-    while let Some(row)=rows.next().map_err(|e|e.to_string())? {
-        let tool:String=row.get(0).map_err(|e|e.to_string())?;if !is_confirmable_file_mutation(&tool){continue;}
-        let raw:Option<String>=row.get(1).map_err(|e|e.to_string())?;
-        if raw.and_then(|s|serde_json::from_str::<Value>(&s).ok()).is_some_and(|v|v["success"]==true && v["result_unknown"]!=true){return Ok(Some(tool));}
-    }
-    Ok(None)
 }
 pub(crate) fn recovery_summary(db: &Path, task: Uuid) -> Result<Value, String> {
     let connection = connection(db)?;

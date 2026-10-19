@@ -61,10 +61,11 @@ async fn studio_round_limit_choice(store: &Option<HumanInputStore>, bus: &EventB
     let context = format!("La tâche a utilisé {round} tours d'outils (max {max}). Une reprise exige une nouvelle décision ; aucune ancienne approbation n'est réutilisée.");
     let choices = vec!["Continuer (+10 tours)".to_string(), "Réinitialiser et continuer (+10 tours)".to_string(), "Arrêter".to_string()];
     let (tx, rx) = oneshot::channel();
-    store.write().await.insert(task, PendingHumanInput { request_id:None, question:question.clone(), context:context.clone(), choices:Some(choices.clone()), response_tx:tx });
-    let _ = bus.send(EventEnvelope::new(EventType::TaskWaitingUserInput, Some(serde_json::json!({"task_id":task,"question":question,"context":context,"choices":choices,"tool_round_limit":true,"current_round":round,"max_tool_rounds":max}))).with_correlation(task));
+    let request_id=Uuid::new_v4().to_string();
+    store.write().await.insert(task, PendingHumanInput { request_id:Some(request_id.clone()), question:question.clone(), context:context.clone(), choices:Some(choices.clone()), response_tx:tx });
+    let _ = bus.send(EventEnvelope::new(EventType::TaskWaitingUserInput, Some(serde_json::json!({"task_id":task,"request_id":request_id.clone(),"question":question,"context":context,"choices":choices,"tool_round_limit":true,"current_round":round,"max_tool_rounds":max}))).with_correlation(task));
     let answer = tokio::time::timeout(std::time::Duration::from_secs(300), rx).await.ok().and_then(Result::ok);
-    store.write().await.remove(&task);
+    let mut waiting=store.write().await;if waiting.get(&task).is_some_and(|p|p.request_id.as_deref()==Some(request_id.as_str())){waiting.remove(&task);}
     answer
 }
 
@@ -1523,9 +1524,7 @@ pub(crate) async fn run_message_via_llm(
             resume_overlay=format!("[Resumed execution — apply CURRENT system/rules/permissions; do not replay operations]\n[Recorded operation results; unknown effects require operator resolution]\n{}\n[Pending human input at interruption: {}. Ask again; no old approval is restored.]\n[CURRENT task instructions]\n{}\n[Saved execution state]\n",ledger,checkpoint.waiting.as_ref().map(|v|v.to_string()).unwrap_or_else(||"none".into()),current_prompt);
             current_prompt=checkpoint.prompt.clone();
             run_outcome=checkpoint.outcome.clone();run_outcome.termination=TerminationReason::Success;
-            if !run_outcome.confirmed_file_mutation() {
-                match crate::studio_tool_contract::confirmed_file_mutation(&store_path,task_id) {Ok(Some(tool))=>run_outcome.record_file_mutation(&tool),Ok(None)=>{},Err(error)=>{abort_recovery!(error);}}
-            }
+
         }
         if let Some(saved)=recovery_checkpoint.as_ref().and_then(|checkpoint|checkpoint.max_tool_rounds) {max_tool_rounds=saved;}
         let mut round = recovery_checkpoint.as_ref().map(|checkpoint|checkpoint.round).unwrap_or(0);
@@ -1588,6 +1587,8 @@ pub(crate) async fn run_message_via_llm(
                 .or_else(||(checkpoint.round>=max_tool_rounds).then(||serde_json::json!({"tool_round_limit":true,"max_tool_rounds":max_tool_rounds})))
         });
         'tool_rounds: loop {
+            if code_studio_disk_task {if let Some(exec)=tools_executor.as_ref(){let policy=exec.read().await.policy.clone();if let Err(error)=crate::studio_file_effects::refresh(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}}
+
             if let Some(waiting) = resumed_limit_wait.take() {
                 max_tool_rounds = waiting["max_tool_rounds"].as_u64().map(|v|v as u32).unwrap_or(max_tool_rounds);
                 if let Err(error)={crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",waiting,(&current_prompt,round,max_tool_rounds,&run_outcome))} {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
@@ -1750,7 +1751,7 @@ pub(crate) async fn run_message_via_llm(
                 })
             }else{None};
             let request = CompletionRequest {
-                require_tool: code_studio_disk_task && ((super::studio_conversation::requires_file_effect(&user_message,&assigned_agent) && !run_outcome.confirmed_file_mutation())
+                require_tool: code_studio_disk_task && ((run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation())
                     || (!explicit_file_goals.is_empty() && super::studio_completion::requires_tool_retry(&current_prompt,&run_outcome.checks)))
                     && (matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code")
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
@@ -2116,7 +2117,7 @@ pub(crate) async fn run_message_via_llm(
             let no_parseable_tools_this_round = parsed_tool_calls.is_none();
             if code_studio_disk_task && no_parseable_tools_this_round
                 && !run_outcome.confirmed_file_mutation()
-                && super::studio_conversation::requires_file_effect(&user_message,&assigned_agent)
+                && run_outcome.requires_file_effect()
                 && tools_executor_snapshot.as_ref().is_some_and(|e|policy_allows_primary_disk_write(&e.policy))
             {
                 if studio_zero_tool_promise_nags >= 3 {
@@ -2929,6 +2930,7 @@ pub(crate) async fn run_message_via_llm(
                         let approved_delivery_envelope=delivery_approval_identity.as_ref().map(|identity| {
                             vec![serde_json::json!({"schema_version":1,"operation_id":typed_call.as_ref().map(|call|call.envelope.operation_id).unwrap_or_else(Uuid::new_v4),"tool":actual_tool,"arguments":serde_json::from_str::<serde_json::Value>(&tool_args.join(" ")).unwrap_or_default(),"approval_identity":identity}).to_string()]
                         });
+                        let file_effect_before=match crate::studio_file_effects::before(&run_outcome,&actual_tool){Ok(value)=>value,Err(error)=>{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}};
                         let (success, res, captured_image): (bool, String, Option<String>) =
                             if actual_tool == "ask_user" {
                                 // Human in the loop: register pending request, emit event, wait for user reply.
@@ -2966,8 +2968,9 @@ pub(crate) async fn run_message_via_llm(
                                         } else {
                                             if code_studio_disk_task {if let Err(error)={explicit_file_goals.clear();scope_unchanged=false;crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":"ask_user","question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome))}{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                             let (tx, rx) = tokio::sync::oneshot::channel();
+                                            let request_id=Uuid::new_v4().to_string();
                                             let pending = PendingHumanInput {
-                                                request_id:None,
+                                                request_id:Some(request_id.clone()),
                                                 question: question.clone(),
                                                 context: context.clone(),
                                                 choices: choices.clone(),
@@ -2979,6 +2982,7 @@ pub(crate) async fn run_message_via_llm(
                                             }
                                             let payload = serde_json::json!({
                                                 "task_id": task_id.to_string(),
+                                                "request_id": request_id.clone(),
                                                 "question": question,
                                                 "context": context,
                                                 "choices": choices
@@ -2999,14 +3003,13 @@ pub(crate) async fn run_message_via_llm(
                                             )
                                             .await
                                             {
-                                                Ok(Ok(reply)) => (
-                                                    true,
-                                                    format!("[ask_user] User replied: {}", reply),
-                                                    None,
-                                                ),
+                                                Ok(Ok(reply)) => {
+                                                    if let Some(exec)=tools_executor.as_ref(){let policy=exec.read().await.policy.clone();if let Err(error)=crate::studio_file_effects::human_reply(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&question,&reply,&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
+                                                    (true,format!("[ask_user] User replied: {}",reply),None)
+                                                },
                                                 Ok(Err(_)) => {
                                                     let mut g = store.write().await;
-                                                    g.remove(&task_id);
+                                                    if g.get(&task_id).is_some_and(|p|p.request_id.as_deref()==Some(request_id.as_str())){g.remove(&task_id);}
                                                     if matches!(TaskStore::open(&store_path).ok().and_then(|s|s.get(task_id).ok().flatten()).map(|t|t.status),Some(TaskStatus::Paused|TaskStatus::Cancelled|TaskStatus::Interrupted|TaskStatus::Failed)) {break 'tool_rounds;}
                                                     (
                                                         false,
@@ -3016,7 +3019,7 @@ pub(crate) async fn run_message_via_llm(
                                                 }
                                                 Err(_) => {
                                                     let mut g = store.write().await;
-                                                    g.remove(&task_id);
+                                                    if g.get(&task_id).is_some_and(|p|p.request_id.as_deref()==Some(request_id.as_str())){g.remove(&task_id);}
                                                     (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS), None)
                                                 }
                                             }
@@ -3411,12 +3414,7 @@ pub(crate) async fn run_message_via_llm(
                         } else { run_outcome.failed_tool_calls += 1; }
                         if serde_json::from_str::<serde_json::Value>(&res).ok().is_some_and(|value|value["result_unknown"]==true){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Operation result unknown; inspect effects and use explicit recovery before continuing. {res}");break 'tool_rounds;}
 
-                        if success {
-                            run_outcome.record_file_mutation(&actual_tool);
-                            if actual_tool=="delegate_to_agent" && !run_outcome.confirmed_file_mutation() {
-                                match crate::studio_tool_contract::confirmed_file_mutation(&store_path,task_id) {Ok(Some(tool))=>run_outcome.record_file_mutation(&tool),Ok(None)=>{},Err(error)=>{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
-                            }
-                        }
+                        if success {if let Err(error)=crate::studio_file_effects::after(&store_path,task_id,&mut run_outcome,file_effect_before.as_ref(),&res){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                         if matches!(effective_role_tool, "run_command" | "run_terminal" | "run_in_container") {
                             run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":effective_role_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }
@@ -4604,7 +4602,8 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         );
     }
 
-    if code_studio_disk_task && !run_outcome.failed() && super::studio_conversation::requires_file_effect(&user_message,&assigned_agent) && !run_outcome.confirmed_file_mutation() {
+    if code_studio_disk_task && !run_outcome.failed(){if let Some(exec)=tools_executor.as_ref(){let policy=exec.read().await.policy.clone();if let Err(error)=crate::studio_file_effects::refresh(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;}}}
+    if code_studio_disk_task && !run_outcome.failed() && run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation() {
         run_outcome.termination=TerminationReason::ToolError;reply_text="No confirmed file mutation; reads and prose cannot attest the requested edit.".into();
     }
     if code_studio_disk_task && !run_outcome.failed() && run_outcome.failed_tool_calls > 0 && run_outcome.successful_tool_calls == 0 {
