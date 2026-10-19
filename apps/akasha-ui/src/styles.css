@@ -9544,6 +9544,9 @@ textarea.input-group-field { min-height: 70px; max-height: 200px; resize: none; 
 .sidebar-mobile-close { display: none; }
 .sidebar-mobile-toggle { display: none; }
 .chat-panel .btn-tiny { min-height: 32px; min-width: 32px; display: inline-flex; align-items: center; justify-content: center; }
+.chat-dual-pane-toolbar .btn-tiny[aria-pressed="true"] { color: var(--akasha-on-accent); background: var(--akasha-btn-primary-bg); }
+.research-result-notice { padding: 12px; border: 1px solid var(--akasha-accent); color: var(--akasha-text); overflow-wrap: anywhere; }
+.research-report-preview { min-width: 0; overflow-wrap: anywhere; margin-top: 24px; }
 .sidebar-nav-collapsed .sidebar-nav-more summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel-load-state { padding: 16px; color: var(--akasha-text-muted); }
 .research-advanced { margin: 12px 0; }

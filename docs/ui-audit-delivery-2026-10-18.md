@@ -116,3 +116,138 @@ Les limites de validation native et matérielle décrites plus haut subsistent.
 - [Chat à 400 px](screenshots/ui-audit-2026-10-18/chat-400.png)
 - [Erreur de chargement et récupération](screenshots/ui-audit-2026-10-18/panel-error.png)
 - [Matrice de contrastes](screenshots/ui-audit-2026-10-18/theme-contrast.json)
+
+## Complément du 19 octobre 2026 — #185 à #188
+
+Branche `codex/ui-audit-followup`, basée sur `main` à `773f57f` (PR #189
+fusionnée). Ces corrections locales ne sont pas encore publiées ni fusionnées.
+
+### Corrections
+
+- **#185 — Simple/Expert :** retirer les enveloppes d’instructions avant de
+  tronquer le titre d’une tâche, y compris dans le Calendrier ; protéger aussi
+  l’interface contre les anciens titres déjà tronqués. Traduire les états du
+  travail actif. En Simple, présenter les demandes principales et masquer les
+  sous-tâches, événements bruts et détails de routage. Un bouton donne accès au
+  mode Expert, où ces détails restent disponibles. Les questions nécessitant
+  une réponse restent accessibles depuis le résumé du Chat.
+- **#186 — Recherche :** une recherche sans preuve exploitable termine avec
+  `research_no_evidence`, sans faux rapport exportable. La suffisance des
+  sources dépend des sources retenues, pas du nombre de lectures tentées.
+  L’interface reconnaît aussi les anciens rapports vides, explique comment
+  réessayer et distingue un rapport partiel. Le rapport est lisible directement
+  dans la page, avant le formulaire ; la visualisation n’occupe de place que
+  pendant l’exécution. Les annulations sont identifiées dans l’historique.
+  Correction connexe : `default_max_retries: 0` effectue maintenant l’appel
+  initial au modèle au lieu de supprimer tous les appels.
+- **#187 — Mesures :** ajout d’une sonde native explicitement activée en
+  développement et d’un lanceur reproductible. La sonde est désactivée dans
+  les binaires de production ; elle n’ajoute aucune télémétrie. Le lancement
+  refuse d’écraser une observation et vérifie l’isolation du profil WebView.
+- **#188 — Commandes :** état `aria-pressed` du double panneau, rendu actif
+  associé, contrôles de focus, clavier et toucher synthétisé. Les cibles ont
+  été mesurées avec un vrai rendu Chromium en émulation `pointer: coarse`.
+
+### Vérifications exécutées
+
+- Compilation UI de production et de test réussie ; compilation Tauri et daemon
+  réussie. Avertissements préexistants conservés.
+- **55 tests unitaires UI réussis.** Les tests des aides et du thème utilisent
+  maintenant le contexte de langue et le nom accessible actuels.
+- **20 tests Playwright réussis**, configuration
+  `apps/akasha-ui/playwright.audit.config.ts`, sans daemon ni données utilisateur :
+  matrice FR/EN × Simple/Expert × préférences neuves/existantes ; présence des
+  13 destinations et conservation d’un brouillon après navigation ; accès
+  clavier au détail Expert ; récupération après échec de chargement d’un
+  panneau ; recherche réussie/partielle/vide/erreur/annulée.
+- Deux contrôles Rust ciblés réussis : extraction du titre avant troncature
+  (instruction longue, pièce jointe, sous-tâche orchestrée), et appel du
+  fournisseur avec zéro ou deux essais configurés.
+- Recherche **réelle**, avec le daemon compilé et Ollama `qwen3.5:9b` sur un
+  port distinct, budget volontairement borné à 60 secondes : aucune source
+  retenue, phase finale `error`, code `research_no_evidence`, aucun rapport.
+  [Résultat du contrôle](screenshots/ui-audit-followup-2026-10-19/research-live-result.json).
+  Le modèle était chargé en VRAM. Ce contrôle valide le traitement de l’absence
+  de preuve ; il ne valide pas la qualité d’un rapport sourcé en conditions
+  réelles. Les résultats positifs/partiels des tests UI utilisent des fixtures
+  explicites et ne sont pas présentés comme des recherches réelles.
+
+Commandes des contrôles ciblés :
+
+```text
+cd apps/akasha-ui
+npm test
+npx vite build --mode e2e
+npx playwright test --config playwright.audit.config.ts
+```
+
+### Démarrage natif : protocole et observations
+
+Windows 11 Professionnel Insider Preview 10.0.26220, Ryzen 7 9800X3D,
+62 Gio de RAM utilisable, RTX 4080 SUPER 16 Go ;
+Rust 1.94.1, Node 22.20.0, Vite 5.4.21, Tauri 2.12.4.
+Même exécutable Tauri **debug**, mêmes préférences synthétiques, même URL locale
+`127.0.0.1:5297`, fenêtre 800 × 600, frontends **minifiés de production** :
+baseline `4f3ee5f` puis correction de cette branche. Pas de compilation ni
+d’inférence lancée par cet audit pendant la série retenue.
+
+Mesure monotone depuis l’entrée dans `run()` côté Rust jusqu’à un champ
+`#chat-input` activé, visible, ayant effectivement reçu le focus, après deux
+frames. Ce n’est ni un temps d’inférence ni une mesure de frappe/envoi du
+premier message. Le défilement nécessaire pour rendre le champ visible fait
+partie de la mesure pour les deux versions.
+
+Chaque lancement « profil neuf » possède un répertoire WebView distinct.
+Les trois lancements « profil réutilisé » reprennent le troisième de ces
+profils. Cela mesure le cache du profil/HTTP ; **le cache disque de Windows
+n’est pas vidé**. Aucun profil utilisateur n’est nécessaire au protocole final.
+Les premières tentatives où Tauri ignorait le chemin absolu de la configuration
+ont été écartées ; le lanceur utilise maintenant `data_directory` du builder
+et refuse une série dont le profil isolé n’est pas créé.
+
+| Frontend | Profil | n | Minimum | Médiane | Maximum |
+|---|---|---:|---:|---:|---:|
+| Avant | Neuf | 3 | 706,1 ms | 761,9 ms | 816,7 ms |
+| Après | Neuf | 3 | 556,1 ms | 557,6 ms | 676,3 ms |
+| Avant | Réutilisé | 3 | 580,5 ms | 604,7 ms | 788,0 ms |
+| Après | Réutilisé | 3 | 473,8 ms | 480,9 ms | 522,2 ms |
+
+[Les 12 observations brutes](screenshots/ui-audit-followup-2026-10-19/startup-observations.json).
+Cette série est plus rapide après correction, mais trois observations par cas,
+l’ordre avant/après et une charge système non verrouillée ne permettent pas de
+généraliser le gain à une version installée. Le protocole utilise un shell debug
+et des ressources servies en HTTP local : il reste à le répéter sur les paquets
+de release avant toute promesse de gain natif en production.
+
+Le JavaScript principal reste autour de 660 kB minifiés en production, contre
+2 120 kB avant découpage. Cela ne mesure pas le temps de compilation Rust.
+
+Lanceur (compiler le shell debug avec `build.devUrl` réglé sur cette URL ; fournir
+deux distributions natives de production, puis un nouveau dossier de résultats) :
+
+```text
+node scripts/benchmark-native-startup.mjs <akasha-ui.exe-debug> <dist-avant> <dist-apres> <nouveau-dossier>
+```
+
+### Cibles bureau et tactiles
+
+Chromium 147.0.7727.15 ; formats 400 × 600, 800 × 600 et 1280 × 720.
+Chaque format est contrôlé avec pointeur fin puis `hasTouch: true`, avec
+vérification de `matchMedia('(pointer:coarse)')`. Mesures après stabilisation
+de l’ouverture du tiroir mobile, focus visibles, activation du double panneau
+au clavier et au toucher synthétisé, centre du repli non recouvert.
+
+| Commande | Pointeur fin | Émulation tactile |
+|---|---|---|
+| Aide de l’en-tête | 32 × 32 px | 44 × 44 px |
+| Repli de navigation | 32 × 32 px | 44 × 44 px |
+| Double panneau | 109,72 × 32 px | 109,72 × 44 px |
+
+Les six relevés JSON et six captures sont dans
+[`screenshots/ui-audit-followup-2026-10-19/`](screenshots/ui-audit-followup-2026-10-19/).
+Ce sont des contrôles de rendu et d’entrée synthétisée : aucun écran tactile
+physique n’a été testé, et aucune certification WCAG globale n’est revendiquée.
+
+- [Rapport affiché dans la page — fixture](screenshots/ui-audit-followup-2026-10-19/research-ready.png)
+- [Absence de preuve — fixture de compatibilité historique](screenshots/ui-audit-followup-2026-10-19/research-empty.png)
+- [Navigation tactile à 400 px](screenshots/ui-audit-followup-2026-10-19/targets-touch-400.png)

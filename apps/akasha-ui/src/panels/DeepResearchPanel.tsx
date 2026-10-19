@@ -21,6 +21,7 @@ import {
 import { InfoTip } from "../components/Tooltip";
 import { useNotifyOnMessage } from "../notifications/useNotifyOnMessage";
 import { useI18n } from "../useI18n";
+import { researchQuality } from "../researchQuality";
 
 const LazyMarkdownContent = lazy(() => import("../MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -45,6 +46,13 @@ export type ResearchRun = {
   searchDegraded?: boolean;
   error?: string;
 };
+
+class ResearchPollingError extends Error {
+  constructor(message: string, readonly run: ResearchRun) {
+    super(message);
+    this.name = "ResearchPollingError";
+  }
+}
 
 type ServerRun = {
   id: string;
@@ -147,6 +155,9 @@ function serverToRun(server: ServerRun, existing?: ResearchRun): ResearchRun {
 function formatDaemonError(message: string, locale: "fr" | "en"): string {
   const en = locale === "en";
   const lower = message.toLowerCase();
+  if (lower.includes("research_no_evidence")) return en
+    ? "No usable sources were found. Try a more specific topic, or check web access in Settings before retrying."
+    : "Aucune source exploitable n’a été trouvée. Précisez le sujet ou vérifiez l’accès au Web dans Paramètres, puis réessayez.";
   if (lower.includes("timed out") || lower.includes("timeout") || lower.includes("time out")) {
     return en
       ? "Request timed out — use an external LLM in llm_router.yaml for faster research."
@@ -255,7 +266,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   const maybeAutoOpenReport = useCallback(
     (run: ResearchRun) => {
       const md = run.reportMarkdown?.trim();
-      if (!md || run.status !== "complete") return;
+      if (!md || run.status !== "complete" || researchQuality(md, run.reportMeta) !== "ready") return;
       const key = run.serverRunId ?? run.id;
       if (autoOpenedReportIdsRef.current.has(key)) return;
       autoOpenedReportIdsRef.current.add(key);
@@ -346,7 +357,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             if (server.phase === "done" || server.phase === "error" || server.phase === "cancelled") {
               stopPolling();
               if (server.phase === "error") {
-                reject(new Error(server.error ?? (en ? "Research failed" : "Recherche échouée")));
+                reject(new ResearchPollingError(server.error ?? (en ? "Research failed" : "Recherche échouée"), current));
               } else {
                 if (server.phase === "done") setPhase("done");
                 resolve();
@@ -354,7 +365,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             }
           } catch (e) {
             stopPolling();
-            reject(e);
+            reject(new ResearchPollingError(e instanceof Error ? e.message : String(e), current));
           }
         };
         void tick();
@@ -386,7 +397,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
         const message = formatDaemonError(e instanceof Error ? e.message : String(e), locale);
         setErr(message);
         upsertRun({
-          ...running,
+          ...(e instanceof ResearchPollingError ? e.run : running),
           updatedAt: new Date().toISOString(),
           status: "error",
           error: message,
@@ -453,7 +464,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
       const message = formatDaemonError(e instanceof Error ? e.message : String(e), locale);
       setErr(message);
       current = {
-        ...current,
+        ...(e instanceof ResearchPollingError ? e.run : current),
         updatedAt: new Date().toISOString(),
         status: "error",
         error: message,
@@ -480,6 +491,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   };
 
   const report = selected?.reportMarkdown ?? "";
+  const quality = researchQuality(report, selected?.reportMeta);
   const evolving = selected?.evolvingReport ?? "";
 
   const reportDoc: ResearchReportDocument | null = useMemo(() => {
@@ -542,7 +554,10 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
 
   const inDraft = selectedId === null;
   const branches = inDraft ? [] : (selected?.branches ?? []);
-  const reportReady = !inDraft && Boolean(report.trim() && !loading);
+  const reportReady = !inDraft && selected?.status === "complete" && quality !== "empty" && !loading;
+  const reportError = !inDraft && !loading
+    ? err || selected?.error || (selected?.status === "complete" && quality === "empty" ? "research_no_evidence" : null)
+    : null;
 
   useNotifyOnMessage(err, "error", t("tabs.research"));
   useNotifyOnMessage(
@@ -584,6 +599,9 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
                     : ` · max ${h.maxRounds} ${en ? "rounds" : "tours"}`}
                   {h.status === "running" ? (en ? " · running" : " · en cours") : null}
                   {h.status === "error" ? (en ? " · error" : " · erreur") : null}
+                  {h.status === "cancelled" ? (en ? " · cancelled" : " · annulée") : null}
+                  {h.status === "complete" && researchQuality(h.reportMarkdown, h.reportMeta) !== "ready"
+                    ? (en ? " · insufficient evidence" : " · sources insuffisantes") : null}
                 </span>
               </button>
               <button
@@ -705,10 +723,24 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
                 </select>
               </label>
               {reportReady ? (
-                <p className="research-report-ready-hint muted">{t("research.report.ready")}</p>
+                <p className="research-report-ready-hint muted">{quality === "limited"
+                  ? (en ? "Partial report — check the evidence limitations below." : "Rapport partiel — consultez les limites des sources ci-dessous.")
+                  : (en ? "Report available below. You can also open it in a separate window or export it." : "Rapport disponible ci-dessous. Vous pouvez aussi l’ouvrir dans une fenêtre ou l’exporter.")}</p>
               ) : null}
             </div>
           </header>
+          {reportError && <p role="alert" className="research-result-notice">{formatDaemonError(reportError, locale)}</p>}
+          {reportReady && quality === "limited" && <div role="status" className="research-result-notice">
+            <p>{en ? "The available sources are insufficient to support all conclusions. This report needs verification."
+              : "Les sources disponibles ne suffisent pas à étayer toutes les conclusions. Ce rapport doit être vérifié."}</p>
+            <p>{en ? "Sources retained" : "Sources retenues"} : {selected?.reportMeta?.sources?.length ?? 0}</p>
+            {selected?.reportMeta?.search_degraded && <p>{en ? "Web search unavailable: model knowledge only." : "Recherche Web indisponible : connaissances du modèle uniquement."}</p>}
+          </div>}
+          {reportReady && <section className="research-report-preview" aria-label={en ? "Research report" : "Rapport de recherche"}>
+            <Suspense fallback={<p role="status">{en ? "Loading report…" : "Chargement du rapport…"}</p>}>
+              <LazyMarkdownContent>{report}</LazyMarkdownContent>
+            </Suspense>
+          </section>}
           {!inDraft && selected?.searchDegraded ? (
             <p className="research-degraded-hint muted" role="status">{t("research.search_degraded")}</p>
           ) : null}
@@ -783,7 +815,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             ) : null}
           </label>
           </details>
-          {(!inDraft || loading) && <ResearchStarViz
+          {loading && <ResearchStarViz
             branches={branches}
             phase={inDraft && !loading ? "idle" : displayPhase}
             phaseLabel={inDraft && !loading ? undefined : (phaseLabel ?? undefined)}

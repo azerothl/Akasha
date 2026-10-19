@@ -329,20 +329,17 @@ async fn run_engine(
                 )
                 .await;
                 let body = degraded_research_step(ctx, topic, query, &user_ctx).await;
-                let finding = ResearchFinding {
-                    url: String::new(),
-                    title: query.clone(),
-                    summary: body.clone(),
-                    evidence: Some(body),
-                    image_url: None,
-                };
-                round_findings.push(finding.clone());
-                store
-                    .update(run_id, |r| {
-                        r.findings.push(finding);
-                    })
-                    .await;
-                finish_sub_agent(run_id, &branch_id, &sa_analyst, StepStatus::Done).await;
+                if let Some(finding) = degraded_finding(query, body) {
+                    round_findings.push(finding.clone());
+                    store
+                        .update(run_id, |r| {
+                            r.findings.push(finding);
+                        })
+                        .await;
+                    finish_sub_agent(run_id, &branch_id, &sa_analyst, StepStatus::Done).await;
+                } else {
+                    finish_sub_agent(run_id, &branch_id, &sa_analyst, StepStatus::Error).await;
+                }
             }
         }
 
@@ -461,6 +458,13 @@ async fn run_engine(
     let search_degraded = store.get(run_id).await.map(|r| r.search_degraded).unwrap_or(false);
     let round_count = store.get(run_id).await.map(|r| r.round).unwrap_or(0);
 
+    // A finished search with no usable evidence is a recoverable failure, not a report.
+    // Keep it in history, but never export the English fallback sentence as a success.
+    if findings.is_empty() && (!search_degraded || report.trim().is_empty()) {
+        finish_sub_agent(run_id, &branch_final, &sa_writer, StepStatus::Error).await;
+        finish_branch(run_id, &branch_final, StepStatus::Error).await;
+        return Err("research_no_evidence".to_string());
+    }
     let final_report = if report.is_empty() && !findings.is_empty() {
         fallback_report(topic, &findings)
     } else if report.is_empty() {
@@ -527,10 +531,11 @@ async fn run_engine(
         generate_report_title(ctx, topic, &category, &final_report, &user_ctx).await;
 
     let duration_secs = started.elapsed().as_secs();
-    let pages_for_meta = pages_fetched.max(sources.len() as u32);
+    // Attempted fetches include unreadable/blocked pages and are not evidence.
+    let pages_for_meta = sources.len() as u32;
     let unique_domains = unique_domains_from_urls(sources.iter().map(|s| s.url.as_str()));
     let sources_sufficient =
-        search_degraded || pages_for_meta >= config.min_sources_for_report;
+        !search_degraded && pages_for_meta >= config.min_sources_for_report;
     let mut quality_warnings = assess_report_quality(
         &final_report,
         sources.len(),
@@ -562,7 +567,7 @@ async fn run_engine(
         user_question: topic.to_string(),
         search_queries: queries_log,
         sub_questions: plan_sub_questions,
-        pages_fetched: pages_for_meta,
+        pages_fetched,
         search_hits_seen,
         images_retrieved,
         sources_skipped: skipped_sources,
@@ -1126,7 +1131,7 @@ async fn degraded_research_step(
     topic: &str,
     query: &str,
     user_ctx: &str,
-) -> String {
+) -> Option<String> {
     let prompt = format!(
         "{user_ctx}Research topic: {topic}\n\nAnswer this sub-question with structured notes. \
          Cite sources as [Source: title — url] when inferring from general knowledge. \
@@ -1134,7 +1139,21 @@ async fn degraded_research_step(
     );
     llm_complete(ctx, prompt, None, 1200, 0.5, "research")
         .await
-        .unwrap_or_else(|| "(step failed)".to_string())
+}
+
+fn degraded_finding(query: &str, body: Option<String>) -> Option<ResearchFinding> {
+    let body = body?;
+    let body = body.trim();
+    if body.is_empty() || body == "(step failed)" {
+        return None;
+    }
+    Some(ResearchFinding {
+        url: String::new(),
+        title: query.to_string(),
+        summary: body.to_string(),
+        evidence: Some(body.to_string()),
+        image_url: None,
+    })
 }
 
 fn format_findings(findings: &[ResearchFinding]) -> String {
@@ -1272,5 +1291,53 @@ fn truncate_label(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", s.chars().take(max).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn degraded_run_without_provider_returns_no_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut routing = akasha_llm::RoutingConfig::default_config();
+        routing.global.default_max_retries = Some(0);
+        let ctx = super::ResearchContext {
+            // No registered provider: completions fail locally, without contacting a service.
+            llm_router: std::sync::Arc::new(akasha_llm::LLMRouter::new(routing)),
+            tools_executor: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                akasha_tools::ToolExecutor::new(akasha_tools::ToolsPolicy::default()),
+            ))),
+            data_dir: dir.path().to_path_buf(),
+        };
+        assert!(!ctx.web_search_enabled().await);
+        let config = super::EngineConfig { max_rounds: 1, max_empty_rounds: 1, ..Default::default() };
+        let id = super::spawn_research_run(ctx, "Rust architecture".into(), config);
+        let run = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(run) = super::ResearchStore::global().get(&id).await {
+                    if run.finished_at.is_some() { break run; }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.expect("local provider failure must complete promptly");
+        assert_eq!(run.error.as_deref(), Some("research_no_evidence"));
+        assert_eq!(run.round, 1);
+        assert!(run.search_degraded);
+        assert!(run.findings.is_empty());
+        assert!(run.report_markdown.is_none());
+        assert!(run.branches.iter().flat_map(|b| &b.sub_agents)
+            .any(|a| a.role == "analyst" && matches!(a.status, super::StepStatus::Error)));
+    }
+
+    #[test]
+    fn degraded_findings_reject_failed_or_blank_model_steps() {
+        let responses = [None, Some(String::new()), Some("  \n \t".into()), Some("(step failed)".into())];
+        let findings: Vec<_> = responses.into_iter()
+            .filter_map(|body| super::degraded_finding("question", body)).collect();
+        assert!(findings.is_empty(), "failed steps must reach the no-evidence error path");
+        let finding = super::degraded_finding("question", Some("  Useful model notes.  ".into())).unwrap();
+        assert_eq!(finding.summary, "Useful model notes.");
+        assert_eq!(finding.evidence.as_deref(), Some("Useful model notes."));
+        assert!(finding.url.is_empty(), "model notes are not web sources");
     }
 }

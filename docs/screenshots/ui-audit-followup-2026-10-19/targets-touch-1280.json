@@ -1,0 +1,28 @@
+{
+  "engine": "147.0.7727.15",
+  "emulatedTouch": true,
+  "width": 1280,
+  "measurements": [
+    {
+      "name": "?",
+      "x": 299.296875,
+      "y": 14.390625,
+      "width": 44,
+      "height": 44
+    },
+    {
+      "name": "Double panneau",
+      "x": 256,
+      "y": 186.984375,
+      "width": 109.71875,
+      "height": 44
+    },
+    {
+      "name": "sidebar collapse",
+      "x": 179,
+      "y": 76,
+      "width": 44,
+      "height": 44
+    }
+  ]
+}

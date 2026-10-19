@@ -44,6 +44,8 @@ pub struct MessageEnvelope {
     pub workspace_id: Option<String>,
     /// User message text (possibly enriched with attachments or context by the adapter).
     pub raw_message: String,
+    /// Original user request before private prompts or attachments are injected.
+    pub display_request: Option<String>,
     /// Optional image data URLs for vision-capable models.
     pub image_data_urls: Option<Vec<String>>,
     /// Task priority when forwarding to orchestrator.
@@ -77,6 +79,7 @@ impl MessageEnvelope {
             user_id: None,
             workspace_id: None,
             raw_message: raw_message.into(),
+            display_request: None,
             image_data_urls,
             priority,
             studio_disk_root: None,
@@ -98,6 +101,7 @@ impl MessageEnvelope {
             user_id: None,
             workspace_id: None,
             raw_message: raw_message.into(),
+            display_request: None,
             image_data_urls: None,
             priority: TaskPriority::UserNormal,
             studio_disk_root: None,
@@ -119,6 +123,7 @@ impl MessageEnvelope {
             user_id: None,
             workspace_id: None,
             raw_message: raw_message.into(),
+            display_request: None,
             image_data_urls: None,
             priority: TaskPriority::UserNormal,
             studio_disk_root: None,
@@ -154,6 +159,7 @@ pub async fn handle_envelope(
         .handle_message(
         store_path,
         &envelope.raw_message,
+        envelope.display_request.as_deref(),
         Uuid::nil(),
         true,
         &envelope.session_id,
