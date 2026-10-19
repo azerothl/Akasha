@@ -2586,6 +2586,9 @@ pub(crate) async fn run_message_via_llm(
                                 Err(error)=>{tool_results.push(format!("Delivery approval unavailable: {error}"));continue;}
                             }
                         }else{None};
+                        if effective_role_tool=="terminal_session" && exec.policy.requires_approval(effective_role_tool) && serde_json::to_vec(&approval_args).map_or(true,|bytes|bytes.len()>4096) {
+                            tool_results.push("Terminal approval payload exceeds the 4 KiB review limit; split the request into smaller inspectable operations.".into());continue;
+                        }
                         if exec.policy.requires_approval(effective_role_tool) {
                             let permission_mode = load_permission_mode(data_dir);
                             if permission_mode.mode == "allow_all" {
@@ -2642,6 +2645,8 @@ pub(crate) async fn run_message_via_llm(
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(effective_role_tool,"git_commit"|"git_push"|"github_create_pr") {
                                         delivery_approval_identity.clone().unwrap_or_default()
+                                    } else if effective_role_tool=="terminal_session" {
+                                        serde_json::to_string(&approval_args).unwrap_or_default()
                                     } else if matches!(
                                         effective_role_tool,
                                         "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file" | "terminal_session" | "git_commit" | "github_create_pr"

@@ -366,8 +366,10 @@ async fn start(
         return Err(format!("LSP server unavailable or denied: {program}. Install/configure it explicitly; no automatic install."));
     }
     let suffixes=if cfg!(windows) {vec![".exe",".cmd",".bat",".com",""]}else{vec![""]};
-    let executable=std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).filter(|dir|dir.is_absolute()).flat_map(|dir|suffixes.iter().map(move |suffix|dir.join(format!("{program}{suffix}")))).find(|path|path.is_file()).and_then(|path|path.canonicalize().ok()).ok_or("LSP executable missing from absolute PATH directories")?;
-    if executable.starts_with(root) {return Err("workspace-controlled LSP executable refused".into());}
+    let executable=std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).filter(|dir|dir.is_absolute()).flat_map(|dir|suffixes.iter().map(move |suffix|dir.join(format!("{program}{suffix}")))).find(|path|path.is_file()).ok_or("LSP executable missing from absolute PATH directories")?;
+    // Preserve the filename for multicall shims such as rustup's rust-analyzer.
+    // Resolve only for containment checks; spawning rustup.exe loses its mode.
+    if executable.canonicalize().map_err(|e|e.to_string())?.starts_with(root) || executable.parent().and_then(|p|p.canonicalize().ok()).is_some_and(|p|p.starts_with(root)) {return Err("workspace-controlled LSP executable refused".into());}
     let mut command = Command::new(executable);
     command
         .args(args)
