@@ -56,6 +56,9 @@ export function ActiveWorkDrawer({
   const [inspectId, setInspectId] = useState<string | null>(null);
   if (tasks.length === 0) return null;
   const { roots, childrenOf } = groupTasks(tasks);
+  // An absent/inactive parent does not turn an internal subtask into a user request.
+  const visibleRoots = simple ? roots.filter((task) => !task.parent_task_id?.trim()) : roots;
+  if (visibleRoots.length === 0) return null;
   const renderRow = (t: ActiveTask, nested: boolean) => {
     const kids = childrenOf.get(t.id) ?? [];
     const inspecting = inspectId === t.id;
@@ -122,8 +125,8 @@ export function ActiveWorkDrawer({
               {kids.map((c) => (
                 <li key={c.id} className="active-work-inspect-row">
                   <button type="button" className="active-work-inspect-open" onClick={() => onOpenTask(c.id)}>
-                    <span className="active-work-status">{c.status}</span>
-                    <span>{c.label?.trim() || c.id.slice(0, 8)}</span>
+                    <span className="active-work-status">{taskStatus(c.status, locale)}</span>
+                    <span>{taskTitle(c.label, en ? "Current request" : "Demande en cours")}</span>
                     {c.assigned_agent ? (
                       <span className="muted active-work-inspect-agent">{c.assigned_agent}</span>
                     ) : null}
@@ -144,9 +147,9 @@ export function ActiveWorkDrawer({
     <div className="active-work-drawer" role="region" aria-label={en ? "Active work" : "Travail actif"}>
       <div className="active-work-drawer-header">
         <strong>{en ? "Active work" : "Travail actif"}</strong>
-        <span className="muted">({simple ? roots.length : tasks.length})</span>
+        <span className="muted">({simple ? visibleRoots.length : tasks.length})</span>
       </div>
-      <ul className="active-work-list">{roots.map((t) => renderRow(t, false))}</ul>
+      <ul className="active-work-list">{visibleRoots.map((t) => renderRow(t, false))}</ul>
     </div>
   );
 }
