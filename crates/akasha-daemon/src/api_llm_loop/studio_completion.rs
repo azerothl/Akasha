@@ -51,7 +51,7 @@ pub(super) fn literal_write_error(root:&Path, literals:&[(String,String)], tool:
 /// Unknown clauses, commands and broader workflows keep the complete catalogue.
 pub(super) fn literal_file_operations_only(message:&str)->bool {
     let goals=file_goals(message);let literals=exact_file_literals(message);
-    if goals.is_empty() || goals.len()!=literals.len() {return false;}
+    if goals.is_empty() || goals.len()!=literals.len() || literals.iter().map(|(path,value)|path.len()+value.len()).sum::<usize>()>4096 {return false;}
     let request=super::studio_conversation::user_request(message);
     let literal=r#"(?:`[^`\r\n]*`|"[^"\r\n]*"|[\p{L}\p{N}_:/+@=-]{1,128})"#;
     let path=r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|(?:workspace:/)?[\p{L}\p{N}_./-]+\.[a-z0-9]{1,12})"#;

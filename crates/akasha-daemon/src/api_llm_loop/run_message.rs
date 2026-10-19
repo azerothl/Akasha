@@ -1738,11 +1738,12 @@ pub(crate) async fn run_message_via_llm(
             let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
                 tools_executor_snapshot.as_ref().and_then(|exec| {
                     let mut names:Vec<String>=crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect();
-                    if focused_file_task && scope_unchanged && active_repository_rules.is_empty() && super::studio_completion::literal_file_operations_only(&task_scope) {
+                    let literal_only=focused_file_task && scope_unchanged && active_repository_rules.is_empty() && super::studio_completion::literal_file_operations_only(&task_scope);
+                    if literal_only {
                         names.retain(|name|matches!(name.as_str(),"read_file"|"write_file"|"write_code"));
-                        insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"literal_file_only","tools":names}));
+                        insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"literal_file_only","literal_values_bound":true,"tools":names}));
                     }
-                    (!names.is_empty()).then(||vec![crate::studio_tool_contract::native_definition(names)])
+                    (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else{crate::studio_tool_contract::native_definition(names)}])
                 })
             }else{None};
             let request = CompletionRequest {
@@ -2347,13 +2348,14 @@ pub(crate) async fn run_message_via_llm(
                 // Validate explicit byte constraints before any dependent batch effect.
                 // Rejected calls and deferred siblings remain visible, without fake results.
                 let literal_errors:Vec<Option<String>>=calls.iter().map(|(name,args)| {
+                    let decoded=if name=="studio_call" {match crate::studio_tool_contract::decode(&args.join(" ")) {Ok(call)=>Some(call),Err(error)=>return Some(serde_json::json!({"schema_version":1,"success":false,"error_code":"invalid_tool_call","error":error}).to_string())}}else{None};
                     if !scope_unchanged {return None;}
-                    let decoded=(name=="studio_call").then(||crate::studio_tool_contract::decode(&args.join(" ")).ok()).flatten();
                     let tool=decoded.as_ref().map(|call|call.envelope.tool.as_str()).unwrap_or(name);
                     let argv=decoded.as_ref().map(|call|call.argv.as_slice()).unwrap_or(args);
                     super::studio_completion::literal_write_error(&tool_disk_workspace_root,&explicit_file_literals,tool,argv)
                 }).collect();
                 let literal_batch_rejected=literal_errors.iter().any(Option::is_some);
+                let mut previous_batch_call_succeeded = true;
                 let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
                 for (lane, lane_calls) in scheduled_lanes {
@@ -2376,9 +2378,17 @@ pub(crate) async fn run_message_via_llm(
                         tool_result_starts.push(tool_results.len());
                         if literal_batch_rejected {
                             let index=tool_result_starts.len()-1;
-                            let error=literal_errors[index].clone().unwrap_or_else(||serde_json::json!({"schema_version":1,"success":false,"error_code":"batch_deferred","error":"No operation executed: this batch contains a file content that violates the explicit user literal. Correct it and request the required operations again in order."}).to_string());
+                            let error=literal_errors[index].clone().unwrap_or_else(||serde_json::json!({"schema_version":1,"success":false,"error_code":"batch_deferred","error":"No operation executed: this batch contains an invalid tool call or a file content that violates the explicit user literal. Correct it and request the required operations again in order."}).to_string());
                             run_outcome.failed_tool_calls+=1;tool_results.push(error);continue;
                         }
+                        if code_studio_disk_task && !previous_batch_call_succeeded {
+                            run_outcome.failed_tool_calls += 1;
+                            tool_results.push(serde_json::json!({"schema_version":1,"success":false,"error_code":"batch_deferred","error":"An earlier operation in this batch failed or requires replanning. Repair it and request the remaining operations again in order."}).to_string());
+                            continue;
+                        }
+                        // Every early return/continue leaves the batch blocked. Only a
+                        // confirmed successful invocation permits its next sibling.
+                        previous_batch_call_succeeded = false;
                         let typed_call=if name=="studio_call" {
                             match crate::studio_tool_contract::decode(&args.join(" ")) {
                                 Ok(call)=>Some(call),Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(serde_json::json!({"schema_version":1,"success":false,"error":error}).to_string());continue;}
@@ -3381,6 +3391,7 @@ pub(crate) async fn run_message_via_llm(
                                 if let (Some(path),Some(hash))=(rule["path"].as_str(),rule["sha256"].as_str()) {active_repository_rules.insert(format!("{path}:{hash}"));}
                             }}
                         }
+                        previous_batch_call_succeeded = success;
                         if success {
                             run_outcome.successful_tool_calls += 1;
                         } else { run_outcome.failed_tool_calls += 1; }

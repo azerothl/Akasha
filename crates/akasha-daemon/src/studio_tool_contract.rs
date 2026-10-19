@@ -298,7 +298,7 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
         return json!({"type":"object","additionalProperties":false,"required":required,"properties":properties});
     }
 
-    if tool=="read_file" {return json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1},"full":{"type":"boolean"},"offset_line":{"type":"integer","minimum":1,"default":1,"description":"First line, default 1 when omitted"},"limit_lines":{"type":"integer","minimum":1,"maximum":5000,"default":500,"description":"Number of lines, default 500 when omitted"}}});}
+    if tool=="read_file" {return json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1},"full":{"type":"boolean","description":"Read the whole file. When true, omit offset_line and limit_lines."},"offset_line":{"type":"integer","minimum":1,"default":1,"description":"First line, default 1 when omitted"},"limit_lines":{"type":"integer","minimum":1,"maximum":5000,"default":500,"description":"Number of lines, default 500 when omitted"}},"not":{"required":["full"],"properties":{"full":{"const":true}},"anyOf":[{"required":["offset_line"]},{"required":["limit_lines"]}]}});}
     if tool == "lsp_query" {
         return json!({"type":"object","additionalProperties":false,"required":["action","path"],"properties":{"action":{"type":"string","enum":["diagnostics","definition","references","rename"]},"path":{"type":"string","minLength":1},"position":{"type":"object","required":["line","character"],"additionalProperties":false,"properties":{"line":{"type":"integer","minimum":0},"character":{"type":"integer","minimum":0}}},"new_name":{"type":"string","maxLength":256},"text":{"type":"string"}}});
     }
@@ -345,6 +345,34 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
 pub(crate) fn native_definition(names: Vec<String>) -> Value {
     let variants: Vec<Value> = names.iter().map(|name| json!({"properties":{"tool":{"enum":[name]},"arguments":argument_schema(name)}})).collect();
     json!({"type":"function","function":{"name":"studio_call","description":"Execute one Studio tool. The runtime assigns operation IDs; do not invent one. The tool-specific argument schema is mandatory. For write_file/write_code creation, explicitly pass expected_version: missing. Existing files must be read before mutation.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}},"oneOf":variants}}})
+}
+
+/// Contextual constraints for literal-copy tasks. The model still emits the call;
+/// the executor never substitutes content or executes a schema example.
+pub(crate) fn literal_native_definition(names:Vec<String>,literals:&[(String,String)])->Value {
+    if literals.is_empty() {return native_definition(names);}
+    let mut definition=native_definition(names);
+    let mut paths=Vec::<String>::new();let mut contents=Vec::<String>::new();let mut cases=vec![];
+    for (path,literal) in literals {
+        let mut aliases=vec![path.clone()];
+        if let Some(relative)=path.strip_prefix("workspace:/") {aliases.push(relative.into());}
+        else if !Path::new(path).is_absolute() && !path.contains(':') {aliases.push(format!("workspace:/{path}"));}
+        let values=vec![literal.clone(),format!("{literal}\n"),format!("{literal}\r\n")];
+        for alias in &aliases {if !paths.contains(alias){paths.push(alias.clone());}}
+        for value in &values {if !contents.contains(value){contents.push(value.clone());}}
+        cases.push(json!({"properties":{"path":{"enum":aliases},"content":{"enum":values}}}));
+    }
+    if let Some(variants)=definition.pointer_mut("/function/parameters/oneOf").and_then(Value::as_array_mut) {
+        for variant in variants {
+            if !variant.pointer("/properties/tool/enum").and_then(Value::as_array).is_some_and(|names|names.iter().any(|name|matches!(name.as_str(),Some("write_file"|"write_code")))) {continue;}
+            let schema=&mut variant["properties"]["arguments"];
+            schema["properties"]["path"]["enum"]=json!(paths);
+            schema["properties"]["content"]["enum"]=json!(contents);
+            schema["properties"]["content"]["description"]=json!("Copy the exact literal string from the enum for this path. Case is significant. Do not add a heading, template or explanation.");
+            schema["oneOf"]=json!(cases);
+        }
+    }
+    definition
 }
 
 pub(crate) fn is_file_mutation(tool: &str) -> bool {
@@ -753,10 +781,31 @@ impl WorkflowOperation {
 #[cfg(test)]
 mod native_schema_regressions {
     use super::*;
+    #[test] fn full_read_and_line_window_are_exclusive_in_schema_and_decoder() {
+        let schema=jsonschema::JSONSchema::compile(&argument_schema("read_file")).unwrap();
+        for args in [json!({"path":"a","full":true}),json!({"path":"a","full":false,"limit_lines":1}),json!({"path":"a","offset_line":1})] {assert!(schema.is_valid(&args));}
+        for args in [json!({"path":"a","full":true,"limit_lines":1}),json!({"path":"a","full":true,"offset_line":1})] {
+            assert!(!schema.is_valid(&args));
+            assert!(decode(&json!({"schema_version":1,"tool":"read_file","arguments":args}).to_string()).is_err());
+        }
+    }
     #[test] fn every_native_variant_uses_the_decoder_schema() {
         for tool in ["delete_file","search_replace","apply_patch","git_push","github_create_pr","lsp_query","read_file"] {
             let definition=native_definition(vec![tool.into()]);
             assert_eq!(definition["function"]["parameters"]["oneOf"][0]["properties"]["arguments"],argument_schema(tool));
         }
+    }
+}
+
+#[cfg(test)]
+mod literal_schema_tests {
+    use super::*;
+    #[test] fn literal_schemas_express_the_same_case_sensitive_path_content_contract() {
+        let definition=literal_native_definition(vec!["write_file".into(),"read_file".into()],&[("first.txt".into(),"alpha".into()),("second.txt".into(),"éTé".into())]);
+        let schema=jsonschema::JSONSchema::compile(&definition["function"]["parameters"]).unwrap();
+        let call=|path:&str,content:&str|json!({"schema_version":1,"tool":"write_file","arguments":{"path":path,"content":content,"expected_version":"missing"}});
+        for content in ["alpha","alpha\n","alpha\r\n"] {assert!(schema.is_valid(&call("workspace:/first.txt",content)));}
+        assert!(!schema.is_valid(&call("first.txt","Alpha")));assert!(!schema.is_valid(&call("first.txt","éTé")));assert!(!schema.is_valid(&call("other.txt","alpha")));
+        assert!(schema.is_valid(&json!({"schema_version":1,"tool":"read_file","arguments":{"path":"workspace:/CODE_STUDIO_PLAN.md"}})));
     }
 }
