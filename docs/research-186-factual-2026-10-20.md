@@ -60,3 +60,8 @@ Le rapport a été contrôlé dans l’interface, après passage par Notes, rech
 ## Suivi de revue de la PR #234
 
 La réserve fixe de 35 mots et la note bilingue ajoutée systématiquement ont été supprimées. Les avertissements de vérification restent dans les métadonnées de qualité, hors du budget du rapport. Un rapport court conserve ainsi son contenu et aucune langue supplémentaire ne lui est imposée. Test de régression sur trois formulations (français, espagnol et anglais avec San Francisco) ; 48 tests Rust Recherche réussis. Les captures et la recherche réelle ci-dessus décrivent le commit initial, antérieur à cet ajustement de publication.
+
+
+### Second passage de revue CI
+
+Les titres susceptibles de contenir une affirmation sont maintenant inclus dans les blocs contrôlés ; seule une liste fermée de titres génériques est exemptée. La détection de la notation Big-O conserve les frontières des mots, afin de ne pas confondre « Go (the language) » avec une garantie de complexité. Deux tests de régression supplémentaires : 50 tests Rust Recherche réussis. Cette évolution a été vérifiée par tests ciblés, sans nouvelle recherche réelle.

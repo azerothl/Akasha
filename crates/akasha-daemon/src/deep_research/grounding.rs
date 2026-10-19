@@ -24,6 +24,25 @@ pub(super) fn heading(block: &str) -> bool {
     block.lines().all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
 }
 
+/// Only a closed set of generic section labels is exempt from factual review.
+/// Unknown headings, including report titles, may contain assertions.
+pub(super) fn structural_heading(block: &str) -> bool {
+    heading(block) && block.lines().filter(|line| !line.trim().is_empty()).all(|line| {
+        matches!(line.trim().trim_start_matches('#').trim().to_lowercase().as_str(),
+            "report" | "rapport" | "findings" | "résultats" | "sources" |
+            "operations" | "opérations" | "limitations" | "limites" |
+            "conclusion" | "introduction" | "summary" | "synthèse")
+    })
+}
+
+fn complexity_claim(block: &str) -> bool {
+    static BIG_O: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let big_o = BIG_O.get_or_init(|| regex::Regex::new(r"(?i)\bo\s*\(").expect("Big-O pattern"));
+    let lower = block.to_lowercase();
+    big_o.is_match(block) || ["amort", "worst-case", "pire cas", "expected cost", "coût espéré"]
+        .iter().any(|term| lower.contains(term))
+}
+
 pub(super) fn parse_review(text: &str, expected: &[usize], passages: usize) -> Option<Review> {
     let text = text.trim().strip_prefix("```json").unwrap_or(text.trim());
     let text = text.strip_suffix("```").unwrap_or(text).trim();
@@ -71,17 +90,14 @@ pub(super) fn publish(
     let mut omitted = 0;
     let mut remaining = max_words.unwrap_or(usize::MAX);
     for (id, block) in blocks.iter().enumerate() {
-        if heading(block) {
+        if structural_heading(block) {
             if block.split_whitespace().count() <= remaining {
                 remaining -= block.split_whitespace().count(); out.push(block.to_string());
             }
             continue;
         }
         let checked = review.blocks.iter().find(|b| b.id == id)?;
-        let lower = block.to_lowercase();
-        let complexity = lower.replace(' ', "").contains("o(")
-            || ["amort", "worst-case", "pire cas", "expected cost", "coût espéré"].iter().any(|term| lower.contains(term));
-        if checked.supported && !complexity {
+        if checked.supported && !complexity_claim(block) {
             let mut text = block.to_string();
             for source in &checked.evidence {
                 let url = &passages.get(*source)?.url;
@@ -171,6 +187,7 @@ mod tests {
     fn omitted_blocks_do_not_leave_empty_section_headings() {
         let blocks = ["# Report", "## Empty", "Unverified", "## Findings", "Adding is O(1)."];
         let review = Review { blocks: vec![
+            BlockReview { id: 1, supported: false, evidence: vec![] },
             BlockReview { id: 2, supported: false, evidence: vec![] },
             BlockReview { id: 4, supported: false, evidence: vec![0] },
         ] };
@@ -186,6 +203,35 @@ mod tests {
         assert!(quoted.contains("> |---|---|---|"));
         assert!(quoted.contains("| Sample | O(n)\\* | O(n) |"));
         assert!(quoted.contains("Removal never shrinks automatically."));
+    }
+
+    #[test]
+    fn factual_headings_require_review_and_cannot_publish_unchecked_claims() {
+        for claim in ["## Vec provides O(1) indexing", "## Vec is always contiguous"] {
+            assert!(heading(claim));
+            assert!(!structural_heading(claim));
+            assert!(publish(&[claim], Review { blocks: vec![] }, &passages(), None).is_none());
+            let review = Review { blocks: vec![BlockReview { id: 0, supported: false, evidence: vec![0] }] };
+            let (report, replaced, _) = publish(&[claim], review, &passages(), None).unwrap();
+            assert!(!report.contains(claim));
+            assert_eq!(replaced, 1);
+        }
+        assert!(structural_heading("## Sources"));
+        assert!(!structural_heading("## Sources\n## This claim is false"));
+    }
+
+    #[test]
+    fn big_o_requires_a_token_boundary_and_preserves_supported_prose() {
+        for text in ["Go (the language) is supported", "Photo (example)", "cacao (food)"] {
+            assert!(!complexity_claim(text));
+            let review = Review { blocks: vec![BlockReview { id: 0, supported: true, evidence: vec![0] }] };
+            let (report, replaced, _) = publish(&[text], review, &passages(), None).unwrap();
+            assert!(report.starts_with(text));
+            assert_eq!(replaced, 0);
+        }
+        for text in ["Cost O(1)", "Cost O (n)", "Cost O\t(n log n)", "`O(n)`", "O(n) amortized"] {
+            assert!(complexity_claim(text));
+        }
     }
 
     #[test]
