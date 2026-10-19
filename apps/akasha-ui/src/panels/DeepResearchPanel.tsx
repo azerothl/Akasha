@@ -47,6 +47,13 @@ export type ResearchRun = {
   error?: string;
 };
 
+class ResearchPollingError extends Error {
+  constructor(message: string, readonly run: ResearchRun) {
+    super(message);
+    this.name = "ResearchPollingError";
+  }
+}
+
 type ServerRun = {
   id: string;
   topic: string;
@@ -350,7 +357,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             if (server.phase === "done" || server.phase === "error" || server.phase === "cancelled") {
               stopPolling();
               if (server.phase === "error") {
-                reject(new Error(server.error ?? (en ? "Research failed" : "Recherche échouée")));
+                reject(new ResearchPollingError(server.error ?? (en ? "Research failed" : "Recherche échouée"), current));
               } else {
                 if (server.phase === "done") setPhase("done");
                 resolve();
@@ -358,7 +365,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             }
           } catch (e) {
             stopPolling();
-            reject(e);
+            reject(new ResearchPollingError(e instanceof Error ? e.message : String(e), current));
           }
         };
         void tick();
@@ -390,7 +397,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
         const message = formatDaemonError(e instanceof Error ? e.message : String(e), locale);
         setErr(message);
         upsertRun({
-          ...running,
+          ...(e instanceof ResearchPollingError ? e.run : running),
           updatedAt: new Date().toISOString(),
           status: "error",
           error: message,
@@ -457,7 +464,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
       const message = formatDaemonError(e instanceof Error ? e.message : String(e), locale);
       setErr(message);
       current = {
-        ...current,
+        ...(e instanceof ResearchPollingError ? e.run : current),
         updatedAt: new Date().toISOString(),
         status: "error",
         error: message,

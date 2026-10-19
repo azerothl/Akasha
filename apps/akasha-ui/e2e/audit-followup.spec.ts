@@ -156,3 +156,34 @@ for (const mode of ['simple','expert']) {
     }
   });
 }
+
+for (const resume of [false,true]) {
+  test(`failed research preserves terminal diagnostic history: ${resume?'resumed':'new'}`, async ({page}) => {
+    await fixture(page);
+    if(resume) await page.addInitScript(()=>localStorage.setItem('akasha_deep_research_v2',JSON.stringify([{
+      id:'res_existing',serverRunId:'dr_diagnostics',topic:'Diagnostic test',maxRounds:1,
+      createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),status:'running',branches:[],
+    }])));
+    await page.route('**/__e2e_daemon/api/research/deep/start',async route=>{
+      await route.fulfill(route.request().postDataJSON().topic?{json:{run_id:'dr_diagnostics'}}:{status:400,json:{error:'missing_topic'}});
+    });
+    await page.route('**/__e2e_daemon/api/research/deep/runs/dr_diagnostics',route=>route.fulfill({json:{
+      id:'dr_diagnostics',topic:'Diagnostic test',phase:'error',round:1,max_rounds:1,
+      branches:[{id:'round_1',label:'Failed round',status:'error',sub_agents:[{id:'analyst_1',role:'analyst',label:'Unavailable model',status:'error'}]}],
+      evolving_report:'Intermediate diagnostic notes',search_degraded:true,error:'research_no_evidence',report_markdown:null,
+    }}));
+    await page.goto('/#/research');
+    if(!resume) {
+      await page.locator('.research-content textarea').fill('Diagnostic test');
+      await page.getByRole('button',{name:'Lancer la recherche',exact:true}).click();
+    }
+    await expect(page.locator('.research-result-notice[role="alert"]')).toContainText('Aucune source exploitable');
+    await expect.poll(()=>page.evaluate(()=>{
+      const row=JSON.parse(localStorage.getItem('akasha_deep_research_v2')??'[]')[0];
+      return {status:row?.status,degraded:row?.searchDegraded,notes:row?.evolvingReport,branch:row?.branches?.[0]?.status,agent:row?.branches?.[0]?.subAgents?.[0]?.status};
+    })).toEqual({status:'error',degraded:true,notes:'Intermediate diagnostic notes',branch:'error',agent:'error'});
+    await page.reload();
+    await expect(page.locator('.research-result-notice[role="alert"]')).toContainText('Aucune source exploitable');
+    expect(await page.evaluate(()=>JSON.parse(localStorage.getItem('akasha_deep_research_v2')??'[]')[0]?.branches?.[0]?.subAgents?.[0]?.status)).toBe('error');
+  });
+}
