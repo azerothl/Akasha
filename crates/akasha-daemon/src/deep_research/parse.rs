@@ -117,13 +117,16 @@ fn balanced_url_prefix(text: &str) -> &str {
     text
 }
 
-fn markdown_citation_urls(text: &str) -> Vec<&str> {
-    let re = Regex::new(r"!?\[[^\]]*\]\(\s*<?").expect("citation prefix re");
-    re.find_iter(text).filter_map(|m| {
-        if m.as_str().starts_with('!') { return None; }
-        let rest = &text[m.end()..];
-        if !rest.starts_with("https://") && !rest.starts_with("http://") { return None; }
-        Some(balanced_url_prefix(rest))
+fn markdown_citation_urls(text: &str) -> Vec<String> {
+    // Resolve CommonMark references, collapsed/shortcut links and autolinks.
+    // Code examples, unused definitions and image destinations are not citations.
+    pulldown_cmark::Parser::new(text).filter_map(|event| {
+        if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link(_, destination, _)) = event {
+            if destination.starts_with("https://") || destination.starts_with("http://") {
+                return Some(destination.into_string());
+            }
+        }
+        None
     }).collect()
 }
 
@@ -210,7 +213,7 @@ pub fn unconsulted_citation_urls(markdown: &str, sources: &[&str]) -> Vec<String
     let known: HashSet<String> = sources.iter().map(|url| page(url)).collect();
     let mut unknown = Vec::new();
     for url in markdown_citation_urls(markdown) {
-        if !known.contains(&page(url)) { unknown.push(url.to_string()); }
+        if !known.contains(&page(&url)) { unknown.push(url); }
     }
     unknown.sort();
     unknown.dedup();
@@ -341,6 +344,14 @@ fn normalize_image_url(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reference_citations_resolve_definitions_without_counting_examples_or_images() {
+        let md = "[claim][1] [known][] [shortcut] <https://known.example/page#part> ![image][picture]\n\n[1]: <https://invented.example/page_(notes)> \"title\"\n[KNOWN]: https://known.example/page\n[shortcut]: https://known.example/page\n[picture]: https://images.example/chart.png\n[unused]: https://unused.example/page\n\n`[code](https://code.example/page)`\n\n```markdown\n[example](https://example.example/page)\n```";
+        assert_eq!(count_markdown_link_citations(md), 4);
+        assert_eq!(unconsulted_citation_urls(md, &["https://known.example/page"]),
+            vec!["https://invented.example/page_(notes)"]);
+    }
 
     #[test]
     fn citations_require_consulted_pages_but_allow_section_anchors() {

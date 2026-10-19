@@ -88,3 +88,7 @@ Contrôles locaux réussis : **26 tests Rust Recherche**, **6 tests unitaires UI
 Le manifeste réserve les URL complètes et un extrait minimum avant de partager le budget restant entre les pages sélectionnées. Une collecte usuelle de 12 sources conserve ainsi ses 12 représentations malgré des extraits longs. Les URL exceptionnellement longues peuvent encore imposer une sélection, en ordre de collecte et sans biais alphabétique ; les sources omises restent signalées. Les contrôles de citation et de longueur utilisent le nombre de sources réellement transmises au rédacteur, tandis que les métadonnées conservent la collecte complète et son seuil de suffisance. La révision reçoit le même manifeste et une cible de citations compatible.
 
 **27 tests Rust Recherche réussis**, dont les cas à 12 sources et à URL volumineuses : [sortie du contrôle](validation/research-186-2026-10-19/ci-manifest-tests.txt). Aucune nouvelle recherche réelle ni validation factuelle générale.
+
+### Cinquième passe : références Markdown résolues
+
+Le contrôle des citations utilise désormais le parseur CommonMark `pulldown-cmark` 0.9, déjà employé dans le workspace. Il résout les liens par références explicites, raccourcies ou implicites et les autoliens ; les images, définitions inutilisées et exemples de code ne comptent pas comme citations. Une destination non consultée reste détectée avec ce format. **28 tests Rust Recherche réussis** : [sortie du contrôle](validation/research-186-2026-10-19/ci-reference-tests.txt).
