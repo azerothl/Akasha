@@ -11,6 +11,8 @@ pub enum VaultError {
     Any(#[from] anyhow::Error),
     #[error("secret not found: {0}")]
     NotFound(String),
+    #[error("vault file corrupted or unreadable")]
+    Corrupted,
 }
 
 pub trait Vault: Send + Sync {

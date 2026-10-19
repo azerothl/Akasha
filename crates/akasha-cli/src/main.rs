@@ -14,6 +14,42 @@ const DEFAULT_PORT: u16 = 3876;
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 const CRASH_LOOP_WINDOW_SECS: u64 = 300; // 5 minutes
 
+const VAULT_CORRUPTED_MSG_EN: &str =
+    "Couldn't open the secrets vault: `vault.enc` looks damaged. Nothing was written.";
+const VAULT_CORRUPTED_MSG_FR: &str =
+    "Impossible d'ouvrir le coffre des secrets : `vault.enc` semble endommagé. Rien n'a été écrit.";
+
+/// Same locale rules as TUI (`AKASHA_LANG` / `LANG` / `LC_ALL` / `LC_MESSAGES`).
+fn cli_locale_is_en() -> bool {
+    if let Ok(lang) = std::env::var("AKASHA_LANG") {
+        if lang.trim().to_lowercase().starts_with("en") {
+            return true;
+        }
+        return false;
+    }
+    for key in ["LANG", "LC_ALL", "LC_MESSAGES"] {
+        if let Ok(lang) = std::env::var(key) {
+            return lang.trim().to_lowercase().starts_with("en");
+        }
+    }
+    false
+}
+
+fn vault_corrupted_user_message() -> &'static str {
+    if cli_locale_is_en() {
+        VAULT_CORRUPTED_MSG_EN
+    } else {
+        VAULT_CORRUPTED_MSG_FR
+    }
+}
+
+fn map_vault_error(e: akasha_vault::VaultError) -> anyhow::Error {
+    match e {
+        akasha_vault::VaultError::Corrupted => anyhow::anyhow!(vault_corrupted_user_message()),
+        other => anyhow::anyhow!("Vault: {}", other),
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "akasha")]
 #[command(version)]
@@ -2028,10 +2064,10 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
 fn cmd_vault(sub: VaultSub) -> anyhow::Result<()> {
     let data_dir = akasha_data_dir();
     std::fs::create_dir_all(&data_dir).ok();
-    let vault = akasha_vault::open_vault(&data_dir).map_err(|e| anyhow::anyhow!("Vault: {}", e))?;
+    let vault = akasha_vault::open_vault(&data_dir).map_err(map_vault_error)?;
     match sub {
         VaultSub::List => {
-            let keys = vault.list_keys()?;
+            let keys = vault.list_keys().map_err(map_vault_error)?;
             for k in keys {
                 println!("{}", k);
             }
@@ -2046,15 +2082,15 @@ fn cmd_vault(sub: VaultSub) -> anyhow::Result<()> {
                     s.trim_end().to_string()
                 }
             };
-            vault.set(&key, &value)?;
+            vault.set(&key, &value).map_err(map_vault_error)?;
             println!("Set {}", key);
         }
         VaultSub::Get { key } => {
-            let value = vault.get(&key)?;
+            let value = vault.get(&key).map_err(map_vault_error)?;
             println!("{}", value);
         }
         VaultSub::Delete { key } => {
-            vault.delete(&key)?;
+            vault.delete(&key).map_err(map_vault_error)?;
             println!("Deleted {}", key);
         }
     }
@@ -3567,13 +3603,15 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     }
 
     // --- 2. Vault (store API keys and connector tokens) ---
-    let vault = akasha_vault::open_vault(&data_dir).map_err(|e| anyhow::anyhow!("Vault: {}", e))?;
+    let vault = akasha_vault::open_vault(&data_dir).map_err(map_vault_error)?;
     if openai_key
         .as_deref()
         .map(|k| !k.is_empty())
         .unwrap_or(false)
     {
-        let _ = vault.set("openai_api_key", openai_key.as_deref().unwrap());
+        vault
+            .set("openai_api_key", openai_key.as_deref().unwrap())
+            .map_err(map_vault_error)?;
         println!("  Vault : openai_api_key enregistré.");
     }
     if openrouter_key
@@ -3581,7 +3619,9 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         .map(|k| !k.is_empty())
         .unwrap_or(false)
     {
-        let _ = vault.set("openrouter_api_key", openrouter_key.as_deref().unwrap());
+        vault
+            .set("openrouter_api_key", openrouter_key.as_deref().unwrap())
+            .map_err(map_vault_error)?;
         println!("  Vault : openrouter_api_key enregistré.");
     }
 
@@ -3589,17 +3629,23 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         println!("\n--- Connecteurs (tokens dans le vault) ---");
         let tg = init_prompt("Token bot Telegram (Entrée pour ignorer) :\n> ");
         if !tg.is_empty() {
-            let _ = vault.set("telegram_bot_token", &tg);
+            vault
+                .set("telegram_bot_token", &tg)
+                .map_err(map_vault_error)?;
             println!("  Vault : telegram_bot_token enregistré.");
         }
         let slack = init_prompt("Slack signing secret (Entrée pour ignorer) :\n> ");
         if !slack.is_empty() {
-            let _ = vault.set("slack_signing_secret", &slack);
+            vault
+                .set("slack_signing_secret", &slack)
+                .map_err(map_vault_error)?;
             println!("  Vault : slack_signing_secret enregistré.");
         }
         let discord = init_prompt("Discord bot token (Entrée pour ignorer) :\n> ");
         if !discord.is_empty() {
-            let _ = vault.set("discord_bot_token", &discord);
+            vault
+                .set("discord_bot_token", &discord)
+                .map_err(map_vault_error)?;
             println!("  Vault : discord_bot_token enregistré.");
         }
     }
