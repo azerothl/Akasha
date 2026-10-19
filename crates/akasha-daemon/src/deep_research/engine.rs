@@ -528,7 +528,8 @@ async fn run_engine(
                 pages.min(12)
             );
             let issues = format!("{issues}\n- Remove citations to pages not consulted: {}. Replace only when extracted evidence supports the claim; otherwise remove the claim.", unknown.join(", "));
-            md = require_report(final_report_retry(ctx, topic, &md, &manifest, &issues, &user_ctx).await,
+            let revision = final_report_retry(ctx, topic, &md, &manifest, &issues, &user_ctx).await;
+            md = require_report(select_report_revision(revision, md, !unknown.is_empty()),
                 run_id, &branch_final, &sa_writer).await?;
         }
         md
@@ -1084,6 +1085,11 @@ async fn require_report(report: Option<String>, run_id: &str, branch: &str, writ
     Err("research_report_generation_failed".into())
 }
 
+fn select_report_revision(revision: Option<String>, original: String, must_replace: bool) -> Option<String> {
+    revision.filter(|text| !text.trim().is_empty())
+        .or_else(|| (!must_replace).then_some(original))
+}
+
 async fn final_report(
     ctx: &ResearchContext,
     topic: &str,
@@ -1435,6 +1441,19 @@ mod tests {
                 Err("research_report_generation_failed".into()));
         }
         assert_eq!(super::require_report(Some("## Sourced report".into()), "no_run", "no_branch", "no_writer").await.unwrap(), "## Sourced report");
+    }
+
+    #[test]
+    fn optional_quality_revision_keeps_original_but_unknown_citations_fail_closed() {
+        for revision in [None, Some("  ".into())] {
+            assert_eq!(super::select_report_revision(revision.clone(), "Final report".into(), false),
+                Some("Final report".into()));
+            assert_eq!(super::select_report_revision(revision, "Unknown citations".into(), true), None);
+        }
+        for must_replace in [false, true] {
+            assert_eq!(super::select_report_revision(Some("Revised report".into()), "Original".into(), must_replace),
+                Some("Revised report".into()));
+        }
     }
 
     #[test]

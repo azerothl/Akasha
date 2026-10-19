@@ -92,3 +92,7 @@ Le manifeste réserve les URL complètes et un extrait minimum avant de partager
 ### Cinquième passe : références Markdown résolues
 
 Le contrôle des citations utilise désormais le parseur CommonMark `pulldown-cmark` 0.9, déjà employé dans le workspace. Il résout les liens par références explicites, raccourcies ou implicites et les autoliens ; les images, définitions inutilisées et exemples de code ne comptent pas comme citations. Une destination non consultée reste détectée avec ce format. **28 tests Rust Recherche réussis** : [sortie du contrôle](validation/research-186-2026-10-19/ci-reference-tests.txt).
+
+### Sixième passe : conserver une rédaction valide si la révision facultative échoue
+
+Précision du comportement de la deuxième passe : la première rédaction reste obligatoire et son échec demeure une erreur. Une révision motivée uniquement par la longueur ou le nombre de citations peut en revanche échouer sans effacer ce rapport final ; ses avertissements de qualité restent calculés. Si la révision est nécessaire à cause de citations non consultées, son échec ou sa réponse vide demeure bloquant. Aucun brouillon de synthèse intermédiaire ne remplace une rédaction finale manquante. **29 tests Rust Recherche réussis**, avec succès, vide et absence de révision dans les deux modes : [sortie du contrôle](validation/research-186-2026-10-19/ci-revision-tests.txt).
