@@ -106,8 +106,10 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
                         if arg.offset_line.is_some()||arg.limit_lines.is_some(){return Err("full and line window are mutually exclusive".into());}
                         argv.push("--full".into());
                     } else if arg.offset_line.is_some()||arg.limit_lines.is_some() {
-                        let offset=arg.offset_line.filter(|n|*n>0).ok_or("positive offset_line required")?;
-                        let limit=arg.limit_lines.filter(|n|*n>0&&*n<=5000).ok_or("limit_lines must be 1..5000")?;
+                        let offset=arg.offset_line.unwrap_or(1);
+                        let limit=arg.limit_lines.unwrap_or(500);
+                        if offset==0 {return Err("offset_line must be positive".into());}
+                        if !(1..=5000).contains(&limit) {return Err("limit_lines must be 1..5000".into());}
                         argv.extend([offset.to_string(),limit.to_string()]);
                     }
                     argv
@@ -209,6 +211,28 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
     })
 }
 
+#[cfg(test)]
+mod read_window_tests {
+    use super::*;
+    #[test]
+    fn independently_optional_read_windows_use_documented_defaults() {
+        for (arguments,expected) in [
+            (json!({"path":"sample.txt","limit_lines":1}),vec!["sample.txt","1","1"]),
+            (json!({"path":"sample.txt","offset_line":501}),vec!["sample.txt","501","500"]),
+            (json!({"path":"sample.txt"}),vec!["sample.txt"]),
+        ] {
+            let call=decode(&json!({"schema_version":1,"tool":"read_file","arguments":arguments}).to_string()).unwrap();
+            assert_eq!(call.argv,expected);
+        }
+        for arguments in [json!({"path":"sample.txt","limit_lines":0}),json!({"path":"sample.txt","offset_line":0}),json!({"path":"sample.txt","limit_lines":5001}),json!({"path":"sample.txt","full":true,"limit_lines":1})] {
+            assert!(decode(&json!({"schema_version":1,"tool":"read_file","arguments":arguments}).to_string()).is_err());
+        }
+        assert_eq!(argument_schema("read_file")["properties"]["offset_line"]["default"],1);
+        assert_eq!(argument_schema("read_file")["properties"]["limit_lines"]["default"],500);
+        assert_eq!(native_definition(vec!["read_file".into()]).pointer("/function/parameters/oneOf/0/properties/arguments/properties/limit_lines/default"),Some(&json!(500)));
+    }
+}
+
 pub(crate) fn supports_typed(tool: &str) -> bool {
     !matches!(
         tool,
@@ -271,7 +295,7 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
         return json!({"type":"object","additionalProperties":false,"required":required,"properties":properties});
     }
 
-    if tool=="read_file" {return json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1},"full":{"type":"boolean"},"offset_line":{"type":"integer","minimum":1},"limit_lines":{"type":"integer","minimum":1,"maximum":5000}}});}
+    if tool=="read_file" {return json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1},"full":{"type":"boolean"},"offset_line":{"type":"integer","minimum":1,"default":1,"description":"First line, default 1 when omitted"},"limit_lines":{"type":"integer","minimum":1,"maximum":5000,"default":500,"description":"Number of lines, default 500 when omitted"}}});}
     if tool == "lsp_query" {
         return json!({"type":"object","additionalProperties":false,"required":["action","path"],"properties":{"action":{"type":"string","enum":["diagnostics","definition","references","rename"]},"path":{"type":"string","minLength":1},"position":{"type":"object","required":["line","character"],"additionalProperties":false,"properties":{"line":{"type":"integer","minimum":0},"character":{"type":"integer","minimum":0}}},"new_name":{"type":"string","maxLength":256},"text":{"type":"string"}}});
     }
@@ -315,7 +339,7 @@ pub(crate) fn native_definition(names: Vec<String>) -> Value {
     let version=json!({"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"REQUIRED: literal missing for a NEW file; SHA-256 from read_file for an EXISTING file. Never omit."});
     let groups=[
         (vec!["write_file","write_code"],json!({"type":"object","additionalProperties":false,"required":["path","content","expected_version"],"properties":{"path":path,"content":{"type":"string","description":"Exact file content; no code fences or call punctuation"},"expected_version":version}})),
-        (vec!["read_file"],json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":path,"full":{"type":"boolean"},"offset_line":{"type":"integer","minimum":1},"limit_lines":{"type":"integer","minimum":1,"maximum":5000}}})),
+        (vec!["read_file"],json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":path,"full":{"type":"boolean"},"offset_line":{"type":"integer","minimum":1,"default":1,"description":"First line, default 1 when omitted"},"limit_lines":{"type":"integer","minimum":1,"maximum":5000,"default":500,"description":"Number of lines, default 500 when omitted"}}})),
         (vec!["edit_file"],json!({"type":"object","additionalProperties":false,"required":["path","content","expected_version","start_line","end_line"],"properties":{"path":path,"content":{"type":"string"},"expected_version":version,"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}})),
         (vec!["run_command"],json!({"type":"object","additionalProperties":false,"required":["program","args"],"properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"}}})),
     ];
