@@ -1737,7 +1737,11 @@ pub(crate) async fn run_message_via_llm(
             if round>=max_tool_rounds {run_outcome.termination=TerminationReason::ToolRoundLimit;reply_text="Tool round budget already exhausted at checkpoint; start a new scoped task to continue.".into();break 'tool_rounds;}
             let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
                 tools_executor_snapshot.as_ref().and_then(|exec| {
-                    let names:Vec<String>=crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect();
+                    let mut names:Vec<String>=crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect();
+                    if focused_file_task && scope_unchanged && active_repository_rules.is_empty() && super::studio_completion::literal_file_operations_only(&task_scope) {
+                        names.retain(|name|matches!(name.as_str(),"read_file"|"write_file"|"write_code"));
+                        insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"literal_file_only","tools":names}));
+                    }
                     (!names.is_empty()).then(||vec![crate::studio_tool_contract::native_definition(names)])
                 })
             }else{None};

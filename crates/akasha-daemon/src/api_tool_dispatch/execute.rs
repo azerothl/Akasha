@@ -44,6 +44,7 @@ pub(crate) async fn execute_tool_call_impl(
     browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
     workspace_root: Option<&std::path::Path>,
     session_id: Option<&str>,
+    approved_delivery_identity: Option<&str>,
 ) -> (bool, String, Option<String>) {
     let studio_project_id = store_path.and_then(|sp| TaskStore::open(sp).ok())
         .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten());
@@ -178,7 +179,7 @@ pub(crate) async fn execute_tool_call_impl(
             let Some(root)=workspace_root.filter(|_|is_studio_workspace)else{return(false,"Delivery requires a Studio task workspace".into(),None);};
             let Some(data_dir)=store_path.and_then(|path|path.parent())else{return(false,"Task data directory unavailable".into(),None);};
             let payload=if args.is_empty()&&matches!(tool_name,"git_delivery_status"|"github_pr_status"){serde_json::json!({})}else{match serde_json::from_str::<serde_json::Value>(&args.join(" ")){Ok(value)if value.is_object()=>value,_=>return(false,"Delivery expects a complete JSON object".into(),None)}};
-            let value=crate::studio_delivery::invoke(data_dir,root,&executor.policy,Some(task_id),tool_name,payload).await;
+            let value=crate::studio_delivery::invoke(data_dir,root,&executor.policy,Some(task_id),tool_name,payload,approved_delivery_identity).await;
             (value["success"].as_bool().unwrap_or(true),value.to_string(),None)
         }
         "lsp_query" | "lsp_apply_rename" => {

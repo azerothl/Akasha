@@ -47,6 +47,28 @@ pub(super) fn literal_write_error(root:&Path, literals:&[(String,String)], tool:
     Some(json!({"schema_version":1,"success":false,"error_code":"explicit_content_mismatch","error":"No file written: the proposed content differs from the user's explicit literal. Request the tool again with these exact bytes; do not change case or add a template.","path":raw_path,"expected_literal":expected}).to_string())
 }
 
+/// Advertise a small native catalogue only for closed, literal-only objectives.
+/// Unknown clauses, commands and broader workflows keep the complete catalogue.
+pub(super) fn literal_file_operations_only(message:&str)->bool {
+    let goals=file_goals(message);let literals=exact_file_literals(message);
+    if goals.is_empty() || goals.len()!=literals.len() {return false;}
+    let request=super::studio_conversation::user_request(message);
+    let literal=r#"(?:`[^`\r\n]*`|"[^"\r\n]*"|[\p{L}\p{N}_:/+@=-]{1,128})"#;
+    let path=r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|(?:workspace:/)?[\p{L}\p{N}_./-]+\.[a-z0-9]{1,12})"#;
+    let creation=regex::Regex::new(&format!(r#"(?ix)^\s*(?:(?:ensuite|puis|then|and)\s+)?(?:crée|créer|cree|create|écris|ecris|write)\s+(?:(?:uniquement|seulement|only|le|la|un|une|the|a|new|fichier|file)\s+)*{path}(?:\s+(?:à\s+la\s+racine\s+du\s+projet|at\s+the\s+project\s+root))?(?:\s+(?:avec\s+exactement|with\s+exactly|containing\s+exactly)\s+{literal})?\s*$"#)).unwrap();
+    let content=regex::Regex::new(&format!(r#"(?ix)^\s*(?:Son\s+contenu\s+doit\s+être\s+exactement\s+la\s+ligne|Its\s+content\s+must\s+be\s+exactly\s+the\s+line)\s+{literal}\s*$"#)).unwrap();
+    let paths=goals.iter().map(|path|format!(r#"(?:`{0}`|"{0}"|{0})"#,regex::escape(path))).collect::<Vec<_>>().join("|");
+    let read=regex::Regex::new(&format!(r#"(?ix)^\s*(?:(?:ensuite|puis|then|and)\s+)?(?:lis|lire|read)\s+(?:{paths})\s+(?:avec\s+read_file(?:\s+pour\s+vérifier\s+son\s+contenu)?|with\s+read_file(?:\s+to\s+verify\s+its\s+content)?)\s*$"#)).unwrap();
+    let stop=regex::Regex::new(r"(?ix)^\s*(?:Termine(?:\s+après\s+ces\s+(?:deux|trois|quatre|\d+)\s+opérations)?(?:,?\s+sans\s+autre\s+modification)?|Finish(?:\s+after\s+(?:these\s+)?(?:two|three|four|\d+)\s+operations)?(?:,?\s+without\s+other\s+changes)?|Stop|Utilise\s+(?:write_file|write_code)(?:\s+ou\s+(?:write_file|write_code))?,\s+puis\s+arrête-toi|Use\s+(?:write_file|write_code)(?:\s+or\s+(?:write_file|write_code))?,?\s+then\s+stop)\s*$").unwrap();
+    let mut clauses=vec![];let mut start=0;let mut quote=None;
+    for (index,ch) in request.char_indices() {
+        if matches!(ch,'"'|'`') {if quote==Some(ch){quote=None;}else if quote.is_none(){quote=Some(ch);}}
+        if quote.is_none() && (ch=='\n' || matches!(ch,'.'|'!'|'?') && request[index+ch.len_utf8()..].chars().next().is_none_or(char::is_whitespace)) {clauses.push(&request[start..index]);start=index+ch.len_utf8();}
+    }
+    clauses.push(&request[start..]);
+    clauses.iter().filter(|clause|!clause.trim().is_empty()).all(|clause|creation.is_match(clause)||content.is_match(clause)||read.is_match(clause)||stop.is_match(clause))
+}
+
 pub(super) fn requires_tool_retry(prompt: &str, checks: &[Value]) -> bool {
     prompt.starts_with("[Pending physical deliverables]")
         && checks.iter().any(|check|check["kind"]=="requested_file" && check["status"]=="failed")
@@ -229,5 +251,16 @@ mod final_literal_regressions {
         assert_eq!(check_deliverables(dir.path(),&policy,&goals,&literals)[0]["status"],"failed");
         std::fs::write(&path,"Token=Value\n").unwrap();
         assert_eq!(check_deliverables(dir.path(),&policy,&goals,&literals)[0]["status"],"passed");
+    }
+}
+
+#[cfg(test)]
+mod native_catalogue_scope_tests {
+    use super::*;
+    #[test] fn only_closed_literal_file_requests_reduce_the_native_catalogue() {
+        assert!(literal_file_operations_only("Crée FIRST.md avec exactement alpha. Puis lis FIRST.md avec read_file pour vérifier son contenu. Ensuite crée SECOND.md avec exactement beta. Termine après ces trois opérations, sans autre modification."));
+        assert!(literal_file_operations_only("Crée uniquement le fichier result.txt à la racine du projet. Son contenu doit être exactement la ligne exact-value. Utilise write_file ou write_code, puis arrête-toi."));
+        assert!(literal_file_operations_only("Create notes.txt with exactly `Hello world`. Read notes.txt with read_file to verify its content. Finish."));
+        for message in ["Create notes.txt with exactly value. Then run npm test.","Crée a.txt avec exactement ok. Publie une PR.","Create notes.txt with exactly three paragraphs.","Crée a.txt avec exactement ok. Lis le plan et respecte ses commandes."] {assert!(!literal_file_operations_only(message),"{message}");}
     }
 }

@@ -359,6 +359,7 @@ pub(crate) fn is_file_mutation(tool: &str) -> bool {
     )
 }
 pub(crate) fn paths_for_tool(tool:&str,args:&[String])->Vec<String> {
+    if matches!(tool,"git_delivery_status"|"github_pr_status"|"git_push"|"github_create_pr") {return vec!["workspace:/".into()];}
     if matches!(tool,"file_diff"|"diff_unified"|"dir_compare") {return args.iter().take(2).cloned().collect();}
     if matches!(tool,"list_dir"|"search_files"|"grep_content"|"git_status"|"git_diff"|"git_log"|"git_branches") {return vec![args.first().cloned().unwrap_or_else(||"workspace:/".into())];}
     if tool=="lsp_query" {return serde_json::from_str::<Value>(&args.join(" ")).ok().and_then(|v|v["path"].as_str().map(str::to_owned)).into_iter().collect();}
@@ -522,12 +523,14 @@ impl Operation {
             if !policy.can_run_command(&program) {return Err("cached/current command denied by current policy".into());}
             crate::api_tool_dispatch::process_ops::resolve_run_command_working_dir(cwd.as_deref(),Some(&canonical),policy)?;
         }
-        if crate::studio_delivery::is_delivery_tool(tool) && (!policy.can_run_command("git") || matches!(tool,"git_delivery_status"|"github_pr_status"|"git_push"|"github_create_pr") && !policy.can_run_command("gh")) {return Err("cached/current delivery executable denied by policy".into());}
+        if crate::studio_delivery::is_delivery_tool(tool) && (!policy.can_run_command("git") || matches!(tool,"github_pr_status"|"git_push"|"github_create_pr") && !policy.can_run_command("gh")) {return Err("cached/current delivery executable denied by policy".into());}
         for raw in paths_for_tool(tool,args) {
             let path=bounded_path(&canonical,&raw)?;let plain=crate::api::strip_verbatim_prefix(path);
             if !policy.can_read(&plain) || is_file_mutation(tool) && !policy.can_write(&plain) {return Err("cached/current path denied by current policy".into());}
         }
         if let Some((old_digest, state, result)) = old {
+            if tool=="git_delivery_status" && !policy.can_run_command("gh") {return Err("cached GitHub status unavailable under current policy; request a fresh local inspection operation".into());}
+
             if old_digest != fingerprint {
                 return Err("operation_id reused with different arguments".into());
             }

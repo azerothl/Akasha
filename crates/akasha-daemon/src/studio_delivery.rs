@@ -147,8 +147,8 @@ fn unsafe_config_key(key:&str) -> bool {
 pub(crate) async fn approval_identity(root:&Path,tool:&str,argv:&[String]) -> Result<String,String> {
     let root=root.canonicalize().map_err(|e|e.to_string())?;
     let payload:Value=serde_json::from_str(&argv.join(" ")).map_err(|e|e.to_string())?;
-    let repo=if matches!(tool,"git_push"|"github_create_pr") {remote_repo(&root,payload["remote"].as_str().unwrap_or("origin")).await?}else{"local".into()};
-    Ok(json!({"workspace":root,"repository":repo,"tool":tool,"arguments":payload}).to_string())
+    let (repo,publication_url)=if matches!(tool,"git_push"|"github_create_pr") {let (repo,url)=remote_target(&root,payload["remote"].as_str().unwrap_or("origin")).await?;(repo,Some(url))}else{("local".into(),None)};
+    Ok(json!({"workspace":root,"repository":repo,"publication_url":publication_url,"tool":tool,"arguments":payload}).to_string())
 }
 
 async fn git(root: &Path, args: Vec<String>, index: Option<&Path>) -> Result<Output, String> {
@@ -230,6 +230,7 @@ fn sha(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 fn file_hash(path: &Path) -> Result<String, String> {
+    if std::fs::symlink_metadata(path).ok().is_some_and(|metadata|metadata.file_type().is_symlink()) {return Err("symlink selections are unsupported for delivery".into());}
     match std::fs::File::open(path) {
         Ok(file) => {
             if !file.metadata().map_err(|e| e.to_string())?.is_file() {
@@ -267,6 +268,7 @@ fn selected_path(
         return Err("select explicit relative file paths, excluding .git".into());
     }
     let path = root.join(raw);
+    if std::fs::symlink_metadata(&path).ok().is_some_and(|metadata|metadata.file_type().is_symlink()) {return Err("symlink selections are unsupported for delivery".into());}
     let mut existing = path.as_path();
     while !existing.exists() {
         existing = existing.parent().ok_or("file ancestor missing")?;
@@ -344,7 +346,7 @@ fn repo_from_url(remote: &str) -> Result<String, String> {
     }
     Ok(parts.join("/"))
 }
-async fn remote_repo(root: &Path, remote: &str) -> Result<String, String> {
+async fn remote_target(root: &Path, remote: &str) -> Result<(String,String), String> {
     if !valid_name(remote) {
         return Err("invalid configured remote name".into());
     }
@@ -358,7 +360,23 @@ async fn remote_repo(root: &Path, remote: &str) -> Result<String, String> {
     if output.lines().count() != 1 {
         return Err("ambiguous remote URL".into());
     }
-    repo_from_url(output.trim())
+    canonical_target(output.trim())
+}
+async fn remote_repo(root:&Path,remote:&str)->Result<String,String> {Ok(remote_target(root,remote).await?.0)}
+fn canonical_target(raw:&str)->Result<(String,String),String> {
+    let repo=repo_from_url(raw)?;
+    let (scheme,port)=if raw.starts_with("git@github.com:") {("ssh",None)}else{let parsed=url::Url::parse(raw).map_err(|e|e.to_string())?;if parsed.scheme()=="ssh" {("ssh",parsed.port())}else{("https",parsed.port())}};
+    let port=port.map(|port|format!(":{port}")).unwrap_or_default();
+    let user=if scheme=="ssh" {"git@"}else{""};
+    Ok((repo.clone(),format!("{scheme}://{user}github.com{port}/{repo}.git")))
+}
+fn approved_target(snapshot:Option<&Value>)->Result<(String,String),String> {
+    let value=snapshot.ok_or("approved publication snapshot required")?;
+    let repo=value["repository"].as_str().ok_or("approved repository missing")?;
+    let url=value["publication_url"].as_str().ok_or("approved publication URL missing")?;
+    let (parsed,canonical)=canonical_target(url)?;
+    if parsed!=repo || canonical!=url {return Err("invalid approved publication snapshot".into());}
+    Ok((repo.into(),url.into()))
 }
 async fn remote_head(root: &Path, remote: &str, branch: &str) -> Result<String, String> {
     let reference = format!("refs/heads/{branch}");
@@ -446,7 +464,8 @@ pub(crate) async fn preflight(
         .await
         .map(|output| output.code == Some(0))
         .unwrap_or(false);
-    let repo = remote_repo(&root, remote).await;
+    let target=remote_target(&root,remote).await;
+    let repo=target.as_ref().map(|(repo,_)|repo.clone()).map_err(Clone::clone);
     let github = match repo.as_ref() {
         Ok(repo) => match auth(&root, repo, policy).await {
             Ok(value) => value,
@@ -454,9 +473,9 @@ pub(crate) async fn preflight(
         },
         Err(error) => json!({"accessible":false,"reason":error}),
     };
-    let remote_sha = if repo.is_ok() {
+    let remote_sha = if github["accessible"]==true {
         if let Some(ref branch) = branch {
-            Some(remote_head(&root, remote, branch).await)
+            Some(remote_head(&root, &target.as_ref().map(|(_,url)|url.clone()).unwrap_or_default(), branch).await)
         } else {
             None
         }
@@ -657,12 +676,15 @@ pub(crate) async fn push(
     root: &Path,
     policy: &akasha_tools::ToolsPolicy,
     request: Push,
+    repo: &str,
+    publication_url: &str,
 ) -> Result<Value, String> {
     if !policy.can_use_tool("git_push") {
         return Err("git_push denied".into());
     }
     let root = repository(data_dir, root, policy).await?;
-    let repo = remote_repo(&root, &request.remote).await?;
+    let target=remote_target(&root,&request.remote).await?;
+    if target!=(repo.to_owned(),publication_url.to_owned()) {return Err("publication destination changed after approval".into());}
     if !valid_ref(&request.branch)
         || branch(&root).await? != request.branch
         || head(&root).await? != request.expected_head
@@ -675,7 +697,7 @@ pub(crate) async fn push(
     {
         return Err("GitHub write permission unavailable".into());
     }
-    if remote_head(&root, &request.remote, &request.branch).await? != request.expected_remote_head {
+    if remote_head(&root, publication_url, &request.branch).await? != request.expected_remote_head {
         return Err("remote branch changed; inspect before push".into());
     }
     if request.expected_remote_head!="missing" {
@@ -694,7 +716,7 @@ pub(crate) async fn push(
             "--no-follow-tags",
             "--recurse-submodules=no",
             "--",
-            &request.remote,
+            publication_url,
             &reference,
         ]),
         None,
@@ -713,7 +735,7 @@ pub(crate) async fn push(
             )
         }
     }
-    let remote = remote_head(&root, &request.remote, &request.branch).await;
+    let remote = remote_head(&root, publication_url, &request.branch).await;
     if remote.as_ref().ok() != Some(&request.expected_head) {
         return Ok(
             json!({"success":false,"result_unknown":true,"error":"remote_head_not_confirmed","expected_head":request.expected_head,"observed":remote.ok()}),
@@ -788,12 +810,15 @@ pub(crate) async fn create_pr(
     root: &Path,
     policy: &akasha_tools::ToolsPolicy,
     request: PullRequest,
+    repo: &str,
+    publication_url: &str,
 ) -> Result<Value, String> {
     if !policy.can_use_tool("github_create_pr") {
         return Err("github_create_pr denied".into());
     }
     let root = repository(data_dir, root, policy).await?;
-    let repo = remote_repo(&root, &request.remote).await?;
+    let target=remote_target(&root,&request.remote).await?;
+    if target!=(repo.to_owned(),publication_url.to_owned()) {return Err("publication destination changed after approval".into());}
     if !valid_ref(&request.head)
         || !valid_ref(&request.base)
         || request.head == request.base
@@ -811,7 +836,7 @@ pub(crate) async fn create_pr(
     }
     if head(&root).await? != request.expected_head
         || branch(&root).await? != request.head
-        || remote_head(&root, &request.remote, &request.head).await? != request.expected_head
+        || remote_head(&root, publication_url, &request.head).await? != request.expected_head
     {
         return Err("push this exact branch/commit explicitly before creating the PR".into());
     }
@@ -972,7 +997,10 @@ pub(crate) async fn invoke(
     task: Option<Uuid>,
     tool: &str,
     payload: Value,
+    approval_identity: Option<&str>,
 ) -> Value {
+    let snapshot=approval_identity.and_then(|raw|serde_json::from_str::<Value>(raw).ok());
+    let publication=approved_target(snapshot.as_ref());
     let result = match tool {
         "git_delivery_status" => match serde_json::from_value::<StatusRequest>(payload) {
             Ok(request) if request.number.is_none() => {
@@ -985,11 +1013,11 @@ pub(crate) async fn invoke(
             Err(_) => Err("invalid commit request".into()),
         },
         "git_push" => match serde_json::from_value::<Push>(payload) {
-            Ok(request) => push(data_dir, root, policy, request).await,
+            Ok(request) => match publication.as_ref(){Ok((repo,url))=>push(data_dir,root,policy,request,repo,url).await,Err(error)=>Err(error.clone())},
             Err(_) => Err("invalid push request".into()),
         },
         "github_create_pr" => match serde_json::from_value::<PullRequest>(payload) {
-            Ok(request) => create_pr(data_dir, root, policy, request).await,
+            Ok(request) => match publication.as_ref(){Ok((repo,url))=>create_pr(data_dir,root,policy,request,repo,url).await,Err(error)=>Err(error.clone())},
             Err(_) => Err("invalid PR creation request".into()),
         },
         "github_pr_status" => match serde_json::from_value::<StatusRequest>(payload) {
@@ -1143,6 +1171,7 @@ pub(crate) async fn route(
             } else {
                 json!({"remote":remote})
             },
+            None,
         )
         .await;
         return Some(json_response("200 OK", &value.to_string()));
@@ -1241,6 +1270,7 @@ pub(crate) async fn route(
         Some(operator.task_id),
         action,
         operator.request,
+        decoded.envelope.approval_identity.as_deref(),
     )
     .await;
     let success = value["success"].as_bool().unwrap_or(true);
@@ -1271,5 +1301,21 @@ mod executable_regressions {
         let paths=std::env::join_paths([root.as_path()]).unwrap();assert!(resolve_program(&root,"git",&paths).is_err());
         let tools=dir.path().join("trusted");std::fs::create_dir(&tools).unwrap();std::fs::write(tools.join(name),"fixture only").unwrap();
         let paths=std::env::join_paths([tools.as_path()]).unwrap();assert_eq!(resolve_program(&root,"git",&paths).unwrap(),tools.join(name));
+    }
+}
+
+#[cfg(test)]
+mod pinned_publication_tests {
+    use super::*;
+    #[test] fn snapshots_pin_transport_and_repository_without_remote_aliases() {
+        for raw in ["https://github.com/owner/repo.git","git@github.com:owner/repo.git","ssh://git@github.com:443/owner/repo.git"] {
+            let (repo,url)=canonical_target(raw).unwrap();assert_eq!(repo,"owner/repo");
+            assert_eq!(approved_target(Some(&json!({"repository":repo,"publication_url":url}))).unwrap(),(repo,url));
+        }
+        assert!(approved_target(Some(&json!({"repository":"owner/approved","publication_url":"https://github.com/owner/other.git"}))).is_err());
+    }
+    #[cfg(unix)]
+    #[test] fn symlink_blobs_are_not_versioned_as_target_contents() {
+        let dir=tempfile::tempdir().unwrap();let a=dir.path().join("a");let link=dir.path().join("link");std::fs::write(&a,"same").unwrap();std::os::unix::fs::symlink(&a,&link).unwrap();assert!(file_hash(&link).is_err());
     }
 }

@@ -434,3 +434,15 @@ async fn publication_rechecks_approved_destination_after_acquiring_workspace() {
     let approved=contracts::decode(&current.to_string()).unwrap();
     let operation=contracts::Operation::begin(&db,id,"git_push",&approved.argv,dir.path(),&p,Some(&approved)).await.unwrap();operation.finish(false,"guard validation only; no push executed").unwrap();
 }
+
+#[tokio::test]
+async fn git_only_profiles_can_start_local_delivery_inspection() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("task.db");let id=Uuid::new_v4();running_task(&db,id);let mut p=policy(dir.path());p.allowed_commands=vec!["git".into()];
+    let decoded=contracts::decode(&json!({"schema_version":1,"tool":"git_delivery_status","arguments":{}}).to_string()).unwrap();
+    let operation=contracts::Operation::begin(&db,id,"git_delivery_status",&decoded.argv,dir.path(),&p,Some(&decoded)).await.unwrap();operation.finish(true,"local inspection only").unwrap();
+    let root=dir.path().join("repo");std::fs::create_dir(&root).unwrap();
+    for args in [vec!["init","-q"],vec!["remote","add","origin","https://github.com/example/local-status.git"]] {assert!(std::process::Command::new("git").args(args).current_dir(&root).output().unwrap().status.success());}
+    let mut local=policy(&root);local.allowed_commands=vec!["git".into()];
+    let status=crate::studio_delivery::preflight(dir.path(),&root,&local,"origin").await.unwrap();assert_eq!(status["github"]["accessible"],false);assert!(status["remote_head"].is_null());
+
+}
