@@ -584,7 +584,7 @@ function buildMethodologyHtml(meta: ResearchReportMeta, locale: "fr" | "en"): st
         : ""
     }
     <div class="method-stats">
-      <span>${en ? "Search providers" : "Fournisseurs"} : ${escapeHtml(meta.providers_used.join(", ") || (meta.search_degraded ? "—" : "brave"))}</span>
+      <span>${en ? "Search providers" : "Fournisseurs"} : ${escapeHtml(meta.providers_used.join(", ") || (used > 0 ? (en ? "Direct URL fetching" : "Lecture directe des URL") : (en ? "None recorded" : "Aucun enregistré")))}</span>
       <span>${en ? "Rounds" : "Tours"} : ${meta.rounds}</span>
       <span>${en ? "Duration" : "Durée"} : ${meta.duration_secs}s</span>
       <span>${en ? "Search hits seen" : "Résultats vus"} : ${hits}</span>
@@ -596,8 +596,12 @@ function buildMethodologyHtml(meta: ResearchReportMeta, locale: "fr" | "en"): st
     </div>
     ${
       meta.search_degraded
-        ? `<p><strong>${en ? "Note" : "Note"} :</strong> ${en ? "Web search was unavailable — report relies on model knowledge." : "Recherche web indisponible — rapport basé sur les connaissances du modèle."}</p>`
-        : !sufficient
+        ? `<p><strong>${en ? "Note" : "Note"} :</strong> ${used > 0
+            ? (en ? "Search providers unavailable — report based on pages read directly." : "Moteurs indisponibles — rapport fondé sur les pages lues directement.")
+            : (en ? "Web search was unavailable — report relies on model knowledge." : "Recherche web indisponible — rapport basé sur les connaissances du modèle.")}</p>`
+        : ""
+    }
+    ${!sufficient
           ? `<p><strong>${en ? "Coverage warning" : "Avertissement couverture"} :</strong> ${en ? `Only ${pages} pages were read (below the target for a full report). Treat conclusions with extra caution.` : `Seulement ${pages} pages lues (sous le seuil visé). À interpréter avec prudence.`}</p>`
           : ""
     }
@@ -630,7 +634,9 @@ function buildCoverHtml(doc: ResearchReportDocument, locale: "fr" | "en"): strin
         <span>${meta.word_count} ${en ? "words" : "mots"}</span>
         <span>${meta.sources.length} ${en ? "sources" : "sources"}</span>
         <span>${meta.rounds} ${en ? "rounds" : "tours"} · ${meta.duration_secs}s</span>
-        ${meta.search_degraded ? `<span>${en ? "degraded (no web)" : "dégradé (sans web)"}</span>` : ""}
+        ${meta.providers_used.length === 0 && meta.sources.length > 0
+          ? `<span>${en ? "pages read directly" : "pages lues directement"}</span>`
+          : meta.search_degraded ? `<span>${en ? "degraded (no web)" : "dégradé (sans web)"}</span>` : ""}
         ${meta.sources_sufficient === false ? `<span>${en ? "thin sources" : "sources limitées"}</span>` : ""}
       </div>`
     : "";
