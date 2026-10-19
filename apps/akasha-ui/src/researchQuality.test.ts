@@ -11,3 +11,10 @@ it('distinguishes a sourced report, partial evidence and offline knowledge',()=>
   expect(researchQuality('Partial report',{...meta,sources_sufficient:false})).toBe('limited');
   expect(researchQuality('Model knowledge',{...meta,sources:[],search_degraded:true})).toBe('limited');
 });
+
+it('keeps direct page evidence independent from discovery availability',()=>{
+  const direct={...meta,providers_used:[],search_degraded:true};
+  expect(researchQuality('Direct source report',direct)).toBe('ready');
+  expect(researchQuality('Thin direct report',{...direct,sources_sufficient:false})).toBe('limited');
+  expect(researchQuality('Model notes',{...direct,sources:[]})).toBe('limited');
+});

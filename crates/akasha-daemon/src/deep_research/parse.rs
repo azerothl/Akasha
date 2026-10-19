@@ -80,6 +80,78 @@ pub fn parse_search_results(body: &str) -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// Explicit HTTP(S) sources in the question are fetched through the regular web
+/// tool, which still applies network and domain policy. Never infer URLs.
+pub fn question_source_urls(topic: &str, limit: usize) -> Vec<String> {
+    let re = Regex::new(r"https?://").expect("source URL re");
+    let mut seen = HashSet::new();
+    let mut previous_end = 0;
+    re.find_iter(topic).filter_map(|m| {
+        if m.start() < previous_end { return None; }
+        let prefix = balanced_url_prefix(&topic[m.start()..]);
+        previous_end = m.start() + prefix.len();
+        let raw = prefix.trim_end_matches([',', ';', '.']);
+        let mut url = url::Url::parse(raw).ok()?;
+        if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
+            return None;
+        }
+        url.set_fragment(None);
+        let canonical = url.to_string();
+        seen.insert(canonical.clone()).then_some(canonical)
+    }).take(limit).collect()
+}
+
+/// Keep balanced path parentheses, stopping before the enclosing Markdown/prose
+/// delimiter. Character offsets also preserve Unicode source URLs.
+fn balanced_url_prefix(text: &str) -> &str {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            ')' => return &text[..index],
+            _ if ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | ']') => return &text[..index],
+            _ => {}
+        }
+    }
+    text
+}
+
+fn markdown_citation_urls(text: &str) -> Vec<String> {
+    // Match the UI's CommonMark + raw HTML + GFM autolink surface. Parsing HTML
+    // also decodes character references and normalizes attribute/tag casing.
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, pulldown_cmark::Parser::new(text));
+    let fragment = scraper::Html::parse_fragment(&html);
+    let anchors = scraper::Selector::parse("a[href]").expect("anchor selector");
+    let mut urls = Vec::new();
+    let external = |raw: &str| {
+        let raw = raw.trim();
+        let raw = if raw.starts_with("//") { format!("https:{raw}") } else { raw.to_string() };
+        url::Url::parse(&raw).ok().filter(|url| matches!(url.scheme(), "http" | "https"))
+            .map(|url| url.to_string())
+    };
+    for anchor in fragment.select(&anchors) {
+        if let Some(url) = anchor.value().attr("href").and_then(external) { urls.push(url); }
+    }
+    let mut finder = linkify::LinkFinder::new();
+    finder.kinds(&[linkify::LinkKind::Url]);
+    finder.url_must_have_scheme(false);
+    for node in fragment.tree.nodes() {
+        let scraper::Node::Text(value) = node.value() else { continue; };
+        if node.ancestors().any(|ancestor| ancestor.value().as_element()
+            .map(|element| matches!(element.name(), "a" | "code" | "pre" | "script" | "style"))
+            .unwrap_or(false)) { continue; }
+        for link in finder.links(value) {
+            let raw = link.as_str();
+            // GFM links bare www. prefixes, but not arbitrary scheme-less domains.
+            let raw = if raw.starts_with("www.") { format!("http://{raw}") } else { raw.to_string() };
+            if let Some(url) = external(&raw) { urls.push(url); }
+        }
+    }
+    urls
+}
+
 pub fn strip_html(html: &str) -> String {
     static TAG_RE: OnceLock<Regex> = OnceLock::new();
     static WS_RE: OnceLock<Regex> = OnceLock::new();
@@ -153,11 +225,24 @@ pub fn word_count(text: &str) -> usize {
 
 /// Count markdown links that look like external citations.
 pub fn count_markdown_link_citations(text: &str) -> usize {
-    static LINK_RE: OnceLock<Regex> = OnceLock::new();
-    let re = LINK_RE.get_or_init(|| {
-        Regex::new(r#"\[([^\]]+)\]\((https?://[^)]+)\)"#).expect("md link re")
-    });
-    re.find_iter(text).count()
+    markdown_citation_urls(text).len()
+}
+
+/// Report links must resolve to a page actually retained as evidence. A fragment
+/// is allowed, but a different path/query is a different, unconsulted page.
+pub fn unconsulted_citation_urls(markdown: &str, sources: &[&str]) -> Vec<String> {
+    let page = |raw: &str| url::Url::parse(raw).map(|mut url| {
+        url.set_fragment(None);
+        url.to_string()
+    }).unwrap_or_else(|_| raw.split('#').next().unwrap_or(raw).to_string());
+    let known: HashSet<String> = sources.iter().map(|url| page(url)).collect();
+    let mut unknown = Vec::new();
+    for url in markdown_citation_urls(markdown) {
+        if !known.contains(&page(&url)) { unknown.push(url); }
+    }
+    unknown.sort();
+    unknown.dedup();
+    unknown
 }
 
 /// Registrable domains from URL list (www. stripped).
@@ -209,7 +294,7 @@ pub fn assess_report_quality(
     let words = word_count(markdown);
     let citations = count_markdown_link_citations(markdown);
     let mut warnings = Vec::new();
-    if search_degraded {
+    if search_degraded && source_count == 0 {
         warnings.push(
             "Web search was unavailable; claims may rely on model knowledge — verify independently."
                 .to_string(),
@@ -231,8 +316,7 @@ pub fn assess_report_quality(
                 .to_string(),
         );
     }
-    let needs_retry = !search_degraded
-        && sources_sufficient
+    let needs_retry = sources_sufficient
         && source_count >= 8
         && (words < min_words || citations < source_count.min(12));
     ReportQualityCheck {
@@ -287,6 +371,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gfm_and_html_links_cannot_bypass_consulted_source_validation() {
+        let md = "https://invented.example/bare, www.invented.example/page\n\n<A HREF='https://invented.example/html?a=1&amp;b=2'>claim</A> <a href=//invented.example/relative>claim</a>\n\n<a href='HTTPS://KNOWN.EXAMPLE/page#part'>known</a>\n\n<img src='https://images.example/image.png'> `https://code.example/page`\n\n```html\n<a href='https://example.example/code'>example</a>\n```";
+        assert_eq!(count_markdown_link_citations(md), 5);
+        assert_eq!(unconsulted_citation_urls(md, &["https://known.example/page"]), vec![
+            "http://www.invented.example/page", "https://invented.example/bare",
+            "https://invented.example/html?a=1&b=2", "https://invented.example/relative",
+        ]);
+    }
+
+    #[test]
+    fn reference_citations_resolve_definitions_without_counting_examples_or_images() {
+        let md = "[claim][1] [known][] [shortcut] <https://known.example/page#part> ![image][picture]\n\n[1]: <https://invented.example/page_(notes)> \"title\"\n[KNOWN]: https://known.example/page\n[shortcut]: https://known.example/page\n[picture]: https://images.example/chart.png\n[unused]: https://unused.example/page\n\n`[code](https://code.example/page)`\n\n```markdown\n[example](https://example.example/page)\n```";
+        assert_eq!(count_markdown_link_citations(md), 4);
+        assert_eq!(unconsulted_citation_urls(md, &["https://known.example/page"]),
+            vec!["https://invented.example/page_(notes)"]);
+    }
+
+    #[test]
+    fn citations_require_consulted_pages_but_allow_section_anchors() {
+        let md = "[known](https://example.org/v1#method) [invented](https://example.org/v2) ![image](https://example.org/chart.png)";
+        assert_eq!(unconsulted_citation_urls(md, &["https://example.org/v1"]), vec!["https://example.org/v2"]);
+        assert_eq!(unconsulted_citation_urls("[query](https://example.org/v1?q=2)", &["https://example.org/v1"]).len(), 1);
+    }
+
+    #[test]
+    fn explicit_sources_are_bounded_deduplicated_and_http_only() {
+        let topic = "Sources [API](https://example.org/api#method), https://example.org/api ; https://example.org/other. ftp://bad.org https://user:secret@example.org/private https://example.org/third";
+        assert_eq!(question_source_urls(topic, 2), vec!["https://example.org/api", "https://example.org/other"]);
+        assert!(question_source_urls("texte sans lien", 5).is_empty());
+        assert!(question_source_urls(topic, 0).is_empty());
+    }
+
+    #[test]
+    fn explicit_sources_preserve_nested_and_markdown_parentheses() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(question_source_urls(&format!("[Rust]({url}) and ({url})."), 5), vec![url]);
+        assert_eq!(question_source_urls("[nested](https://example.org/a_(b_(c)))", 5), vec!["https://example.org/a_(b_(c))"]);
+        assert_eq!(question_source_urls("[Rust](<https://example.org/a_(b)>)", 5), vec!["https://example.org/a_(b)"]);
+        let redirect = "https://example.org/?next=https://other.org/page";
+        assert_eq!(question_source_urls(redirect, 5), vec![redirect]);
+    }
+
+    #[test]
+    fn citation_validation_preserves_parentheses_and_section_anchors() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        let md = format!("[Rust]({url}#History) ![media](https://example.org/image_(a).png)");
+        assert!(unconsulted_citation_urls(&md, &[url]).is_empty());
+        assert_eq!(count_markdown_link_citations(&md), 1);
+        assert_eq!(unconsulted_citation_urls(&format!("[Unknown]({url})"), &[]), vec![url]);
+        assert!(unconsulted_citation_urls("[nested](<https://example.org/a_(b_(c))>)", &["https://example.org/a_(b_(c))"]).is_empty());
+    }
+
+    #[test]
     fn parse_search_line() {
         let body = "1. Example Title | https://example.com/page | A short description";
         let results = parse_search_results(body);
@@ -317,6 +454,18 @@ mod tests {
             ]),
             3
         );
+    }
+
+    #[test]
+    fn direct_pages_do_not_get_model_only_or_false_thin_source_warnings() {
+        let body = (0..12).map(|i| format!("[Source {i}](https://example.org/{i})")).collect::<Vec<_>>().join(" ");
+        let quality = assess_report_quality(&body, 12, true, true, 10);
+        assert!(quality.warnings.is_empty());
+        assert!(!quality.needs_retry);
+        let thin = assess_report_quality(&body, 4, false, true, 10);
+        assert!(thin.warnings.iter().any(|warning| warning.contains("Only 4 pages")));
+        assert!(!thin.warnings.iter().any(|warning| warning.contains("model knowledge")));
+        assert!(assess_report_quality("Notes", 0, false, true, 10).warnings.iter().any(|warning| warning.contains("model knowledge")));
     }
 
     #[test]
