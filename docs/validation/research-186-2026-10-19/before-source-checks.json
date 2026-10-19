@@ -1,0 +1,44 @@
+[
+  {
+    "url": "https://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+    "status": 200,
+    "resolved_url": "https://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+    "sha256": "273c8e92cb5024b4519190652defeaf4916bc0d88e89494ac129d5ef784410bc",
+    "title": "VecDeque in std::collections - Rust"
+  },
+  {
+    "url": "https://doc.rust-lang.org/stable/std/collections/vec_deque/index.html",
+    "status": 200,
+    "resolved_url": "https://doc.rust-lang.org/stable/std/collections/vec_deque/index.html",
+    "sha256": "c5b38928f046035f1d98f39800670db4d51772fced30d7fcd2b7654d97252b5b",
+    "title": "std::collections::vec_deque - Rust"
+  },
+  {
+    "url": "https://doc.rust-lang.org/stable/alloc/collections/vec_deque/struct.VecDeque.html",
+    "status": 200,
+    "resolved_url": "https://doc.rust-lang.org/stable/alloc/collections/vec_deque/struct.VecDeque.html",
+    "sha256": "2ddb1e24368fcbfd216204bc33ab4096d3c3e7aa5a3e591c14a377f99f90567a",
+    "title": "VecDeque in alloc::collections::vec_deque - Rust"
+  },
+  {
+    "url": "https://doc.rust-lang.org/stable/std/collections/index.html",
+    "status": 200,
+    "resolved_url": "https://doc.rust-lang.org/stable/std/collections/index.html",
+    "sha256": "1824bc21ff7bb7bec7f6c208531bbcd040d14fbfc9c43ac4392e97c973d88b59",
+    "title": "std::collections - Rust"
+  },
+  {
+    "url": "https://doc.rust-lang.org/1.36.0/std/collections/vec_deque/struct.VecDeque.html",
+    "status": 200,
+    "resolved_url": "https://doc.rust-lang.org/1.36.0/std/collections/vec_deque/struct.VecDeque.html",
+    "sha256": "65832d411ac48b2883cb3919c861d874e928b01ed9258bb73f1b6adce22f9c72",
+    "title": "std::collections::vec_deque::VecDeque - Rust"
+  },
+  {
+    "url": "https://doc.rust-lang.org/nightly/std/vec/index.html",
+    "status": 200,
+    "resolved_url": "https://doc.rust-lang.org/nightly/std/vec/index.html",
+    "sha256": "48a87d7ad784ace1563c95c06fe0c6f0ef7d8baafdc8a25db38da3ae90adb12f",
+    "title": "std::vec - Rust"
+  }
+]

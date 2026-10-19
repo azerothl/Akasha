@@ -80,6 +80,23 @@ pub fn parse_search_results(body: &str) -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// Explicit HTTP(S) sources in the question are fetched through the regular web
+/// tool, which still applies network and domain policy. Never infer URLs.
+pub fn question_source_urls(topic: &str, limit: usize) -> Vec<String> {
+    let re = Regex::new(r#"https?://[^\s<>\"\)\]]+"#).expect("source URL re");
+    let mut seen = HashSet::new();
+    re.find_iter(topic).filter_map(|m| {
+        let raw = m.as_str().trim_end_matches([',', ';', '.']);
+        let mut url = url::Url::parse(raw).ok()?;
+        if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
+            return None;
+        }
+        url.set_fragment(None);
+        let canonical = url.to_string();
+        seen.insert(canonical.clone()).then_some(canonical)
+    }).take(limit).collect()
+}
+
 pub fn strip_html(html: &str) -> String {
     static TAG_RE: OnceLock<Regex> = OnceLock::new();
     static WS_RE: OnceLock<Regex> = OnceLock::new();
@@ -158,6 +175,24 @@ pub fn count_markdown_link_citations(text: &str) -> usize {
         Regex::new(r#"\[([^\]]+)\]\((https?://[^)]+)\)"#).expect("md link re")
     });
     re.find_iter(text).count()
+}
+
+/// Report links must resolve to a page actually retained as evidence. A fragment
+/// is allowed, but a different path/query is a different, unconsulted page.
+pub fn unconsulted_citation_urls(markdown: &str, sources: &[&str]) -> Vec<String> {
+    let page = |url: &str| url.split('#').next().unwrap_or(url).to_string();
+    let known: HashSet<String> = sources.iter().map(|url| page(url)).collect();
+    let re = Regex::new(r"!?\[[^\]]*\]\((https?://[^)\s]+)\)").expect("citation re");
+    let mut unknown = Vec::new();
+    for cap in re.captures_iter(markdown) {
+        // Images are media, not citations to source pages.
+        if cap.get(0).unwrap().as_str().starts_with('!') { continue; }
+        let url = cap.get(1).unwrap().as_str();
+        if !known.contains(&page(url)) { unknown.push(url.to_string()); }
+    }
+    unknown.sort();
+    unknown.dedup();
+    unknown
 }
 
 /// Registrable domains from URL list (www. stripped).
@@ -285,6 +320,21 @@ fn normalize_image_url(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn citations_require_consulted_pages_but_allow_section_anchors() {
+        let md = "[known](https://example.org/v1#method) [invented](https://example.org/v2) ![image](https://example.org/chart.png)";
+        assert_eq!(unconsulted_citation_urls(md, &["https://example.org/v1"]), vec!["https://example.org/v2"]);
+        assert_eq!(unconsulted_citation_urls("[query](https://example.org/v1?q=2)", &["https://example.org/v1"]).len(), 1);
+    }
+
+    #[test]
+    fn explicit_sources_are_bounded_deduplicated_and_http_only() {
+        let topic = "Sources [API](https://example.org/api#method), https://example.org/api ; https://example.org/other. ftp://bad.org https://user:secret@example.org/private https://example.org/third";
+        assert_eq!(question_source_urls(topic, 2), vec!["https://example.org/api", "https://example.org/other"]);
+        assert!(question_source_urls("texte sans lien", 5).is_empty());
+        assert!(question_source_urls(topic, 0).is_empty());
+    }
 
     #[test]
     fn parse_search_line() {

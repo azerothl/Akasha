@@ -3,8 +3,8 @@
 use super::parse::{
     assess_report_quality, extract_og_image_from_html, is_low_quality_summary,
     is_unreadable_fetched_content, parse_category, parse_json_array, parse_json_object,
-    parse_search_results, parse_stop_decision, strip_html, truncate_content,
-    unique_domains_from_urls, word_count,
+    parse_search_results, parse_stop_decision, question_source_urls, strip_html, truncate_content,
+    unique_domains_from_urls, unconsulted_citation_urls, word_count,
 };
 use super::queries::{booster_queries, specialized_site_queries};
 use super::prompts::{
@@ -204,7 +204,7 @@ async fn run_engine(
 
         finish_sub_agent(run_id, &branch_id, &sa_query, StepStatus::Done).await;
 
-        if queries.is_empty() {
+        if queries.is_empty() && question_source_urls(topic, 1).is_empty() {
             finish_branch(run_id, &branch_id, StepStatus::Error).await;
             break;
         }
@@ -216,8 +216,32 @@ async fn run_engine(
         let mut round_findings: Vec<ResearchFinding> = Vec::new();
 
         if search_ok {
-            set_phase(run_id, ResearchPhase::Searching).await;
             let round_url_start = urls_fetched.len();
+            // Read explicitly supplied pages even when search providers return no
+            // hits (e.g. throttling). This uses the same fetch/extraction policy.
+            if round_num == 1 {
+                for url in question_source_urls(topic, config.max_total_urls_per_round as usize) {
+                    if cancel.load(Ordering::SeqCst) || started.elapsed().as_secs() >= config.max_time_secs {
+                        break;
+                    }
+                    if !urls_fetched.insert(url.clone()) { continue; }
+                    set_phase(run_id, ResearchPhase::Reading).await;
+                    let reader = add_sub_agent(run_id, &branch_id, "reader", &truncate_label(&url, 40), StepStatus::Running).await;
+                    let status = match fetch_and_extract(ctx, &url, &url, topic, config).await {
+                        Some(finding) => {
+                            round_findings.push(finding.clone());
+                            store.update(run_id, |r| r.findings.push(finding)).await;
+                            StepStatus::Done
+                        }
+                        None => {
+                            push_skipped_source(&mut skipped_sources, &url, &url, "fetch_or_low_quality");
+                            StepStatus::Error
+                        }
+                    };
+                    finish_sub_agent(run_id, &branch_id, &reader, status).await;
+                }
+            }
+            set_phase(run_id, ResearchPhase::Searching).await;
             for query in &queries {
                 if cancel.load(Ordering::SeqCst) {
                     break;
@@ -494,7 +518,11 @@ async fn run_engine(
             search_degraded,
             config.min_final_report_words,
         );
-        if quality.needs_retry {
+        let source_urls: Vec<_> = findings.iter()
+            .filter(|f| !f.url.is_empty())
+            .map(|f| f.url.as_str()).collect();
+        let unknown = unconsulted_citation_urls(&md, &source_urls);
+        if quality.needs_retry || !unknown.is_empty() {
             let issues = format!(
                 "- Word count {} (target {})\n- Inline link citations {} (target at least {})\n- Add citations from the source manifest for major claims",
                 quality.words,
@@ -502,6 +530,7 @@ async fn run_engine(
                 quality.citations,
                 pages.min(14)
             );
+            let issues = format!("{issues}\n- Remove citations to pages not consulted: {}. Replace only when extracted evidence supports the claim; otherwise remove the claim.", unknown.join(", "));
             md = final_report_retry(ctx, topic, &md, &manifest, &issues, &user_ctx).await;
         }
         md
@@ -534,16 +563,21 @@ async fn run_engine(
     // Attempted fetches include unreadable/blocked pages and are not evidence.
     let pages_for_meta = sources.len() as u32;
     let unique_domains = unique_domains_from_urls(sources.iter().map(|s| s.url.as_str()));
-    let sources_sufficient =
-        !search_degraded && pages_for_meta >= config.min_sources_for_report;
+    let source_urls: Vec<_> = sources.iter().map(|s| s.url.as_str()).collect();
+    let unknown_citations = unconsulted_citation_urls(&final_report, &source_urls);
+    let enough_pages = !search_degraded && pages_for_meta >= config.min_sources_for_report;
+    let sources_sufficient = enough_pages && unknown_citations.is_empty();
     let mut quality_warnings = assess_report_quality(
         &final_report,
         sources.len(),
-        sources_sufficient,
+        enough_pages,
         search_degraded,
         config.min_final_report_words,
     )
     .warnings;
+    if !unknown_citations.is_empty() {
+        quality_warnings.push(format!("Report cites pages not consulted; verify these references: {}", unknown_citations.join(", ")));
+    }
     if queries_log.is_empty() && !search_degraded {
         quality_warnings.push(
             "No search queries were recorded — methodology trace may be incomplete.".to_string(),
@@ -783,6 +817,7 @@ async fn fetch_and_extract(
 
     let prompt = EXTRACTOR_PROMPT
         .replace("{goal}", goal)
+        .replace("{source_url}", url)
         .replace("{webpage_content}", &content);
 
     let response = llm_complete(ctx, prompt, None, 3072, 0.2, "utility").await?;
@@ -796,10 +831,7 @@ async fn fetch_and_extract(
         if is_low_quality_summary(&summary) {
             return None;
         }
-        let evidence = parsed
-            .get("evidence")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let evidence = extracted_evidence(&parsed);
         let image_url = parsed
             .get("image_urls")
             .and_then(|v| v.as_array())
@@ -826,6 +858,19 @@ async fn fetch_and_extract(
         evidence: Some(response.chars().take(3000).collect()),
         image_url: og_image,
     })
+}
+
+// Some providers return an array despite the requested string schema. Preserve its
+// complete evidence instead of silently replacing it with the shorter summary.
+fn extracted_evidence(parsed: &serde_json::Value) -> Option<String> {
+    let value = parsed.get("evidence")?;
+    let evidence = match value {
+        serde_json::Value::String(text) => text.trim().to_string(),
+        serde_json::Value::Array(items) => items.iter().filter_map(|v| v.as_str())
+            .map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n"),
+        _ => return None,
+    };
+    (!evidence.is_empty()).then_some(evidence)
 }
 
 fn extract_json_object(text: &str) -> String {
@@ -977,7 +1022,11 @@ fn format_source_manifest(findings: &[ResearchFinding]) -> String {
     let mut lines: Vec<String> = findings
         .iter()
         .filter(|f| !f.url.is_empty())
-        .map(|f| format!("- [{}]({}) — {}", f.title, f.url, f.summary.replace('\n', " ")))
+        .map(|f| format!(
+            "### [{}]({})\nSummary: {}\nExtracted evidence (only for this URL):\n{}",
+            f.title, f.url, f.summary,
+            f.evidence.as_deref().unwrap_or("(No detailed evidence extracted.)")
+        ))
         .collect();
     lines.sort();
     lines.dedup();
@@ -1296,6 +1345,27 @@ fn truncate_label(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn extraction_preserves_string_and_array_evidence() {
+        let text = serde_json::json!({"evidence": " exact method and qualifier "});
+        assert_eq!(super::extracted_evidence(&text).as_deref(), Some("exact method and qualifier"));
+        let array = serde_json::json!({"evidence": ["first fact", "second fact", "", 42]});
+        assert_eq!(super::extracted_evidence(&array).as_deref(), Some("first fact\nsecond fact"));
+        assert!(super::extracted_evidence(&serde_json::json!({"evidence": []})).is_none());
+    }
+
+    #[test]
+    fn final_manifest_keeps_evidence_bound_to_its_source() {
+        let findings = vec![super::ResearchFinding {
+            url: "https://example.org/v1/api".into(), title: "API v1".into(),
+            summary: "Short summary".into(), evidence: Some("Exact API and version constraint".into()),
+            image_url: None,
+        }];
+        let manifest = super::format_source_manifest(&findings);
+        assert!(manifest.contains("[API v1](https://example.org/v1/api)"));
+        assert!(manifest.contains("Exact API and version constraint"));
+    }
+
     #[tokio::test]
     async fn degraded_run_without_provider_returns_no_evidence() {
         let dir = tempfile::tempdir().unwrap();
