@@ -107,7 +107,7 @@ pub(super) fn publish(
             let mut text = block.to_string();
             for source in &checked.evidence {
                 let url = &passages.get(*source)?.url;
-                if !text.contains(url) { text.push_str(&format!(" [Source](<{url}>)")); }
+                if !text.contains(url) { text.push_str(&format!("\n\n[Source](<{url}>)")); }
             }
             let words = text.split_whitespace().count();
             if words <= remaining { remaining -= words; out.push(text); }
@@ -278,6 +278,24 @@ mod tests {
         assert!(!report.contains("## Findings"));
         assert!(report.starts_with("One two three"));
         assert_eq!(report.split_whitespace().count(), 10);
+    }
+
+    #[test]
+    fn citations_follow_fenced_code_without_corrupting_closing_fence() {
+        let code = "```rust\nlet first = 1;\n\nlet second = 2;\n```";
+        let review = Review { blocks: vec![BlockReview { id: 0, supported: true, evidence: vec![0] }] };
+        let (report, _, _) = publish(&[code], review, &passages(), None).unwrap();
+        assert!(report.starts_with(&format!("{code}\n\n[Source]")));
+        let mut code_blocks = 0;
+        for event in pulldown_cmark::Parser::new(&report) {
+            if let pulldown_cmark::Event::Text(ref text) = event {
+                assert!(!text.contains("[Source]"));
+            }
+            if matches!(event, pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(..))) {
+                code_blocks += 1;
+            }
+        }
+        assert_eq!(code_blocks, 1);
     }
 
     #[test]

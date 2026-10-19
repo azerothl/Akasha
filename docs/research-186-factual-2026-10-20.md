@@ -85,3 +85,8 @@ Le plafond final est vérifié aussi pour les rapports dégradés sans page cons
 ### Références Markdown et preuves normalisées
 
 Les références Markdown sont résolues avec le parseur sur le document complet avant la séparation des blocs : chaque affirmation conserve ainsi sa destination pour le contrôle de ses preuves. L’expansion des tableaux conserve également les autres citations vérifiées dont les espaces avaient été normalisés sur plusieurs lignes sources. Deux régressions supplémentaires : 56 tests Rust Recherche réussis.
+
+
+### Blocs Markdown et légendes après tableau
+
+Le découpage utilise les limites des blocs du parseur Markdown et conserve les exemples de code, listes et tableaux entiers. Les citations sont ajoutées dans un paragraphe séparé pour préserver les clôtures de code. La collecte recherche aussi les qualifications dans les 14 lignes suivant le tableau. Trois régressions supplémentaires : 59 tests Rust Recherche réussis.

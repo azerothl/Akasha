@@ -976,7 +976,7 @@ fn complete_selected_tables(evidence: &str, content: &str, goal: &str) -> String
         }
         let unrelated: HashSet<_> = labels.iter().filter(|(row, _)| !matching.is_empty() && !matching.contains(row))
             .flat_map(|(_, label)| label.iter().cloned()).collect();
-        for before in start.saturating_sub(14)..start {
+        for before in (start.saturating_sub(14)..start).chain(end..(end + 14).min(lines.len())) {
             let lower = lines[before].to_lowercase();
             let legend = ["denot", "amort", "notation", "cost", "coût", "resiz", "*", "~"]
                 .iter().any(|term| lower.contains(term));
@@ -1350,8 +1350,29 @@ fn inline_reference_links(report: &str) -> String {
 /// assertions remain intact: they must fail safely if no bounded audit fits.
 fn audit_blocks(report: &str, max_bytes: usize) -> Vec<String> {
     let mut blocks = Vec::new();
-    for block in report.split("\n\n").filter(|block| !block.trim().is_empty()) {
-        if block.len() <= max_bytes || block.lines().any(|line| line.trim_start().starts_with('|')) {
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    let mut ranges = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut prose = false;
+    for (event, range) in Parser::new_ext(report, Options::ENABLE_TABLES).into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                if depth == 0 { start = range.start; prose = matches!(tag, Tag::Paragraph); }
+                depth += 1;
+            }
+            Event::End(_) => {
+                depth -= 1;
+                if depth == 0 { ranges.push((start..range.end, prose)); }
+            }
+            Event::Html(_) | Event::Rule if depth == 0 => ranges.push((range, false)),
+            _ => {}
+        }
+    }
+    for (range, prose) in ranges {
+        let block = report[range].trim();
+        if block.is_empty() { continue; }
+        if block.len() <= max_bytes || !prose {
             blocks.push(block.to_string());
             continue;
         }
@@ -1864,6 +1885,23 @@ mod tests {
                 Err("research_report_generation_failed".into()));
         }
         assert_eq!(super::require_report(Some("## Sourced report".into()), "no_run", "no_branch", "no_writer").await.unwrap(), "## Sourced report");
+    }
+
+    #[test]
+    fn fenced_code_with_blank_lines_is_one_indivisible_audit_block() {
+        let code = "```rust\nlet first = 1;\n\nlet second = 2;\n```";
+        let report = format!("Introduction.\n\n{code}\n\nConclusion.");
+        let blocks = super::audit_blocks(&report, 10);
+        assert_eq!(blocks, vec!["Introduction.", code, "Conclusion."]);
+    }
+
+    #[test]
+    fn table_expansion_recovers_following_cost_qualifiers() {
+        let page = "| Type | insert |\n| Vec | O(n)* |\n* denotes amortized cost.\n~ denotes expected cost.";
+        let expanded = super::complete_selected_tables("| Type | insert |", page, "Vec");
+        assert!(expanded.contains("| Vec | O(n)* |"));
+        assert!(expanded.contains("* denotes amortized cost."));
+        assert!(expanded.contains("~ denotes expected cost."));
     }
 
     #[test]
