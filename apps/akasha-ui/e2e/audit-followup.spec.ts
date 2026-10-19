@@ -223,3 +223,24 @@ for (const resume of [false,true]) {
     expect(await page.evaluate(()=>JSON.parse(localStorage.getItem('akasha_deep_research_v2')??'[]')[0]?.branches?.[0]?.subAgents?.[0]?.status)).toBe('error');
   });
 }
+
+// Rendering fixture only; real-source factual validation is documented separately.
+test('research quoted table retains rows and cost qualifiers', async ({page}) => {
+  await fixture(page);
+  await page.addInitScript(() => localStorage.setItem('akasha_deep_research_v2', JSON.stringify([{
+    id:'res_quoted_table', topic:'Quoted table rendering fixture', maxRounds:1,
+    createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), status:'complete', branches:[],
+    reportMarkdown:'# Rendering fixture\n\n> Costs marked * are amortized; removal costs are not.\n> | Type | insert(i) | remove(i) |\n> |---|---|---|\n> | Array | O(n)\\* | O(n) |\n> | Ring | O(1)\\* | O(1) |\n\n[Source](<https://example.org/operations>)',
+    reportMeta:{sources:[{title:'Fixture source',url:'https://example.org/operations'}],sources_sufficient:false,
+      quality_warnings:['Rendering fixture'],category:'comparison',word_count:35,rounds:1,duration_secs:1,providers_used:['fixture']},
+  }])));
+  await page.goto('/#/research');
+  const report=page.getByRole('region',{name:'Rapport de recherche'});
+  await expect(report.getByRole('table')).toHaveCount(1);
+  await expect(report.getByRole('row')).toHaveCount(3);
+  await expect(report.locator('th').filter({hasText:'insert(i)'})).toBeVisible();
+  await expect(report.getByRole('cell',{name:'O(n)*',exact:true})).toBeVisible();
+  await expect(report.getByRole('cell',{name:'O(n)',exact:true})).toBeVisible();
+  await expect(report).toContainText('removal costs are not');
+  await expect(report.getByRole('link',{name:'Source',exact:true})).toHaveAttribute('href','https://example.org/operations');
+});
