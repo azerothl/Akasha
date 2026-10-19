@@ -153,12 +153,25 @@ fn markdown_citation_urls(text: &str) -> Vec<String> {
 }
 
 pub fn strip_html(html: &str) -> String {
-    static TAG_RE: OnceLock<Regex> = OnceLock::new();
-    static WS_RE: OnceLock<Regex> = OnceLock::new();
-    let tag_re = TAG_RE.get_or_init(|| Regex::new(r"<[^>]+>").expect("tag re"));
-    let ws_re = WS_RE.get_or_init(|| Regex::new(r"\s+").expect("ws re"));
-    let no_tags = tag_re.replace_all(html, " ");
-    ws_re.replace_all(&no_tags, " ").trim().to_string()
+    fn append(element: scraper::ElementRef<'_>, text: &mut String) {
+        let name = element.value().name();
+        if matches!(name, "script" | "style" | "nav" | "aside" | "header" | "footer") { return; }
+        let block = matches!(name, "p" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "pre" | "br");
+        if block { text.push('\n'); }
+        if matches!(name, "td" | "th") { text.push_str(" | "); }
+        for child in element.children() {
+            if let scraper::Node::Text(value) = child.value() { text.push_str(value); }
+            else if let Some(child) = scraper::ElementRef::wrap(child) { append(child, text); }
+        }
+        if block { text.push('\n'); }
+    }
+    let document = scraper::Html::parse_document(html);
+    let selector = scraper::Selector::parse("main, article").expect("content selector");
+    let root = document.select(&selector).next().unwrap_or_else(|| document.root_element());
+    let mut text = String::new();
+    append(root, &mut text);
+    text.lines().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n")
 }
 
 pub fn is_low_quality_summary(summary: &str) -> bool {
@@ -369,6 +382,18 @@ fn normalize_image_url(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_text_preserves_tables_qualifiers_and_excludes_navigation() {
+        let page = "<nav>OtherType push_front</nav><main><h1>Costs &amp; APIs</h1><p>Costs marked * are amortized.</p><table><tr><th>Type</th><th>insert(i)</th><th>remove(i)</th></tr><tr><td>Vec</td><td>O(n-i)*</td><td>O(n-i)</td></tr></table><p><code>push</code> adds at the end.</p><script>fake fact</script></main>";
+        let text = strip_html(page);
+        assert!(text.contains("Type | insert(i) | remove(i)\n| Vec | O(n-i)* | O(n-i)"));
+        assert!(text.contains("Costs marked * are amortized."));
+        assert!(text.contains("Costs & APIs"));
+        assert!(text.contains("push adds at the end."));
+        assert!(!text.contains("OtherType") && !text.contains("fake fact"));
+        assert_eq!(strip_html("plain text without HTML"), "plain text without HTML");
+    }
 
     #[test]
     fn gfm_and_html_links_cannot_bypass_consulted_source_validation() {
