@@ -1463,6 +1463,7 @@ pub(crate) async fn schedule_run_now(
         .handle_message(
             store_path,
             msg,
+            None,
             correlation,
             true,
             &session_id,
@@ -1490,11 +1491,41 @@ pub(crate) async fn schedule_run_now(
     }
 }
 
+fn composer_message(mode: &str, prompt: &str, message: &str) -> String {
+    // Byte length preserves arbitrary multi-paragraph prompts without ambiguous delimiters.
+    format!("[Composer mode: {mode}; prompt_bytes: {}]\n{prompt}\n\n{message}", prompt.len())
+}
+
 pub(crate) fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> String {
     const LABEL_MAX: usize = 100;
     match initial_message {
         Some(m) if !m.trim().is_empty() => {
-            let s = m.trim();
+            // Labels describe the request, never the private instructions prepended for the LLM.
+            // Unwrap before truncating, otherwise the user's words can be lost entirely.
+            let mut s = m.trim();
+            if s.starts_with("[Task]\nObjective: ") {
+                s = s.trim_start_matches("[Task]\nObjective: ");
+                s = s.split("\nContext: ").next().unwrap_or(s);
+                s = s.split("\nSuccess criteria:").next().unwrap_or(s);
+            }
+            if s.starts_with("[Orchestrated — disk deliverables REQUIRED]") {
+                s = s.splitn(2, "\n\n").nth(1).unwrap_or("").trim();
+            }
+            if s.starts_with("[Composer mode:") {
+                // Old envelopes have no unambiguous end for a user-managed prompt.
+                // Keep their labels generic instead of exposing private paragraphs.
+                s = s.split_once("]\n").and_then(|(header, rest)| {
+                    let (_, length) = header.rsplit_once("; prompt_bytes: ")?;
+                    let length = length.parse::<usize>().ok()?;
+                    rest.get(length..)?.strip_prefix("\n\n")
+                }).unwrap_or("").trim();
+            }
+            if s.starts_with("[Pièce(s) jointe(s) à ce message") {
+                s = s.splitn(2, "\n\nMessage : ").nth(1).unwrap_or("");
+                s = s.split("\n\n--- Document(s) joint(s) ---").next().unwrap_or(s).trim();
+            }
+            let clean = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            let s = if clean.is_empty() { "Tâche" } else { clean.as_str() };
             if s.chars().count() > LABEL_MAX {
                 format!("{}…", s.chars().take(LABEL_MAX).collect::<String>())
             } else {
@@ -1752,6 +1783,7 @@ if method == "POST" && path == "/api/message" {
         .as_ref()
         .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
         .unwrap_or_default();
+    let display_request = message.clone();
     // Parse attachments: images -> data URLs for vision; documents -> append extracted text to message.
     let image_data_urls: Option<Vec<String>> = {
         let arr = body_json
@@ -2360,10 +2392,12 @@ if method == "POST" && path == "/api/message" {
             .filter(|s| !s.is_empty())
             .or_else(|| crate::api::agent_role_system_prompt(mode).map(|s| s.to_string()));
         if let Some(p) = prefix {
-            message_for_llm = format!("[Composer mode: {mode}]\n{p}\n\n{message_for_llm}");
+            message_for_llm = composer_message(mode, &p, &message_for_llm);
         } else if mode == "ask" {
-            message_for_llm = format!(
-                "[Composer mode: ask]\nAnswer questions only. Use read-only tools if needed. Do not write files or run mutating shell commands.\n\n{message_for_llm}"
+            message_for_llm = composer_message(
+                "ask",
+                "Answer questions only. Use read-only tools if needed. Do not write files or run mutating shell commands.",
+                &message_for_llm,
             );
         }
     }
@@ -2374,6 +2408,7 @@ if method == "POST" && path == "/api/message" {
         priority,
         incognito,
     );
+    envelope.display_request = Some(display_request);
     envelope.studio_disk_root = studio_disk_root.clone();
     envelope.studio_forced_agent = studio_forced_agent;
     envelope.studio_evolution_branch = studio_evolution_branch;
@@ -2667,6 +2702,29 @@ mod tests {
     use akasha_store::Task;
     use chrono::Utc;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn task_label_unwraps_private_instructions_before_truncation() {
+        let id = Uuid::nil();
+        let long_instruction = "Internal instruction. ".repeat(30);
+        let message = composer_message("ask", &long_instruction, "Comparer Vec et HashMap\n  en français");
+        assert_eq!(task_label(Some(&message), &id), "Comparer Vec et HashMap en français");
+        let attachment = "[Pièce(s) jointe(s) à ce message : aide]\n\nMessage : Résumer ce document\n\n--- Document(s) joint(s) ---\nsecret attachment body".to_string();
+        let attachment = composer_message("ask", "Read only.\n\nInstructions privées et caractères accentués.", &attachment);
+        assert_eq!(task_label(Some(&attachment), &id), "Résumer ce document");
+        let prompt = "Premier paragraphe privé.\n\nSecond paragraphe privé : été 🦀.\n\nDernière consigne.";
+        let message = composer_message("custom", prompt, "Ma vraie demande\n\nAvec un second paragraphe");
+        assert_eq!(task_label(Some(&message), &id), "Ma vraie demande Avec un second paragraphe");
+        for legacy in [
+            "[Composer mode: custom]\nPrivate first paragraph\n\nPrivate second paragraph\n\nUser request",
+            "[Composer mode: custom; prompt_bytes: 1]\né\n\nUser request",
+            "[Composer mode: custom; prompt_bytes: 999999]\nprivate",
+        ] {
+            assert_eq!(task_label(Some(&legacy.to_string()), &id), "Tâche");
+        }
+        let child = "[Task]\nObjective: [Orchestrated — disk deliverables REQUIRED]\nInternal tools requirement.\n\nCréer le rapport\nContext: private shared plan\nSuccess criteria: secret".to_string();
+        assert_eq!(task_label(Some(&child), &id), "Créer le rapport");
+    }
 
     #[test]
     fn tasks_paths_smoke() {

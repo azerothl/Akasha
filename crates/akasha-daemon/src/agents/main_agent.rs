@@ -291,6 +291,19 @@ pub struct MainAgent {
     studio_disk_registry: StudioDiskRootRegistry,
 }
 
+fn initial_task_message(message: &str, display_request: Option<&str>) -> Option<String> {
+    // Persist the original request before truncation, never private LLM wrappers.
+    let request = display_request.unwrap_or(message);
+    const MAX_INITIAL_MESSAGE: usize = 500;
+    if request.trim().is_empty() {
+        None
+    } else if request.chars().count() > MAX_INITIAL_MESSAGE {
+        Some(request.chars().take(MAX_INITIAL_MESSAGE).chain(std::iter::once('…')).collect())
+    } else {
+        Some(request.to_string())
+    }
+}
+
 impl MainAgent {
     pub fn new(
         bus: EventBus,
@@ -455,6 +468,7 @@ User message:\n{}",
         &self,
         store_path: &Path,
         message: &str,
+        display_request: Option<&str>,
         _correlation_id: Uuid,
         forward_to_orchestrator: bool,
         session_id: &str,
@@ -468,16 +482,7 @@ User message:\n{}",
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
 
-        const MAX_INITIAL_MESSAGE: usize = 500;
-        let initial_message = if message.is_empty() {
-            None
-        } else {
-            Some(if message.chars().count() > MAX_INITIAL_MESSAGE {
-                message.chars().take(MAX_INITIAL_MESSAGE).chain(std::iter::once('…')).collect::<String>()
-            } else {
-                message.to_string()
-            })
-        };
+        let initial_message = initial_task_message(message, display_request);
 
         // Determine a preliminary assigned_agent (without LLM) so the task can be persisted
         // immediately, satisfying the "ack < 500ms" guarantee and ensuring the task_id is in
@@ -879,6 +884,20 @@ mod tests {
         is_external_info_request, normalize_task_type, parse_selector_decision,
         strip_thinking_tokens, SelectorAnswerMode,
     };
+
+    #[test]
+    fn initial_task_message_preserves_raw_request_before_truncation() {
+        let raw = "Créer le rapport avec été 🦀.";
+        let decorated = format!("[Composer mode: custom]\n{}\n\n[Studio project private context]\n{raw}", "Private instructions.\n\n".repeat(100));
+        let initial = super::initial_task_message(&decorated, Some(raw)).unwrap();
+        assert_eq!(initial, raw);
+        assert_eq!(crate::api_routes_tasks::task_label(Some(&initial), &uuid::Uuid::nil()), raw);
+        let long = "é".repeat(600);
+        let initial = super::initial_task_message(&decorated, Some(&long)).unwrap();
+        assert_eq!(initial, format!("{}…", "é".repeat(500)));
+        assert_eq!(super::initial_task_message(&decorated, Some("")), None);
+        assert_eq!(super::initial_task_message("schedule request", None).as_deref(), Some("schedule request"));
+    }
 
     #[test]
     fn selector_parse_valid_direct() {

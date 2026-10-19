@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { describe, expect, it, beforeEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import { render, screen, cleanup } from "@testing-library/react";
+import { I18nProvider } from "../useI18n";
 import {
   ThemeEditorPanel,
   THEME_OVERRIDE_STORAGE_KEY,
@@ -9,6 +10,7 @@ import {
 } from "./ThemeEditorPanel";
 
 const t = (key: string) => key;
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("ThemeEditorPanel", () => {
   beforeEach(() => {
@@ -22,7 +24,7 @@ describe("ThemeEditorPanel", () => {
   });
 
   it("is collapsed by default when no overrides exist", () => {
-    render(<ThemeEditorPanel theme="dark_akasha" t={t} />);
+    render(<I18nProvider><ThemeEditorPanel theme="dark_akasha" t={t} /></I18nProvider>);
     const details = document.querySelector("details.theme-editor-details");
     expect(details).not.toBeNull();
     expect(details?.hasAttribute("open")).toBe(false);
@@ -35,7 +37,7 @@ describe("ThemeEditorPanel", () => {
     );
     const overrides = loadThemeOverrides();
     expect(themeOverrideCount(overrides, "dark_akasha")).toBe(1);
-    render(<ThemeEditorPanel theme="dark_akasha" t={t} />);
+    render(<I18nProvider><ThemeEditorPanel theme="dark_akasha" t={t} /></I18nProvider>);
     expect(screen.getByText("(1)")).toBeTruthy();
   });
 
