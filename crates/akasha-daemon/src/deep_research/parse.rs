@@ -266,7 +266,7 @@ pub fn assess_report_quality(
     let words = word_count(markdown);
     let citations = count_markdown_link_citations(markdown);
     let mut warnings = Vec::new();
-    if search_degraded {
+    if search_degraded && source_count == 0 {
         warnings.push(
             "Web search was unavailable; claims may rely on model knowledge — verify independently."
                 .to_string(),
@@ -288,8 +288,7 @@ pub fn assess_report_quality(
                 .to_string(),
         );
     }
-    let needs_retry = !search_degraded
-        && sources_sufficient
+    let needs_retry = sources_sufficient
         && source_count >= 8
         && (words < min_words || citations < source_count.min(12));
     ReportQualityCheck {
@@ -409,6 +408,18 @@ mod tests {
             ]),
             3
         );
+    }
+
+    #[test]
+    fn direct_pages_do_not_get_model_only_or_false_thin_source_warnings() {
+        let body = (0..12).map(|i| format!("[Source {i}](https://example.org/{i})")).collect::<Vec<_>>().join(" ");
+        let quality = assess_report_quality(&body, 12, true, true, 10);
+        assert!(quality.warnings.is_empty());
+        assert!(!quality.needs_retry);
+        let thin = assess_report_quality(&body, 4, false, true, 10);
+        assert!(thin.warnings.iter().any(|warning| warning.contains("Only 4 pages")));
+        assert!(!thin.warnings.iter().any(|warning| warning.contains("model knowledge")));
+        assert!(assess_report_quality("Notes", 0, false, true, 10).warnings.iter().any(|warning| warning.contains("model knowledge")));
     }
 
     #[test]

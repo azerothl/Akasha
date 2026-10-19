@@ -490,7 +490,7 @@ async fn run_engine(
         finish_branch(run_id, &branch_final, StepStatus::Error).await;
         return Err("research_no_evidence".to_string());
     }
-    // A disabled discovery provider is not model-only research when pages were read.
+    // Preserve discovery provenance; page sufficiency is independent of providers.
     let (search_degraded, enough_pages) = report_source_quality(search_degraded,
         findings.iter().filter(|f| !f.url.is_empty()).count(), config.min_sources_for_report as usize);
     store.update(run_id, |r| r.search_degraded = search_degraded).await;
@@ -1021,7 +1021,7 @@ fn fallback_title_from_topic(topic: &str) -> String {
 // Conservative UTF-8 byte budgets leave room in the default 8192-token context
 // even for byte-level tokenization. Full findings remain in the live run data.
 fn report_source_quality(discovery_unavailable: bool, pages: usize, required: usize) -> (bool, bool) {
-    (discovery_unavailable && pages == 0, pages >= required)
+    (discovery_unavailable, pages >= required)
 }
 
 const REPORT_PROMPT_BYTES: usize = 5632;
@@ -1365,8 +1365,8 @@ fn truncate_label(s: &str, max: usize) -> String {
 mod tests {
     #[test]
     fn fetched_page_sufficiency_does_not_depend_on_discovery() {
-        assert_eq!(super::report_source_quality(true, 12, 12), (false, true));
-        assert_eq!(super::report_source_quality(true, 4, 12), (false, false));
+        assert_eq!(super::report_source_quality(true, 12, 12), (true, true));
+        assert_eq!(super::report_source_quality(true, 4, 12), (true, false));
         assert_eq!(super::report_source_quality(true, 0, 12), (true, false));
         assert_eq!(super::report_source_quality(false, 0, 12), (false, false));
     }

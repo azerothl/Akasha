@@ -737,7 +737,9 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             <p>{en ? "The available sources are insufficient to support all conclusions. This report needs verification."
               : "Les sources disponibles ne suffisent pas à étayer toutes les conclusions. Ce rapport doit être vérifié."}</p>
             <p>{en ? "Sources retained" : "Sources retenues"} : {selected?.reportMeta?.sources?.length ?? 0}</p>
-            {selected?.reportMeta?.search_degraded && <p>{en ? "Web search unavailable: model knowledge only." : "Recherche Web indisponible : connaissances du modèle uniquement."}</p>}
+            {selected?.reportMeta?.search_degraded && <p>{selected.reportMeta.sources.length > 0
+              ? (en ? "Search providers unavailable: report based on pages read directly." : "Moteurs indisponibles : rapport fondé sur les pages lues directement.")
+              : (en ? "Web search unavailable: model knowledge only." : "Recherche Web indisponible : connaissances du modèle uniquement.")}</p>}
           </div>}
           {reportReady && <section className="research-report-preview" aria-label={en ? "Research report" : "Rapport de recherche"}>
             <Suspense fallback={<p role="status">{en ? "Loading report…" : "Chargement du rapport…"}</p>}>
@@ -745,7 +747,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             </Suspense>
           </section>}
           {!inDraft && selected?.searchDegraded ? (
-            <p className="research-degraded-hint muted" role="status">{t("research.search_degraded")}</p>
+            <p className="research-degraded-hint muted" role="status">{en ? "Discovery of new pages is unavailable." : "La recherche de nouvelles pages est indisponible."}</p>
           ) : null}
           {loading ? (
             <p className="research-slow-hint muted">

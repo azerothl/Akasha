@@ -82,7 +82,7 @@ for(const touch of [false,true])for(const width of [400,800,1280]){
   });
 }
 
-for(const outcome of ['ready','limited','empty','error','report-error','cancelled'] as const){
+for(const outcome of ['ready','direct','limited','empty','error','report-error','cancelled'] as const){
   test(`research outcome: ${outcome}`,async({page})=>{
     await fixture(page);let polls=0;
     await page.route('**/__e2e_daemon/api/research/deep/start',async route=>{
@@ -93,17 +93,18 @@ for(const outcome of ['ready','limited','empty','error','report-error','cancelle
       const phase=polls===1?'searching':(outcome==='error'||outcome==='report-error')?'error':outcome==='cancelled'?'cancelled':'done';
       const sources=outcome==='empty'?[]:[{title:'Rust documentation',url:'https://doc.rust-lang.org/std/collections/'}];
       await route.fulfill({json:{id:'dr_fixture',topic:'Rust collections',phase,round:1,max_rounds:1,
-        branches:[],evolving_report:'',search_degraded:false,error:phase==='error'?(outcome==='report-error'?'research_report_generation_failed':'research_no_evidence'):null,
+        branches:[],evolving_report:'',search_degraded:outcome==='direct',error:phase==='error'?(outcome==='report-error'?'research_report_generation_failed':'research_no_evidence'):null,
         report_markdown:phase==='done'?(outcome==='empty'?'No information could be gathered for this question.':'# Collections\n\nVec est une séquence contiguë. [Documentation Rust](https://doc.rust-lang.org/std/collections/).'):null,
-        report_meta:{sources,sources_sufficient:outcome==='ready',quality_warnings:[],search_degraded:false,category:'general',word_count:20,rounds:1,duration_secs:1,providers_used:['fixture']}}});
+        report_meta:{sources,sources_sufficient:outcome==='ready'||outcome==='direct',quality_warnings:[],search_degraded:outcome==='direct',category:'general',word_count:20,rounds:1,duration_secs:1,providers_used:outcome==='direct'?[]:['fixture']}}});
     });
     await page.goto('/#/research');const topic=page.locator('.research-content textarea');
     const run=page.getByRole('button',{name:'Lancer la recherche',exact:true});
     await topic.fill('   ');await expect(run).toBeDisabled();await topic.fill('Rust collections');await run.click();
     await expect(page.getByRole('button',{name:'Annuler',exact:true})).toBeVisible();
-    if(outcome==='ready'||outcome==='limited'){
+    if(outcome==='ready'||outcome==='direct'||outcome==='limited'){
       await expect(page.getByRole('region',{name:'Rapport de recherche'})).toContainText('Vec est une séquence contiguë');
       if(outcome==='limited')await expect(page.getByText(/Rapport partiel/)).toBeVisible();
+      if(outcome==='direct'){await expect(page.getByText(/Rapport partiel/)).toHaveCount(0);await expect(page.getByText(/connaissances du modèle uniquement/)).toHaveCount(0);}
     }else if(outcome==='report-error'){
       await expect(page.locator('.research-result-notice[role="alert"]')).toContainText('Le rapport final n’a pas pu être rédigé');
       await expect(page.getByRole('button',{name:'Rouvrir le rapport'})).toHaveCount(0);
