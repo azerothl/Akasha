@@ -97,7 +97,14 @@ pub(super) fn publish(
             continue;
         }
         let checked = review.blocks.iter().find(|b| b.id == id)?;
-        if checked.supported && !complexity_claim(block) {
+        let selected_sources: Vec<_> = checked.evidence.iter()
+            .map(|source| passages.get(*source).map(|passage| passage.url.as_str()))
+            .collect::<Option<Vec<_>>>()?;
+        // A consulted URL is not necessarily evidence for this particular claim.
+        // Use original selected passages if the draft cites any unselected URL,
+        // rather than trying to rewrite arbitrary Markdown/HTML link syntax.
+        let citations_selected = super::parse::unconsulted_citation_urls(block, &selected_sources).is_empty();
+        if checked.supported && !complexity_claim(block) && citations_selected {
             let mut text = block.to_string();
             for source in &checked.evidence {
                 let url = &passages.get(*source)?.url;
@@ -232,6 +239,29 @@ mod tests {
         for text in ["Cost O(1)", "Cost O (n)", "Cost O\t(n log n)", "`O(n)`", "O(n) amortized"] {
             assert!(complexity_claim(text));
         }
+    }
+
+    #[test]
+    fn citations_must_be_selected_for_this_block_not_merely_consulted() {
+        let mut sources = passages();
+        sources.push(Passage { url: "https://other.example/unrelated".into(), text: "An unrelated fact.".into() });
+        for claim in [
+            "Claim [B](https://other.example/unrelated)",
+            "Claim <https://other.example/unrelated>",
+            "Claim <a href=\"https://other.example/unrelated\">B</a>",
+            "Claim [B][ref]\n\n[ref]: https://other.example/unrelated",
+        ] {
+            let review = Review { blocks: vec![BlockReview { id: 0, supported: true, evidence: vec![0] }] };
+            let (report, replaced, _) = publish(&[claim], review, &sources, None).unwrap();
+            assert!(!report.contains("other.example"), "{report}");
+            assert!(report.contains("https://example.org/operations"));
+            assert_eq!(replaced, 1);
+        }
+        let claim = "Claim [A](https://example.org/operations#section)";
+        let review = Review { blocks: vec![BlockReview { id: 0, supported: true, evidence: vec![0] }] };
+        let (report, replaced, _) = publish(&[claim], review, &sources, None).unwrap();
+        assert!(report.starts_with(claim));
+        assert_eq!(replaced, 0);
     }
 
     #[test]

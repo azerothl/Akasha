@@ -65,3 +65,8 @@ La réserve fixe de 35 mots et la note bilingue ajoutée systématiquement ont �
 ### Second passage de revue CI
 
 Les titres susceptibles de contenir une affirmation sont maintenant inclus dans les blocs contrôlés ; seule une liste fermée de titres génériques est exemptée. La détection de la notation Big-O conserve les frontières des mots, afin de ne pas confondre « Go (the language) » avec une garantie de complexité. Deux tests de régression supplémentaires : 50 tests Rust Recherche réussis. Cette évolution a été vérifiée par tests ciblés, sans nouvelle recherche réelle.
+
+
+### Citations propres à chaque bloc
+
+Un lien vers une page consultée ne suffit plus : si le bloc cite une URL que son audit ne retient pas comme preuve, sa prose est remplacée par les passages originaux sélectionnés. Test des liens Markdown, HTML, automatiques et par référence, ainsi que des ancres autorisées : 51 tests Rust Recherche réussis.
