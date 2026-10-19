@@ -89,14 +89,14 @@ impl NativeCalls {
     }
     #[cfg(test)]
     pub(crate) fn finish(self,text:String,finish:Option<&str>)->Result<String,ProviderError>{
-        self.finish_with_functions(text,finish,&[])
+        self.finish_with_functions(text,finish,&["studio_call".into()])
     }
     pub(crate) fn finish_with_functions(self,text:String,finish:Option<&str>,functions:&[String])->Result<String,ProviderError>{
         if self.0.is_empty(){return Ok(text);}
         if !matches!(finish,Some("tool_calls"|"stop")){return Err(ProviderError::Api("native tool generation incomplete; nothing executed".into()));}
         let mut output=Vec::new();
         for (_, (name,arguments)) in self.0 {
-            if name!="studio_call" && !functions.contains(&name){return Err(ProviderError::Api("unsupported native function; nothing executed".into()));}
+            if !functions.contains(&name){return Err(ProviderError::Api("unsupported native function; nothing executed".into()));}
             let value:serde_json::Value=serde_json::from_str(&arguments).map_err(|_|ProviderError::Api("malformed native arguments; nothing executed".into()))?;
             if !value.is_object(){return Err(ProviderError::Api("native arguments must be an object".into()));}
             let value=if name=="studio_call"{value}else{serde_json::json!({"schema_version":1,"tool":name,"arguments":value})};
@@ -108,9 +108,6 @@ impl NativeCalls {
 
 pub(crate) fn advertised_function_names(body:&serde_json::Value)->Vec<String>{
     body["tools"].as_array().into_iter().flatten().filter_map(|tool|tool.pointer("/function/name").and_then(serde_json::Value::as_str).map(str::to_owned)).collect()
-}
-fn normalize_native_completion(json:&serde_json::Value,text:String)->Result<String,ProviderError>{
-    normalize_native_completion_with_functions(json,text,&[])
 }
 fn normalize_native_completion_with_functions(json:&serde_json::Value,text:String,functions:&[String])->Result<String,ProviderError>{
     let choice=&json["choices"][0];
@@ -292,6 +289,18 @@ mod studio_native_tests {
         for (name,finish) in [("unknown","tool_calls"),("write_file","length")] {
             let mut calls=NativeCalls::default();calls.apply(&delta(name,&args)).unwrap();
             assert!(calls.finish_with_functions(String::new(),Some(finish),&["write_file".into()]).is_err());
+        }
+    }
+    #[test]
+    fn native_wrapper_requires_explicit_advertisement_for_the_whole_batch() {
+        let args=json!({"schema_version":1,"tool":"run_command","arguments":{"command":"forbidden"}}).to_string();
+        for functions in [vec![],vec!["write_file".into(),"read_file".into()]] {
+            let mut calls=NativeCalls::default();
+            calls.apply(&json!({"tool_calls":[{"index":0,"function":{"name":"write_file","arguments":"{}"}},{"index":1,"function":{"name":"studio_call","arguments":args}}]})).unwrap();
+            assert!(calls.finish_with_functions(String::new(),Some("tool_calls"),&functions).is_err());
+            let response=json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"studio_call","arguments":args}}]},"finish_reason":"tool_calls"}]});
+            assert!(normalize_native_completion_with_functions(&response,String::new(),&functions).is_err());
+            assert!(normalize_native_completion_with_functions(&response,String::new(),&["studio_call".into()]).is_ok());
         }
     }
     #[test]
@@ -1395,7 +1404,7 @@ impl LLMProvider for OpenRouterProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let text=normalize_native_completion(&json,text)?;
+        let text=normalize_native_completion_with_functions(&json,text,&advertised_function_names(&body))?;
         let usage = json.get("usage").map(|u| TokenUsage {
             prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -1702,7 +1711,7 @@ impl LLMProvider for AzureOpenAIProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let text=normalize_native_completion(&json,text)?;
+        let text=normalize_native_completion_with_functions(&json,text,&advertised_function_names(&body))?;
         let usage = json.get("usage").map(|u| TokenUsage {
             prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),

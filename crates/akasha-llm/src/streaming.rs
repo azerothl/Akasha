@@ -396,7 +396,7 @@ mod tests {
     async fn posted_native_function_catalogue_controls_sse_normalization() {
         use std::io::{Read,Write};
         use serde_json::json;
-        for name in ["write_file","unadvertised"] {
+        for name in ["write_file","unadvertised","studio_call"] {
             let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
             let worker=std::thread::spawn(move || {
                 let (mut socket,_)=listener.accept().unwrap();let mut bytes=vec![];let mut buffer=[0u8;1024];
@@ -431,7 +431,7 @@ mod tests {
         });
         let response=reqwest::Client::new().get(format!("http://{address}")).send().await.unwrap();
         let (tx,_rx)=std::sync::mpsc::channel();
-        let completed=super::read_openai_compatible_sse_stream(response,"fixture",&tx).await.unwrap();
+        let completed=super::read_openai_sse_with_functions(response,"fixture",&tx,&["studio_call".into()]).await.unwrap();
         assert_eq!(completed.done_reason.as_deref(),Some("tool_calls"));assert!(completed.text.starts_with("TOOL_JSON:"));worker.join().unwrap();
     }
     use super::apply_openai_delta;
