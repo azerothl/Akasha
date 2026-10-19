@@ -247,10 +247,14 @@ pub fn is_unreadable_fetched_content(body: &str, url: &str) -> bool {
 pub fn requested_max_words(topic: &str) -> Option<usize> {
     static LIMIT: OnceLock<Regex> = OnceLock::new();
     let re = LIMIT.get_or_init(|| Regex::new(
-        r"(?i)(?:\b(\d{1,6})\s+(?:mots?|words?)\s+(?:maximum|max\b|au plus)|(?:maximum(?:\s+(?:de|of))?|au plus|at most|no more than|up to)\s+(\d{1,6})\s+(?:mots?|words?)\b)"
+        r"(?i)(?:\b(\d{1,6})\s+(?:mots?|words?)\s+(?:au\s+maximum|maximum|max\b|au plus)|(?:maximum(?:\s+(?:de|of))?|au plus|at most|no more than|up to|do not exceed|ne pas dépasser|limit\s+(?:the\s+)?(?:answer|report|response)\s+to|limiter\s+(?:la réponse|le rapport)\s+à)\s+(\d{1,6})\s+(?:mots?|words?)\b|(?:\bunder|\bmoins de)\s+(\d{1,6})\s+(?:mots?|words?)\b)"
     ).expect("word limit regex"));
     re.captures_iter(topic).filter_map(|cap| {
-        cap.get(1).or_else(|| cap.get(2))?.as_str().parse::<usize>().ok().filter(|n| *n > 0)
+        let exclusive = cap.get(3).is_some();
+        let value = cap.get(1).or_else(|| cap.get(2)).or_else(|| cap.get(3))?
+            .as_str().parse::<usize>().ok()?;
+        let limit = if exclusive { value.checked_sub(1)? } else { value };
+        (limit > 0).then_some(limit)
     }).min()
 }
 
@@ -407,10 +411,13 @@ mod tests {
 
     #[test]
     fn explicit_word_maximum_does_not_confuse_sources_dates_or_minimums() {
-        for text in ["400 mots maximum", "400 words max", "au plus 400 mots", "maximum de 400 mots", "at most 400 words", "no more than 400 words", "up to 400 words"] {
+        for text in ["400 mots maximum", "400 words max", "au plus 400 mots", "maximum de 400 mots", "at most 400 words", "no more than 400 words", "up to 400 words", "400 mots au maximum", "do not exceed 400 words", "limit the answer to 400 words", "limit the report to 400 words", "ne pas dépasser 400 mots", "limiter la réponse à 400 mots"] {
             assert_eq!(requested_max_words(text), Some(400), "{text}");
         }
+        assert_eq!(requested_max_words("keep it under 400 words"), Some(399));
+        assert_eq!(requested_max_words("moins de 400 mots"), Some(399));
         assert_eq!(requested_max_words("2026 : 4 sources, 400 mots minimum"), None);
+        assert_eq!(requested_max_words("at least 400 words, 3 sources minimum"), None);
         assert_eq!(requested_max_words("0 words max"), None);
         assert_eq!(requested_max_words("500 words maximum, at most 300 words"), Some(300));
     }

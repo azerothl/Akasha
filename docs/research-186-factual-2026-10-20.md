@@ -70,3 +70,8 @@ Les titres susceptibles de contenir une affirmation sont maintenant inclus dans 
 ### Citations propres à chaque bloc
 
 Un lien vers une page consultée ne suffit plus : si le bloc cite une URL que son audit ne retient pas comme preuve, sa prose est remplacée par les passages originaux sélectionnés. Test des liens Markdown, HTML, automatiques et par référence, ainsi que des ancres autorisées : 51 tests Rust Recherche réussis.
+
+
+### Formulations de limites de longueur
+
+Le parseur reconnaît aussi « 400 mots au maximum », « do not exceed », « limit the answer/report/response to », « ne pas dépasser » et « limiter la réponse/le rapport à ». Les bornes strictes « under 400 words » et « moins de 400 mots » imposent au plus 399 mots. Les tests excluent toujours les minimums et les nombres de sources ; 51 tests Rust Recherche réussis.
