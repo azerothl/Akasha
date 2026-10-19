@@ -14,8 +14,6 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    # Main has ESLint errors; keep CI informative without blocking merges until fixed.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -31,5 +29,9 @@ jobs:
         run: npm ci
 
       - name: ESLint
+        # Non-blocking while main has lint errors; step still succeeds for required checks.
+        continue-on-error: true
         working-directory: apps/akasha-ui
-        run: npm run lint
+        run: |
+          echo "::add-matcher::${GITHUB_WORKSPACE}/.github/eslint-stylish-problem-matcher.json"
+          npm run lint
