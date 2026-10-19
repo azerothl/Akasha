@@ -99,7 +99,7 @@ fn json_function_calls(response: &str) -> Option<Vec<(String, Vec<String>)>> {
     if response.len() > 1024 * 1024 { return None; }
     let value: Value = serde_json::from_str(response.trim()).ok()?;
     let items = value.as_array().cloned().unwrap_or_else(||vec![value]);
-    if items.is_empty() || !items.iter().all(|item| item["name"]=="studio_call" && item.get("arguments").is_some()
+    if items.is_empty() || !items.iter().all(|item| (item["name"]=="studio_call" || item["name"].as_str().is_some_and(|name|crate::studio_tool_contract::supports_typed(name) && crate::api::AVAILABLE_TOOLS.iter().any(|(known,_)|*known==name))) && item.get("arguments").is_some()
         && item.as_object().is_some_and(|object|object.keys().all(|key|matches!(key.as_str(),"name"|"arguments")))) {
         return None;
     }
@@ -108,7 +108,12 @@ fn json_function_calls(response: &str) -> Option<Vec<(String, Vec<String>)>> {
     }
     Some(items.into_iter().map(|item| {
         let args=&item["arguments"];
-        let encoded=if let Some(text)=args.as_str(){text.to_owned()}else{args.to_string()};
+        let encoded=if item["name"]=="studio_call" {
+            if let Some(text)=args.as_str(){text.to_owned()}else{args.to_string()}
+        }else{
+            let arguments=args.as_str().and_then(|raw|serde_json::from_str::<Value>(raw).ok()).unwrap_or_else(||args.clone());
+            json!({"schema_version":1,"tool":item["name"],"arguments":arguments}).to_string()
+        };
         ("studio_call".into(),vec![encoded])
     }).collect())
 }
@@ -204,6 +209,13 @@ mod tests {
         assert!(parse_calls(&format!("Example: {response}")).is_empty());
         assert!(parse_calls(r#"[{"name":"other_function","arguments":{}}]"#).is_empty());
         assert!(crate::studio_tool_contract::decode(&parse_calls(r#"{"name":"studio_call","arguments":{"tool":"read_file"}}"#)[0].1.join(" ")).is_err());
+        for response in [r#"[{"name":"read_file","arguments":{"path":"workspace:/FIRST.md"}}]"#,r#"{"name":"read_file","arguments":"{\"path\":\"workspace:/FIRST.md\"}"}"#] {
+            let calls=parse_calls(response);assert_eq!(calls.len(),1);
+            let decoded=crate::studio_tool_contract::decode(&calls[0].1.join(" ")).unwrap();
+            assert_eq!(decoded.envelope.tool,"read_file");assert_eq!(decoded.argv,vec!["workspace:/FIRST.md"]);
+            let history=tool_turn(response,"alpha",3,"");assert!(history[0].content.is_empty());
+            assert_eq!(history[0].tool_calls[0]["id"],history[1].tool_call_id.as_deref().unwrap());
+        }
     }
     #[test]
     fn native_human_question_remains_visible_after_its_wait_is_cleared() {
