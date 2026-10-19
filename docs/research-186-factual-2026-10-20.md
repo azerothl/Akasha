@@ -75,3 +75,8 @@ Un lien vers une page consultée ne suffit plus : si le bloc cite une URL que so
 ### Formulations de limites de longueur
 
 Le parseur reconnaît aussi « 400 mots au maximum », « do not exceed », « limit the answer/report/response to », « ne pas dépasser » et « limiter la réponse/le rapport à ». Les bornes strictes « under 400 words » et « moins de 400 mots » imposent au plus 399 mots. Les tests excluent toujours les minimums et les nombres de sources ; 51 tests Rust Recherche réussis.
+
+
+### Budget et blocs longs
+
+Le plafond final est vérifié aussi pour les rapports dégradés sans page consultée : un dépassement résiduel après révision produit une erreur explicite. Les titres génériques utilisent uniquement le budget restant après sélection du contenu. Les longs paragraphes sont répartis entre phrases complètes pour les audits bornés. Les tableaux et les assertions indivisibles restent entiers ; si un tel bloc dépasse encore la capacité de contrôle, la recherche échoue explicitement plutôt que publier une assertion non contrôlée. 54 tests Rust Recherche réussis.

@@ -91,9 +91,8 @@ pub(super) fn publish(
     let mut remaining = max_words.unwrap_or(usize::MAX);
     for (id, block) in blocks.iter().enumerate() {
         if structural_heading(block) {
-            if block.split_whitespace().count() <= remaining {
-                remaining -= block.split_whitespace().count(); out.push(block.to_string());
-            }
+            // Content gets priority; budget structural labels after selection.
+            out.push(block.to_string());
             continue;
         }
         let checked = review.blocks.iter().find(|b| b.id == id)?;
@@ -137,6 +136,13 @@ pub(super) fn publish(
     let compact: Vec<_> = out.iter().enumerate().filter(|(index, block)| {
         !heading(block) || out.get(index + 1).is_some_and(|next| !heading(next) || level(next) > level(block))
     }).map(|(_, block)| block.clone()).collect();
+    let compact: Vec<_> = compact.into_iter().filter(|block| {
+        if !structural_heading(block) { return true; }
+        let words = block.split_whitespace().count();
+        if words > remaining { return false; }
+        remaining -= words;
+        true
+    }).collect();
     let result = compact.join("\n\n");
     if max_words.is_some_and(|limit| result.split_whitespace().count() > limit) { return None; }
     Some((result, replaced, omitted))
@@ -262,6 +268,16 @@ mod tests {
         let (report, replaced, _) = publish(&[claim], review, &sources, None).unwrap();
         assert!(report.starts_with(claim));
         assert_eq!(replaced, 0);
+    }
+
+    #[test]
+    fn short_limits_prioritize_content_over_structural_headings() {
+        let blocks = ["## Findings", "One two three four five six seven eight nine."];
+        let review = Review { blocks: vec![BlockReview { id: 1, supported: true, evidence: vec![0] }] };
+        let (report, _, _) = publish(&blocks, review, &passages(), Some(10)).unwrap();
+        assert!(!report.contains("## Findings"));
+        assert!(report.starts_with("One two three"));
+        assert_eq!(report.split_whitespace().count(), 10);
     }
 
     #[test]
