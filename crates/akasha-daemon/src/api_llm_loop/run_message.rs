@@ -2355,7 +2355,16 @@ pub(crate) async fn run_message_via_llm(
                     super::studio_completion::literal_write_error(&tool_disk_workspace_root,&explicit_file_literals,tool,argv)
                 }).collect();
                 let literal_batch_rejected=literal_errors.iter().any(Option::is_some);
-                let rejected_batch = serde_json::json!({"calls":calls,"errors":literal_errors,"retry_hint":"No call in this batch was executed. Resubmit from the FIRST unexecuted operation, not just the last call. Every write_file/write_code requires expected_version: use the string missing for creation, or the SHA-256 from read_file for an existing file. A deferred creation did NOT create its file."});
+                // Retain the execution order without duplicating large file bodies
+                // in every rejected sibling result. Literal contents remain in the
+                // original user request; this is evidence of non-execution only.
+                let rejected_calls:Vec<_>=calls.iter().take(16).map(|(name,args)| {
+                    let value=if name=="studio_call" {serde_json::from_str::<serde_json::Value>(&args.join(" ")).ok()}else{None};
+                    let tool=value.as_ref().and_then(|v|v["tool"].as_str()).unwrap_or(name);
+                    let path=value.as_ref().and_then(|v|v["arguments"]["path"].as_str()).or_else(||args.first().filter(|_|name!="studio_call").map(String::as_str)).unwrap_or("");
+                    serde_json::json!({"tool":&tool[..tool.floor_char_boundary(64.min(tool.len()))],"path":&path[..path.floor_char_boundary(256.min(path.len()))],"status":"not_executed"})
+                }).collect();
+                let rejected_batch = serde_json::json!({"calls":rejected_calls,"omitted_calls":calls.len().saturating_sub(16),"retry_hint":"No call in this batch was executed. Resubmit from the FIRST unexecuted operation, not just the last call. Every write_file/write_code requires expected_version: use the string missing for creation, or the SHA-256 from read_file for an existing file. A deferred creation did NOT create its file."});
                 let mut previous_batch_call_succeeded = true;
                 let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);

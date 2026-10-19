@@ -961,36 +961,7 @@ pub(crate) async fn pr_status(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let mut state = "passed";
-    if checks.is_empty() {
-        state = "not_run";
-    } else if checks.iter().any(|check| {
-        matches!(
-            check["conclusion"].as_str(),
-            Some("FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE")
-        ) || matches!(check["state"].as_str(), Some("FAILURE" | "ERROR"))
-    }) {
-        state = "failed";
-    } else if checks.iter().any(|check| {
-        check["status"]
-            .as_str()
-            .is_some_and(|status| status != "COMPLETED")
-            || check["state"] == "PENDING"
-    }) {
-        state = "pending";
-    } else if checks.iter().any(|check| {
-        matches!(
-            check["conclusion"].as_str(),
-            Some("SKIPPED" | "NEUTRAL" | "STALE")
-        )
-    }) {
-        state = "passed_with_skipped_or_neutral";
-    } else if checks
-        .iter()
-        .any(|check| check["conclusion"] != "SUCCESS" && check["state"] != "SUCCESS")
-    {
-        state = "unknown";
-    }
+    let state=classify_checks(&checks);
     let local_head = head(&root).await?;
     let matches = value["headRefOid"].as_str() == Some(local_head.as_str());
     Ok(
@@ -1409,5 +1380,44 @@ mod registered_metadata_tests {
         assert_eq!(common,root.join(".git").canonicalize().unwrap());assert!(dir.starts_with(common.join("worktrees")));
         let mut policy=akasha_tools::ToolsPolicy::default();policy.allowed_commands=vec!["git".into()];policy.allowed_read_paths=vec![data.path().to_string_lossy().into_owned()];
         let status=preflight(data.path(),&path,&policy,"origin").await.unwrap();assert_eq!(status["branch"],branch);assert_eq!(status["github"]["accessible"],false);
+    }
+}
+
+fn classify_checks(checks: &[Value]) -> &'static str {
+    if checks.is_empty() {return "not_run";}
+    let mut states=Vec::with_capacity(checks.len());
+    for check in checks {
+        let conclusion=check["conclusion"].as_str();let legacy=check["state"].as_str();let status=check["status"].as_str();
+        let state=if matches!(conclusion,Some("FAILURE"|"TIMED_OUT"|"CANCELLED"|"ACTION_REQUIRED"|"STARTUP_FAILURE")) || matches!(legacy,Some("FAILURE"|"ERROR")) {"failed"}
+        else if matches!(status,Some("QUEUED"|"IN_PROGRESS"|"REQUESTED"|"WAITING"|"PENDING")) || matches!(legacy,Some("PENDING"|"EXPECTED")) {"pending"}
+        else if status.is_some_and(|status|status!="COMPLETED") {"unknown"}
+        else if conclusion==Some("SUCCESS") || conclusion.is_none() && legacy==Some("SUCCESS") {"passed"}
+        else if matches!(conclusion,Some("SKIPPED"|"NEUTRAL")) {"passed_with_skipped_or_neutral"}
+        else {"unknown"};
+        states.push(state);
+    }
+    for state in ["failed","pending","unknown","passed_with_skipped_or_neutral"] {if states.contains(&state){return state;}}
+    "passed"
+}
+#[cfg(test)]
+mod checks_freshness_tests {
+    use super::*;
+    #[test] fn stale_unknown_or_missing_conclusions_never_become_a_passed_rollup() {
+        let completed=|value:&str|json!({"status":"COMPLETED","conclusion":value});
+        for value in ["STALE","UNKNOWN_FUTURE"] {
+            assert_eq!(classify_checks(&[completed(value)]),"unknown");
+            assert_eq!(classify_checks(&[completed("SKIPPED"),completed(value)]),"unknown");
+            assert_eq!(classify_checks(&[completed("NEUTRAL"),completed(value)]),"unknown");
+        }
+        assert_eq!(classify_checks(&[json!({"status":"COMPLETED"})]),"unknown");
+        assert_eq!(classify_checks(&[json!({"status":"COMPLETED","conclusion":"STALE","state":"SUCCESS"})]),"unknown");
+        assert_eq!(classify_checks(&[]),"not_run");
+        assert_eq!(classify_checks(&[completed("SUCCESS"),json!({"state":"SUCCESS"})]),"passed");
+        assert_eq!(classify_checks(&[completed("SKIPPED"),completed("SUCCESS")]),"passed_with_skipped_or_neutral");
+        assert_eq!(classify_checks(&[completed("NEUTRAL")]),"passed_with_skipped_or_neutral");
+        for failure in ["FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE"] {assert_eq!(classify_checks(&[completed("SKIPPED"),completed(failure)]),"failed");}
+        assert_eq!(classify_checks(&[json!({"status":"IN_PROGRESS"}),completed("STALE")]),"pending");
+        assert_eq!(classify_checks(&[json!({"state":"PENDING"})]),"pending");
+        assert_eq!(classify_checks(&[json!({"status":"FUTURE"}),completed("SKIPPED")]),"unknown");
     }
 }
