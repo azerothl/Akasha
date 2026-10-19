@@ -575,7 +575,7 @@ async fn run_engine(
 
     let (final_report, replaced_blocks, omitted_blocks) = if represented_pages > 0 {
         let verifier = add_sub_agent(run_id, &branch_final, "analyst", "Checking source fidelity", StepStatus::Running).await;
-        match ground_report(ctx, &final_report, &findings, &manifest, requested_word_limit, topic).await {
+        match ground_report(ctx, &final_report, &findings, &manifest, requested_word_limit).await {
             Some(result) => {
                 finish_sub_agent(run_id, &branch_final, &verifier, StepStatus::Done).await;
                 result
@@ -631,6 +631,9 @@ async fn run_engine(
         if word_count(&final_report) > limit {
             quality_warnings.push(format!("Report exceeds the requested maximum of {limit} words."));
         }
+    }
+    if represented_pages > 0 {
+        quality_warnings.push("Source fidelity was checked automatically against the passages read; this does not replace independent verification.".into());
     }
     if replaced_blocks > 0 || omitted_blocks > 0 {
         quality_warnings.push(format!("Source grounding replaced {replaced_blocks} draft blocks with original excerpts and omitted {omitted_blocks} blocks without usable evidence or room. Original quotations may remain in their source language; verify independently."));
@@ -1300,7 +1303,7 @@ async fn final_report(
 /// selected by integer IDs, never taken from a model's proposed correction.
 async fn ground_report(
     ctx: &ResearchContext, report: &str, findings: &[ResearchFinding], manifest: &str,
-    max_words: Option<usize>, topic: &str,
+    max_words: Option<usize>,
 ) -> Option<(String, usize, usize)> {
     use super::grounding::{self, Passage, Review};
     let mut passages = Vec::new();
@@ -1334,7 +1337,7 @@ async fn ground_report(
         checked.blocks.append(&mut review.blocks);
         next = end;
     }
-    grounding::publish(&blocks, checked, &passages, max_words, topic.to_lowercase().contains("fran"))
+    grounding::publish(&blocks, checked, &passages, max_words)
 }
 
 async fn final_report_retry(

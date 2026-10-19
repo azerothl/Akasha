@@ -55,3 +55,8 @@ Les citations originales priment sur une traduction incertaine ; le rapport cont
 Le rapport a été contrôlé dans l’interface, après passage par Notes, rechargement complet, sélection d’un ancien rapport puis retour à l’entrée de 368 mots. Les quatre sources, limites, phases et tableau de trois lignes sont conservés. [Historique après rechargement](validation/research-186-factual-2026-10-20/history-final.png) · [Tableau affiché](validation/research-186-factual-2026-10-20/table-final-wide.png).
 
 **Validation locale factuelle et restitution : réussies sur ce cas.** Les anciens rapports refusés restent intacts. Le dernier critère UI disposera de sa preuve réelle de résultat sourcé après livraison des corrections. **#186 reste ouvert tant que cette branche n’est pas livrée et sa CI vérifiée.** Aucun push, fusion ou succès de CI n’est revendiqué par ce bilan local.
+
+
+## Suivi de revue de la PR #234
+
+La réserve fixe de 35 mots et la note bilingue ajoutée systématiquement ont été supprimées. Les avertissements de vérification restent dans les métadonnées de qualité, hors du budget du rapport. Un rapport court conserve ainsi son contenu et aucune langue supplémentaire ne lui est imposée. Test de régression sur trois formulations (français, espagnol et anglais avec San Francisco) ; 48 tests Rust Recherche réussis. Les captures et la recherche réelle ci-dessus décrivent le commit initial, antérieur à cet ajustement de publication.

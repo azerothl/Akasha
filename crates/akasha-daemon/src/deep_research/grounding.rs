@@ -63,13 +63,13 @@ fn quote(text: &str) -> String {
 /// replaced with original passages, independently of a model's positive verdict.
 /// This deliberately preserves operation-specific qualifications verbatim.
 pub(super) fn publish(
-    blocks: &[&str], review: Review, passages: &[Passage], max_words: Option<usize>, french: bool,
+    blocks: &[&str], review: Review, passages: &[Passage], max_words: Option<usize>,
 ) -> Option<(String, usize, usize)> {
     let mut out = Vec::new();
     let mut used = HashSet::new();
     let mut replaced = 0;
     let mut omitted = 0;
-    let mut remaining = max_words.unwrap_or(usize::MAX).saturating_sub(35);
+    let mut remaining = max_words.unwrap_or(usize::MAX);
     for (id, block) in blocks.iter().enumerate() {
         if heading(block) {
             if block.split_whitespace().count() <= remaining {
@@ -107,18 +107,14 @@ pub(super) fn publish(
     }
     // A report consisting solely of headings is not a completed research result.
     if out.iter().all(|block| heading(block)) { return None; }
-    let limit_note = if french {
-        "## Limites\n\nSynthèse limitée aux passages lus. Les citations originales préservent leurs qualifications ; ce contrôle automatique ne remplace pas une vérification indépendante."
-    } else {
-        "## Limitations\n\nSynthesis limited to passages read. Original quotations preserve their qualifications; this automated check does not replace independent verification."
-    };
+    // Keep validation warnings in result metadata, outside the requested report
+    // budget. A fixed, bilingual footer consumes short reports and cannot match
+    // arbitrary report languages reliably.
     let level = |text: &str| text.trim_start().chars().take_while(|c| *c == '#').count();
     let compact: Vec<_> = out.iter().enumerate().filter(|(index, block)| {
         !heading(block) || out.get(index + 1).is_some_and(|next| !heading(next) || level(next) > level(block))
     }).map(|(_, block)| block.clone()).collect();
-    let mut out = compact;
-    out.push(limit_note.into());
-    let result = out.join("\n\n");
+    let result = compact.join("\n\n");
     if max_words.is_some_and(|limit| result.split_whitespace().count() > limit) { return None; }
     Some((result, replaced, omitted))
 }
@@ -135,7 +131,7 @@ mod tests {
     fn a_positive_model_verdict_cannot_merge_complexity_qualifiers() {
         let blocks = vec!["## Operations", "Adding and removing are amortized O(1)."];
         let review = Review { blocks: vec![BlockReview { id: 1, supported: true, evidence: vec![0] }] };
-        let (report, replaced, _) = publish(&blocks, review, &passages(), Some(200), true).unwrap();
+        let (report, replaced, _) = publish(&blocks, review, &passages(), Some(200)).unwrap();
         assert!(!report.contains("Adding and removing are amortized"));
         assert!(report.contains("Adding is amortized O(1). Removing is O(1)."));
         assert_eq!(replaced, 1);
@@ -145,7 +141,7 @@ mod tests {
     #[test]
     fn prose_about_amortization_also_uses_original_qualifications() {
         let review = Review { blocks: vec![BlockReview { id: 0, supported: true, evidence: vec![0] }] };
-        let (report, replaced, _) = publish(&["Les coûts amortis garantissent toujours une opération plus rapide."], review, &passages(), Some(100), true).unwrap();
+        let (report, replaced, _) = publish(&["Les coûts amortis garantissent toujours une opération plus rapide."], review, &passages(), Some(100)).unwrap();
         assert_eq!(replaced, 1);
         assert!(!report.contains("garantissent toujours"));
         assert!(report.contains("Removing is O(1)."));
@@ -155,7 +151,7 @@ mod tests {
     fn unsupported_mechanisms_are_replaced_only_with_original_text() {
         let blocks = vec!["This structure masks deleted objects and guarantees optimal throughput."];
         let review = Review { blocks: vec![BlockReview { id: 0, supported: false, evidence: vec![0] }] };
-        let (report, _, _) = publish(&blocks, review, &passages(), Some(100), true).unwrap();
+        let (report, _, _) = publish(&blocks, review, &passages(), Some(100)).unwrap();
         assert!(!report.contains("masks") && !report.contains("optimal"));
         assert!(report.contains(&passages()[0].text));
     }
@@ -168,7 +164,7 @@ mod tests {
             assert!(parse_review(text, &[0], 1).is_none());
         }
         assert!(parse_review(r#"{"blocks":[{"id":0,"supported":false,"evidence":[]}]}"#, &[0], 1).is_some());
-        assert!(publish(&["## Heading", "Unverified"], Review { blocks: vec![] }, &passages(), None, true).is_none());
+        assert!(publish(&["## Heading", "Unverified"], Review { blocks: vec![] }, &passages(), None).is_none());
     }
 
     #[test]
@@ -178,7 +174,7 @@ mod tests {
             BlockReview { id: 2, supported: false, evidence: vec![] },
             BlockReview { id: 4, supported: false, evidence: vec![0] },
         ] };
-        let (report, _, _) = publish(&blocks, review, &passages(), Some(100), true).unwrap();
+        let (report, _, _) = publish(&blocks, review, &passages(), Some(100)).unwrap();
         assert!(!report.contains("## Empty"));
         assert!(report.contains("# Report") && report.contains("## Findings"));
     }
@@ -193,10 +189,21 @@ mod tests {
     }
 
     #[test]
+    fn short_reports_keep_their_budget_and_language() {
+        for text in ["Les sources décrivent cette structure.", "Las fuentes describen esta estructura.", "Sources describe this structure near San Francisco."] {
+            let review = Review { blocks: vec![BlockReview { id: 0, supported: true, evidence: vec![0] }] };
+            let (report, _, _) = publish(&[text], review, &passages(), Some(30)).unwrap();
+            assert!(report.starts_with(text));
+            assert!(report.split_whitespace().count() <= 30);
+            assert!(!report.contains("## Limit"));
+        }
+    }
+
+    #[test]
     fn no_empty_report_or_arbitrary_truncation_for_word_budget() {
         let review = || Review { blocks: vec![BlockReview { id: 0, supported: false, evidence: vec![0] }] };
-        assert!(publish(&["Claim"], review(), &passages(), Some(5), true).is_none());
-        let (report, _, _) = publish(&["Claim"], review(), &passages(), Some(100), true).unwrap();
+        assert!(publish(&["Claim"], review(), &passages(), Some(5)).is_none());
+        let (report, _, _) = publish(&["Claim"], review(), &passages(), Some(100)).unwrap();
         assert!(report.split_whitespace().count() <= 100);
         assert!(report.contains("Removing is O(1)."));
     }
