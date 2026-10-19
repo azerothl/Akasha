@@ -55,7 +55,7 @@ pub(crate) fn implementation_role(agent: &str) -> bool {
 fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
     let path = r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;!?"`]+)"#;
     let pattern = format!(
-        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
+        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
     );
     let re = regex::Regex::new(&pattern).unwrap();
     // Object-before-path requests: "Add logging to config.txt". Keep this
@@ -136,13 +136,6 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
             } else {
                 None
             };
-            if matches!(
-                verb.as_str(),
-                "rename" | "move" | "renomme" | "d\u{e9}place" | "deplace"
-            ) && target.is_none()
-            {
-                return None;
-            }
             let mut goals = vec![(verb.clone(), source, target.clone())];
             if target.is_none() {
                 while let Some(item) = path_list.captures(&request[list_end..]) {
@@ -451,6 +444,9 @@ fn paths_for_request(
         }
     };
     for (verb, source, target) in parsed(request) {
+        if matches!(verb.as_str(),"rename"|"move"|"renomme"|"d\u{e9}place"|"deplace") && target.is_none() {
+            return Err("rename/move target could not be resolved; provide explicit source and destination paths".into());
+        }
         let source = resolve(&source)?;
         if let Some(target) = target.filter(|_| {
             matches!(
@@ -766,6 +762,16 @@ mod tests {
         std::fs::write(root.path().join("b.txt"), "b").unwrap();
         scoped.observe(&before, &capture_paths(&scoped.paths()).unwrap());
         assert!(scoped.verified(&capture_paths(&scoped.paths()).unwrap()));
+    }
+    #[test]
+    fn rename_target_prepositions_and_unresolved_targets_fail_closed() {
+        for request in ["Rename old.txt as new.txt", "Move old.txt into archive/old.txt"] {
+            assert!(has_request(request));assert!(parsed(request)[0].2.is_some());
+        }
+        let root=tempfile::tempdir().unwrap();
+        for request in ["Rename old.txt", "Move old.txt towards new.txt"] {
+            assert!(has_request(request));assert!(paths_for_request(root.path(),request,&policy(root.path())).is_err());
+        }
     }
     #[test]
     fn unrelated_and_noop_writes_do_not_attest_requested_changes() {
