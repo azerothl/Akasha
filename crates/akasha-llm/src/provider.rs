@@ -309,11 +309,17 @@ mod studio_native_tests {
             {"properties":{"tool":{"enum":["write_file"]},"arguments":{"type":"object","required":["path","content","expected_version"],"properties":{"content":{"type":"string"}}}}},
             {"properties":{"tool":{"enum":["read_file"]},"arguments":{"type":"object","required":["path"]}}}
         ]}}}]})).unwrap();
-        let body=OpenAIProvider::new(None,None).build_chat_completions_body(&request,"test");
+        let bodies=[OpenAIProvider::new(None,None).build_chat_completions_body(&request,"test"),OpenRouterProvider::new(None,None,None,None).build_chat_completions_body(&request,"test"),AzureOpenAIProvider::new(None,None).build_chat_completions_body(&request,"test")];
+        for body in bodies {
         assert_eq!(advertised_function_names(&body),vec!["write_file","read_file"]);
+        for name in ["studio_call","run_command"] {
+            let response=json!({"choices":[{"message":{"tool_calls":[{"function":{"name":name,"arguments":json!({"schema_version":1,"tool":"run_command","arguments":{"command":"forbidden"}}).to_string()}}]},"finish_reason":"tool_calls"}]});
+            assert!(normalize_native_completion_with_functions(&response,String::new(),&advertised_function_names(&body)).is_err());
+        }
         assert_eq!(body["tools"][0]["function"]["parameters"]["required"],json!(["path","content","expected_version"]));
         assert_eq!(body["tools"][1]["function"]["parameters"]["required"],json!(["path"]));
         assert_eq!(body["tool_choice"],"required");
+        }
     }
 
     #[test]
@@ -1296,7 +1302,7 @@ impl OpenRouterProvider {
             }
             _ => serde_json::json!(request.prompt),
         };
-        let messages = request.chat_messages(user_content);
+        let messages = request.native_chat_messages(user_content);
 
         let mut body = serde_json::json!({
             "model": model,
@@ -1319,7 +1325,7 @@ impl OpenRouterProvider {
                 body["reasoning_effort"] = serde_json::json!(level);
             }
         }
-        if let Some(tools)=request.tools.as_ref().filter(|tools|!tools.is_empty()) {body["tools"]=serde_json::json!(tools);body["parallel_tool_calls"]=serde_json::json!(false);if request.require_tool {body["tool_choice"]=serde_json::json!("required");}}
+        if request.tools.as_ref().is_some_and(|tools|!tools.is_empty()) {body["tools"]=serde_json::json!(request.native_functions().into_iter().map(|function|serde_json::json!({"type":"function","function":function})).collect::<Vec<_>>());body["parallel_tool_calls"]=serde_json::json!(false);if request.require_tool {body["tool_choice"]=serde_json::json!("required");}}
         body
     }
 }
@@ -1625,7 +1631,7 @@ impl AzureOpenAIProvider {
     }
 
     fn build_chat_completions_body(&self, request: &CompletionRequest, deployment: &str) -> serde_json::Value {
-        let messages = request.chat_messages(serde_json::json!(request.prompt));
+        let messages = request.native_chat_messages(serde_json::json!(request.prompt));
 
         let mut body = serde_json::json!({
             "messages": messages,
@@ -1647,7 +1653,7 @@ impl AzureOpenAIProvider {
                 body["reasoning_effort"] = serde_json::json!(level);
             }
         }
-        if let Some(tools)=request.tools.as_ref().filter(|tools|!tools.is_empty()) {body["tools"]=serde_json::json!(tools);body["parallel_tool_calls"]=serde_json::json!(false);if request.require_tool {body["tool_choice"]=serde_json::json!("required");}}
+        if request.tools.as_ref().is_some_and(|tools|!tools.is_empty()) {body["tools"]=serde_json::json!(request.native_functions().into_iter().map(|function|serde_json::json!({"type":"function","function":function})).collect::<Vec<_>>());body["parallel_tool_calls"]=serde_json::json!(false);if request.require_tool {body["tool_choice"]=serde_json::json!("required");}}
         body
     }
 }
