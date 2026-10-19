@@ -116,6 +116,22 @@ impl ConversationMessage {
     }
 }
 
+// Studio schemas refer to their argument subtree while wrapped. Ordinary
+// provider functions make that subtree the root again.
+fn restore_argument_refs(value:&mut Value,prefix:&str) {
+    match value {
+        Value::Object(map)=>for (key,value) in map {
+            if key=="$ref" {
+                if let Some(tail)=value.as_str().and_then(|reference|reference.strip_prefix(prefix)) {
+                    if tail.is_empty() || tail.starts_with('/') { *value=Value::String(format!("#{tail}")); }
+                }
+            } else {restore_argument_refs(value,prefix);}
+        },
+        Value::Array(values)=>for value in values {restore_argument_refs(value,prefix);},
+        _=>{}
+    }
+}
+
 impl crate::CompletionRequest {
     pub(crate) fn native_functions(&self) -> Vec<Value> {
         let mut result=vec![];
@@ -124,8 +140,9 @@ impl crate::CompletionRequest {
             let parameters=&function["parameters"];
             if let Some(names)=parameters.pointer("/properties/tool/enum").and_then(Value::as_array).filter(|_|function["name"]=="studio_call") {
                 for name in names {
-                    let schema=parameters["oneOf"].as_array().and_then(|variants|variants.iter().find(|variant|variant.pointer("/properties/tool/enum").and_then(Value::as_array).is_some_and(|names|names.contains(name))))
-                        .and_then(|variant|variant.pointer("/properties/arguments")).cloned().unwrap_or_else(||json!({"type":"object"}));
+                    let variant=parameters["oneOf"].as_array().and_then(|variants|variants.iter().enumerate().find(|(_,variant)|variant.pointer("/properties/tool/enum").and_then(Value::as_array).is_some_and(|names|names.contains(name))));
+                    let mut schema=variant.and_then(|(_,variant)|variant.pointer("/properties/arguments")).cloned().unwrap_or_else(||json!({"type":"object"}));
+                    if let Some((index,_))=variant { restore_argument_refs(&mut schema,&format!("#/oneOf/{index}/properties/arguments")); }
                     result.push(json!({"name":name,"description":format!("Execute {name} with the exact requested arguments and current permissions. {} {}", function["description"].as_str().unwrap_or(""), if matches!(name.as_str(),Some("write_file"|"write_code")){"REQUIRED keyword expected_version: use the literal string missing when creating a new file; for existing files use its SHA-256 from read_file."}else{""}),"parameters":schema}));
                 }
             } else {result.push(function.clone());}
@@ -286,5 +303,17 @@ impl crate::CompletionRequest {
             }
         }
         messages
+    }
+}
+
+#[cfg(test)]
+mod native_schema_ref_tests {
+    use super::*;
+    #[test]
+    fn flattened_mcp_function_retains_its_own_local_definitions() {
+        let request:crate::CompletionRequest=serde_json::from_value(json!({"prompt":"","tools":[{"function":{"name":"studio_call","parameters":{"properties":{"tool":{"enum":["mcp_fixture_echo"]}},"oneOf":[{"properties":{"tool":{"enum":["mcp_fixture_echo"]},"arguments":{"type":"object","properties":{"text":{"$ref":"#/oneOf/0/properties/arguments/$defs/text"}},"$defs":{"text":{"type":"string"}}}}}]}}}]})).unwrap();
+        let functions=request.native_functions();
+        assert_eq!(functions[0]["parameters"]["properties"]["text"]["$ref"],"#/$defs/text");
+        assert_eq!(functions[0]["parameters"]["$defs"]["text"]["type"],"string");
     }
 }
