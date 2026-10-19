@@ -60,9 +60,10 @@ fn resolve_program(root:&Path,program:&str,paths:&std::ffi::OsStr)->Result<PathB
 // Every delivery subprocess (including Git launched by gh) uses the same isolated
 // config scopes. Repository configuration is inspected while its lock is held.
 fn isolate_git_configuration(command: &mut Command) {
-    command.env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" })
+    command.env("GH_HOST","github.com").env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" })
         .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_COUNT", "0")
-        .env_remove("GIT_CONFIG_PARAMETERS").env_remove("GIT_CONFIG");
+        .env_remove("GIT_CONFIG_PARAMETERS").env_remove("GIT_CONFIG")
+        .env_remove("GIT_SSH_COMMAND").env_remove("GIT_SSH").env_remove("GIT_SSH_VARIANT");
     for (key, _) in std::env::vars_os() {
         let key_upper=key.to_string_lossy().to_ascii_uppercase();
         if key_upper.starts_with("GIT_CONFIG_KEY_") || key_upper.starts_with("GIT_CONFIG_VALUE_") {
@@ -505,10 +506,16 @@ async fn remote_target(root: &Path, remote: &str) -> Result<(String,String), Str
 async fn remote_repo(root:&Path,remote:&str)->Result<String,String> {Ok(remote_target(root,remote).await?.0)}
 fn canonical_target(raw:&str)->Result<(String,String),String> {
     let repo=repo_from_url(raw)?;
-    let (scheme,port)=if raw.starts_with("git@github.com:") {("ssh",None)}else{let parsed=url::Url::parse(raw).map_err(|e|e.to_string())?;if parsed.scheme()=="ssh" {("ssh",parsed.port())}else{("https",parsed.port())}};
-    let port=port.map(|port|format!(":{port}")).unwrap_or_default();
-    let user=if scheme=="ssh" {"git@"}else{""};
-    Ok((repo.clone(),format!("{scheme}://{user}github.com{port}/{repo}.git")))
+    // A remote may be configured with SSH for ordinary Git use, but Studio
+    // publishes this GitHub repository over pinned HTTPS using explicit gh auth.
+    // SSH config/HostName and inherited SSH commands cannot route publication.
+    if !raw.starts_with("git@github.com:") {
+        let parsed=url::Url::parse(raw).map_err(|error|error.to_string())?;
+        if parsed.scheme()=="https" && parsed.port_or_known_default()!=Some(443) {
+            return Err("Studio publication requires github.com HTTPS port 443".into());
+        }
+    }
+    Ok((repo.clone(),format!("https://github.com/{repo}.git")))
 }
 fn approved_target(snapshot:Option<&Value>)->Result<(String,String),String> {
     let value=snapshot.ok_or("approved publication snapshot required")?;
@@ -1421,6 +1428,7 @@ mod pinned_publication_tests {
     #[test] fn snapshots_pin_transport_and_repository_without_remote_aliases() {
         for raw in ["https://github.com/owner/repo.git","git@github.com:owner/repo.git","ssh://git@github.com:443/owner/repo.git"] {
             let (repo,url)=canonical_target(raw).unwrap();assert_eq!(repo,"owner/repo");
+            assert_eq!(url,"https://github.com/owner/repo.git");
             assert_eq!(approved_target(Some(&json!({"repository":repo,"publication_url":url}))).unwrap(),(repo,url));
         }
         assert!(approved_target(Some(&json!({"repository":"owner/approved","publication_url":"https://github.com/owner/other.git"}))).is_err());
@@ -1587,6 +1595,26 @@ mod identity_config_tests {
             let mut command=Command::new("git");isolate_git_configuration(&mut command);
             let out=command.env("GIT_CONFIG_GLOBAL",file.path()).args(["config","--get",key]).current_dir(root.path()).output().await.unwrap();
             assert!(out.status.success());assert_eq!(String::from_utf8(out.stdout).unwrap().trim(),expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod ssh_routing_tests {
+    use super::*;
+    #[test]
+    fn publication_uses_https_and_drops_inherited_ssh_routing() {
+        for remote in ["git@github.com:owner/repo.git","ssh://git@github.com/owner/repo.git"] {
+            assert_eq!(canonical_target(remote).unwrap().1,"https://github.com/owner/repo.git");
+        }
+        assert!(canonical_target("https://github.com:8443/owner/repo.git").is_err());
+        let mut command=Command::new("git");
+        command.env("GIT_SSH_COMMAND","unapproved-command").env("GH_HOST","unapproved.invalid");
+        isolate_git_configuration(&mut command);
+        let values=command.as_std().get_envs().collect::<Vec<_>>();
+        assert!(values.iter().any(|(name,value)|*name==std::ffi::OsStr::new("GH_HOST") && *value==Some(std::ffi::OsStr::new("github.com"))));
+        for key in ["GIT_SSH_COMMAND","GIT_SSH","GIT_SSH_VARIANT"] {
+            assert!(values.iter().any(|(name,value)|*name==std::ffi::OsStr::new(key) && value.is_none()));
         }
     }
 }
