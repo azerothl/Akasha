@@ -721,12 +721,74 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             </p>
           ) : null}
 
-          <ResearchStarViz
+          <label className="settings-field">
+            <span>
+              {t("research.topic_label")}
+              <InfoTip label={t("research.topic_label")} content={t("research.hero")} />
+            </span>
+            <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3} disabled={loading} />
+          </label>
+          <div className="research-actions">
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void run()}
+              disabled={loading || !topic.trim() || apiReady === false}
+            >
+              {loading
+                ? phaseLabel ?? (en ? "Researching…" : "Recherche…")
+                : en
+                  ? "Run research"
+                  : "Lancer la recherche"}
+            </button>
+            {loading ? (
+              <button type="button" className="btn-secondary" onClick={() => void cancelRun()}>
+                {en ? "Cancel" : "Annuler"}
+              </button>
+            ) : null}
+          </div>
+          <details className="research-advanced">
+            <summary>{en ? "Research options" : "Options de recherche"}</summary>
+            <p className="muted">{en ? "Limit how many rounds the research can run." : "Limiter le nombre d’étapes de la recherche."}</p>
+          <label className="settings-field research-max-rounds-field">
+            <span className="research-max-rounds-label">
+              {t("research.max_rounds_label")}
+              <button
+                type="button"
+                className="research-field-tip"
+                title={t("research.max_rounds_help")}
+                aria-label={t("research.max_rounds_help")}
+              >
+                ?
+              </button>
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              value={maxRounds}
+              onChange={(e) => setMaxRounds(Math.min(16, Math.max(1, Number(e.target.value) || 10)))}
+              disabled={loading}
+              aria-describedby="research-max-rounds-help"
+            />
+            <span id="research-max-rounds-help" className="sr-only">
+              {t("research.max_rounds_help")}
+            </span>
+            {selected?.reportMeta && !loading ? (
+              <span className="research-max-rounds-used muted">
+                {en
+                  ? `Last run: ${selected.reportMeta.rounds} of ${selected.maxRounds} rounds used`
+                  : `Dernière recherche : ${selected.reportMeta.rounds} / ${selected.maxRounds} tours utilisés`}
+              </span>
+            ) : null}
+          </label>
+          </details>
+          {(!inDraft || loading) && <ResearchStarViz
             branches={branches}
             phase={inDraft && !loading ? "idle" : displayPhase}
             phaseLabel={inDraft && !loading ? undefined : (phaseLabel ?? undefined)}
             topic={loading ? topic.trim() : inDraft ? undefined : selected?.topic}
-          />
+          />}
 
           {branches.length > 0 ? (
             <ol className="research-step-list">
@@ -762,64 +824,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             </details>
           ) : null}
 
-          <label className="settings-field">
-            <span>
-              {t("research.topic_label")}
-              <InfoTip label={t("research.topic_label")} content={t("research.hero")} />
-            </span>
-            <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3} disabled={loading} />
-          </label>
-          <label className="settings-field research-max-rounds-field">
-            <span className="research-max-rounds-label">
-              {t("research.max_rounds_label")}
-              <button
-                type="button"
-                className="research-field-tip"
-                title={t("research.max_rounds_help")}
-                aria-label={t("research.max_rounds_help")}
-              >
-                ?
-              </button>
-            </span>
-            <input
-              type="number"
-              min={1}
-              max={16}
-              value={maxRounds}
-              onChange={(e) => setMaxRounds(Math.min(16, Math.max(1, Number(e.target.value) || 10)))}
-              disabled={loading}
-              aria-describedby="research-max-rounds-help"
-            />
-            <span id="research-max-rounds-help" className="sr-only">
-              {t("research.max_rounds_help")}
-            </span>
-            {selected?.reportMeta && !loading ? (
-              <span className="research-max-rounds-used muted">
-                {en
-                  ? `Last run: ${selected.reportMeta.rounds} of ${selected.maxRounds} rounds used`
-                  : `Dernière recherche : ${selected.reportMeta.rounds} / ${selected.maxRounds} tours utilisés`}
-              </span>
-            ) : null}
-          </label>
-          <div className="research-actions">
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={() => void run()}
-              disabled={loading || !topic.trim() || apiReady === false}
-            >
-              {loading
-                ? phaseLabel ?? (en ? "Researching…" : "Recherche…")
-                : en
-                  ? "Run research"
-                  : "Lancer la recherche"}
-            </button>
-            {loading ? (
-              <button type="button" className="btn-secondary" onClick={() => void cancelRun()}>
-                {en ? "Cancel" : "Annuler"}
-              </button>
-            ) : null}
-          </div>
+
         </div>
       </div>
     </section>

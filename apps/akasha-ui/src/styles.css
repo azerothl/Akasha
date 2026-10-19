@@ -83,8 +83,8 @@ pre,
   top: -3rem;
   left: 0.75rem;
   padding: 0.5rem 1rem;
-  background: var(--akasha-accent);
-  color: #fff;
+  background: var(--akasha-btn-primary-bg);
+  color: var(--akasha-on-accent);
   font-size: 0.9375rem;
   font-weight: 500;
   border-radius: 6px;
@@ -547,8 +547,8 @@ pre,
 }
 .update-banner-download-btn {
   padding: 0.35rem 0.75rem;
-  background: var(--akasha-accent);
-  color: #fff;
+  background: var(--akasha-btn-primary-bg);
+  color: var(--akasha-on-accent);
   border: none;
   border-radius: 4px;
   font-size: 0.875rem;
@@ -574,7 +574,7 @@ pre,
 /* Unified button base classes (dark_akasha: gradient + radius from Akasha_app) */
 .btn-primary {
   background: var(--akasha-btn-primary-bg, var(--akasha-accent));
-  color: #fff;
+  color: var(--akasha-on-accent);
   border: none;
   border-radius: var(--akasha-radius-button, 6px);
   padding: 0.5rem 1rem;
@@ -613,7 +613,7 @@ pre,
 
 .refresh-btn {
   background: var(--akasha-btn-primary-bg, var(--akasha-accent));
-  color: #fff;
+  color: var(--akasha-on-accent);
   border: none;
   border-radius: var(--akasha-radius-button, 6px);
   padding: 0.5rem 1rem;
@@ -9162,7 +9162,7 @@ a.settings-link-btn.refresh-btn {
 
 .panel-hero-action {
   background: var(--akasha-btn-primary-bg, var(--akasha-accent));
-  color: #fff;
+  color: var(--akasha-on-accent);
   border-color: transparent;
 }
 
@@ -9526,4 +9526,53 @@ a.settings-link-btn.refresh-btn {
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
   border: 0;
+}
+
+/* Audit UI #180–#188: usable controls and restrained first-run surfaces. */
+[hidden] { display: none !important; }
+.chat-send-hint { margin: 6px 0 0; font-size: 0.75rem; color: var(--akasha-text-muted); }
+textarea.input-group-field { min-height: 70px; max-height: 200px; resize: none; overflow-y: auto; line-height: 1.5; font-family: inherit; }
+.chat-starters { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin: 24px 0; }
+.chat-placeholder { max-width: 42rem; }
+.chat-panel .chat-area .chat-placeholder { flex: 0 0 auto; padding: 12px 0; text-align: start; width: 100%; }
+.chat-dual-pane-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 16px; flex-shrink: 0; }
+.chat-placeholder h3 { color: var(--akasha-text); margin-bottom: 8px; }
+.chat-starters .btn-secondary { text-align: start; }
+.sidebar-nav-more summary { cursor: pointer; padding: 10px 6px; color: var(--akasha-text-muted); font-size: 0.875rem; }
+.sidebar-nav-more[open] summary { margin-bottom: 4px; }
+.sidebar-nav-group-label { font-size: 0.75rem; letter-spacing: 0.03em; }
+.sidebar-mobile-close { display: none; }
+.sidebar-mobile-toggle { display: none; }
+.chat-panel .btn-tiny { min-height: 32px; min-width: 32px; display: inline-flex; align-items: center; justify-content: center; }
+.sidebar-nav-collapsed .sidebar-nav-more summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-load-state { padding: 16px; color: var(--akasha-text-muted); }
+.research-advanced { margin: 12px 0; }
+.research-advanced summary { min-height: 32px; cursor: pointer; color: var(--akasha-text-muted); }
+.research-advanced .research-max-rounds-field { margin-top: 8px; }
+.research-main-head { flex-wrap: wrap; }
+.task-center-toolbar-title { font-size: 0.875rem; color: var(--akasha-text-muted); }
+.akasha-tooltip-trigger, .sidebar-nav-collapse-btn, .sidebar-right-toggle, .sidebar-right-close,
+.sidebar-mobile-toggle, .research-field-tip, .chat-dual-pane-toggle, .chat-composition-bar button,
+.notification-center-trigger, .permissions-bell-trigger, .steering-queue-bell-trigger {
+  min-width: 32px; min-height: 32px; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.input-group:focus-within { outline: 2px solid var(--akasha-accent); outline-offset: 2px; }
+::selection { color: var(--akasha-on-accent); background: var(--akasha-btn-primary-bg); }
+input, textarea { caret-color: var(--akasha-accent); }
+@media (max-width: 768px) {
+  .sidebar-mobile-close { display: inline-flex; margin-bottom: 8px; }
+  .sidebar-mobile-toggle { display: inline-flex; }
+  .sidebar-left:not(.sidebar-left--open) { visibility: hidden; }
+  .sidebar-left--open { visibility: visible; }
+  textarea.input-group-field { font-size: 1rem; }
+}
+@media (pointer: coarse) {
+  button, select, summary { min-height: 44px; }
+  .chat-panel .btn-tiny { min-height: 44px; min-width: 44px; }
+  .akasha-tooltip-trigger, .sidebar-nav-collapse-btn, .sidebar-right-toggle, .sidebar-right-close,
+  .sidebar-mobile-toggle, .research-field-tip, .chat-dual-pane-toggle, .chat-composition-bar button,
+  .notification-center-trigger, .permissions-bell-trigger, .steering-queue-bell-trigger { min-width: 44px; min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
