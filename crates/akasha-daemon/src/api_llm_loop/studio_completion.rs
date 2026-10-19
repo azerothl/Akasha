@@ -79,6 +79,21 @@ pub(super) fn file_goals(message: &str) -> Vec<String> {
     if !super::studio_conversation::explicit_file_request(message) {
         return vec![];
     }
+    // These are supplemental final-presence checks, not a workflow interpreter.
+    // Deletion/move workflows can intentionally remove intermediate creations;
+    // leave their terminal state to explicit acceptance criteria and review.
+    // Quoted examples/literals must not disable an otherwise clear objective.
+    let mut unquoted = String::new();
+    let mut delimiter = None;
+    for ch in request.chars() {
+        if matches!(ch, '"' | '`') {
+            if delimiter == Some(ch) { delimiter = None; }
+            else if delimiter.is_none() { delimiter = Some(ch); }
+            unquoted.push(' ');
+        } else { unquoted.push(if delimiter.is_none() { ch } else { ' ' }); }
+    }
+    let terminal_mutation = regex::Regex::new(r"(?ix)\b(?:delete|remove|unlink|rename|move|supprime(?:r|z)?|efface(?:r|z)?|déplace(?:r|z)?|deplace(?:r|z)?|renomme(?:r|z)?)(?:\s|-(?:le|la|les)\b)").unwrap();
+    if terminal_mutation.is_match(&unquoted) { return vec![]; }
     let grammar=regex::Regex::new(r#"(?ix)^\s*(?:(?:ensuite|puis|then|and)\s+)?(?:crée|créer|cree|create|écris|ecris|write)\s+(?:(?:uniquement|seulement|only|le|la|un|une|the|a|new|fichier|file)\s+)*(?:`([^`\r\n]+)`|"([^"\r\n]+)"|((?:workspace:/)?[\p{L}\p{N}_./-]+\.[a-z0-9]{1,12}))"#).expect("literal file goal grammar");
     let mut sentences = vec![];
     let mut start = 0;
@@ -168,6 +183,24 @@ pub(super) fn check_deliverables(root:&Path, policy:&akasha_tools::ToolsPolicy, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn intermediate_creations_do_not_become_final_presence_obligations() {
+        for request in [
+            "Create temp.txt, inspect it, then delete temp.txt.",
+            "Crée temp.txt. Puis supprime temp.txt.",
+            "Create temp.txt. Rename temp.txt to final.txt.",
+            "Crée `temp.txt` puis déplace `temp.txt` vers `final.txt`.",
+        ] {
+            assert!(file_goals(request).is_empty(), "{request}");
+            assert!(!literal_file_operations_only(request));
+        }
+    }
+    #[test]
+    fn quoted_delete_examples_and_operation_named_files_keep_their_goals() {
+        assert_eq!(file_goals("Create notes.txt with exactly `then delete temp.txt`."), ["notes.txt"]);
+        assert_eq!(file_goals("Create delete.txt with exactly value."), ["delete.txt"]);
+        assert_eq!(exact_file_literals("Create notes.txt with exactly `then delete temp.txt`."), [("notes.txt".into(), "then delete temp.txt".into())]);
+    }
     #[test]
     fn empty_generation_retry_is_once_before_effects_and_is_durable_in_checks() {
         let goals=vec!["output.txt".into()];
