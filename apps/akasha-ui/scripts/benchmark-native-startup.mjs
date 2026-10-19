@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { waitForStartupSample } from './startup-sample.mjs';
 const args = process.argv.slice(2);
 if (args.length !== 4) throw new Error('Expected exe, before dist, after dist, output dir');
 const [exe, before, after, destination] = args.map(p => path.resolve(p));
@@ -43,11 +44,7 @@ try {
       const dataProfile=cache==='fresh-profile'?path.join(destination,`${variant}-fresh-${i}`):profile;
       const child=spawn(exe,[],{env:{...process.env,AKASHA_UI_STARTUP_PROBE:output,AKASHA_UI_STARTUP_PROFILE:dataProfile},stdio:'ignore'});
       try {
-        let found=false;
-        for(let tick=0;tick<400;tick++){try{await fs.access(output);found=true;break;}catch{}await new Promise(r=>setTimeout(r,100));}
-        if(!found) throw new Error(`No interactive-composer sample: ${variant}/${cache}/${i}`);
-        const row=JSON.parse(await fs.readFile(output,'utf8'));
-        if(!row.isolated_profile)throw new Error('WebView profile isolation not confirmed');
+        const row=await waitForStartupSample(output);
         observations.push({variant,cache,run:i+1,...row});
         await fs.writeFile(path.join(destination,'observations.json'),JSON.stringify(observations,null,2));
         console.log(`${variant} ${cache} ${i+1}: ${row.native_ms.toFixed(1)} ms`);
