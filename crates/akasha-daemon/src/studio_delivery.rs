@@ -1000,11 +1000,28 @@ async fn existing_pr(
 }
 fn verified_pr(repo:&str,request:&PullRequest,pr:&Value,state:&str)->Value {
     let observed=pr.pointer("/head/sha").and_then(Value::as_str);
-    let matches=observed==Some(request.expected_head.as_str());
-    json!({"schema_version":1,"success":matches,"state":state,"repository":repo,"branch":request.head,"commit":observed,"expected_commit":request.expected_head,"error":if matches{None}else{Some("pr_head_unverified_or_changed")},"result_unknown":observed.is_none(),"pr":{"number":pr["number"],"url":pr["html_url"],"draft":pr["draft"],"head":observed}})
+    let head_matches=observed==Some(request.expected_head.as_str());
+    let body_matches=pr.get("body").is_some_and(|body|body.as_str()==Some(request.body.as_str()) || (body.is_null() && request.body.is_empty()));
+    let metadata_matches=pr["title"].as_str()==Some(request.title.as_str()) && body_matches && pr["draft"].as_bool()==Some(request.draft);
+    let error=if !head_matches{Some("pr_head_unverified_or_changed")}else if !metadata_matches{Some("pr_metadata_differs_from_approved_request")}else{None};
+    json!({"schema_version":1,"success":head_matches && metadata_matches,"state":state,"repository":repo,"branch":request.head,"commit":observed,"expected_commit":request.expected_head,"error":error,"result_unknown":observed.is_none(),"pr":{"number":pr["number"],"url":pr["html_url"],"draft":pr["draft"],"head":observed}})
 }
 #[cfg(test)]
 mod pr_head_tests {
+    #[test]
+    fn existing_pr_must_match_all_approved_metadata_without_mutating_it() {
+        let request=super::PullRequest {remote:"origin".into(),head:"feature".into(),base:"main".into(),expected_head:"expected".into(),title:"approved".into(),body:"approved body".into(),draft:true};
+        let matching=serde_json::json!({"number":1,"html_url":"https://github.com/owner/repo/pull/1","head":{"sha":"expected"},"title":"approved","body":"approved body","draft":true});
+        assert_eq!(super::verified_pr("owner/repo",&request,&matching,"existing_pr")["success"],true);
+        for (field,value) in [("title",serde_json::json!("different")),("body",serde_json::json!("different")),("draft",serde_json::json!(false))] {
+            let mut changed=matching.clone();changed[field]=value;
+            let result=super::verified_pr("owner/repo",&request,&changed,"existing_pr");
+            assert_eq!(result["success"],false);assert_eq!(result["error"],"pr_metadata_differs_from_approved_request");assert_eq!(result["result_unknown"],false);
+        }
+        let mut missing=matching.clone();missing.as_object_mut().unwrap().remove("draft");assert_eq!(super::verified_pr("owner/repo",&request,&missing,"existing_pr")["success"],false);
+        let empty=super::PullRequest {body:String::new(),..request};let mut null_body=matching.clone();null_body["body"]=serde_json::Value::Null;
+        assert_eq!(super::verified_pr("owner/repo",&empty,&null_body,"existing_pr")["success"],true);
+    }
     #[test]
     fn changed_pr_head_is_not_attested_as_the_requested_commit() {
         let request=super::PullRequest {remote:"origin".into(),head:"feature".into(),base:"main".into(),expected_head:"expected".into(),title:"test".into(),body:String::new(),draft:true};
