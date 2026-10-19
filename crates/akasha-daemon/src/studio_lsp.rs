@@ -731,6 +731,12 @@ struct RenamePlan {
     created_at: chrono::DateTime<chrono::Utc>,
     files: Vec<PlanFile>,
 }
+const PLAN_LIMIT: usize = 8 * 1024 * 1024;
+fn encode_plan(plan: &RenamePlan) -> Result<Vec<u8>,String> {
+    let bytes=serde_json::to_vec(plan).map_err(|e|e.to_string())?;
+    if bytes.len()>PLAN_LIMIT {return Err("LSP plan exceeds limit".into());}
+    Ok(bytes)
+}
 fn plan_dir(data_dir: &Path) -> Result<PathBuf, String> {
     let data = data_dir.canonicalize().map_err(|e| e.to_string())?;
     let dir = data.join("studio-lsp-plans");
@@ -843,8 +849,9 @@ fn prepare_plan(
         created_at: chrono::Utc::now(),
         files,
     };
+    let bytes=encode_plan(&plan)?;
     let dir = plan_dir(data_dir)?;
-    if task.is_some() && serde_json::to_vec(&plan).map_err(|e|e.to_string())?.len()>48*1024 {
+    if task.is_some() && bytes.len()>48*1024 {
         return Err("Rename preview exceeds the agent tool result budget; prepare and review this rename in the Studio editor before applying it".into());
     }
     let mut active = 0;
@@ -876,7 +883,6 @@ fn prepare_plan(
     if active >= 256 {
         return Err("LSP active rename plan limit reached (256)".into());
     }
-    let bytes = serde_json::to_vec(&plan).map_err(|e| e.to_string())?;
     let mut tmp = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
     tmp.write_all(&bytes).map_err(|e| e.to_string())?;
     tmp.persist(dir.join(format!("{}.json", plan.id)))
@@ -914,10 +920,10 @@ pub(crate) fn plan_paths(
     let mut bytes = Vec::new();
     std::fs::File::open(path)
         .map_err(|e| e.to_string())?
-        .take(8 * 1024 * 1024 + 1)
+        .take(PLAN_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > 8 * 1024 * 1024 {
+    if bytes.len() > PLAN_LIMIT {
         return Err("LSP plan too large".into());
     }
     let plan: RenamePlan = serde_json::from_slice(&bytes).map_err(|_| "invalid LSP plan")?;
@@ -965,10 +971,10 @@ pub(crate) fn apply_plan(
     let mut bytes = Vec::new();
     std::fs::File::open(&path)
         .map_err(|e| e.to_string())?
-        .take(8 * 1024 * 1024 + 1)
+        .take(PLAN_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > 8 * 1024 * 1024 {
+    if bytes.len() > PLAN_LIMIT {
         return Err("LSP plan exceeds limit".into());
     }
     let plan: RenamePlan = serde_json::from_slice(&bytes).map_err(|_| "invalid rename plan")?;
@@ -1118,5 +1124,17 @@ mod freshness_tests {
         for caps in [json!({"diagnosticProvider":true}),json!({"diagnosticProvider":{}})] {
             assert!(!requires_push_restart(&caps,"old","new"));
         }
+    }
+}
+
+#[cfg(test)]
+mod persisted_plan_limit_tests {
+    use super::*;
+    #[test] fn escaped_plan_is_refused_before_it_can_be_returned_or_persisted() {
+        let plan=|text: String| RenamePlan{schema_version:1,id:Uuid::new_v4(),task_id:None,workspace:PathBuf::from("fixture"),created_at:chrono::Utc::now(),files:(0..4).map(|i|PlanFile{path:format!("{i}.txt"),expected_version:"missing".into(),before:text.clone(),after:text.clone(),edit_count:1}).collect()};
+        assert!(encode_plan(&plan("small".into())).is_ok());
+        let oversized=plan("\u{0001}".repeat(FILE_LIMIT));
+        assert_eq!(oversized.files.iter().map(|file|file.before.len()+file.after.len()).sum::<usize>(),4*1024*1024);
+        assert!(encode_plan(&oversized).unwrap_err().contains("exceeds limit"));
     }
 }

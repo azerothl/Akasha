@@ -205,9 +205,9 @@ pub(crate) fn resolve(
     let connection = connection(db)?;
     let record =
         json!({"operation_id":operation,"decision":decision,"note":note,"automatic":false});
-    let changed=connection.execute("UPDATE studio_operations SET state=?3,updated_at=?4,result=?5 WHERE task=?1 AND operation=?2 AND state='started'",params![task.to_string(),operation.to_string(),format!("resolved_{decision}"),chrono::Utc::now().to_rfc3339(),record.to_string()]).map_err(|e|e.to_string())?;
+    let changed=resolve_stopped_operation(&connection,task,operation,decision,&record)?;
     if changed != 1 {
-        return Err("unknown operation not found or already resolved".into());
+        return Err("unknown operation not found, already resolved, or task resumed concurrently".into());
     }
     if let Err(error) = store.insert_event(
         task,
@@ -264,4 +264,26 @@ pub(crate) fn route(method: &str, path: &str, body: Option<&[u8]>, db: &Path) ->
         Ok(value) => json_response("200 OK", &value.to_string()),
         Err(error) => json_response("409 Conflict", &json!({"error":error}).to_string()),
     })
+}
+
+fn resolve_stopped_operation(connection: &Connection, task:Uuid, operation:Uuid, decision:&str, record:&Value) -> Result<usize,String> {
+    // The stopped predicate and operation update share one SQLite write. If a
+    // competing resume queued the task after the earlier check, no row changes.
+    connection.execute("UPDATE studio_operations SET state=?3,updated_at=?4,result=?5 WHERE task=?1 AND operation=?2 AND state='started' AND EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND status IN ('paused','interrupted','failed','completed','cancelled'))",params![task.to_string(),operation.to_string(),format!("resolved_{decision}"),chrono::Utc::now().to_rfc3339(),record.to_string()]).map_err(|e|e.to_string())
+}
+#[cfg(test)]
+mod resolution_race_tests {
+    use super::*;
+    #[test] fn queued_resume_between_validation_and_resolution_cannot_resolve_the_effect() {
+        let connection=Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE tasks(id TEXT PRIMARY KEY,status TEXT);CREATE TABLE studio_operations(task TEXT,operation TEXT,state TEXT,updated_at TEXT,result TEXT);").unwrap();
+        let task=Uuid::new_v4();let operation=Uuid::new_v4();
+        connection.execute("INSERT INTO tasks VALUES(?1,'paused')",[task.to_string()]).unwrap();
+        connection.execute("INSERT INTO studio_operations VALUES(?1,?2,'started','',NULL)",params![task.to_string(),operation.to_string()]).unwrap();
+        connection.execute("UPDATE tasks SET status='queued' WHERE id=?1",[task.to_string()]).unwrap();
+        assert_eq!(resolve_stopped_operation(&connection,task,operation,"not_applied",&json!({"decision":"not_applied"})).unwrap(),0);
+        assert_eq!(connection.query_row("SELECT state FROM studio_operations",[],|r|r.get::<_,String>(0)).unwrap(),"started");
+        connection.execute("UPDATE tasks SET status='paused' WHERE id=?1",[task.to_string()]).unwrap();
+        assert_eq!(resolve_stopped_operation(&connection,task,operation,"not_applied",&json!({"decision":"not_applied"})).unwrap(),1);
+    }
 }
