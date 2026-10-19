@@ -317,6 +317,8 @@ mod tests {
     }
     #[test]
     fn only_the_explicit_user_scope_triggers_the_no_effect_guard() {
+        assert!(explicit_file_request("Modify config.txt to replace old with new."));
+        assert!(explicit_file_request("Modifie config.txt pour remplacer old par new."));
         assert!(explicit_file_request("[Current user request — task scope]\nCrée FIRST.md puis lis le fichier.\n[End current user request]"));
         assert!(!explicit_file_request("Create example.md in project context.\n[Current user request — task scope]\nExplique le module.\n[End current user request]"));
         assert!(!explicit_file_request("Explique comment créer un fichier."));
