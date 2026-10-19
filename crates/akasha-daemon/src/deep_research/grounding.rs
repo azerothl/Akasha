@@ -99,6 +99,11 @@ pub(super) fn publish(
     } else {
         "## Limitations\n\nSynthesis limited to passages read. Original quotations preserve their qualifications; this automated check does not replace independent verification."
     };
+    let level = |text: &str| text.trim_start().chars().take_while(|c| *c == '#').count();
+    let compact: Vec<_> = out.iter().enumerate().filter(|(index, block)| {
+        !heading(block) || out.get(index + 1).is_some_and(|next| !heading(next) || level(next) > level(block))
+    }).map(|(_, block)| block.clone()).collect();
+    let mut out = compact;
     out.push(limit_note.into());
     let result = out.join("\n\n");
     if max_words.is_some_and(|limit| result.split_whitespace().count() > limit) { return None; }
@@ -142,6 +147,18 @@ mod tests {
         }
         assert!(parse_review(r#"{"blocks":[{"id":0,"supported":false,"evidence":[]}]}"#, &[0], 1).is_some());
         assert!(publish(&["## Heading", "Unverified"], Review { blocks: vec![] }, &passages(), None, true).is_none());
+    }
+
+    #[test]
+    fn omitted_blocks_do_not_leave_empty_section_headings() {
+        let blocks = ["# Report", "## Empty", "Unverified", "## Findings", "Adding is O(1)."];
+        let review = Review { blocks: vec![
+            BlockReview { id: 2, supported: false, evidence: vec![] },
+            BlockReview { id: 4, supported: false, evidence: vec![0] },
+        ] };
+        let (report, _, _) = publish(&blocks, review, &passages(), Some(100), true).unwrap();
+        assert!(!report.contains("## Empty"));
+        assert!(report.contains("# Report") && report.contains("## Findings"));
     }
 
     #[test]

@@ -1126,8 +1126,17 @@ fn clip_prompt(text: &str, limit: usize) -> String {
 fn manifest_evidence_units(evidence: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let lines: Vec<_> = evidence.lines().filter(|line| !line.trim().is_empty() && seen.insert(*line)).collect();
-    if lines.iter().any(|line| line.trim_start().starts_with('|')) {
-        return vec![lines.join("\n")];
+    if let Some(first_table) = lines.iter().position(|line| line.trim_start().starts_with('|')) {
+        let context = |line: &str| {
+            let lower = line.to_lowercase();
+            ["amort", "expect", "denot", "notation", "footnote", "legend", "qualif", "cost", "coût", "never", "only", "unless", "provided", "except", "o(", "*", "~"]
+                .iter().any(|term| lower.contains(term))
+        };
+        let first = lines.iter().position(|line| context(line)).unwrap_or(first_table).min(first_table);
+        let last = lines.iter().rposition(|line| line.trim_start().starts_with('|') || context(line)).unwrap_or(first_table);
+        let mut units = vec![lines[first..=last].join("\n")];
+        units.extend(lines[..first].iter().chain(lines[last + 1..].iter()).map(|line| line.to_string()));
+        return units;
     }
     let mut units = Vec::new();
     let mut opening = String::new();
@@ -1567,10 +1576,20 @@ mod tests {
     }
 
     #[test]
+    fn table_unit_excludes_unrelated_intro_but_keeps_cost_context() {
+        let intro = "Broad background unrelated to the requested operations. ".repeat(10);
+        let essential = "The size is denoted by n.\nCosts marked * are amortized.\n| Type | add | remove |\n| Sample | O(n)* | O(n) |\nRemoval costs are not amortized.";
+        let evidence = format!("{intro}\n{essential}\nGeneral recommendation without a measured advantage.");
+        let units = super::manifest_evidence_units(&evidence);
+        assert_eq!(units[0], essential);
+        assert!(units.iter().any(|unit| unit == &intro));
+    }
+
+    #[test]
     fn manifest_keeps_selected_table_with_its_legend_and_opening_guarantees() {
         let evidence = "Context.\nCosts marked * are amortized, not worst-case.\n| Type | add(i) | remove(i) |\n| Sample | O(n-i)* | O(n-i) |\nRemoval never shrinks automatically.";
         let units = super::manifest_evidence_units(evidence);
-        assert_eq!(units, vec![evidence]);
+        assert_eq!(units[0], evidence.strip_prefix("Context.\n").unwrap());
         let mut findings = vec![super::ResearchFinding {
             url: "https://example.org/table".into(), title: "Table".into(),
             summary: "not evidence".into(), evidence: Some(evidence.into()), image_url: None,
@@ -1580,7 +1599,7 @@ mod tests {
             summary: "not evidence".into(), evidence: Some("First documented guarantee.\nSecond independent guarantee.".into()), image_url: None,
         }); }
         let (manifest, _, _) = super::format_source_manifest(&findings);
-        assert!(manifest.contains(evidence));
+        assert!(manifest.contains(evidence.strip_prefix("Context.\n").unwrap()));
         assert!(manifest.len() <= super::MANIFEST_BYTES);
         let too_large = format!("| header |\n{}", "complete qualification ".repeat(300));
         findings[0].evidence = Some(too_large);
