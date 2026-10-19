@@ -107,7 +107,7 @@ impl EmbeddedLlm {
     /// Complete using an optional router model id (compare / explicit route model field).
     pub fn complete_for_router_model(
         &self,
-        router_model: Option<&str>,
+        _router_model: Option<&str>,
         prompt: &str,
         max_tokens: Option<usize>,
         temperature: Option<f64>,
@@ -115,7 +115,7 @@ impl EmbeddedLlm {
         let _guard = acquire_inference_lock()?;
         #[cfg(feature = "llama-cpp")]
         if config::llama_cpp_compiled() {
-            let path = router_model
+            let path = _router_model
                 .and_then(|m| config::resolve_gguf_path_for_router_model(m))
                 .or_else(config::resolve_gguf_path);
             if let Some(path) = path {
