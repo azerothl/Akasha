@@ -4,7 +4,10 @@ describe('task presentation',()=>{
   it('hides already-truncated private prompts from old daemons',()=>{
     for(const text of ['[Composer mode: ask] Answer only…','[Task] Objective: [Orchestrated — disk deliverables REQUIRED]'])
       expect(taskTitle(text,'Demande')).toBe('Demande');
-    expect(taskTitle('Comparer Vec et HashMap','Demande')).toBe('Comparer Vec et HashMap');
+    for (const text of ['Comparer Vec et HashMap','[Task] investigate outage','[Orchestrated architecture] explain layers','[Pièce(s) jointe] explain this term'])
+      expect(taskTitle(text,'Demande')).toBe(text);
+    for (const text of ['[Task]\nObjective: [Orchestrated — disk deliverables REQUIRED]', '[Orchestrated — disk deliverables REQUIRED] internal prompt…', '[Pièce(s) jointe(s) à ce message : aide] private attachment…'])
+      expect(taskTitle(text,'Demande')).toBe('Demande');
   });
   it('localizes statuses without changing unknown statuses',()=>{
     expect(taskStatus('RUNNING','fr')).toBe('En cours');

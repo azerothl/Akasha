@@ -1,7 +1,7 @@
 /** Older daemons may have truncated a private prompt before the actual request. */
 export function taskTitle(label: string | undefined, fallback: string): string {
   const text = label?.trim() ?? "";
-  return !text || /^\[(?:Composer mode:|Task\]|Orchestrated|Pièce\(s\) jointe)/.test(text)
+  return !text || /^\[(?:Composer mode:[^\]]+\]\s|Task\]\s+Objective:|Orchestrated — disk deliverables REQUIRED\]|Pièce\(s\) jointe\(s\) à ce message)/.test(text)
     ? fallback : text;
 }
 
