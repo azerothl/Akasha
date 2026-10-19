@@ -113,7 +113,7 @@ async fn run_until_cancelled<F: std::future::Future>(cancel: &AtomicBool, work: 
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         } => None,
-        result = work => Some(result),
+        result = work => if cancel.load(Ordering::SeqCst) {None} else {Some(result)},
     }
 }
 
@@ -1707,5 +1707,16 @@ mod tests {
         assert_eq!(finding.summary, "Useful model notes.");
         assert_eq!(finding.evidence.as_deref(), Some("Useful model notes."));
         assert!(finding.url.is_empty(), "model notes are not web sources");
+    }
+}
+
+#[cfg(test)]
+mod completion_cancel_race_tests {
+    #[tokio::test]
+    async fn accepted_cancellation_wins_when_work_completes_during_the_poll_interval() {
+        use std::sync::atomic::{AtomicBool,Ordering};
+        let cancel=AtomicBool::new(false);
+        let work=async {cancel.store(true,Ordering::SeqCst);Ok::<(),()>(())};
+        assert!(super::run_until_cancelled(&cancel,work).await.is_none());
     }
 }

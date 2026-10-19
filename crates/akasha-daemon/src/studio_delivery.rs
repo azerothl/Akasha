@@ -77,18 +77,19 @@ fn isolate_git_configuration(command: &mut Command) {
         .env("GIT_ALLOW_PROTOCOL","https");
 }
 
-fn safe_global_identity(git:&Path)->Vec<(String,String)> {
-    static IDENTITY:std::sync::OnceLock<Vec<(String,String)>>=std::sync::OnceLock::new();
-    IDENTITY.get_or_init(||["user.name","user.email"].into_iter().filter_map(|key| {
+fn safe_global_identity(git:&Path)->Vec<(String,String)> { read_global_identity(git,None) }
+fn read_global_identity(git:&Path,config:Option<&Path>)->Vec<(String,String)> {
+    ["user.name","user.email"].into_iter().filter_map(|key| {
         let mut command=std::process::Command::new(git);
         command.args(["config","--global","--no-includes","--get",key]);
+        if let Some(config)=config {command.env("GIT_CONFIG_GLOBAL",config);}
         #[cfg(windows)]
         { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
         let output=command.output().ok()?;
         if !output.status.success(){return None;}
         let value=String::from_utf8(output.stdout).ok()?.trim_end_matches(['\r','\n']).to_string();
         (!value.is_empty() && value.len()<=1024 && !value.contains(['\r','\n','\0'])).then(||(key.into(),value))
-    }).collect()).clone()
+    }).collect()
 }
 
 fn isolated_identity_config(identity:&[(String,String)])->Result<tempfile::NamedTempFile,String> {
@@ -1811,5 +1812,17 @@ mod staged_approval_tests {
         let actual=parse_staged_entries(&git_fixture(root.path(),&["ls-files","--stage","-z"])).unwrap();
         let mut expected=BTreeMap::new();expected.insert("selected.txt".into(),Some(StagedEntry{mode:"100644".into(),oid}));
         verify_staged_approvals(&expected,&actual).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod refreshed_identity_tests {
+    use super::*;
+    #[test] fn inert_global_identity_is_reread_after_source_changes() {
+        let dir=tempfile::tempdir().unwrap();let config=dir.path().join("global.gitconfig");std::fs::write(&config,"").unwrap();
+        assert!(read_global_identity(Path::new("git"),Some(&config)).is_empty());
+        std::fs::write(&config,"[user]\nname = Newly configured\nemail = fresh@example.invalid\n").unwrap();
+        let identity=read_global_identity(Path::new("git"),Some(&config));assert!(identity.contains(&("user.name".into(),"Newly configured".into())));assert!(identity.contains(&("user.email".into(),"fresh@example.invalid".into())));
+        std::fs::write(&config,"[user]\nname = Renamed user\nemail = renamed@example.invalid\n").unwrap();assert!(read_global_identity(Path::new("git"),Some(&config)).contains(&("user.name".into(),"Renamed user".into())));
     }
 }

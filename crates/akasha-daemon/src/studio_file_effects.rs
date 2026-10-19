@@ -54,6 +54,22 @@ pub(crate) fn implementation_role(agent: &str) -> bool {
             | "studio_project_manager"
     )
 }
+fn explicit_path_kind(det: &str) -> Option<bool> {
+    let det = det.to_lowercase();
+    if det
+        .split_whitespace()
+        .any(|word| matches!(word, "folder" | "directory" | "dossier" | "r\u{e9}pertoire"))
+    {
+        Some(true)
+    } else if det
+        .split_whitespace()
+        .any(|word| matches!(word, "file" | "fichier"))
+    {
+        Some(false)
+    } else {
+        None
+    }
+}
 fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> {
     let path = r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;!?"`]+)"#;
     let pattern = format!(
@@ -63,11 +79,13 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
     // Object-before-path requests: "Add logging to config.txt". Keep this
     // fallback bounded to unquoted words and the current sentence; never scan
     // literal content or a later instruction for a convenient filename.
+    let object_atom =
+        r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[\p{L}\p{N}_/\\:.=@+-]*[\p{L}\p{N}_/\\:=@+-])"#;
     let object_path = regex::Regex::new(&format!(
-        r#"(?i)^\s+(?:[\p{{L}}\p{{N}}_-]+\s+){{1,12}}?(?:to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<path>{path})"#
+        r#"(?i)^\s+(?:{object_atom}\s+){{1,12}}?(?P<prep>to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?P<det>(?:(?:the|le|la|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire)\s+)*)(?P<path>{path})"#
     )).unwrap();
     let path_list = regex::Regex::new(&format!(
-        r#"(?i)^\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et|&)\s+)(?:(?:the|le|la|fichier|file)\s+)*(?P<path>{path})"#
+        r#"(?i)^\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et|&)\s+)(?P<det>(?:(?:the|a|new|le|la|un|une|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire)\s+)*)(?P<path>{path})"#
     )).unwrap();
     let mut outside = vec![true; request.len() + 1];
     let mut quote = None;
@@ -105,8 +123,11 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
             let mut source = clean(raw);
             let verb = verb.as_str().to_lowercase();
             let verb = verb.strip_suffix(['r', 'z']).unwrap_or(&verb).to_string();
-            let det=cap.name("det").map(|value|value.as_str().to_lowercase()).unwrap_or_default();
-            let kind=if det.split_whitespace().any(|word|matches!(word,"folder"|"directory"|"dossier"|"r\u{e9}pertoire")) {Some(true)} else if det.split_whitespace().any(|word|matches!(word,"file"|"fichier")) {Some(false)} else {None};
+            let det = cap
+                .name("det")
+                .map(|value| value.as_str().to_lowercase())
+                .unwrap_or_default();
+            let mut kind = explicit_path_kind(&det);
             let filesystem = matches!(
                 verb.as_str(),
                 "delete"
@@ -120,16 +141,41 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
                     | "d\u{e9}place"
                     | "deplace"
             );
-            if !filesystem
-                && !raw.starts_with(['`', '"', '\''])
-                && !source.contains(['.', '/', '\\'])
-                && kind.is_none()
+            let object = object_path.captures(&request[verb_end..]);
+            let object_destination = !filesystem
+                && object.as_ref().is_some_and(|object| {
+                    matches!(verb.as_str(), "add" | "ajoute" | "replace" | "remplace")
+                        || (matches!(
+                            object
+                                .name("prep")
+                                .map(|p| p.as_str().to_lowercase())
+                                .as_deref(),
+                            Some("in" | "into" | "from" | "dans" | "sur")
+                        ) && !matches!(
+                            verb.as_str(),
+                            "create" | "write" | "save" | "cr\u{e9}e" | "cree" | "enregistre"
+                        ))
+                });
+            if object_destination
+                || (!filesystem
+                    && !raw.starts_with(['`', '"', '\''])
+                    && !source.contains(['.', '/', '\\'])
+                    && kind.is_none())
             {
-                let object = object_path.captures(&request[verb_end..])?;
+                let object = object?;
+                kind = explicit_path_kind(
+                    object
+                        .name("det")
+                        .map(|det| det.as_str())
+                        .unwrap_or_default(),
+                );
                 list_end = verb_end + object.get(0)?.end();
                 raw = object.name("path")?.as_str();
                 source = clean(raw);
-                if !raw.starts_with(['`', '"', '\'']) && !source.contains(['.', '/', '\\']) {
+                if !raw.starts_with(['`', '"', '\''])
+                    && !source.contains(['.', '/', '\\'])
+                    && kind.is_none()
+                {
                     return None;
                 }
             }
@@ -140,13 +186,31 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
             };
             let mut goals = vec![(verb.clone(), source, target.clone(), kind)];
             if target.is_none() {
+                let mut list_kind = kind;
                 while let Some(item) = path_list.captures(&request[list_end..]) {
                     let raw = item.name("path")?.as_str();
                     let path = clean(raw);
+                    list_kind = explicit_path_kind(
+                        item.name("det").map(|det| det.as_str()).unwrap_or_default(),
+                    )
+                    .or(list_kind);
                     if !raw.starts_with(['`', '"', '\'']) && !path.contains(['.', '/', '\\']) {
-                        break;
+                        if list_kind.is_none() {
+                            break;
+                        }
+                        let tail = request[list_end + item.get(0)?.end()..].trim_start();
+                        let item_ended_sentence = raw.ends_with(['.', '!', '?']);
+                        if !item_ended_sentence
+                            && !tail.is_empty()
+                            && !tail.starts_with([',', ';', '!', '?'])
+                            && !tail.starts_with("and ")
+                            && !tail.starts_with("et ")
+                            && !tail.starts_with("CASE:")
+                        {
+                            break;
+                        }
                     }
-                    goals.push((verb.clone(), path, None, kind));
+                    goals.push((verb.clone(), path, None, list_kind));
                     list_end += item.get(0)?.end();
                 }
             }
@@ -384,8 +448,12 @@ impl Scope {
             && self.goals.iter().all(|g| {
                 current.get(&g.path).is_some_and(|v| match g.end {
                     EndState::Present => g.changed && !missing(v) && *v != g.baseline,
-                    EndState::FilePresent => g.changed && v.starts_with("file:") && *v != g.baseline,
-                    EndState::DirectoryPresent => g.changed && v.starts_with("directory:") && *v != g.baseline,
+                    EndState::FilePresent => {
+                        g.changed && v.starts_with("file:") && *v != g.baseline
+                    }
+                    EndState::DirectoryPresent => {
+                        g.changed && v.starts_with("directory:") && *v != g.baseline
+                    }
                     EndState::Absent => g.changed && missing(v),
                     EndState::RenameDestination => {
                         !missing(v)
@@ -448,7 +516,11 @@ fn paths_for_request(
         }
     };
     for (verb, source, target, kind) in parsed(request) {
-        if matches!(verb.as_str(),"rename"|"move"|"renomme"|"d\u{e9}place"|"deplace") && target.is_none() {
+        if matches!(
+            verb.as_str(),
+            "rename" | "move" | "renomme" | "d\u{e9}place" | "deplace"
+        ) && target.is_none()
+        {
             return Err("rename/move target could not be resolved; provide explicit source and destination paths".into());
         }
         let source = resolve(&source)?;
@@ -476,7 +548,11 @@ fn paths_for_request(
                 ) {
                     EndState::Absent
                 } else {
-                    match kind {Some(true)=>EndState::DirectoryPresent,Some(false)=>EndState::FilePresent,None=>EndState::Present}
+                    match kind {
+                        Some(true) => EndState::DirectoryPresent,
+                        Some(false) => EndState::FilePresent,
+                        None => EndState::Present,
+                    }
                 },
             );
         }
@@ -711,6 +787,11 @@ mod tests {
         for (request, expected) in [
             ("Add logging to config.txt", "config.txt"),
             ("Update dependencies in Cargo.toml", "Cargo.toml"),
+            ("Add dist/ to .gitignore", ".gitignore"),
+            ("Add foo.txt to config.txt", "config.txt"),
+            ("Add `dist/` to the file .gitignore", ".gitignore"),
+            ("Replace foo.txt with bar in config.txt", "config.txt"),
+            ("Update deps.v2 in Cargo.toml", "Cargo.toml"),
             ("Replace foo with bar in config.toml", "config.toml"),
             ("Change the port in config.toml", "config.toml"),
             ("Remplace foo par bar dans config.toml", "config.toml"),
@@ -736,6 +817,28 @@ mod tests {
     }
     #[test]
     fn conjunctive_paths_keep_the_governing_operation() {
+        assert_eq!(parsed("Create directory docs and assets").len(), 2);
+        assert_eq!(parsed("Create directory docs and folder assets").len(), 2);
+        let mixed = parsed("Create file README and folder assets and cache");
+        assert_eq!(mixed.len(), 3);
+        assert_eq!(mixed[1].3, Some(true));
+        assert_eq!(mixed[2].3, Some(true));
+        assert_eq!(parsed("Create file README and LICENSE").len(), 2);
+        assert_eq!(
+            parsed("Create directory docs and explain the result").len(),
+            1
+        );
+        let dirs = tempfile::tempdir().unwrap();
+        let mut directory_scope = scope(dirs.path(), "Create directory docs and assets");
+        let before = capture_paths(&directory_scope.paths()).unwrap();
+        std::fs::create_dir(dirs.path().join("docs")).unwrap();
+        directory_scope.observe(&before, &capture_paths(&directory_scope.paths()).unwrap());
+        assert!(!directory_scope.verified(&capture_paths(&directory_scope.paths()).unwrap()));
+        let before = capture_paths(&directory_scope.paths()).unwrap();
+        std::fs::create_dir(dirs.path().join("assets")).unwrap();
+        directory_scope.observe(&before, &capture_paths(&directory_scope.paths()).unwrap());
+        assert!(directory_scope.verified(&capture_paths(&directory_scope.paths()).unwrap()));
+
         for request in [
             "Create a.txt and b.txt",
             "Create a.txt, b.txt and c.txt",
@@ -769,22 +872,46 @@ mod tests {
     }
     #[test]
     fn rename_target_prepositions_and_unresolved_targets_fail_closed() {
-        for request in ["Rename old.txt as new.txt", "Move old.txt into archive/old.txt"] {
-            assert!(has_request(request));assert!(parsed(request)[0].2.is_some());
+        for request in [
+            "Rename old.txt as new.txt",
+            "Move old.txt into archive/old.txt",
+        ] {
+            assert!(has_request(request));
+            assert!(parsed(request)[0].2.is_some());
         }
-        let root=tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
         for request in ["Rename old.txt", "Move old.txt towards new.txt"] {
-            assert!(has_request(request));assert!(paths_for_request(root.path(),request,&policy(root.path())).is_err());
+            assert!(has_request(request));
+            assert!(paths_for_request(root.path(), request, &policy(root.path())).is_err());
         }
     }
     #[test]
     fn explicit_directory_and_file_determiners_require_the_requested_kind() {
-        let root=tempfile::tempdir().unwrap();
-        for request in ["Create folder docs", "Create directory assets", "Cr\u{e9}e le dossier notes", "Cr\u{e9}e le r\u{e9}pertoire notes", "Create DIRECTORY assets", "Create FILE README"] {assert!(has_request(request),"{request}");}
-        let mut folder=scope(root.path(),"Create folder docs");let before=capture_paths(&folder.paths()).unwrap();
-        std::fs::write(root.path().join("docs"),"not a directory").unwrap();folder.observe(&before,&capture_paths(&folder.paths()).unwrap());assert!(!folder.verified(&capture_paths(&folder.paths()).unwrap()));
-        std::fs::remove_file(root.path().join("docs")).unwrap();std::fs::create_dir(root.path().join("docs")).unwrap();folder.observe(&before,&capture_paths(&folder.paths()).unwrap());assert!(folder.verified(&capture_paths(&folder.paths()).unwrap()));
-        let mut file=scope(root.path(),"Create file README");let before=capture_paths(&file.paths()).unwrap();std::fs::create_dir(root.path().join("README")).unwrap();file.observe(&before,&capture_paths(&file.paths()).unwrap());assert!(!file.verified(&capture_paths(&file.paths()).unwrap()));
+        let root = tempfile::tempdir().unwrap();
+        for request in [
+            "Create folder docs",
+            "Create directory assets",
+            "Cr\u{e9}e le dossier notes",
+            "Cr\u{e9}e le r\u{e9}pertoire notes",
+            "Create DIRECTORY assets",
+            "Create FILE README",
+        ] {
+            assert!(has_request(request), "{request}");
+        }
+        let mut folder = scope(root.path(), "Create folder docs");
+        let before = capture_paths(&folder.paths()).unwrap();
+        std::fs::write(root.path().join("docs"), "not a directory").unwrap();
+        folder.observe(&before, &capture_paths(&folder.paths()).unwrap());
+        assert!(!folder.verified(&capture_paths(&folder.paths()).unwrap()));
+        std::fs::remove_file(root.path().join("docs")).unwrap();
+        std::fs::create_dir(root.path().join("docs")).unwrap();
+        folder.observe(&before, &capture_paths(&folder.paths()).unwrap());
+        assert!(folder.verified(&capture_paths(&folder.paths()).unwrap()));
+        let mut file = scope(root.path(), "Create file README");
+        let before = capture_paths(&file.paths()).unwrap();
+        std::fs::create_dir(root.path().join("README")).unwrap();
+        file.observe(&before, &capture_paths(&file.paths()).unwrap());
+        assert!(!file.verified(&capture_paths(&file.paths()).unwrap()));
     }
     #[test]
     fn unrelated_and_noop_writes_do_not_attest_requested_changes() {
