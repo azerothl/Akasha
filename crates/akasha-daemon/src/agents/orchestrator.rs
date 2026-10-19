@@ -1003,6 +1003,7 @@ async fn decompose_to_plan(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4096);
     let request = CompletionRequest {
+        tools: None,
         prompt,
         max_tokens: Some(system_max_tokens),
         temperature: Some(0.2),
@@ -1064,6 +1065,7 @@ async fn decompose_to_plan(
         project_min_steps()
     );
     let retry_request = CompletionRequest {
+        tools: None,
         prompt: retry_prompt,
         max_tokens: Some(system_max_tokens),
         temperature: Some(0.1),
@@ -1188,6 +1190,7 @@ Output only: SATISFACTORY, CANNOT_DO, or NEEDS_REFINEMENT"#,
         aggregated_response.trim().chars().take(2000).collect::<String>()
     );
     let req = CompletionRequest {
+        tools: None,
         prompt,
         max_tokens: Some(32),
         temperature: Some(0.0),
@@ -2726,6 +2729,7 @@ Reply in the SAME LANGUAGE as the user's question above. Do not add any informat
                 raw_responses
             );
             let req = CompletionRequest {
+                tools: None,
                 prompt: synthesis_prompt,
                 max_tokens: Some(4096),
                 temperature: Some(0.3),
@@ -2895,6 +2899,7 @@ Formatting rules (Markdown):
                 )
             );
             let review_req = CompletionRequest {
+                tools: None,
                 prompt: review_prompt,
                 max_tokens: Some(256),
                 temperature: Some(0.0),

@@ -792,6 +792,7 @@ mod tests {
                 temperature: Some(0.0),
                 preferred_task_type: Some("conversation".into()),
                 system_prompt: None,
+                tools: None,
                 image_data_urls: None,
                 top_p: None,
                 top_k: None,

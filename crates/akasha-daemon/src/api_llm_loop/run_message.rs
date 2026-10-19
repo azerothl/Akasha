@@ -176,9 +176,8 @@ pub(crate) async fn run_message_via_llm(
         }
         }
     };
-    let code_studio_disk_task = tool_disk_workspace_root
-        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags))
-        || TaskStore::open(&store_path).ok()
+    // A path shape is not a project identity. Match the dispatcher/ledger gate.
+    let code_studio_disk_task = TaskStore::open(&store_path).ok()
             .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten()).is_some();
     let studio_disk_system_append = {
         let proj_base = crate::studio::studio_projects_base(data_dir_for_studio_flags);
@@ -1623,6 +1622,12 @@ pub(crate) async fn run_message_via_llm(
                     );
                 }
             }
+            let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
+                tools_executor_snapshot.as_ref().and_then(|exec| {
+                    let names:Vec<String>=crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect();
+                    (!names.is_empty()).then(||vec![crate::studio_tool_contract::native_definition(names)])
+                })
+            }else{None};
             let request = CompletionRequest {
                 prompt: if code_studio_disk_task && round > 0 {
                     format!("{}\n\n{}", tool_instruction, current_prompt)
@@ -1642,6 +1647,7 @@ pub(crate) async fn run_message_via_llm(
                 num_ctx: None,
                 num_gpu: None,
                 thinking_level: completion_thinking_level.clone(),
+                tools: native_tools,
             };
             // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
             // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -2191,6 +2197,15 @@ pub(crate) async fn run_message_via_llm(
                     .with_correlation(task_id),
                 );
                     for (name, args) in &lane_calls {
+                        let typed_call=if name=="studio_call" {
+                            match crate::studio_tool_contract::decode(&args.join(" ")) {
+                                Ok(call)=>Some(call),Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(serde_json::json!({"schema_version":1,"success":false,"error":error}).to_string());continue;}
+                            }
+                        }else{None};
+                        let native_envelope_args=args;
+                        let name=typed_call.as_ref().map(|call|&call.envelope.tool).unwrap_or(name);
+                        let args=typed_call.as_ref().map(|call|&call.argv).unwrap_or(args);
+
                         // Hot-reloaded permissions must constrain the next invocation of an active task.
                         let current_executor = if let Some(registry) = tools_executor.as_ref() {
                             registry.read().await.clone()
@@ -3125,8 +3140,8 @@ pub(crate) async fn run_message_via_llm(
                             } else {
                                 execute_tool_call(
                                     exec,
-                                    &actual_tool,
-                                    tool_args,
+                                    if typed_call.is_some(){"studio_call"}else{&actual_tool},
+                                    if typed_call.is_some(){native_envelope_args.as_slice()}else{tool_args},
                                     process_registry.as_ref(),
                                     long_term_client.as_ref(),
                                     task_id,
@@ -3144,7 +3159,7 @@ pub(crate) async fn run_message_via_llm(
                             };
                         if success { run_outcome.successful_tool_calls += 1; } else { run_outcome.failed_tool_calls += 1; }
                         if matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container") {
-                            run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::Value::Null, "source":"tool_executor"}));
+                            run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }
                         if let Some(img) = captured_image {
                             // Studio browser PNGs are persisted and displayed by the
@@ -3291,8 +3306,8 @@ pub(crate) async fn run_message_via_llm(
                 let results_blob = tool_results.join("\n");
                 let mut studio_readonly_nudge: Option<String> = None;
                 if code_studio_disk_task && !calls.is_empty() {
-                    let only_survey = calls.iter().all(|(name, _)| {
-                        let c = canonicalize_tool_name(&name.trim().to_string());
+                    let only_survey = calls.iter().all(|(name, args)| {
+                        let c = if name=="studio_call" {crate::studio_tool_contract::decode(&args.join(" ")).ok().map(|call|call.envelope.tool).unwrap_or_default()} else {canonicalize_tool_name(&name.trim().to_string())};
                         crate::api_studio::studio_survey_tool(&c)
                     });
                     if only_survey {
@@ -4146,6 +4161,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(2048);
                 let req = CompletionRequest {
+                    tools: None,
                     prompt: extract_prompt,
                     max_tokens: Some(extract_max_tokens),
                     temperature: Some(0.1),
