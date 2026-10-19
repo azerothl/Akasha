@@ -897,6 +897,7 @@ async fn fetch_and_extract(
         // Only original source passages may enter the evidence manifest. A model
         // summary (including an incorrect translation) is not a source quotation.
         let evidence = verified_source_evidence(&parsed, &content)?;
+        let evidence = complete_selected_tables(&evidence, &content, goal);
         let image_url = parsed
             .get("image_urls")
             .and_then(|v| v.as_array())
@@ -938,6 +939,50 @@ fn verified_source_evidence(parsed: &serde_json::Value, content: &str) -> Option
         .filter(|quote| quote.len() >= 20 && source.contains(quote) && seen.insert(quote.clone()))
         .take(6).collect();
     (!quotes.is_empty()).then(|| quotes.join("\n"))
+}
+
+/// Expand a selected table header/row using the original page, never model prose.
+/// Match row labels to literal question terms; retain all rows if no target is
+/// named. Include nearby notation and cost legends, excluding unrelated types.
+fn complete_selected_tables(evidence: &str, content: &str, goal: &str) -> String {
+    let tokens = |text: &str| text.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|word| word.len() >= 2).map(str::to_lowercase).collect::<HashSet<_>>();
+    let goal_terms = tokens(goal);
+    let lines: Vec<_> = content.lines().collect();
+    let selected: HashSet<_> = evidence.lines().map(str::trim).collect();
+    let mut keep: HashSet<usize> = lines.iter().enumerate()
+        .filter(|(_, line)| selected.contains(line.trim())).map(|(id, _)| id).collect();
+    let selected_ids: Vec<_> = keep.iter().copied().collect();
+    for id in selected_ids {
+        if !lines[id].trim_start().starts_with('|') { continue; }
+        let mut start = id;
+        while start > 0 && lines[start - 1].trim_start().starts_with('|') { start -= 1; }
+        let mut end = id + 1;
+        while end < lines.len() && lines[end].trim_start().starts_with('|') { end += 1; }
+        let labels: Vec<_> = (start + 1..end).map(|row| {
+            let label = lines[row].split('|').find(|cell| !cell.trim().is_empty()).unwrap_or("");
+            (row, tokens(label))
+        }).collect();
+        let matching: HashSet<_> = labels.iter().filter(|(_, label)| !label.is_disjoint(&goal_terms))
+            .map(|(row, _)| *row).collect();
+        keep.insert(start);
+        for (row, _) in &labels {
+            if matching.is_empty() || matching.contains(row) { keep.insert(*row); }
+        }
+        let unrelated: HashSet<_> = labels.iter().filter(|(row, _)| !matching.is_empty() && !matching.contains(row))
+            .flat_map(|(_, label)| label.iter().cloned()).collect();
+        for before in start.saturating_sub(14)..start {
+            let lower = lines[before].to_lowercase();
+            let legend = ["denot", "amort", "notation", "cost", "coût", "resiz", "*", "~"]
+                .iter().any(|term| lower.contains(term));
+            if legend && tokens(lines[before]).is_disjoint(&unrelated) { keep.insert(before); }
+        }
+    }
+    let mut ids: Vec<_> = keep.into_iter().collect(); ids.sort_unstable();
+    // Old extraction formats can normalize whitespace; retain their verified
+    // passages when no exact source line was found, without fabricating a table.
+    if ids.is_empty() { return evidence.to_string(); }
+    ids.into_iter().map(|id| lines[id]).collect::<Vec<_>>().join("\n")
 }
 
 fn numbered_source_content(content: &str) -> String {
@@ -1132,7 +1177,11 @@ fn manifest_evidence_units(evidence: &str) -> Vec<String> {
             ["amort", "expect", "denot", "notation", "footnote", "legend", "qualif", "cost", "coût", "never", "only", "unless", "provided", "except", "o(", "*", "~"]
                 .iter().any(|term| lower.contains(term))
         };
-        let first = lines.iter().position(|line| context(line)).unwrap_or(first_table).min(first_table);
+        let first = lines[..first_table].iter().position(|line| {
+            let lower = line.to_lowercase();
+            ["amort", "expect", "denot", "notation", "footnote", "legend", "qualif", "cost", "coût", "o(", "*", "~"]
+                .iter().any(|term| lower.contains(term))
+        }).unwrap_or(first_table);
         let last = lines.iter().rposition(|line| line.trim_start().starts_with('|') || context(line)).unwrap_or(first_table);
         let mut units = vec![lines[first..=last].join("\n")];
         units.extend(lines[..first].iter().chain(lines[last + 1..].iter()).map(|line| line.to_string()));
@@ -1573,6 +1622,22 @@ mod tests {
         trigger.await.unwrap();
         assert_eq!(result, None);
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn selected_header_recovers_named_rows_and_notation_from_original_page() {
+        let content = "Overview.\nThe size is denoted by n.\nCosts with * are amortized.\nRemoval costs are not amortized.\n| Type | add(i) | remove(i) |\n| Array | O(n-i)* | O(n-i) |\n| Ring | O(1)* | O(1) |\n| Tree | O(log n) | O(log n) |\nEnd.";
+        let expanded = super::complete_selected_tables("| Type | add(i) | remove(i) |", content, "Compare Array and Ring");
+        assert!(expanded.contains("| Array | O(n-i)* | O(n-i) |"));
+        assert!(expanded.contains("| Ring | O(1)* | O(1) |"));
+        assert!(!expanded.contains("| Tree |"));
+        assert!(expanded.contains("size is denoted by n") && expanded.contains("Removal costs are not amortized"));
+        for line in expanded.lines() { assert!(content.lines().any(|original| original == line)); }
+        let units = super::manifest_evidence_units(&expanded);
+        assert_eq!(units.len(), 1);
+        let unnamed = super::complete_selected_tables("| Type | add(i) | remove(i) |", content, "Explain this table");
+        assert!(unnamed.contains("| Tree |"));
+        assert_eq!(super::complete_selected_tables("A verified sentence.", "A verified sentence.", "question"), "A verified sentence.");
     }
 
     #[test]

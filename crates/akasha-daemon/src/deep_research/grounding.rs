@@ -38,14 +38,25 @@ pub(super) fn parse_review(text: &str, expected: &[usize], passages: usize) -> O
 }
 
 fn quote(text: &str) -> String {
-    text.lines().map(|line| {
+    let mut out = Vec::new();
+    let mut in_table = false;
+    for line in text.lines() {
+        let table = line.trim_start().starts_with('|');
         let mut escaped = String::from("> ");
         for c in line.chars() {
-            if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|') { escaped.push('\\'); }
+            if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>') || (c == '|' && !table) {
+                escaped.push('\\');
+            }
             escaped.push(c);
         }
-        escaped
-    }).collect::<Vec<_>>().join("\n")
+        out.push(escaped);
+        if table && !in_table {
+            let cells = line.trim().trim_matches('|').split('|').count();
+            out.push(format!("> |{}|", vec!["---"; cells].join("|")));
+        }
+        in_table = table;
+    }
+    out.join("\n")
 }
 
 /// Reject a missing/malformed review. Numerical complexity prose is always
@@ -67,7 +78,9 @@ pub(super) fn publish(
             continue;
         }
         let checked = review.blocks.iter().find(|b| b.id == id)?;
-        let complexity = block.to_lowercase().replace(' ', "").contains("o(");
+        let lower = block.to_lowercase();
+        let complexity = lower.replace(' ', "").contains("o(")
+            || ["amort", "worst-case", "pire cas", "expected cost", "coût espéré"].iter().any(|term| lower.contains(term));
         if checked.supported && !complexity {
             let mut text = block.to_string();
             for source in &checked.evidence {
@@ -130,6 +143,15 @@ mod tests {
     }
 
     #[test]
+    fn prose_about_amortization_also_uses_original_qualifications() {
+        let review = Review { blocks: vec![BlockReview { id: 0, supported: true, evidence: vec![0] }] };
+        let (report, replaced, _) = publish(&["Les coûts amortis garantissent toujours une opération plus rapide."], review, &passages(), Some(100), true).unwrap();
+        assert_eq!(replaced, 1);
+        assert!(!report.contains("garantissent toujours"));
+        assert!(report.contains("Removing is O(1)."));
+    }
+
+    #[test]
     fn unsupported_mechanisms_are_replaced_only_with_original_text() {
         let blocks = vec!["This structure masks deleted objects and guarantees optimal throughput."];
         let review = Review { blocks: vec![BlockReview { id: 0, supported: false, evidence: vec![0] }] };
@@ -159,6 +181,15 @@ mod tests {
         let (report, _, _) = publish(&blocks, review, &passages(), Some(100), true).unwrap();
         assert!(!report.contains("## Empty"));
         assert!(report.contains("# Report") && report.contains("## Findings"));
+    }
+
+    #[test]
+    fn original_table_cells_and_qualifications_remain_readable() {
+        let text = "Costs marked * are amortized.\n| Type | add | remove |\n| Sample | O(n)* | O(n) |\nRemoval never shrinks automatically.";
+        let quoted = quote(text);
+        assert!(quoted.contains("> |---|---|---|"));
+        assert!(quoted.contains("| Sample | O(n)\\* | O(n) |"));
+        assert!(quoted.contains("Removal never shrinks automatically."));
     }
 
     #[test]
