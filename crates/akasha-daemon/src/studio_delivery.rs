@@ -11,14 +11,14 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 const OUTPUT_LIMIT: u64 = 4 * 1024 * 1024;
-struct OwnedIndexLock { path:Option<PathBuf>, file:Option<std::fs::File> }
-impl Drop for OwnedIndexLock {
+struct OwnedGitLock { path:Option<PathBuf>, file:Option<std::fs::File> }
+impl Drop for OwnedGitLock {
     fn drop(&mut self) {self.file.take();if let Some(path)=self.path.take(){let _=std::fs::remove_file(path);}}
 }
 async fn reconcile_selected_index(root:&Path,index_path:&Path,original:&str,branch_name:&str,commit:&str,selected:&HashSet<String>)->Result<(),String> {
     let lock_path=PathBuf::from(format!("{}.lock",index_path.display()));
     let file=std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path).map_err(|e|format!("index lock unavailable: {e}"))?;
-    let mut lock=OwnedIndexLock{path:Some(lock_path),file:Some(file)};
+    let mut lock=OwnedGitLock{path:Some(lock_path),file:Some(file)};
     if file_hash(index_path)?!=original || branch(root).await?!=branch_name || head(root).await?!=commit {return Err("Git index/checkout changed concurrently; reconcile selected paths manually".into());}
     let tmp=tempfile::tempdir().map_err(|e|e.to_string())?;let index=tmp.path().join("index");
     if index_path.is_file(){std::fs::copy(index_path,&index).map_err(|e|e.to_string())?;}else{git(root,args(&["read-tree","--empty"]),Some(&index)).await?.checked()?;}
@@ -154,7 +154,17 @@ pub(crate) async fn approval_identity(root:&Path,tool:&str,argv:&[String]) -> Re
     Ok(json!({"workspace":root,"git_dir":git_dir,"git_common_dir":common_dir,"repository":repo,"publication_url":publication_url,"tool":tool,"arguments":payload}).to_string())
 }
 
+fn lock_git_configuration(root: &Path) -> Result<OwnedGitLock,String> {
+    let (_,common)=bound_metadata(&delivery_data_dir(root)?,root)?;
+    let path=common.join("config.lock");
+    let file=std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
+        .map_err(|e|format!("repository Git configuration is busy; delivery refused: {e}"))?;
+    Ok(OwnedGitLock{path:Some(path),file:Some(file)})
+}
 async fn git(root: &Path, args: Vec<String>, index: Option<&Path>) -> Result<Output, String> {
+    // Git's config writers must acquire this same lock. Keep our ownership
+    // across both inspection and execution, including network operations.
+    let _config_lock=lock_git_configuration(root)?;
     // Config inspection does not execute helpers. Reject repository-controlled
     // launchers before any delivery Git command (including read-only preflight).
     let config = run(root, "git", ["config", "--local", "--no-includes", "--name-only", "--list"].iter().map(|x|x.to_string()).collect(), None).await?;
@@ -1419,5 +1429,22 @@ mod checks_freshness_tests {
         assert_eq!(classify_checks(&[json!({"status":"IN_PROGRESS"}),completed("STALE")]),"pending");
         assert_eq!(classify_checks(&[json!({"state":"PENDING"})]),"pending");
         assert_eq!(classify_checks(&[json!({"status":"FUTURE"}),completed("SKIPPED")]),"unknown");
+    }
+}
+
+#[cfg(test)]
+mod configuration_lock_tests {
+    use super::*;
+    #[test] fn concurrent_git_config_writer_cannot_change_the_configuration_until_execution_releases_it() {
+        let data=tempfile::tempdir().unwrap();let root=data.path().join("studio-projects").join(Uuid::new_v4().to_string());std::fs::create_dir_all(&root).unwrap();
+        assert!(std::process::Command::new("git").args(["init","-q"]).current_dir(&root).output().unwrap().status.success());
+        let root=root.canonicalize().unwrap();let before=std::fs::read(root.join(".git/config")).unwrap();
+        let lock=lock_git_configuration(&root).unwrap();
+        let change=||std::process::Command::new("git").args(["config","--local","url.https://unapproved.invalid/.insteadOf","https://github.com/"]).current_dir(&root).output().unwrap();
+        assert!(!change().status.success());assert_eq!(std::fs::read(root.join(".git/config")).unwrap(),before);
+        assert!(lock_git_configuration(&root).is_err());
+        drop(lock);assert!(change().status.success());
+        assert_ne!(std::fs::read(root.join(".git/config")).unwrap(),before);
+        assert!(!root.join(".git/config.lock").exists());
     }
 }
