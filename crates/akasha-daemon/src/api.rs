@@ -560,13 +560,15 @@ pub(crate) async fn pdf_extract_message_from_disk(
                     None,
                 )
             }
-            Err(e) => (
+            Err(failure) => (
                 false,
                 format!(
-                    "[{}] PDF extraction failed for {}: {}",
+                    "[{}] {}",
                     via_tool,
-                    disk_path.display(),
-                    e
+                    crate::pdf_extract_safe::pdf_extract_user_message(
+                        failure,
+                        crate::pdf_extract_safe::daemon_locale_is_en(),
+                    )
                 ),
                 None,
             ),

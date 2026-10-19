@@ -1813,21 +1813,31 @@ if method == "POST" && path == "/api/message" {
                         &base64::engine::general_purpose::STANDARD,
                         content_base64,
                     ) {
-                        let text = if mime == "application/pdf" {
-                            crate::pdf_extract_safe::extract_text_from_mem(&decoded).unwrap_or_else(|_| {
-                                String::from(
-                                    "[Extraction du texte PDF impossible ou PDF vide.]",
-                                )
-                            })
+                        if mime == "application/pdf" {
+                            match crate::pdf_extract_safe::extract_text_from_mem(&decoded) {
+                                Ok(text) => {
+                                    doc_texts.push(format!(
+                                        "[Document « {} »]\n{}",
+                                        name,
+                                        text.trim()
+                                    ));
+                                }
+                                Err(failure) => {
+                                    doc_texts.push(format!(
+                                        "[Document « {} »]\n{}",
+                                        name,
+                                        crate::pdf_extract_safe::pdf_extract_bracketed_user_message(
+                                            failure
+                                        )
+                                    ));
+                                }
+                            }
                         } else if let Ok(t) = String::from_utf8(decoded) {
-                            t
+                            if !t.trim().is_empty() {
+                                doc_texts.push(format!("[Document « {} »]\n{}", name, t.trim()));
+                            }
                         } else {
                             continue;
-                        };
-                        if !text.trim().is_empty() {
-                            doc_texts.push(format!("[Document « {} »]\n{}", name, text.trim()));
-                        } else if mime == "application/pdf" {
-                            doc_texts.push(format!("[Document « {} »]\n[PDF joint : extraction du texte vide (image ou PDF scanné).]", name));
                         }
                     }
                 }
