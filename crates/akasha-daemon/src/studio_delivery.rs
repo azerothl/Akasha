@@ -322,20 +322,52 @@ fn file_hash(path: &Path) -> Result<String, String> {
 }
 // Delivery versions are opaque approval tokens, distinct from content-only
 // editor versions and from the raw index checksum used for reconciliation.
-fn selected_file_version(path: &Path) -> Result<String, String> {
-    let content = file_hash(path)?;
-    if content == "missing" { return Ok(content); }
-    #[cfg(unix)]
-    let executable = {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path).map_err(|e|e.to_string())?.permissions().mode() & 0o111 != 0
-    };
-    #[cfg(not(unix))]
-    let executable = false;
-    // Preserve existing non-executable version tokens; executable files have a
-    // separate hash domain, so chmod still invalidates either direction.
-    if executable { Ok(sha(format!("delivery-file-executable-v1:{content}").as_bytes())) } else { Ok(content) }
+struct SelectedSnapshot { bytes:Vec<u8>, executable:bool }
+impl SelectedSnapshot {
+    fn version(&self)->String {
+        let content=sha(&self.bytes);
+        if self.executable {sha(format!("delivery-file-executable-v1:{content}").as_bytes())}else{content}
+    }
 }
+fn selected_file_snapshot(path:&Path)->Result<Option<SelectedSnapshot>,String> {
+    if std::fs::symlink_metadata(path).ok().is_some_and(|metadata|metadata.file_type().is_symlink()) {return Err("symlink selections are unsupported for delivery".into());}
+    let file=match std::fs::File::open(path) {Ok(file)=>file,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(None),Err(error)=>return Err(error.to_string())};
+    let metadata=file.metadata().map_err(|error|error.to_string())?;
+    if !metadata.is_file(){return Err("directory/submodule selection unsupported".into());}
+    let mut bytes=Vec::new();file.take(16*1024*1024+1).read_to_end(&mut bytes).map_err(|error|error.to_string())?;
+    if bytes.len()>16*1024*1024{return Err("selected file exceeds 16 MiB".into());}
+    #[cfg(unix)]
+    let executable={use std::os::unix::fs::PermissionsExt;metadata.permissions().mode()&0o111!=0};
+    #[cfg(not(unix))]
+    let executable=false;
+    Ok(Some(SelectedSnapshot{bytes,executable}))
+}
+fn selected_file_version(path:&Path)->Result<String,String> {
+    Ok(selected_file_snapshot(path)?.map(|snapshot|snapshot.version()).unwrap_or_else(||"missing".into()))
+}
+#[derive(Clone,Debug,PartialEq,Eq)]
+struct StagedEntry {mode:String,oid:String}
+fn parse_staged_entries(raw:&str)->Result<BTreeMap<String,StagedEntry>,String> {
+    let mut entries=BTreeMap::new();
+    for record in raw.split('\0').filter(|record|!record.is_empty()) {
+        let (header,path)=record.split_once('\t').ok_or("invalid staged entry")?;
+        let fields=header.split_whitespace().collect::<Vec<_>>();
+        if fields.len()!=3 || fields[2]!="0" || !matches!(fields[1].len(),40|64) || !fields[1].bytes().all(|byte|byte.is_ascii_hexdigit()) {return Err("invalid/conflicted staged entry".into());}
+        if entries.insert(path.into(),StagedEntry{mode:fields[0].into(),oid:fields[1].into()}).is_some(){return Err("ambiguous staged path".into());}
+    }
+    Ok(entries)
+}
+async fn staged_entries(root:&Path,index:&Path,selected:&HashSet<String>)->Result<BTreeMap<String,StagedEntry>,String> {
+    let mut argv=args(&["ls-files","--stage","-z","--"]);argv.extend(selected.iter().cloned());
+    parse_staged_entries(&git(root,argv,Some(index)).await?.checked()?)
+}
+fn verify_staged_approvals(expected:&BTreeMap<String,Option<StagedEntry>>,actual:&BTreeMap<String,StagedEntry>)->Result<(),String> {
+    for (path,approved) in expected {
+        if approved.as_ref()!=actual.get(path) {return Err(format!("staged blob or mode differs from approved file: {path}"));}
+    }
+    Ok(())
+}
+
 fn selected_path(
     root: &Path,
     raw: &str,
@@ -672,21 +704,30 @@ pub(crate) async fn commit(
     if head(&root).await? != request.expected_head {
         return Err("stale HEAD; refresh delivery status".into());
     }
+    let temporary = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let mut snapshots=BTreeMap::new();
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
     for raw in &request.paths {
         let path = selected_path(&root, raw, policy)?;
         let normalized=path.strip_prefix(&root).map_err(|_|"selected path outside repository")?.components().map(|part|part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
-        if !seen.insert(normalized) {
+        if !seen.insert(normalized.clone()) {
             return Err("duplicate selected path".into());
         }
         let expected = request
             .expected_versions
             .get(raw)
             .ok_or("selected path version missing")?;
-        if selected_file_version(&path)? != *expected {
+        let snapshot=selected_file_snapshot(&path)?;
+        if snapshot.as_ref().map(|snapshot|snapshot.version()).unwrap_or_else(||"missing".into()) != *expected {
             return Err("stale selected file version; refresh before commit".into());
         }
+        let snapshot=if let Some(snapshot)=snapshot {
+            let copy=temporary.path().join(format!("approved-{}",paths.len()));
+            std::fs::write(&copy,&snapshot.bytes).map_err(|error|error.to_string())?;
+            Some((copy,snapshot.executable))
+        }else{None};
+        snapshots.insert(normalized,snapshot);
         paths.push(path);
     }
     if !git(
@@ -712,7 +753,6 @@ pub(crate) async fn commit(
         .checked()?;
     let index_path = root.join(index_name.trim());
     let original_index = file_hash(&index_path)?;
-    let temporary = tempfile::tempdir().map_err(|e| e.to_string())?;
     let index = temporary.path().join("index");
     let read_tree = if request.expected_head == "unborn" {
         args(&["read-tree", "--empty"])
@@ -720,6 +760,20 @@ pub(crate) async fn commit(
         args(&["read-tree", &request.expected_head])
     };
     git(&root, read_tree, Some(&index)).await?.checked()?;
+    let original_entries=staged_entries(&root,&index,&seen).await?;
+    let filemode=git(&root,args(&["config","--bool","--get","core.filemode"]),None).await?;
+    let trust_filemode=if filemode.code==Some(1){true}else{filemode.checked()?.trim()=="true"};
+    let mut approved_entries=BTreeMap::new();
+    for (relative,snapshot) in snapshots {
+        let expected=if let Some((copy,executable))=snapshot {
+            // Apply Git's built-in path/EOL rules to the approved bytes, not a
+            // second read of the mutable worktree file. Process filters are denied.
+            let oid=git(&root,vec!["hash-object".into(),format!("--path={relative}"),"--".into(),git_environment_path(&copy)],Some(&index)).await?.checked()?;
+            let mode=if cfg!(unix)&&trust_filemode {if executable{"100755"}else{"100644"}}else{original_entries.get(&relative).filter(|entry|entry.mode=="100755").map(|_|"100755").unwrap_or("100644")};
+            Some(StagedEntry{mode:mode.into(),oid:oid.trim().into()})
+        }else{None};
+        approved_entries.insert(relative,expected);
+    }
     let mut add = args(&["add", "--"]);
     add.extend(paths.iter().map(|path|path.strip_prefix(&root).unwrap().components().map(|part|part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")));
     git(&root, add, Some(&index)).await?.checked()?;
@@ -732,6 +786,7 @@ pub(crate) async fn commit(
             git(&root,args(&["ls-files","--error-unmatch","--",&relative]),Some(&index)).await?.checked().map_err(|_|format!("selected file was not staged: {relative}"))?;
         }
     }
+    verify_staged_approvals(&approved_entries,&staged_entries(&root,&index,&seen).await?)?;
     let diff = git(
         &root,
         args(&[
@@ -1623,5 +1678,44 @@ mod ssh_routing_tests {
         for key in ["GIT_SSH_COMMAND","GIT_SSH","GIT_SSH_VARIANT","GIT_SSL_NO_VERIFY","HTTPS_PROXY","SSL_CERT_FILE","GIT_OBJECT_DIRECTORY"] {
             assert!(values.iter().any(|(name,value)|*name==std::ffi::OsStr::new(key) && value.is_none()));
         }
+    }
+}
+
+#[cfg(test)]
+mod staged_approval_tests {
+    use super::*;
+    fn git_fixture(root:&Path,argv:&[&str])->String {
+        let out=std::process::Command::new("git").current_dir(root).args(argv).output().unwrap();
+        assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));String::from_utf8(out.stdout).unwrap()
+    }
+    #[test]
+    fn restored_disk_bytes_cannot_approve_a_different_staged_blob_or_mode() {
+        let root=tempfile::tempdir().unwrap();git_fixture(root.path(),&["init","-q"]);
+        let path=root.path().join("selected.bin");let approved=b"approved\0\xff";std::fs::write(&path,approved).unwrap();
+        let token=selected_file_version(&path).unwrap();
+        let oid=git_fixture(root.path(),&["hash-object","--no-filters","selected.bin"]).trim().to_string();
+        std::fs::write(&path,b"unapproved\0\xff").unwrap();git_fixture(root.path(),&["add","--","selected.bin"]);std::fs::write(&path,approved).unwrap();
+        assert_eq!(selected_file_version(&path).unwrap(),token);
+        let actual=parse_staged_entries(&git_fixture(root.path(),&["ls-files","--stage","-z"])).unwrap();
+        let mut expected=BTreeMap::new();expected.insert("selected.bin".into(),Some(StagedEntry{mode:"100644".into(),oid}));
+        assert!(verify_staged_approvals(&expected,&actual).is_err());
+        let mut wrong_mode=actual.clone();wrong_mode.get_mut("selected.bin").unwrap().mode="100755".into();
+        let expected=actual.iter().map(|(path,entry)|(path.clone(),Some(entry.clone()))).collect();
+        assert!(verify_staged_approvals(&expected,&wrong_mode).is_err());
+        let mut removed=BTreeMap::new();removed.insert("selected.bin".into(),None);
+        assert!(verify_staged_approvals(&removed,&actual).is_err());assert!(verify_staged_approvals(&removed,&BTreeMap::new()).is_ok());
+    }
+    #[test]
+    fn approved_snapshot_hash_respects_git_path_line_ending_rules() {
+        let root=tempfile::tempdir().unwrap();git_fixture(root.path(),&["init","-q"]);
+        std::fs::write(root.path().join(".gitattributes"),"selected.txt text eol=lf\n").unwrap();
+        std::fs::write(root.path().join("selected.txt"),b"approved\r\n").unwrap();
+        let snapshot=selected_file_snapshot(&root.path().join("selected.txt")).unwrap().unwrap();
+        std::fs::write(root.path().join("snapshot"),snapshot.bytes).unwrap();
+        let oid=git_fixture(root.path(),&["hash-object","--path=selected.txt","snapshot"]).trim().to_string();
+        git_fixture(root.path(),&["add","--","selected.txt"]);
+        let actual=parse_staged_entries(&git_fixture(root.path(),&["ls-files","--stage","-z"])).unwrap();
+        let mut expected=BTreeMap::new();expected.insert("selected.txt".into(),Some(StagedEntry{mode:"100644".into(),oid}));
+        verify_staged_approvals(&expected,&actual).unwrap();
     }
 }
