@@ -19,7 +19,7 @@ async fn reconcile_selected_index(root:&Path,index_path:&Path,original:&str,bran
     let lock_path=PathBuf::from(format!("{}.lock",index_path.display()));
     let file=std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path).map_err(|e|format!("index lock unavailable: {e}"))?;
     let mut lock=OwnedGitLock{path:Some(lock_path),file:Some(file)};
-    if file_hash(index_path)?!=original || branch(root).await?!=branch_name || head(root).await?!=commit {return Err("Git index/checkout changed concurrently; reconcile selected paths manually".into());}
+    if index_hash(index_path)?!=original || branch(root).await?!=branch_name || head(root).await?!=commit {return Err("Git index/checkout changed concurrently; reconcile selected paths manually".into());}
     let tmp=tempfile::tempdir().map_err(|e|e.to_string())?;let index=tmp.path().join("index");
     if index_path.is_file(){std::fs::copy(index_path,&index).map_err(|e|e.to_string())?;}else{git(root,args(&["read-tree","--empty"]),Some(&index)).await?.checked()?;}
     let mut reset=args(&["reset","-q",commit,"--"]);reset.extend(selected.iter().cloned());
@@ -299,6 +299,23 @@ fn valid_name(value: &str) -> bool {
 }
 fn sha(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+fn index_hash(path:&Path)->Result<String,String> {
+    if std::fs::symlink_metadata(path).ok().is_some_and(|m|m.file_type().is_symlink()){return Err("symlink index unsupported".into());}
+    let mut file=match std::fs::File::open(path){Ok(file)=>file,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok("missing".into()),Err(error)=>return Err(error.to_string())};
+    if !file.metadata().map_err(|e|e.to_string())?.is_file(){return Err("index must be a regular file".into());}
+    let mut digest=Sha256::new();let mut buffer=[0u8;64*1024];
+    loop {let count=file.read(&mut buffer).map_err(|e|e.to_string())?;if count==0{break;}digest.update(&buffer[..count]);}
+    Ok(format!("{:x}",digest.finalize()))
+}
+#[cfg(test)]
+mod large_index_tests {
+    #[test]
+    fn index_checksum_streams_beyond_the_selected_file_limit() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("index");let bytes=vec![42u8;16*1024*1024+17];std::fs::write(&path,&bytes).unwrap();
+        assert_eq!(super::index_hash(&path).unwrap(),super::sha(&bytes));assert!(super::file_hash(&path).is_err());
+        assert_eq!(super::index_hash(&dir.path().join("missing")).unwrap(),"missing");assert!(super::index_hash(dir.path()).is_err());
+    }
 }
 fn file_hash(path: &Path) -> Result<String, String> {
     if std::fs::symlink_metadata(path).ok().is_some_and(|metadata|metadata.file_type().is_symlink()) {return Err("symlink selections are unsupported for delivery".into());}
@@ -752,7 +769,7 @@ pub(crate) async fn commit(
         .await?
         .checked()?;
     let index_path = root.join(index_name.trim());
-    let original_index = file_hash(&index_path)?;
+    let original_index = index_hash(&index_path)?;
     let index = temporary.path().join("index");
     let read_tree = if request.expected_head == "unborn" {
         args(&["read-tree", "--empty"])
@@ -967,19 +984,25 @@ pub(crate) struct PullRequest {
 fn draft_default() -> bool {
     true
 }
-async fn existing_pr(
-    root: &Path,
-    repo: &str,
-    head: &str,
-    base: &str,
-) -> Result<Option<Value>, String> {
-    let owner = repo.split('/').next().ok_or("repository owner missing")?;
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("head", &format!("{owner}:{head}"))
-        .append_pair("base", base)
-        .append_pair("state", "open")
-        .append_pair("per_page", "100")
-        .finish();
+fn open_pr_query(repo:&str,head:&str,base:Option<&str>)->Result<String,String> {
+    let owner=repo.split('/').next().filter(|s|!s.is_empty()).ok_or("repository owner missing")?;
+    let mut query=url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("head",&format!("{owner}:{head}"));
+    if let Some(base)=base{query.append_pair("base",base);}
+    query.append_pair("state","open").append_pair("per_page","100");Ok(query.finish())
+}
+#[cfg(test)]
+mod numeric_branch_tests {
+    #[test]
+    fn numeric_branch_is_looked_up_as_a_head_not_a_pull_request_number() {
+        let query=super::open_pr_query("owner/repo","123",None).unwrap();
+        let pairs=url::form_urlencoded::parse(query.as_bytes()).collect::<std::collections::BTreeMap<_,_>>();
+        assert_eq!(pairs.get("head").unwrap(),"owner:123");assert_eq!(pairs.get("state").unwrap(),"open");assert!(!pairs.contains_key("base"));
+        assert!(super::open_pr_query("owner/repo","123",Some("main")).unwrap().contains("base=main"));
+    }
+}
+async fn existing_pr(root:&Path,repo:&str,head:&str,base:Option<&str>)->Result<Option<Value>,String> {
+    let query=open_pr_query(repo,head,base)?;
     let output = gh(
         root,
         args(&[
@@ -1064,7 +1087,7 @@ pub(crate) async fn create_pr(
     {
         return Err("push this exact branch/commit explicitly before creating the PR".into());
     }
-    if let Some(pr) = existing_pr(&root, &repo, &request.head, &request.base).await? {
+    if let Some(pr) = existing_pr(&root, &repo, &request.head, Some(&request.base)).await? {
         return Ok(
             verified_pr(&repo,&request,&pr,"existing_pr"),
         );
@@ -1096,7 +1119,7 @@ pub(crate) async fn create_pr(
             )
         }
         _ => {
-            if let Ok(Some(pr)) = existing_pr(&root, &repo, &request.head, &request.base).await {
+            if let Ok(Some(pr)) = existing_pr(&root, &repo, &request.head, Some(&request.base)).await {
                 return Ok(
                     verified_pr(&repo,&request,&pr,"pr_recovered_after_uncertain_response"),
                 );
@@ -1123,7 +1146,11 @@ pub(crate) async fn pr_status(
     let selector = match number {
         Some(number) if number > 0 => number.to_string(),
         Some(_) => return Err("positive PR number required".into()),
-        None => branch(&root).await?,
+        None => {
+            let current=branch(&root).await?;
+            let pr=existing_pr(&root,&repo,&current,None).await?.ok_or("no open PR for the current branch")?;
+            pr["number"].as_u64().filter(|n|*n>0).ok_or("invalid PR number in branch lookup")?.to_string()
+        },
     };
     let output=gh(&root,args(&["pr","view",&selector,"--repo",&repo,"--json","number,url,state,isDraft,headRefOid,headRefName,baseRefName,statusCheckRollup,mergeable,reviewDecision"])).await?.checked()?;
     let value: Value = serde_json::from_str(&output).map_err(|_| "invalid PR status response")?;
