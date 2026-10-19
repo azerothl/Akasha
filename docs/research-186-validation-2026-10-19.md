@@ -60,3 +60,11 @@ Une relecture supplémentaire par modèle a été essayée et apparaît dans les
 Le correctif final conserve les réparations déterministes (Unicode, URL explicites via la politique de collecte, conservation des extraits, références hors manifeste signalées) et des consignes de rédaction plus strictes. Il ne prétend **pas** résoudre la fiabilité factuelle générale d’un LLM. La CI distante et la livraison de ces changements restent à effectuer.
 
 **Ticket #186 maintenu ouvert.** La restitution réelle, les références accessibles et l’historique sont observés, mais aucun des rapports examinés n’a été entièrement validé sur le fond. Le dernier critère ne doit pas être coché. Il reste à obtenir un rapport exploitable sans ces erreurs, à vérifier ses affirmations contre les sources et à livrer les correctifs validés. Aucun rapport n’a été réécrit à la main pour fabriquer une réussite.
+
+## Suite à la revue de la PR #225
+
+Trois retours corrigés : les sources explicites sont désormais collectées même si la recherche web est désactivée ; les URL avec parenthèses équilibrées, notamment les destinations Markdown et les chemins imbriqués, sont conservées lors de la collecte et de la vérification des citations. Une URL contenue dans le paramètre d’une autre URL n’est pas interprétée comme une source supplémentaire.
+
+Le contrôle de collecte utilise un serveur HTTP local de test, sans fournisseur LLM : il constate la requête quand le domaine est autorisé et son absence quand ce même domaine est bloqué, avec `web_search_enabled: false` dans les deux cas. Les notes sans source ne sont pas ajoutées lorsqu’une preuve web a effectivement été obtenue. Les scénarios historiques sans moteur de recherche et sans URL restent possibles.
+
+`cargo test -p akasha-daemon --lib --no-default-features --features embedded deep_research -j 2` : **22 tests réussis** sur cette correction. [Sortie du contrôle](validation/research-186-2026-10-19/ci-review-tests.txt). Il s’agit de régressions déterministes, sans nouvelle prétention de validation factuelle des rapports réels.

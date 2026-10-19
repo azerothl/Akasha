@@ -215,32 +215,32 @@ async fn run_engine(
 
         let mut round_findings: Vec<ResearchFinding> = Vec::new();
 
-        if search_ok {
-            let round_url_start = urls_fetched.len();
-            // Read explicitly supplied pages even when search providers return no
-            // hits (e.g. throttling). This uses the same fetch/extraction policy.
-            if round_num == 1 {
-                for url in question_source_urls(topic, config.max_total_urls_per_round as usize) {
-                    if cancel.load(Ordering::SeqCst) || started.elapsed().as_secs() >= config.max_time_secs {
-                        break;
-                    }
-                    if !urls_fetched.insert(url.clone()) { continue; }
-                    set_phase(run_id, ResearchPhase::Reading).await;
-                    let reader = add_sub_agent(run_id, &branch_id, "reader", &truncate_label(&url, 40), StepStatus::Running).await;
-                    let status = match fetch_and_extract(ctx, &url, &url, topic, config).await {
-                        Some(finding) => {
-                            round_findings.push(finding.clone());
-                            store.update(run_id, |r| r.findings.push(finding)).await;
-                            StepStatus::Done
-                        }
-                        None => {
-                            push_skipped_source(&mut skipped_sources, &url, &url, "fetch_or_low_quality");
-                            StepStatus::Error
-                        }
-                    };
-                    finish_sub_agent(run_id, &branch_id, &reader, status).await;
+        let round_url_start = urls_fetched.len();
+        // Read explicitly supplied pages even when search providers return no
+        // hits (e.g. throttling). This uses the same fetch/extraction policy.
+        if round_num == 1 {
+            for url in question_source_urls(topic, config.max_total_urls_per_round as usize) {
+                if cancel.load(Ordering::SeqCst) || started.elapsed().as_secs() >= config.max_time_secs {
+                    break;
                 }
+                if !urls_fetched.insert(url.clone()) { continue; }
+                set_phase(run_id, ResearchPhase::Reading).await;
+                let reader = add_sub_agent(run_id, &branch_id, "reader", &truncate_label(&url, 40), StepStatus::Running).await;
+                let status = match fetch_and_extract(ctx, &url, &url, topic, config).await {
+                    Some(finding) => {
+                        round_findings.push(finding.clone());
+                        store.update(run_id, |r| r.findings.push(finding)).await;
+                        StepStatus::Done
+                    }
+                    None => {
+                        push_skipped_source(&mut skipped_sources, &url, &url, "fetch_or_low_quality");
+                        StepStatus::Error
+                    }
+                };
+                finish_sub_agent(run_id, &branch_id, &reader, status).await;
             }
+        }
+        if search_ok {
             set_phase(run_id, ResearchPhase::Searching).await;
             for query in &queries {
                 if cancel.load(Ordering::SeqCst) {
@@ -341,8 +341,9 @@ async fn run_engine(
                     finish_sub_agent(run_id, &branch_id, &sa_reader, StepStatus::Done).await;
                 }
             }
-        } else {
-            // Degraded: LLM-only step per query
+        } else if !round_findings.iter().chain(findings.iter()).any(|f| !f.url.is_empty()) {
+            // Only use model-only notes when no explicitly supplied evidence exists.
+            // A disabled search provider does not disable the independent fetch policy.
             for query in &queries {
                 let sa_analyst = add_sub_agent(
                     run_id,
@@ -1364,6 +1365,55 @@ mod tests {
         let manifest = super::format_source_manifest(&findings);
         assert!(manifest.contains("[API v1](https://example.org/v1/api)"));
         assert!(manifest.contains("Exact API and version constraint"));
+    }
+
+    #[tokio::test]
+    async fn explicit_fetch_is_independent_of_search_and_respects_blocked_domains() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for blocked in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let fetched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen = fetched.clone();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                let mut request = [0u8; 2048];
+                let size = socket.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..size]).contains("GET /source_(notes)"));
+                let body = "<html><body>Local fixture document with enough readable source content for extraction.</body></html>";
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+                true
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let mut policy = akasha_tools::ToolsPolicy::default();
+            policy.web_search_enabled = false;
+            policy.allowed_web_domains = vec!["127.0.0.1".into()];
+            if blocked { policy.blocked_web_domains = vec!["127.0.0.1".into()]; }
+            let mut routing = akasha_llm::RoutingConfig::default_config();
+            routing.global.default_max_retries = Some(0);
+            let ctx = super::ResearchContext {
+                llm_router: std::sync::Arc::new(akasha_llm::LLMRouter::new(routing)),
+                tools_executor: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                    akasha_tools::ToolExecutor::new(policy),
+                ))),
+                data_dir: dir.path().to_path_buf(),
+            };
+            assert!(!ctx.web_search_enabled().await);
+            let config = super::EngineConfig { max_rounds: 1, max_empty_rounds: 1, ..Default::default() };
+            let id = super::spawn_research_run(ctx, format!("Read [fixture](http://{address}/source_(notes))"), config);
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if super::ResearchStore::global().get(&id).await.is_some_and(|run| run.finished_at.is_some()) { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }).await.expect("fixture run must finish without a model provider");
+            let was_fetched = fetched.load(std::sync::atomic::Ordering::SeqCst);
+            server.abort();
+            let _ = server.await;
+            assert_eq!(was_fetched, !blocked, "fetch must obey its own domain policy even with search disabled");
+        }
     }
 
     #[tokio::test]

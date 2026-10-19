@@ -83,10 +83,14 @@ pub fn parse_search_results(body: &str) -> Vec<(String, String, String)> {
 /// Explicit HTTP(S) sources in the question are fetched through the regular web
 /// tool, which still applies network and domain policy. Never infer URLs.
 pub fn question_source_urls(topic: &str, limit: usize) -> Vec<String> {
-    let re = Regex::new(r#"https?://[^\s<>\"\)\]]+"#).expect("source URL re");
+    let re = Regex::new(r"https?://").expect("source URL re");
     let mut seen = HashSet::new();
+    let mut previous_end = 0;
     re.find_iter(topic).filter_map(|m| {
-        let raw = m.as_str().trim_end_matches([',', ';', '.']);
+        if m.start() < previous_end { return None; }
+        let prefix = balanced_url_prefix(&topic[m.start()..]);
+        previous_end = m.start() + prefix.len();
+        let raw = prefix.trim_end_matches([',', ';', '.']);
         let mut url = url::Url::parse(raw).ok()?;
         if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
             return None;
@@ -95,6 +99,32 @@ pub fn question_source_urls(topic: &str, limit: usize) -> Vec<String> {
         let canonical = url.to_string();
         seen.insert(canonical.clone()).then_some(canonical)
     }).take(limit).collect()
+}
+
+/// Keep balanced path parentheses, stopping before the enclosing Markdown/prose
+/// delimiter. Character offsets also preserve Unicode source URLs.
+fn balanced_url_prefix(text: &str) -> &str {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            ')' => return &text[..index],
+            _ if ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | ']') => return &text[..index],
+            _ => {}
+        }
+    }
+    text
+}
+
+fn markdown_citation_urls(text: &str) -> Vec<&str> {
+    let re = Regex::new(r"!?\[[^\]]*\]\(\s*<?").expect("citation prefix re");
+    re.find_iter(text).filter_map(|m| {
+        if m.as_str().starts_with('!') { return None; }
+        let rest = &text[m.end()..];
+        if !rest.starts_with("https://") && !rest.starts_with("http://") { return None; }
+        Some(balanced_url_prefix(rest))
+    }).collect()
 }
 
 pub fn strip_html(html: &str) -> String {
@@ -170,11 +200,7 @@ pub fn word_count(text: &str) -> usize {
 
 /// Count markdown links that look like external citations.
 pub fn count_markdown_link_citations(text: &str) -> usize {
-    static LINK_RE: OnceLock<Regex> = OnceLock::new();
-    let re = LINK_RE.get_or_init(|| {
-        Regex::new(r#"\[([^\]]+)\]\((https?://[^)]+)\)"#).expect("md link re")
-    });
-    re.find_iter(text).count()
+    markdown_citation_urls(text).len()
 }
 
 /// Report links must resolve to a page actually retained as evidence. A fragment
@@ -182,12 +208,8 @@ pub fn count_markdown_link_citations(text: &str) -> usize {
 pub fn unconsulted_citation_urls(markdown: &str, sources: &[&str]) -> Vec<String> {
     let page = |url: &str| url.split('#').next().unwrap_or(url).to_string();
     let known: HashSet<String> = sources.iter().map(|url| page(url)).collect();
-    let re = Regex::new(r"!?\[[^\]]*\]\((https?://[^)\s]+)\)").expect("citation re");
     let mut unknown = Vec::new();
-    for cap in re.captures_iter(markdown) {
-        // Images are media, not citations to source pages.
-        if cap.get(0).unwrap().as_str().starts_with('!') { continue; }
-        let url = cap.get(1).unwrap().as_str();
+    for url in markdown_citation_urls(markdown) {
         if !known.contains(&page(url)) { unknown.push(url.to_string()); }
     }
     unknown.sort();
@@ -334,6 +356,26 @@ mod tests {
         assert_eq!(question_source_urls(topic, 2), vec!["https://example.org/api", "https://example.org/other"]);
         assert!(question_source_urls("texte sans lien", 5).is_empty());
         assert!(question_source_urls(topic, 0).is_empty());
+    }
+
+    #[test]
+    fn explicit_sources_preserve_nested_and_markdown_parentheses() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(question_source_urls(&format!("[Rust]({url}) and ({url})."), 5), vec![url]);
+        assert_eq!(question_source_urls("[nested](https://example.org/a_(b_(c)))", 5), vec!["https://example.org/a_(b_(c))"]);
+        assert_eq!(question_source_urls("[Rust](<https://example.org/a_(b)>)", 5), vec!["https://example.org/a_(b)"]);
+        let redirect = "https://example.org/?next=https://other.org/page";
+        assert_eq!(question_source_urls(redirect, 5), vec![redirect]);
+    }
+
+    #[test]
+    fn citation_validation_preserves_parentheses_and_section_anchors() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        let md = format!("[Rust]({url}#History) ![media](https://example.org/image_(a).png)");
+        assert!(unconsulted_citation_urls(&md, &[url]).is_empty());
+        assert_eq!(count_markdown_link_citations(&md), 1);
+        assert_eq!(unconsulted_citation_urls(&format!("[Unknown]({url})"), &[]), vec![url]);
+        assert!(unconsulted_citation_urls("[nested](<https://example.org/a_(b_(c))>)", &["https://example.org/a_(b_(c))"]).is_empty());
     }
 
     #[test]
