@@ -133,7 +133,9 @@ fn server(path: &Path) -> Result<(&'static str, &'static str, Vec<&'static str>)
         _ => Err("LSP language unsupported; supported: TypeScript/JavaScript, Rust, Python".into()),
     }
 }
+#[derive(Clone)]
 struct Document {
+    language: String,
     version: i32,
     text: String,
 }
@@ -330,7 +332,7 @@ impl Session {
                 _ => return Err("LSP server does not synchronize changed buffers".into()),
             };
             self.notify("textDocument/didChange",json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[change]})).await?;
-            self.documents.insert(uri.into(), Document {version,text});
+            self.documents.insert(uri.into(), Document {language: language.into(),version,text});
             self.diagnostics.remove(uri);
             Ok(())
         } else {
@@ -342,6 +344,7 @@ impl Session {
             self.documents.insert(
                 uri.into(),
                 Document {
+                    language: language.into(),
                     version: 1,
                     text: text.clone(),
                 },
@@ -572,8 +575,14 @@ pub(crate) async fn query(
         })
     });
     if restarted_for_freshness {
+        let snapshots = locked.as_ref().map(|old| old.documents.iter()
+            .filter(|(key, _)| *key != &uri)
+            .map(|(key, document)| (key.clone(), document.clone())).collect::<Vec<_>>()).unwrap_or_default();
         if let Some(mut old) = locked.take() { let _ = old.child.kill().await; }
         *locked = Some(start(&root, program, &args, policy).await?);
+        let fresh = locked.as_mut().ok_or("LSP session missing")?;
+        // Keep unsaved context from other open buffers across the barrier.
+        for (key, document) in snapshots { fresh.open(&key, &document.language, document.text).await?; }
     }
     let session = locked.as_mut().ok_or("LSP session missing")?;
     session.last_used = std::time::Instant::now();
