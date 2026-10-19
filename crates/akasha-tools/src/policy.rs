@@ -10,6 +10,8 @@ fn default_calendar_read_enabled() -> bool {
 
 fn path_normalize(p: &Path) -> PathBuf {
     let s = p.to_string_lossy().replace('\\', "/").to_lowercase();
+    #[cfg(windows)]
+    let s=if let Some(unc)=s.strip_prefix("//?/unc/") {format!("//{unc}")}else{s.strip_prefix("//?/").unwrap_or(&s).to_owned()};
     PathBuf::from(s)
 }
 
@@ -1145,5 +1147,15 @@ mod windows_executable_alias_regressions {
         let mut policy=ToolsPolicy {allowed_commands:vec!["cmd".into()],..Default::default()};
         assert!(policy.can_run_command("cmd.exe"));policy.blocked_commands=vec!["cmd.exe".into()];assert!(!policy.can_run_command("cmd"));
         policy.blocked_commands.clear();policy.allowed_commands=vec!["powershell.exe".into()];assert!(policy.can_run_command("powershell"));
+    }
+}
+
+#[cfg(all(test,windows))]
+mod verbatim_path_regressions {
+    use super::*;
+    #[test] fn canonical_paths_match_the_same_allowed_directory() {
+        let policy=ToolsPolicy {allowed_read_paths:vec!["C:/workspace".into()],..Default::default()};
+        assert!(policy.can_read(Path::new(r"\\?\C:\workspace\file.txt")));
+        assert!(!policy.can_read(Path::new(r"\\?\C:\outside\file.txt")));
     }
 }

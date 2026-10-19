@@ -1416,8 +1416,7 @@ pub(crate) async fn run_message_via_llm(
     use crate::task_outcome::TerminationReason;
     let restricted_studio_role = crate::studio_role_policy::restricted_role(&assigned_agent);
     let guidance_changed=store.get_events(task_id).ok().is_some_and(|events|events.iter().any(|e|matches!(e.event_type.as_str(),"user_steering_applied"|"user_follow_up_applied")));
-    let human_history=crate::permissions_queue::load(data_dir).requests.iter().any(|item|item.task_id==task_id.to_string())
-        || recovery_checkpoint.as_ref().is_some_and(|c|c.waiting.as_ref().is_some_and(|w|w["tool_round_limit"]!=true) || super::studio_conversation::history_has_question(&c.conversation));
+    let human_history=recovery_checkpoint.as_ref().is_some_and(|c|super::studio_conversation::scope_changed_by_human(c.waiting.as_ref(),&c.conversation));
     // Task.initial_message is a 500-character title/context excerpt. The original
     // objective must come from the full request or its durable conversation.
     let task_scope=recovery_checkpoint.as_ref().and_then(|c| {

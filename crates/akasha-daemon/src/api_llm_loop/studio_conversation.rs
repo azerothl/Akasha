@@ -24,6 +24,20 @@ pub(super) fn history_has_question(history: &[ConversationMessage]) -> bool {
     })
 }
 
+pub(super) fn scope_changed_by_human(waiting:Option<&Value>,history:&[ConversationMessage])->bool {
+    waiting.is_some_and(|w|w["tool_round_limit"]!=true && (w["tool"].is_null() || w["tool"]=="ask_user")) || history_has_question(history)
+}
+
+#[cfg(test)]
+mod approval_scope_regressions {
+    use super::*;
+    #[test] fn approval_waits_preserve_scope_on_restart_but_questions_do_not() {
+        assert!(!scope_changed_by_human(Some(&json!({"tool":"write_file","question":"Approve?"})),&[]));
+        assert!(scope_changed_by_human(Some(&json!({"tool":"ask_user","question":"Change scope?"})),&[]));
+        assert!(!scope_changed_by_human(Some(&json!({"tool_round_limit":true})),&[]));
+    }
+}
+
 pub(super) fn user_request(message: &str) -> &str {
     message
         .split_once("[Current user request — task scope]\n")
