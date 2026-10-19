@@ -11,6 +11,8 @@ use uuid::Uuid;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum EndState {
     Present,
+    FilePresent,
+    DirectoryPresent,
     Absent,
     RenameDestination,
 }
@@ -52,7 +54,7 @@ pub(crate) fn implementation_role(agent: &str) -> bool {
             | "studio_project_manager"
     )
 }
-fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
+fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> {
     let path = r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;!?"`]+)"#;
     let pattern = format!(
         r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
@@ -103,6 +105,8 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
             let mut source = clean(raw);
             let verb = verb.as_str().to_lowercase();
             let verb = verb.strip_suffix(['r', 'z']).unwrap_or(&verb).to_string();
+            let det=cap.name("det").map(|value|value.as_str().to_lowercase()).unwrap_or_default();
+            let kind=if det.split_whitespace().any(|word|matches!(word,"folder"|"directory"|"dossier"|"r\u{e9}pertoire")) {Some(true)} else if det.split_whitespace().any(|word|matches!(word,"file"|"fichier")) {Some(false)} else {None};
             let filesystem = matches!(
                 verb.as_str(),
                 "delete"
@@ -119,9 +123,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
             if !filesystem
                 && !raw.starts_with(['`', '"', '\''])
                 && !source.contains(['.', '/', '\\'])
-                && !cap
-                    .name("det")
-                    .is_some_and(|v| v.as_str().contains("file") || v.as_str().contains("fichier"))
+                && kind.is_none()
             {
                 let object = object_path.captures(&request[verb_end..])?;
                 list_end = verb_end + object.get(0)?.end();
@@ -136,7 +138,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
             } else {
                 None
             };
-            let mut goals = vec![(verb.clone(), source, target.clone())];
+            let mut goals = vec![(verb.clone(), source, target.clone(), kind)];
             if target.is_none() {
                 while let Some(item) = path_list.captures(&request[list_end..]) {
                     let raw = item.name("path")?.as_str();
@@ -144,7 +146,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
                     if !raw.starts_with(['`', '"', '\'']) && !path.contains(['.', '/', '\\']) {
                         break;
                     }
-                    goals.push((verb.clone(), path, None));
+                    goals.push((verb.clone(), path, None, kind));
                     list_end += item.get(0)?.end();
                 }
             }
@@ -382,6 +384,8 @@ impl Scope {
             && self.goals.iter().all(|g| {
                 current.get(&g.path).is_some_and(|v| match g.end {
                     EndState::Present => g.changed && !missing(v) && *v != g.baseline,
+                    EndState::FilePresent => g.changed && v.starts_with("file:") && *v != g.baseline,
+                    EndState::DirectoryPresent => g.changed && v.starts_with("directory:") && *v != g.baseline,
                     EndState::Absent => g.changed && missing(v),
                     EndState::RenameDestination => {
                         !missing(v)
@@ -443,7 +447,7 @@ fn paths_for_request(
             });
         }
     };
-    for (verb, source, target) in parsed(request) {
+    for (verb, source, target, kind) in parsed(request) {
         if matches!(verb.as_str(),"rename"|"move"|"renomme"|"d\u{e9}place"|"deplace") && target.is_none() {
             return Err("rename/move target could not be resolved; provide explicit source and destination paths".into());
         }
@@ -472,7 +476,7 @@ fn paths_for_request(
                 ) {
                     EndState::Absent
                 } else {
-                    EndState::Present
+                    match kind {Some(true)=>EndState::DirectoryPresent,Some(false)=>EndState::FilePresent,None=>EndState::Present}
                 },
             );
         }
@@ -772,6 +776,15 @@ mod tests {
         for request in ["Rename old.txt", "Move old.txt towards new.txt"] {
             assert!(has_request(request));assert!(paths_for_request(root.path(),request,&policy(root.path())).is_err());
         }
+    }
+    #[test]
+    fn explicit_directory_and_file_determiners_require_the_requested_kind() {
+        let root=tempfile::tempdir().unwrap();
+        for request in ["Create folder docs", "Create directory assets", "Cr\u{e9}e le dossier notes", "Cr\u{e9}e le r\u{e9}pertoire notes", "Create DIRECTORY assets", "Create FILE README"] {assert!(has_request(request),"{request}");}
+        let mut folder=scope(root.path(),"Create folder docs");let before=capture_paths(&folder.paths()).unwrap();
+        std::fs::write(root.path().join("docs"),"not a directory").unwrap();folder.observe(&before,&capture_paths(&folder.paths()).unwrap());assert!(!folder.verified(&capture_paths(&folder.paths()).unwrap()));
+        std::fs::remove_file(root.path().join("docs")).unwrap();std::fs::create_dir(root.path().join("docs")).unwrap();folder.observe(&before,&capture_paths(&folder.paths()).unwrap());assert!(folder.verified(&capture_paths(&folder.paths()).unwrap()));
+        let mut file=scope(root.path(),"Create file README");let before=capture_paths(&file.paths()).unwrap();std::fs::create_dir(root.path().join("README")).unwrap();file.observe(&before,&capture_paths(&file.paths()).unwrap());assert!(!file.verified(&capture_paths(&file.paths()).unwrap()));
     }
     #[test]
     fn unrelated_and_noop_writes_do_not_attest_requested_changes() {
