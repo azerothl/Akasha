@@ -564,6 +564,22 @@ pub(crate) fn collect_task_tree_ids(store: &TaskStore, root: Uuid) -> Vec<Uuid> 
     to_cancel
 }
 
+fn cancel_tree_member(store: &TaskStore, id: Uuid) -> Result<bool, String> {
+    store.transition_if(id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running,TaskStatus::Paused,TaskStatus::Interrupted,TaskStatus::WaitingUserInput],TaskStatus::Cancelled).map_err(|e|e.to_string())
+}
+
+async fn clear_cancelled_tree_waits(store_path:&Path,response:&str,waits:&HumanInputStore) {
+    if !response.starts_with("HTTP/1.1 200 ") {return;}
+    let Some(body)=response.split_once("\r\n\r\n").and_then(|(_,body)|serde_json::from_str::<serde_json::Value>(body).ok()) else{return;};
+    let Some(ids)=body["cancelled_ids"].as_array() else{return;};
+    let Ok(store)=TaskStore::open(store_path) else{return;};
+    let mut pending=waits.write().await;
+    for id in ids.iter().filter_map(|id|id.as_str().and_then(|id|Uuid::parse_str(id).ok())) {
+        // A newer wait created after a concurrent resume must also survive.
+        if store.get(id).ok().flatten().is_some_and(|task|task.status==TaskStatus::Cancelled) {pending.remove(&id);}
+    }
+}
+
 /// P6-B4: cancel a parent task and all descendants (aggregated cancel).
 pub(crate) async fn cancel_task_tree(
     store_path: &Path,
@@ -588,23 +604,10 @@ pub(crate) async fn cancel_task_tree(
         let Some(task) = store.get(tid).ok().flatten() else {
             continue;
         };
-        let cancellable = matches!(
-            task.status,
-            TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
-        );
-        if !cancellable {
-            skipped.push(serde_json::json!({
-                "task_id": tid.to_string(),
-                "status": task.status.as_str(),
-            }));
-            continue;
-        }
-        if store.update_status(tid, TaskStatus::Cancelled).is_err() {
-            skipped.push(serde_json::json!({
-                "task_id": tid.to_string(),
-                "error": "store",
-            }));
-            continue;
+        match cancel_tree_member(&store,tid) {
+            Ok(true)=>{},
+            Ok(false)=>{skipped.push(serde_json::json!({"task_id":tid.to_string(),"status":store.get(tid).ok().flatten().map(|task|task.status.as_str().to_owned()).unwrap_or_else(||task.status.as_str().to_owned())}));continue;},
+            Err(_)=>{skipped.push(serde_json::json!({"task_id":tid.to_string(),"error":"store"}));continue;},
         }
         let _ = main_agent.bus().send(
             EventEnvelope::new(
@@ -2498,12 +2501,7 @@ if path.starts_with("/api/tasks/") {
             }
             if method == "POST" && parts.get(1) == Some(&"cancel-tree") {
                 let response=cancel_task_tree(store_path,id,main_agent).await;
-                if response.starts_with("HTTP/1.1 200 ") {
-                    if let (Some(waits),Ok(store))=(human_input_store.as_ref(),TaskStore::open(store_path)) {
-                        let ids=collect_task_tree_ids(&store,id);let mut pending=waits.write().await;
-                        for task in ids {pending.remove(&task);}
-                    }
-                }
+                if let Some(waits)=human_input_store.as_ref(){clear_cancelled_tree_waits(store_path,&response,waits).await;}
                 return Some(response);
             }
             if method == "GET" && parts.get(1) == Some(&"children") {
@@ -2771,5 +2769,25 @@ mod tests {
         assert!(ids.contains(&root));
         assert!(ids.contains(&child));
         assert!(ids.contains(&grand));
+    }
+}
+
+#[cfg(test)]
+mod tree_wait_cleanup_tests {
+    use super::*;
+    #[tokio::test]
+    async fn tree_cancel_transitions_waiting_members_and_only_releases_confirmed_cancelled_waits() {
+        let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let store=TaskStore::open(&db).unwrap();let root=Uuid::new_v4();let waiting=Uuid::new_v4();let paused=Uuid::new_v4();let completed=Uuid::new_v4();let unrelated=Uuid::new_v4();let now=chrono::Utc::now();
+        let waits=crate::api::new_human_input_store();let mut receivers=std::collections::HashMap::new();
+        for (id,parent,status) in [(root,None,TaskStatus::Running),(waiting,Some(root),TaskStatus::WaitingUserInput),(paused,Some(root),TaskStatus::Paused),(completed,Some(root),TaskStatus::Completed),(unrelated,None,TaskStatus::WaitingUserInput)] {
+            store.insert(&akasha_store::Task{id,parent_task_id:parent,status,assigned_agent:"studio_fullstack".into(),created_at:now,updated_at:now,initial_message:None,studio_project_id:None}).unwrap();
+            let (tx,rx)=tokio::sync::oneshot::channel();receivers.insert(id,rx);waits.write().await.insert(id,crate::api::PendingHumanInput{request_id:Some(id.to_string()),question:"Continue?".into(),context:String::new(),choices:None,response_tx:tx});
+        }
+        let ids=collect_task_tree_ids(&store,root);let cancelled=ids.into_iter().filter(|id|cancel_tree_member(&store,*id).unwrap()).collect::<Vec<_>>();assert_eq!(cancelled.len(),3);assert_eq!(store.get(waiting).unwrap().unwrap().status,TaskStatus::Cancelled);
+        let response=json_response("200 OK",&serde_json::json!({"cancelled_ids":cancelled,"skipped":[{"task_id":completed}]}).to_string());
+        clear_cancelled_tree_waits(&db,&response,&waits).await;
+        let guard=waits.read().await;assert!(guard.contains_key(&completed));assert!(guard.contains_key(&unrelated));assert!(!guard.contains_key(&waiting));drop(guard);
+        assert!(matches!(receivers.get_mut(&waiting).unwrap().try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Closed)));
+        assert!(matches!(receivers.get_mut(&unrelated).unwrap().try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
     }
 }
