@@ -120,3 +120,28 @@ test('failed deferred chunk keeps chat draft and offers keyboard recovery',async
   await page.getByRole('button',{name:'Retour au Chat',exact:true}).press('Enter');
   await expect(page.locator('#chat-input')).toHaveValue('Brouillon protégé');
 });
+
+for (const mode of ['simple','expert']) {
+  test(`task sidebar respects ${mode} mode`, async ({page}) => {
+    await page.setViewportSize({width:1280,height:720});
+    await fixture(page,'fr',mode,true);
+    await page.route('**/__e2e_daemon/api/tasks', route=>route.fulfill({json:{tasks:[
+      {id:rootId,label:'Demande principale',status:'waiting_user_input',assigned_agent:'private-root-agent'},
+      {id:'00000000-0000-0000-0000-000000000002',parent_task_id:rootId,label:'Sous-tâche interne',status:'running',assigned_agent:'private-child-agent'},
+    ]}}));
+    await page.goto('/');
+    if(mode==='simple') await page.getByText('Plus d’outils',{exact:true}).click();
+    await page.locator('#tab-tasks').click();
+    const sidebar=page.locator('.sidebar-right-task-list');
+    await expect(sidebar.getByText('Demande principale',{exact:true})).toBeVisible();
+    await expect(sidebar.locator('.sidebar-right-task-card')).toHaveCount(mode==='simple'?1:2);
+    await expect(sidebar.getByText('Sous-tâche interne',{exact:true})).toHaveCount(mode==='simple'?0:1);
+    await expect(sidebar.locator('.sidebar-right-task-agent')).toHaveCount(mode==='simple'?0:2);
+    await expect(sidebar.locator('.task-tree-meta-row')).toHaveCount(mode==='simple'?0:2);
+    await expect(sidebar.locator('.sidebar-right-task-status-pill').first()).toHaveText('Votre réponse est attendue');
+    if(mode==='simple') {
+      await expect(sidebar.locator('.sidebar-right-task-snippet,.sidebar-right-task-progress,.task-tree-toggle')).toHaveCount(0);
+      await expect(page.locator('.task-tree-toolbar-sidebar')).toHaveCount(0);
+    }
+  });
+}

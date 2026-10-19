@@ -3675,6 +3675,10 @@ function App() {
     return rows;
   }, [taskTreeData, collapsedTaskBranches]);
 
+  const sidebarTaskRows = isSimpleMode
+    ? taskTreeRows.filter((row) => !row.task.parent_task_id)
+    : taskTreeRows;
+
   const visibleTaskEvents = useMemo(() => {
     const compact = collapseStreamedProgressEvents(tasksEvents, selectedTask?.id ?? "root");
     if (!isSimpleMode) return compact;
@@ -11348,7 +11352,7 @@ function App() {
                       aria-label={t("tasks.search_placeholder")}
                     />
                   </div>
-                  {taskTreeData.branchIds.size > 0 && (
+                  {!isSimpleMode && taskTreeData.branchIds.size > 0 && (
                     <div className="task-tree-toolbar task-tree-toolbar-sidebar" role="group" aria-label={t("tasks.tree_actions")}>
                       <button
                         type="button"
@@ -11374,7 +11378,7 @@ function App() {
               {!tasksLoading && tasksList.length === 0 && (
                 <p className="empty-state">{t("tasks.empty")}</p>
               )}
-              {!tasksLoading && tasksList.length > 0 && taskTreeRows.length === 0 && (
+              {!tasksLoading && tasksList.length > 0 && sidebarTaskRows.length === 0 && (
                 <p className="empty-state">{t("tasks.no_match_filter")}</p>
               )}
               {tab === "tasks" && eventTriggers.length > 0 && (
@@ -11390,9 +11394,9 @@ function App() {
                   </ul>
                 </div>
               )}
-              {!tasksLoading && taskTreeRows.length > 0 && (
+              {!tasksLoading && sidebarTaskRows.length > 0 && (
                 <ul className="sidebar-right-task-list" role="list">
-                  {taskTreeRows.map((row) => {
+                  {sidebarTaskRows.map((row) => {
                     const task = row.task;
                     const isSelected = tasksList[tasksSelected]?.id === task.id;
                     const isAncestor = !isSelected && selectedTaskAncestorIds.has(task.id);
@@ -11435,7 +11439,7 @@ function App() {
                           <div className="sidebar-right-task-card-head">
                             <div className="sidebar-right-task-card-heading">
                               <div className="task-tree-title-row">
-                                {row.hasChildren ? (
+                                {!isSimpleMode && row.hasChildren ? (
                                   <button
                                     type="button"
                                     className="task-tree-toggle"
@@ -11457,31 +11461,31 @@ function App() {
                                   {taskDisplayLabel(task)}
                                 </span>
                               </div>
-                              <div className="task-tree-meta-row">
+                              {!isSimpleMode && <div className="task-tree-meta-row">
                                 <span className={"task-tree-kind-badge " + (row.depth > 0 ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
                                   {hierarchyLabel}
                                 </span>
                                 {row.hasChildren && <span className="task-tree-child-count">{childCountLabel}</span>}
-                              </div>
+                              </div>}
                             </div>
                             <span className={"sidebar-right-task-status-pill status-" + task.status}>
-                              {task.status}
+                              {taskStatus(task.status, locale)}
                             </span>
                           </div>
-                          {task.status === "running" && runningChip != null && (
+                          {!isSimpleMode && task.status === "running" && runningChip != null && (
                             <div className="sidebar-right-task-progress">
                               <div className="sidebar-right-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
                               <span className="sidebar-right-task-progress-pct">{runningChip.pct ?? 0}%</span>
                             </div>
                           )}
-                          {isSimpleMode && runningChip?.message && (
+                          {!isSimpleMode && runningChip?.message && (
                             <p className="sidebar-right-task-snippet">{trimPreview(runningChip.message, 96)}</p>
                           )}
                           <div className="sidebar-right-task-meta">
                             {!isSimpleMode && <span className="sidebar-right-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>}
                             {createdLabel && <span className="sidebar-right-task-created">{createdLabel}</span>}
                             {task.created_at && <span className="sidebar-right-task-relative">{formatRelativeTimeLabel(task.created_at, locale)}</span>}
-                            {task.assigned_agent && <span className="sidebar-right-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
+                            {!isSimpleMode && task.assigned_agent && <span className="sidebar-right-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
                           </div>
                           <button
                             type="button"
