@@ -2264,6 +2264,12 @@ function App() {
   /** When set, show modal with full entry content and "Voir dans la liste" (index >= 0). */
   const [memoryGraphDetail, setMemoryGraphDetail] = useState<{ entry: MemoryLongTermEntry; index: number } | null>(null);
   const memoryGraphRef = useRef<RelationGraphComponent | null>(null);
+  // A lazy graph can mount after its data; ref arrival must re-run initialization.
+  const [memoryGraphReady, setMemoryGraphReady] = useState(false);
+  const bindMemoryGraph = useCallback((instance: RelationGraphComponent | null | undefined) => {
+    memoryGraphRef.current = instance ?? null;
+    setMemoryGraphReady(!!instance);
+  }, []);
   /** Track last node click for double-click detection: single = recenter, double = open detail modal. */
   const memoryGraphLastClickRef = useRef<{ nodeId: string; at: number } | null>(null);
 
@@ -4502,14 +4508,14 @@ function App() {
       memoryGraphRef.current?.setJsonData(data, true, () => {});
     }, 0);
     return () => clearTimeout(t);
-  }, [memoryViewGraph, memoryLongTerm, memoryLongTermSelected, theme]);
+  }, [memoryViewGraph, memoryLongTerm, memoryLongTermSelected, theme, memoryGraphReady]);
 
   // Re-apply graph options when theme changes so canvas/edges/nodes use the new colors (setOptions is on the instance, not the ref)
   useEffect(() => {
     if (!memoryViewGraph || !memoryGraphRef.current) return;
     const instance = memoryGraphRef.current.getInstance?.();
     if (instance) void (instance as { setOptions: (opts: RGOptions) => void | Promise<void> }).setOptions(memoryGraphOptions);
-  }, [theme, memoryViewGraph, memoryGraphOptions]);
+  }, [theme, memoryViewGraph, memoryGraphOptions, memoryGraphReady]);
 
   const fetchScheduleReports = useCallback(async () => {
     try {
@@ -9196,7 +9202,7 @@ function App() {
                           return (
                             <div className="memory-graph-canvas">
                               <RelationGraph
-                                ref={memoryGraphRef}
+                                ref={bindMemoryGraph}
                                 options={memoryGraphOptions}
                                 onNodeClick={(node: RGNode) => {
                                   const now = Date.now();

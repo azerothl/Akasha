@@ -1,4 +1,4 @@
-import { Component, Suspense, lazy, createElement, type ComponentType, type ComponentProps, type ReactNode } from "react";
+import { Component, Suspense, lazy, createElement, forwardRef, type ComponentType, type ComponentProps, type ComponentRef, type ReactNode } from "react";
 import { useI18n } from "../useI18n";
 import { PRESERVE_DRAFT_EVENT } from "../hooks/useChatDraftRecovery";
 
@@ -26,12 +26,12 @@ class PanelErrorBoundary extends Component<{ children: ReactNode; en: boolean },
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function deferPanel<T extends ComponentType<any>>(load: () => Promise<{ default: T }>) {
   const Panel = lazy(load);
-  return function DeferredPanel(props: ComponentProps<T>) {
+  return forwardRef<ComponentRef<T>, ComponentProps<T>>(function DeferredPanel(props, ref) {
     const { locale } = useI18n();
     return <PanelErrorBoundary en={locale === "en"}>
       <Suspense fallback={<p className="panel-load-state" role="status">{locale === "en" ? "Loading panel…" : "Chargement du panneau…"}</p>}>
-        {createElement(Panel, props)}
+        {createElement(Panel, { ...props, ref } as ComponentProps<T>)}
       </Suspense>
     </PanelErrorBoundary>;
-  };
+  });
 }
