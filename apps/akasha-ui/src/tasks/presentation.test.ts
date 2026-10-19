@@ -9,6 +9,16 @@ describe('task presentation',()=>{
   it('localizes statuses without changing unknown statuses',()=>{
     expect(taskStatus('RUNNING','fr')).toBe('En cours');
     expect(taskStatus('failed','en')).toBe('Failed');
+    for (const [state, fr, en] of [
+      ['pending','En attente','Pending'], ['queued','En file d’attente','Queued'],
+      ['running','En cours','Running'], ['completed','Terminée','Completed'],
+      ['failed','Échec','Failed'], ['paused','En pause','Paused'],
+      ['cancelled','Annulée','Cancelled'], ['waiting_user_input','Votre réponse est attendue','Waiting for your input'],
+      ['interrupted','Interrompue','Interrupted'],
+    ]) {
+      expect(taskStatus(state,'fr')).toBe(fr);
+      expect(taskStatus(state.toUpperCase(),'en')).toBe(en);
+    }
     expect(taskStatus('custom','fr')).toBe('custom');
   });
 });

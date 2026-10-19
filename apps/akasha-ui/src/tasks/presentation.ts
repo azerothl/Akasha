@@ -7,6 +7,9 @@ export function taskTitle(label: string | undefined, fallback: string): string {
 
 export function taskStatus(status: string, locale: "fr" | "en"): string {
   const labels: Record<string, [string, string]> = {
+    queued: ["En file d’attente", "Queued"],
+    waiting_user_input: ["Votre réponse est attendue", "Waiting for your input"],
+    interrupted: ["Interrompue", "Interrupted"],
     pending: ["En attente", "Pending"], running: ["En cours", "Running"],
     paused: ["En pause", "Paused"], completed: ["Terminée", "Completed"],
     failed: ["Échec", "Failed"], cancelled: ["Annulée", "Cancelled"],

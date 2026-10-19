@@ -4,9 +4,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-const [exe, before, after, destination] = process.argv.slice(2).map(p => path.resolve(p));
-if (!exe || !before || !after || !destination) throw new Error('Expected exe, before dist, after dist, output dir');
+const args = process.argv.slice(2);
+if (args.length !== 4) throw new Error('Expected exe, before dist, after dist, output dir');
+const [exe, before, after, destination] = args.map(p => path.resolve(p));
 await fs.mkdir(destination, {recursive:true});
+// Reject old samples and profiles before launching anything: retries must use a new directory.
+if ((await fs.readdir(destination)).length !== 0) {
+  throw new Error('Benchmark output directory must be empty; choose a new directory for each run');
+}
+// Reserve this directory so concurrent invocations cannot record into the same sample files.
+await fs.writeFile(path.join(destination, '.benchmark-run'), '', {flag:'wx'});
 let root = before;
 const server = http.createServer(async (req, res) => {
   try {

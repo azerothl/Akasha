@@ -1455,6 +1455,7 @@ pub(crate) async fn schedule_run_now(
         .handle_message(
             store_path,
             msg,
+            None,
             correlation,
             true,
             &session_id,
@@ -1774,6 +1775,7 @@ if method == "POST" && path == "/api/message" {
         .as_ref()
         .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
         .unwrap_or_default();
+    let display_request = message.clone();
     // Parse attachments: images -> data URLs for vision; documents -> append extracted text to message.
     let image_data_urls: Option<Vec<String>> = {
         let arr = body_json
@@ -2385,6 +2387,7 @@ if method == "POST" && path == "/api/message" {
         priority,
         incognito,
     );
+    envelope.display_request = Some(display_request);
     envelope.studio_disk_root = studio_disk_root.clone();
     envelope.studio_forced_agent = studio_forced_agent;
     envelope.studio_evolution_branch = studio_evolution_branch;
