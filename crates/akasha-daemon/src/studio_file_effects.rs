@@ -38,6 +38,8 @@ struct Scope {
     receipt_floor: i64,
     goals: Vec<Goal>,
     renames: Vec<Rename>,
+    #[serde(default)]
+    terminal_pending: BTreeMap<String, BTreeMap<String, String>>,
 }
 pub(crate) fn implementation_role(agent: &str) -> bool {
     matches!(
@@ -181,7 +183,7 @@ fn receipt_floor(db: &Path) -> Result<i64, String> {
 fn hydrate(scope: &mut Scope, db: &Path, task: Uuid) -> Result<(), String> {
     crate::studio_tool_contract::ensure_ledger(db)?;
     let c = rusqlite::Connection::open(db).map_err(|e| e.to_string())?;
-    let mut stmt=c.prepare("WITH RECURSIVE lineage(id) AS (SELECT ?1 UNION SELECT t.id FROM tasks t JOIN lineage p ON t.parent_task_id=p.id WHERE t.status='completed') SELECT o.result FROM studio_operations o WHERE o.task IN (SELECT id FROM lineage) AND o.state='completed' AND o.rowid>?2").map_err(|e|e.to_string())?;
+    let mut stmt=c.prepare("WITH RECURSIVE lineage(id) AS (SELECT ?1 UNION SELECT t.id FROM tasks t JOIN lineage p ON t.parent_task_id=p.id WHERE t.status='completed') SELECT o.result FROM studio_operations o WHERE o.task IN (SELECT id FROM lineage) AND o.state='completed' AND o.rowid>?2 ORDER BY o.rowid").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map(
             rusqlite::params![task.to_string(), scope.receipt_floor],
@@ -361,6 +363,25 @@ impl Scope {
                 }
             }
         }
+        if let (Some(action), Some(session)) = (
+            value["terminal_effect"]["action"].as_str(),
+            value["terminal_effect"]["session_id"].as_str(),
+        ) {
+            if matches!(action, "start" | "write") {
+                let pending = self.terminal_pending.entry(session.to_owned()).or_default();
+                for (path, state) in &before {
+                    pending.entry(path.clone()).or_insert_with(|| state.clone());
+                }
+            }
+            if matches!(action, "read" | "stop") {
+                if let Some(pending) = self.terminal_pending.get(session).cloned() {
+                    self.observe(&pending, &after);
+                }
+                if action == "stop" {
+                    self.terminal_pending.remove(session);
+                }
+            }
+        }
         self.observe(&before, &after);
     }
     fn verified(&self, current: &BTreeMap<String, String>) -> bool {
@@ -522,6 +543,7 @@ pub(crate) fn refresh(
                 receipt_floor: receipt_floor(db)?,
                 goals,
                 renames,
+                terminal_pending: BTreeMap::new(),
             };
             let versions = capture_paths(&s.paths())?;
             for g in &mut s.goals {
@@ -603,6 +625,7 @@ pub(crate) fn human_reply(
         receipt_floor: receipt_floor(db)?,
         goals,
         renames,
+        terminal_pending: BTreeMap::new(),
     };
     let current = capture_paths(&scope.paths())?;
     for goal in &mut scope.goals {
@@ -649,6 +672,7 @@ mod tests {
             receipt_floor: 0,
             goals,
             renames,
+            terminal_pending: BTreeMap::new(),
         };
         let values = capture_paths(&scope.paths()).unwrap();
         for g in &mut scope.goals {
@@ -802,6 +826,31 @@ mod tests {
         assert!(!scope.verified(&capture_paths(&scope.paths()).unwrap()));
         std::fs::write(root.path().join("new.ts"), "original").unwrap();
         assert!(scope.verified(&capture_paths(&scope.paths()).unwrap()));
+    }
+    #[test]
+    fn delayed_terminal_effect_waits_for_same_session_observation_and_survives_checkpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("delayed.txt");
+        std::fs::write(&path, "old").unwrap();
+        let mut scope = scope(root.path(), "Modify delayed.txt");
+        let before = capture_paths(&scope.paths()).unwrap();
+        let receipt = |action: &str,
+                       session: &str,
+                       a: &BTreeMap<String, String>,
+                       b: &BTreeMap<String, String>| json!({"success":true,"terminal_effect":{"action":action,"session_id":session},"file_effects":a.iter().map(|(path,state)|json!({"path":path,"before":state,"after":b[path]})).collect::<Vec<_>>()});
+        scope.receipt(&receipt("write", "ours", &before, &before));
+        assert!(!scope.verified(&before));
+        scope = serde_json::from_value(serde_json::to_value(&scope).unwrap()).unwrap();
+        std::fs::write(&path, "new").unwrap();
+        let after = capture_paths(&scope.paths()).unwrap();
+        scope.receipt(&receipt("read", "other", &after, &after));
+        assert!(!scope.verified(&after));
+        scope.receipt(&receipt("read", "ours", &after, &after));
+        assert!(scope.verified(&after));
+        scope.receipt(&receipt("stop", "ours", &after, &after));
+        assert!(scope.terminal_pending.is_empty());
+        std::fs::write(&path, "old").unwrap();
+        assert!(!scope.verified(&capture_paths(&scope.paths()).unwrap()));
     }
     #[test]
     fn completed_scoped_receipt_restores_a_lost_checkpoint_effect() {

@@ -512,6 +512,7 @@ pub(crate) struct Operation {
     path: Option<PathBuf>,
     before: Option<String>,
     effect_before: std::collections::BTreeMap<String,String>,
+    terminal_context: Option<(String, Option<String>)>,
     _lock: tokio::sync::OwnedMutexGuard<()>,
     pub cached: Option<(bool, String)>,
 }
@@ -599,6 +600,7 @@ impl Operation {
                 path: None,
                 before: None,
                 effect_before: Default::default(),
+                terminal_context: None,
                 _lock: lock,
                 cached: Some((
                     value["success"].as_bool().unwrap_or(false),
@@ -669,7 +671,7 @@ impl Operation {
                 if value["success"]==true && value["result_unknown"]!=true && value["file_version"].as_str()==before.as_deref() && before.is_some() {
                     value["replayed"]=json!(true);
                     value["retry_hint"]=json!("Identical write already confirmed and current file version verified; no new disk effect. Continue with the next requested operation or conclude after all checks.");
-                    return Ok(Self{db:db.into(),task,id,tool:tool.into(),path:None,before:None,effect_before:Default::default(),_lock:lock,cached:Some((true,value.to_string()))});
+                    return Ok(Self{db:db.into(),task,id,tool:tool.into(),path:None,before:None,effect_before:Default::default(),terminal_context:None,_lock:lock,cached:Some((true,value.to_string()))});
                 }
             }
         }
@@ -712,6 +714,7 @@ impl Operation {
             path,
             before,
             effect_before,
+            terminal_context: (tool=="terminal_session").then(||(args.first().cloned().unwrap_or_default(),args.get(1).cloned())),
             _lock: lock,
             cached: None,
         })
@@ -738,6 +741,11 @@ impl Operation {
         let (output,_,truncated) = crate::tool_output::truncate_utf8_by_bytes(plain, 64 * 1024);
         let mut value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
         value["file_effects"]=crate::studio_file_effects::receipt_effects(&self.effect_before)?;
+        if let Some((action,session))=&self.terminal_context {
+            let output:Value=serde_json::from_str(text).unwrap_or(Value::Null);
+            let session=if action=="start" {output["session_id"].as_str()} else {session.as_deref()};
+            if let Some(session)=session {value["terminal_effect"]=json!({"action":action,"session_id":session});}
+        }
         value["truncated"]=json!(truncated);
         if truncated {value["output"]=json!(format!("{}\n[Output truncated at 64 KiB; use bounded reads to inspect remaining data.]",value["output"].as_str().unwrap_or_default()));}
         if self.tool == "read_file" && !success && value["file_version"] == "missing" {

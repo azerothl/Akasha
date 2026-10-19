@@ -82,7 +82,22 @@ fn function_response_without_leading_reasoning(response: &str) -> &str {
 
 pub(super) fn parse_calls_for_turn(response: &str, allowed: Option<&[String]>) -> Vec<(String, Vec<String>)> {
     if let Some(calls)=json_function_calls(function_response_without_leading_reasoning(response),allowed) {return calls;}
-    parse_calls(response)
+    let calls=parse_calls(response);
+    if let Some(allowed)=allowed {
+        for (name,args) in &calls {
+            let actual=if name=="studio_call" {
+                match crate::studio_tool_contract::decode(&args.join(" ")) {
+                    Ok(decoded)=>decoded.envelope.tool,
+                    // Invalid calls already fail closed at the typed decoder.
+                    Err(_)=>continue,
+                }
+            } else {name.clone()};
+            if !allowed.iter().any(|name|name==&actual) {
+                return vec![("studio_call".into(),vec!["fallback function is outside the advertised turn catalogue; no batch call executed".into()])];
+            }
+        }
+    }
+    calls
 }
 
 pub(super) fn parse_calls(response: &str) -> Vec<(String, Vec<String>)> {
@@ -332,5 +347,12 @@ mod content_catalogue_tests {
         let read=r#"{"name":"read_file","arguments":{"path":"workspace:/a.txt"}}"#;
         let calls=parse_calls_for_turn(read,Some(&allowed));assert!(crate::studio_tool_contract::decode(&calls[0].1.join(" ")).is_ok());
         assert!(!parse_calls_for_turn("TOOL: write_file a.txt\nhello",Some(&allowed)).is_empty());
+        for response in [
+            "TOOL: run_command node -e bad",
+            r#"TOOL_JSON: {"schema_version":1,"tool":"run_command","arguments":{"program":"node"}}"#,
+            "TOOL_JSON: {\"schema_version\":1,\"tool\":\"write_file\",\"arguments\":{\"path\":\"workspace:/a.txt\",\"content\":\"a\",\"expected_version\":\"missing\"}}\nTOOL: run_command node -e bad",
+        ] {let calls=parse_calls_for_turn(response,Some(&allowed));assert_eq!(calls.len(),1);assert!(calls[0].1[0].contains("outside the advertised turn catalogue"));}
+        let mut workflow=allowed.clone();workflow.push("ask_user".into());
+        assert_eq!(parse_calls_for_turn("TOOL: ask_user Continue?",Some(&workflow))[0].0,"ask_user");
     }
 }
