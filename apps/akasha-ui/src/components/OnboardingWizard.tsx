@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useFocusScope } from "../hooks/useFocusScope";
 import { invoke } from "@tauri-apps/api/core";
 import { E2E_WEB, e2eDaemonGetJson } from "../e2eDaemon";
 
@@ -84,7 +86,11 @@ export function markSetupWizardDone(): void {
 }
 
 export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useFocusScope(dialogRef, true, onComplete, { inertOutside: true });
   const [step, setStep] = useState(0);
+  useEffect(() => { headingRef.current?.focus(); }, [step]);
   const [busy, setBusy] = useState(false);
   const [doctorMsg, setDoctorMsg] = useState<string | null>(null);
   const [howToCall, setHowToCall] = useState("");
@@ -274,10 +280,10 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
 
   const calibrateBlocked = step === 3 && needsCalibrate && !canAdvanceFromCalibrate;
 
-  return (
-    <div className="human-input-overlay onboarding-overlay" role="dialog" aria-modal="true">
+  return createPortal(
+    <div ref={dialogRef} tabIndex={-1} className="human-input-overlay onboarding-overlay" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
       <div className="human-input-modal onboarding-wizard-modal">
-        <h2>{t("onboarding.title")}</h2>
+        <h2 id="onboarding-title" ref={headingRef} tabIndex={-1} data-initial-focus>{t("onboarding.title")}</h2>
         <p className="onboarding-wizard-steps-label">
           {steps[step]} ({step + 1}/{steps.length})
         </p>
@@ -477,6 +483,7 @@ export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
