@@ -17,6 +17,9 @@ pub(crate) struct Envelope {
     pub operation_id: Uuid,
     pub tool: String,
     pub arguments: Value,
+    /// Runtime constraint injected after approval; never widens tool permission.
+    #[serde(default)]
+    pub approval_identity: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -485,6 +488,13 @@ impl Operation {
             return Err("task stopped or waiting while acquiring workspace lock".into());
         }
 
+        if let Some(expected)=typed.and_then(|call|call.envelope.approval_identity.as_ref()) {
+            if !policy.can_use_tool(tool) || !policy.can_run_command("git") || !crate::studio_delivery::is_delivery_tool(tool) || crate::studio_delivery::approval_identity(&canonical,tool,args).await?!=*expected {
+                return Err("delivery destination changed while waiting for workspace lock; request fresh approval".into());
+            }
+            let current=akasha_store::TaskStore::open(db).map_err(|e|e.to_string())?.get(task).map_err(|e|e.to_string())?.ok_or("Studio task disappeared during approval validation")?.status;
+            if current!=task_status {return Err("task status changed during delivery approval validation".into());}
+        }
         let id = typed
             .map(|t| t.envelope.operation_id)
             .unwrap_or_else(Uuid::new_v4);
@@ -493,6 +503,7 @@ impl Operation {
                 .map_err(|e| e.to_string())?
                 .as_bytes(),
         );
+        let fingerprint=if let Some(identity)=typed.and_then(|call|call.envelope.approval_identity.as_ref()) {digest(serde_json::to_string(&(fingerprint,identity)).map_err(|e|e.to_string())?.as_bytes())}else{fingerprint};
         let mut connection = connection(db)?;
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

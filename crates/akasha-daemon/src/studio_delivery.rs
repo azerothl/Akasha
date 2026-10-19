@@ -1039,6 +1039,7 @@ pub(crate) fn history(data_dir: &Path, task: Uuid) -> Result<Value, String> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OperatorRequest {
+    expected_repository: Option<String>,
     task_id: Uuid,
     operation_id: Uuid,
     request: Value,
@@ -1189,7 +1190,14 @@ pub(crate) async fn route(
             ))
         }
     };
-    let envelope = json!({"schema_version":1,"operation_id":operator.operation_id,"tool":action,"arguments":operator.request});
+    let mut envelope = json!({"schema_version":1,"operation_id":operator.operation_id,"tool":action,"arguments":operator.request});
+    if matches!(action,"git_push"|"github_create_pr") {
+        let Some(expected)=operator.expected_repository.as_deref().filter(|repo|!repo.is_empty()) else {return Some(json_response("400 Bad Request",&json!({"error":"expected_repository from delivery preflight required"}).to_string()));};
+        let identity=match approval_identity(&root,action,&[operator.request.to_string()]).await {Ok(identity)=>identity,Err(error)=>return Some(json_response("409 Conflict",&json!({"error":error}).to_string()))};
+        let current:Value=serde_json::from_str(&identity).unwrap_or(Value::Null);
+        if current["repository"]!=expected {return Some(json_response("409 Conflict",&json!({"error":"delivery destination changed since preflight; inspect before publishing"}).to_string()));}
+        envelope["approval_identity"]=json!(identity);
+    }
     let decoded = match crate::studio_tool_contract::decode(&envelope.to_string()) {
         Ok(decoded) => decoded,
         Err(error) => {

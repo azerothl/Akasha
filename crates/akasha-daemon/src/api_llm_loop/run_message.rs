@@ -2898,6 +2898,9 @@ pub(crate) async fn run_message_via_llm(
                                 tool_results.push("Delivery destination changed after approval; request fresh approval.".into());continue;
                             }
                         }
+                        let approved_delivery_envelope=delivery_approval_identity.as_ref().map(|identity| {
+                            vec![serde_json::json!({"schema_version":1,"operation_id":typed_call.as_ref().map(|call|call.envelope.operation_id).unwrap_or_else(Uuid::new_v4),"tool":actual_tool,"arguments":serde_json::from_str::<serde_json::Value>(&tool_args.join(" ")).unwrap_or_default(),"approval_identity":identity}).to_string()]
+                        });
                         let (success, res, captured_image): (bool, String, Option<String>) =
                             if actual_tool == "ask_user" {
                                 // Human in the loop: register pending request, emit event, wait for user reply.
@@ -3350,8 +3353,8 @@ pub(crate) async fn run_message_via_llm(
                             } else {
                                 execute_tool_call(
                                     exec,
-                                    if typed_call.is_some(){"studio_call"}else{&actual_tool},
-                                    if typed_call.is_some(){native_envelope_args.as_slice()}else{tool_args},
+                                    if typed_call.is_some() || approved_delivery_envelope.is_some(){"studio_call"}else{&actual_tool},
+                                    approved_delivery_envelope.as_deref().unwrap_or_else(||if typed_call.is_some(){native_envelope_args.as_slice()}else{tool_args}),
                                     process_registry.as_ref(),
                                     long_term_client.as_ref(),
                                     task_id,

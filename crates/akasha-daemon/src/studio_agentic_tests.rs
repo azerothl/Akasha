@@ -411,3 +411,26 @@ async fn command_cwd_is_parsed_before_cached_policy_checks() {
     let cmd=contracts::decode(&json!({"schema_version":1,"tool":"run_command","arguments":{"program":"git","args":["status"],"cwd":"workspace:/"}}).to_string()).unwrap();
     let op=contracts::Operation::begin(&db,id,"run_command",&cmd.argv,dir.path(),&p,Some(&cmd)).await.unwrap();op.finish(true,"inspection test").unwrap();
 }
+
+#[tokio::test]
+async fn publication_rechecks_approved_destination_after_acquiring_workspace() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("task.db");let id=Uuid::new_v4();running_task(&db,id);let mut p=policy(dir.path());p.allowed_commands.push("gh".into());
+    let git=|args:&[&str]|assert!(std::process::Command::new("git").args(args).current_dir(dir.path()).output().unwrap().status.success());
+    git(&["init","-q"]);git(&["remote","add","origin","https://github.com/example/approved.git"]);
+    let args=vec![json!({"remote":"origin","branch":"main","expected_head":"unborn","expected_remote_head":"missing"}).to_string()];
+    let identity=crate::studio_delivery::approval_identity(dir.path(),"git_push",&args).await.unwrap();
+    let envelope=json!({"schema_version":1,"tool":"git_push","arguments":serde_json::from_str::<Value>(&args[0]).unwrap(),"approval_identity":identity});
+    let decoded=contracts::decode(&envelope.to_string()).unwrap();
+    let lock=contracts::workspace_guard(dir.path()).await.unwrap();
+    let future=contracts::Operation::begin(&db,id,"git_push",&decoded.argv,dir.path(),&p,Some(&decoded));tokio::pin!(future);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(20),future.as_mut()).await.is_err());
+    git(&["remote","set-url","origin","https://github.com/example/retargeted.git"]);drop(lock);
+    let error=future.await.err().unwrap();
+    assert!(error.contains("destination changed"),"{error}");
+    let database=rusqlite::Connection::open(&db).unwrap();
+    let exists:i64=database.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='studio_operations'",[],|r|r.get(0)).unwrap();
+    if exists>0 {let count:i64=database.query_row("SELECT count(*) FROM studio_operations",[],|r|r.get(0)).unwrap();assert_eq!(count,0);}
+    let mut current=envelope;current["approval_identity"]=json!(crate::studio_delivery::approval_identity(dir.path(),"git_push",&args).await.unwrap());
+    let approved=contracts::decode(&current.to_string()).unwrap();
+    let operation=contracts::Operation::begin(&db,id,"git_push",&approved.argv,dir.path(),&p,Some(&approved)).await.unwrap();operation.finish(false,"guard validation only; no push executed").unwrap();
+}
