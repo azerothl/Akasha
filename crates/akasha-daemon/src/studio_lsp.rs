@@ -552,8 +552,6 @@ pub(crate) async fn query(
     if locked.is_none() {
         *locked = Some(start(&root, program, &args, policy).await?);
     }
-    let session = locked.as_mut().ok_or("LSP session missing")?;
-    session.last_used = std::time::Instant::now();
     let disk_text = read_text(&path)?;
     let text = query.text.unwrap_or_else(|| disk_text.clone());
     if text.len() > FILE_LIMIT {
@@ -565,6 +563,20 @@ pub(crate) async fn query(
     let uri = url::Url::from_file_path(&path)
         .map_err(|_| "invalid document URI")?
         .to_string();
+    // Push notifications carry no request identity and may omit document version.
+    // A new process/reader is the freshness barrier for changed push-only buffers:
+    // neither queued nor delayed diagnostics from the old process can be accepted.
+    let restarted_for_freshness = locked.as_ref().is_some_and(|session| {
+        session.documents.get(&uri).is_some_and(|document| {
+            requires_push_restart(&session.capabilities, &document.text, &text)
+        })
+    });
+    if restarted_for_freshness {
+        if let Some(mut old) = locked.take() { let _ = old.child.kill().await; }
+        *locked = Some(start(&root, program, &args, policy).await?);
+    }
+    let session = locked.as_mut().ok_or("LSP session missing")?;
+    session.last_used = std::time::Instant::now();
     session.open(&uri, language, text.clone()).await?;
     let document_version = session
         .documents
@@ -689,7 +701,7 @@ pub(crate) async fn query(
         _ => return Err("LSP action must be diagnostics, definition, references or rename".into()),
     };
     Ok(
-        json!({"schema_version":1,"server":program,"language":language,"path":relative(&root,&path)?,"document_version":document_version,"file_version":hash(&text),"result":result}),
+        json!({"schema_version":1,"server":program,"language":language,"path":relative(&root,&path)?,"document_version":document_version,"session_restarted_for_freshness":restarted_for_freshness,"file_version":hash(&text),"result":result}),
     )
 }
 
@@ -1081,4 +1093,21 @@ pub(crate) async fn route(
             &json!({"schema_version":1,"error":error}).to_string(),
         ),
     })
+}
+
+fn requires_push_restart(capabilities: &Value, previous: &str, current: &str) -> bool {
+    previous != current && !capabilities.get("diagnosticProvider").is_some_and(|v| *v != false && !v.is_null())
+}
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+    #[test] fn changed_push_buffers_need_a_new_process_but_pull_and_unchanged_buffers_do_not() {
+        for caps in [json!({}),json!({"diagnosticProvider":false}),json!({"diagnosticProvider":null})] {
+            assert!(requires_push_restart(&caps,"old","new"));
+            assert!(!requires_push_restart(&caps,"old","old"));
+        }
+        for caps in [json!({"diagnosticProvider":true}),json!({"diagnosticProvider":{}})] {
+            assert!(!requires_push_restart(&caps,"old","new"));
+        }
+    }
 }

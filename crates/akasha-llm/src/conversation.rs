@@ -28,6 +28,15 @@ mod tests {
         serde_json::from_value(json!({"prompt":"","conversation":[{"role":"user","content":"create a file"},{"role":"assistant","content":"call"},{"role":"tool","content":"saved","tool_call_id":"one"}],"tools":[{"function":{"name":"studio_call","parameters":{"type":"object","required":["schema_version","tool","arguments"],"properties":{"schema_version":{"enum":[1]},"tool":{"enum":["write_file"]},"arguments":{"type":"object"}},"oneOf":[{"properties":{"tool":{"enum":["write_file"]},"arguments":{"type":"object","required":["path","content","expected_version"]}}}]}}}]})).unwrap()
     }
     #[test]
+    fn native_functions_and_liquid_transport_preserve_creation_preconditions() {
+        let request=request();
+        assert!(request.native_functions()[0]["description"].as_str().unwrap().contains("expected_version"));
+        let prompt=request.lfm2_chatml_prompt();
+        assert!(prompt.contains("expected_version='missing'"));
+        assert!(prompt.contains("rejected batch executes NO calls"));
+        assert!(prompt.contains("first unexecuted operation"));
+    }
+    #[test]
     fn tool_continuation_has_no_artificial_continue_user_turn() {
         let messages = request().chat_messages(json!(""));
         assert_eq!(messages.as_array().unwrap().len(), 3);
@@ -117,7 +126,7 @@ impl crate::CompletionRequest {
                 for name in names {
                     let schema=parameters["oneOf"].as_array().and_then(|variants|variants.iter().find(|variant|variant.pointer("/properties/tool/enum").and_then(Value::as_array).is_some_and(|names|names.contains(name))))
                         .and_then(|variant|variant.pointer("/properties/arguments")).cloned().unwrap_or_else(||json!({"type":"object"}));
-                    result.push(json!({"name":name,"description":format!("Execute {name} with the exact requested arguments and current permissions."),"parameters":schema}));
+                    result.push(json!({"name":name,"description":format!("Execute {name} with the exact requested arguments and current permissions. {} {}", function["description"].as_str().unwrap_or(""), if matches!(name.as_str(),Some("write_file"|"write_code")){"REQUIRED keyword expected_version: use the literal string missing when creating a new file; for existing files use its SHA-256 from read_file."}else{""}),"parameters":schema}));
                 }
             } else {result.push(function.clone());}
         }
@@ -171,7 +180,7 @@ impl crate::CompletionRequest {
         }
         if self.tools.as_ref().is_some_and(|tools|!tools.is_empty()) {
             let definitions=serde_json::to_string(&self.native_functions()).unwrap().replace("<|","\\u003c|");
-            let guidance=format!("\nList of tools: {definitions}\n[LiquidAI native tool transport]\nUse native function calls: <|tool_call_start|>[function_name(keyword=value)]<|tool_call_end|>. Use the listed function names and literal keyword arguments. Do not use studio_call wrappers, TOOL: lines or JSON-response wrappers from other transport examples. Request the next needed operation, observe its actual result, then continue in the user's requested order. Preserve exact requested file contents, without extra headings, dates, templates or explanations. Failed reads before creation do not count as successful post-write checks. Do not repeat confirmed writes. After every requested operation has actually completed, answer normally in the user's language without another tool call.\n{}\n",if self.require_tool{"A real tool operation is still required this turn; a final claim cannot replace it."}else{"A final plain-text answer is allowed when no requested operation remains."});
+            let guidance=format!("\nList of tools: {definitions}\n[LiquidAI native tool transport]\nUse native function calls: <|tool_call_start|>[function_name(keyword=value)]<|tool_call_end|>. Use the listed function names and literal keyword arguments. Do not use studio_call wrappers, TOOL: lines or JSON-response wrappers from other transport examples. Request one next needed operation, observe its actual result, then continue in the user's requested order. Every write_file or write_code call MUST include expected_version: use expected_version='missing' for a new file, or the SHA-256 returned by read_file for an existing file. A rejected batch executes NO calls; restart from its first unexecuted operation, including a deferred first creation. Do not skip it merely because it appeared in your earlier response. Preserve exact requested file contents, without extra headings, dates, templates or explanations. Failed reads before creation do not count as successful post-write checks. Do not repeat confirmed writes. After every requested operation has actually completed, answer normally in the user's language without another tool call.\n{}\n",if self.require_tool{"A real tool operation is still required this turn; a final claim cannot replace it."}else{"A final plain-text answer is allowed when no requested operation remains."});
             let list=messages.as_array_mut().unwrap();
             if list.first().is_some_and(|m|m["role"]=="system") {
                 list[0]["content"]=json!(list[0]["content"].as_str().unwrap_or("").to_owned()+&guidance);

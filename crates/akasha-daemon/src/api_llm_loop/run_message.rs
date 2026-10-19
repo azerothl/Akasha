@@ -2355,6 +2355,7 @@ pub(crate) async fn run_message_via_llm(
                     super::studio_completion::literal_write_error(&tool_disk_workspace_root,&explicit_file_literals,tool,argv)
                 }).collect();
                 let literal_batch_rejected=literal_errors.iter().any(Option::is_some);
+                let rejected_batch = serde_json::json!({"calls":calls,"errors":literal_errors,"retry_hint":"No call in this batch was executed. Resubmit from the FIRST unexecuted operation, not just the last call. Every write_file/write_code requires expected_version: use the string missing for creation, or the SHA-256 from read_file for an existing file. A deferred creation did NOT create its file."});
                 let mut previous_batch_call_succeeded = true;
                 let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
@@ -2379,6 +2380,7 @@ pub(crate) async fn run_message_via_llm(
                         if literal_batch_rejected {
                             let index=tool_result_starts.len()-1;
                             let error=literal_errors[index].clone().unwrap_or_else(||serde_json::json!({"schema_version":1,"success":false,"error_code":"batch_deferred","error":"No operation executed: this batch contains an invalid tool call or a file content that violates the explicit user literal. Correct it and request the required operations again in order."}).to_string());
+                            let error=serde_json::json!({"schema_version":1,"success":false,"error":serde_json::from_str::<serde_json::Value>(&error).unwrap_or_else(|_|serde_json::json!(error)),"rejected_batch":rejected_batch}).to_string();
                             run_outcome.failed_tool_calls+=1;tool_results.push(error);continue;
                         }
                         if code_studio_disk_task && !previous_batch_call_succeeded {
