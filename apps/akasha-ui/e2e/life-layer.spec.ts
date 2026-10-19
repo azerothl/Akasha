@@ -92,13 +92,24 @@ test.describe("Life layer P7", () => {
     });
   });
 
-  test("calendar schedules shows Life layer packs", async ({ page }) => {
-    await page.goto("/");
-    await page.getByRole("tab", { name: /Calendar|Calendrier/i }).click();
-    await page.getByRole("tab", { name: /Tâches récurrentes|Recurring/i }).click();
-    await expect(page.getByText(/Life layer/i)).toBeVisible({ timeout: 15000 });
-    await expect(page.getByText(/Brief matinal|Morning brief/i)).toBeVisible();
-    await expect(page.getByText(/Pack nuit|Overnight pack/i)).toBeVisible();
-  });
+  for (const locale of ["fr", "en"] as const) {
+    test(`calendar schedules shows Life layer packs in Simple mode (${locale})`, async ({ page }) => {
+      await page.addInitScript((language) => {
+        localStorage.setItem("akasha_locale", language);
+        localStorage.setItem("akasha_ui_mode", "simple");
+      }, locale);
+      await page.goto("/");
+      const calendar = page.getByRole("tab", { name: /^(Calendar|Calendrier)$/i });
+      await expect(calendar).toBeHidden();
+      await page.getByText(locale === "fr" ? "Plus d’outils" : "More tools", { exact: true }).click();
+      await expect(calendar).toBeVisible();
+      await calendar.click();
+      await expect(calendar).toHaveAttribute("aria-selected", "true");
+      await page.getByRole("tab", { name: /Tâches récurrentes|Recurring/i }).click();
+      await expect(page.getByText(/Life layer/i)).toBeVisible({ timeout: 15000 });
+      await expect(page.getByText(/Brief matinal|Morning brief/i)).toBeVisible();
+      await expect(page.getByText(/Pack nuit|Overnight pack/i)).toBeVisible();
+    });
+  }
 });
 
