@@ -495,8 +495,8 @@ async fn run_engine(
         findings.iter().filter(|f| !f.url.is_empty()).count(), config.min_sources_for_report as usize);
     store.update(run_id, |r| r.search_degraded = search_degraded).await;
     let report_word_target = config.min_final_report_words.min(REPORT_OUTPUT_TOKENS as usize / 2);
+    let (manifest, represented_pages, omitted_sources) = format_source_manifest(&findings);
     let final_report = {
-        let manifest = format_source_manifest(&findings);
         let mut md = require_report(final_report(
             ctx,
             topic,
@@ -506,7 +506,7 @@ async fn run_engine(
             report_word_target,
             &user_ctx,
         ).await, run_id, &branch_final, &sa_writer).await?;
-        let pages = findings.iter().filter(|f| !f.url.is_empty()).count();
+        let pages = represented_pages;
         let sources_ok = enough_pages;
         let quality = assess_report_quality(
             &md,
@@ -525,7 +525,7 @@ async fn run_engine(
                 quality.words,
                 report_word_target,
                 quality.citations,
-                pages.min(14)
+                pages.min(12)
             );
             let issues = format!("{issues}\n- Remove citations to pages not consulted: {}. Replace only when extracted evidence supports the claim; otherwise remove the claim.", unknown.join(", "));
             md = require_report(final_report_retry(ctx, topic, &md, &manifest, &issues, &user_ctx).await,
@@ -566,13 +566,13 @@ async fn run_engine(
     let sources_sufficient = enough_pages && unknown_citations.is_empty();
     let mut quality_warnings = assess_report_quality(
         &final_report,
-        sources.len(),
+        represented_pages,
         enough_pages,
         search_degraded,
         report_word_target,
     )
     .warnings;
-    if format_source_manifest(&findings).contains("[Additional sources omitted for context]") {
+    if omitted_sources {
         quality_warnings.push("Some source excerpts were omitted to fit the model context; conclusions may be incomplete.".into());
     }
     if !unknown_citations.is_empty() {
@@ -1036,26 +1036,33 @@ fn clip_prompt(text: &str, limit: usize) -> String {
     format!("{}{}", &text[..end], &marker[..marker.len().min(limit)])
 }
 
-fn format_source_manifest(findings: &[ResearchFinding]) -> String {
-    let mut sources: Vec<_> = findings.iter().filter(|f| !f.url.is_empty()).collect();
-    sources.sort_by(|a, b| a.url.cmp(&b.url));
-    sources.dedup_by(|a, b| a.url == b.url);
+fn format_source_manifest(findings: &[ResearchFinding]) -> (String, usize, bool) {
+    let mut seen = HashSet::new();
+    let sources: Vec<_> = findings.iter().filter(|f| !f.url.is_empty() && seen.insert(&f.url)).collect();
     let mut manifest = String::from("Selected source excerpts; complete findings are retained in live run data.\n");
-    for source in sources {
-        // Never cut an URL: omit a record when its complete header cannot fit.
+    let note = "\n[Additional sources omitted for context]";
+    // Reserve a complete URL and a minimum excerpt for each selected page first.
+    // Preserve collection order rather than choosing an alphabetical subset.
+    let mut selected = Vec::new();
+    let mut reserved = manifest.len() + note.len();
+    for source in &sources {
         let header = format!("\n### [{}]({})\n", clip_prompt(&source.title, 64), source.url);
-        let note = "\n[Additional sources omitted for context]";
-        let remaining = MANIFEST_BYTES.saturating_sub(manifest.len() + note.len());
-        if header.len() + 64 > remaining {
-            manifest.push_str(note);
-            break;
+        if reserved + header.len() + 32 <= MANIFEST_BYTES {
+            reserved += header.len() + 32;
+            selected.push((*source, header));
         }
+    }
+    let represented = selected.len();
+    let omitted = represented < sources.len();
+    let per_excerpt = 32 + MANIFEST_BYTES.saturating_sub(reserved) / represented.max(1);
+    for (source, header) in selected {
         let evidence = source.evidence.as_deref().unwrap_or(&source.summary);
-        let excerpt = clip_prompt(evidence, (remaining - header.len()).min(480));
+        let excerpt = clip_prompt(evidence, per_excerpt.min(480));
         manifest.push_str(&header);
         manifest.push_str(&excerpt);
     }
-    manifest
+    if omitted { manifest.push_str(note); }
+    (manifest, represented, omitted)
 }
 
 fn report_prompt(template: &str, topic: &str, report: &str, manifest: &str,
@@ -1372,12 +1379,39 @@ mod tests {
     }
 
     #[test]
+    fn manifest_shares_evidence_budget_and_quality_uses_represented_pages() {
+        let findings: Vec<_> = (0..12).map(|index| super::ResearchFinding {
+            url: format!("https://example.org/{index}"), title: format!("Source {index}"),
+            summary: "evidence with a necessary qualifier ".repeat(100),
+            evidence: None, image_url: None,
+        }).collect();
+        let (manifest, represented, omitted) = super::format_source_manifest(&findings);
+        assert_eq!(represented, 12);
+        assert!(!omitted);
+        assert!(manifest.len() <= super::MANIFEST_BYTES);
+        for finding in &findings { assert!(manifest.contains(&finding.url)); }
+
+        let long_urls: Vec<_> = findings.into_iter().map(|mut finding| {
+            finding.url.push_str(&"x".repeat(350));
+            finding
+        }).collect();
+        let (manifest, represented, omitted) = super::format_source_manifest(&long_urls);
+        assert!(omitted && represented < 12 && represented > 0);
+        assert!(manifest.len() <= super::MANIFEST_BYTES);
+        let report = long_urls.iter().filter(|f| manifest.contains(&f.url))
+            .map(|f| format!("[Source]({})", f.url)).collect::<Vec<_>>().join("\n");
+        let quality = super::assess_report_quality(&report, represented, true, false, 0);
+        assert!(!quality.needs_retry);
+        assert!(quality.warnings.is_empty());
+    }
+
+    #[test]
     fn evidence_and_final_prompts_have_utf8_byte_budgets() {
         let findings: Vec<_> = (0..100).map(|index| super::ResearchFinding {
             url: format!("https://example.org/source/{index}"), title: "Documentation é 🦀".repeat(100),
             summary: "summary".repeat(1000), evidence: Some("preuve 🦀".repeat(3000)), image_url: None,
         }).collect();
-        let manifest = super::format_source_manifest(&findings);
+        let (manifest, _, _) = super::format_source_manifest(&findings);
         assert!(manifest.len() <= super::MANIFEST_BYTES);
         assert!(manifest.contains("[truncated]"));
         assert!(manifest.contains("[Additional sources omitted for context]"));
@@ -1419,7 +1453,7 @@ mod tests {
             summary: "Short summary".into(), evidence: Some("Exact API and version constraint".into()),
             image_url: None,
         }];
-        let manifest = super::format_source_manifest(&findings);
+        let (manifest, _, _) = super::format_source_manifest(&findings);
         assert!(manifest.contains("[API v1](https://example.org/v1/api)"));
         assert!(manifest.contains("Exact API and version constraint"));
     }
