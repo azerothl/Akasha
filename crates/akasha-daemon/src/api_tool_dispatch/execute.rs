@@ -2633,24 +2633,22 @@ pub(crate) async fn execute_tool_call_impl(
                         let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
                         let (key, _) =
                             rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+                        let disk_path_opt = workspace_root
+                            .map(|root| root.join(&key))
+                            .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                            .map(strip_verbatim_prefix);
+                        let policy_path=disk_path_opt.as_deref().unwrap_or_else(||Path::new(&key));
+                        if !executor.policy.can_write(policy_path) || workspace_root.is_some_and(|root|
+                            !crate::studio::is_strictly_under_studio_root(policy_path,root)) {
+                            return (false,"[delete_file] path not allowed by policy".to_string(),None);
+                        }
+                        // Check the resolved disk location before mutating either store.
                         {
                             let mut guard = ws.write().await;
                             if let Some(per_task) = guard.get_mut(&lineage_task_id) {
                                 per_task.remove(&key);
                             }
                         }
-                        let rel_path = Path::new(&key);
-                        if !executor.policy.can_write(rel_path) {
-                            return (
-                                false,
-                                "[delete_file] path not allowed by policy".to_string(),
-                                None,
-                            );
-                        }
-                        let disk_path_opt = workspace_root
-                            .map(|root| root.join(&key))
-                            .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
-                            .map(strip_verbatim_prefix);
                         if let Some(disk_path) = disk_path_opt {
                             if disk_path.is_dir() {
                                 return (

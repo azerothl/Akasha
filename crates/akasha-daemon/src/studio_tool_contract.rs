@@ -253,6 +253,10 @@ pub(crate) fn supports_typed(tool: &str) -> bool {
 }
 
 pub(crate) fn argument_schema(tool: &str) -> Value {
+    if tool.starts_with("mcp_") {
+        return crate::mcp_runtime::discovered_tool(tool).map(|tool|tool.input_schema)
+            .unwrap_or_else(||json!({"not":{}}));
+    }
     if crate::studio_delivery::is_delivery_tool(tool) {
         let mut properties = serde_json::Map::new();
         let mut required = Vec::new();
@@ -342,8 +346,26 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
     }
 }
 
+fn rebase_schema_refs(value:&mut Value,base:&str) {
+    match value {
+        Value::Object(map)=>for (key,value) in map {
+            if key=="$ref" {
+                if let Some(reference)=value.as_str().and_then(|r|r.strip_prefix('#')) {
+                    *value=Value::String(format!("{base}{reference}"));
+                }
+            } else {rebase_schema_refs(value,base);}
+        },
+        Value::Array(values)=>for value in values {rebase_schema_refs(value,base);},
+        _=>{}
+    }
+}
+
 pub(crate) fn native_definition(names: Vec<String>) -> Value {
-    let variants: Vec<Value> = names.iter().map(|name| json!({"properties":{"tool":{"enum":[name]},"arguments":argument_schema(name)}})).collect();
+    let variants: Vec<Value> = names.iter().enumerate().map(|(index,name)| {
+        let mut schema=argument_schema(name);
+        rebase_schema_refs(&mut schema,&format!("#/oneOf/{index}/properties/arguments"));
+        json!({"properties":{"tool":{"enum":[name]},"arguments":schema}})
+    }).collect();
     json!({"type":"function","function":{"name":"studio_call","description":"Execute one Studio tool. The runtime assigns operation IDs; do not invent one. The tool-specific argument schema is mandatory. For write_file/write_code creation, explicitly pass expected_version: missing. Existing files must be read before mutation.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}},"oneOf":variants}}})
 }
 

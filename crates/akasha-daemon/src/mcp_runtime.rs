@@ -743,3 +743,20 @@ pub async fn stop_stdio_server() -> Value {
     }
     json!({ "ok": true })
 }
+
+#[cfg(test)]
+mod native_catalogue_regressions {
+    use super::*;
+    #[test]
+    fn native_mcp_variant_uses_discovered_fields_and_local_definitions() {
+        let name="mcp_schemafixture_lookup";
+        let schema=json!({"type":"object","required":["query"],"additionalProperties":false,"properties":{"query":{"$ref":"#/$defs/query"}},"$defs":{"query":{"type":"string","minLength":1}}});
+        tool_cache().write().unwrap().push(DiscoveredTool{name:name.into(),server:"schemafixture".into(),tool:"lookup".into(),description:"fixture".into(),input_schema:schema.clone()});
+        assert_eq!(crate::studio_tool_contract::argument_schema(name),schema);
+        let definition=crate::studio_tool_contract::native_definition(vec![name.into()]);
+        let compiled=jsonschema::JSONSchema::compile(&definition["function"]["parameters"]).unwrap();
+        assert!(compiled.is_valid(&json!({"schema_version":1,"tool":name,"arguments":{"query":"needle"}})));
+        assert!(!compiled.is_valid(&json!({"schema_version":1,"tool":name,"arguments":{"argv":["needle"]}})));
+        tool_cache().write().unwrap().retain(|tool|tool.name!=name);
+    }
+}

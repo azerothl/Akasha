@@ -57,6 +57,45 @@ fn resolve_program(root:&Path,program:&str,paths:&std::ffi::OsStr)->Result<PathB
     Ok(candidate)
 }
 
+// Every delivery subprocess (including Git launched by gh) uses the same isolated
+// config scopes. Repository configuration is inspected while its lock is held.
+fn isolate_git_configuration(command: &mut Command) {
+    command.env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" })
+        .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_COUNT", "0")
+        .env_remove("GIT_CONFIG_PARAMETERS").env_remove("GIT_CONFIG");
+    for (key, _) in std::env::vars_os() {
+        let key_upper=key.to_string_lossy().to_ascii_uppercase();
+        if key_upper.starts_with("GIT_CONFIG_KEY_") || key_upper.starts_with("GIT_CONFIG_VALUE_") {
+            command.env_remove(key);
+        }
+    }
+}
+
+fn safe_global_identity(git:&Path)->Vec<(String,String)> {
+    static IDENTITY:std::sync::OnceLock<Vec<(String,String)>>=std::sync::OnceLock::new();
+    IDENTITY.get_or_init(||["user.name","user.email"].into_iter().filter_map(|key| {
+        let mut command=std::process::Command::new(git);
+        command.args(["config","--global","--no-includes","--get",key]);
+        #[cfg(windows)]
+        { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
+        let output=command.output().ok()?;
+        if !output.status.success(){return None;}
+        let value=String::from_utf8(output.stdout).ok()?.trim_end_matches(['\r','\n']).to_string();
+        (!value.is_empty() && value.len()<=1024 && !value.contains(['\r','\n','\0'])).then(||(key.into(),value))
+    }).collect()).clone()
+}
+
+fn isolated_identity_config(identity:&[(String,String)])->Result<tempfile::NamedTempFile,String> {
+    let mut file=tempfile::NamedTempFile::new().map_err(|error|error.to_string())?;
+    for (key,value) in identity {
+        let field=match key.as_str(){"user.name"=>"name","user.email"=>"email",_=>continue};
+        let escaped=value.replace('\\',"\\\\").replace('"',"\\\"");
+        writeln!(file,"[user]\n{field} = \"{escaped}\"").map_err(|error|error.to_string())?;
+    }
+    file.flush().map_err(|error|error.to_string())?;
+    Ok(file)
+}
+
 async fn run(
     root: &Path,
     program: &str,
@@ -65,7 +104,13 @@ async fn run(
 ) -> Result<Output, String> {
     let executable=resolve_program(root,program,&std::env::var_os("PATH").unwrap_or_default())?;
     let (git_dir,common_dir)=bound_metadata(&delivery_data_dir(root)?,root)?;
+    // Keep only inert author metadata from the user's global config. Network,
+    // helper, include and command settings never reach the execution config.
+    let identity=if program=="git" { safe_global_identity(&executable) } else { Vec::new() };
     let mut command = Command::new(executable);
+    isolate_git_configuration(&mut command);
+    let _identity_config=isolated_identity_config(&identity)?;
+    command.env("GIT_CONFIG_GLOBAL",_identity_config.path());
     command.env("GIT_DIR",git_environment_path(&git_dir)).env("GIT_COMMON_DIR",git_environment_path(&common_dir)).env("GIT_WORK_TREE",git_environment_path(root));
     command
         .current_dir(root)
@@ -188,6 +233,13 @@ async fn git(root: &Path, args: Vec<String>, index: Option<&Path>) -> Result<Out
         "-c".into(),
         "diff.external=".into(),
     ];
+    if matches!(args.first().map(String::as_str),Some("push"|"ls-remote")) {
+        // Authentication is explicit and bound to the trusted gh executable;
+        // user/system credential helpers and URL rewrite rules stay disabled.
+        let gh=resolve_program(root,"gh",&std::env::var_os("PATH").unwrap_or_default())?;
+        let quoted=gh.to_string_lossy().replace('\\',"/").replace('\'',"'\\''");
+        argv.extend(["-c".into(),"credential.helper=".into(),"-c".into(),format!("credential.https://github.com.helper=!'{}' auth git-credential",quoted)]);
+    }
     argv.extend(args);
     run(root, "git", argv, index).await
 }
@@ -1498,5 +1550,43 @@ mod configuration_lock_tests {
         drop(lock);assert!(change().status.success());
         assert_ne!(std::fs::read(root.join(".git/config")).unwrap(),before);
         assert!(!root.join(".git/config.lock").exists());
+    }
+}
+
+#[cfg(test)]
+mod isolated_config_tests {
+    use super::*;
+    #[tokio::test]
+    async fn delivery_ignores_global_rewrites_and_environment_config() {
+        let temp=tempfile::tempdir().unwrap();
+        let config=temp.path().join("global");
+        std::fs::write(&config,"[url \"https://unapproved.invalid/\"]\n insteadOf = https://github.com/\n").unwrap();
+        let mut command=Command::new("git");
+        command.env("GIT_CONFIG_GLOBAL",&config).env("GIT_CONFIG_COUNT","1")
+            .env("GIT_CONFIG_KEY_0","url.https://environment.invalid/.insteadOf")
+            .env("GIT_CONFIG_VALUE_0","https://github.com/");
+        isolate_git_configuration(&mut command);
+        let result=command.args(["ls-remote","--get-url","https://github.com/owner/repo.git"]).output().await.unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8(result.stdout).unwrap().trim(),"https://github.com/owner/repo.git");
+    }
+}
+
+#[cfg(test)]
+mod identity_config_tests {
+    use super::*;
+    #[tokio::test]
+    async fn isolated_author_defaults_preserve_repository_identity_precedence() {
+        let root=tempfile::tempdir().unwrap();
+        let out=Command::new("git").args(["init","-q"]).current_dir(root.path()).output().await.unwrap();
+        assert!(out.status.success());
+        let out=Command::new("git").args(["config","--local","user.name","Project author"]).current_dir(root.path()).output().await.unwrap();
+        assert!(out.status.success());
+        let file=isolated_identity_config(&[("user.name".into(),"Global author".into()),("user.email".into(),"author@example.invalid".into())]).unwrap();
+        for (key,expected) in [("user.name","Project author"),("user.email","author@example.invalid")] {
+            let mut command=Command::new("git");isolate_git_configuration(&mut command);
+            let out=command.env("GIT_CONFIG_GLOBAL",file.path()).args(["config","--get",key]).current_dir(root.path()).output().await.unwrap();
+            assert!(out.status.success());assert_eq!(String::from_utf8(out.stdout).unwrap().trim(),expected);
+        }
     }
 }
