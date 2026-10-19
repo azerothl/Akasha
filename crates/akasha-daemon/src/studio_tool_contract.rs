@@ -323,7 +323,12 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
         if tool == "edit_file" {
             required.extend(["start_line", "end_line"]);
         }
-        json!({"type":"object","additionalProperties":false,"required":required,"properties":{"path":{"type":"string","minLength":1},"content":{"type":"string"},"expected_version":{"type":"string","description":"SHA-256 from read_file, or missing for creation"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}})
+        let mut properties=serde_json::Map::new();
+        properties.insert("path".into(),json!({"type":"string","minLength":1,"description":"Exact requested workspace:/ relative path. Use the field path, never workspace."}));
+        if is_file_mutation(tool) {properties.insert("expected_version".into(),json!({"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"REQUIRED: literal missing for a NEW file; SHA-256 from read_file for an EXISTING file. Never invent a hash or omit this field."}));}
+        if required.contains(&"content") {properties.insert("content".into(),json!({"type":"string","description":"Exact file content requested by the user; preserve case and bytes, no heading, template, code fences or call punctuation unless requested."}));}
+        if tool=="edit_file" {for field in ["start_line","end_line"] {properties.insert(field.into(),json!({"type":"integer","minimum":1}));}}
+        json!({"type":"object","additionalProperties":false,"required":required,"properties":properties})
     } else if matches!(
         tool,
         "run_command" | "run_terminal" | "run_command_background"
@@ -351,6 +356,10 @@ pub(crate) fn is_file_mutation(tool: &str) -> bool {
     )
 }
 pub(crate) fn paths_for_tool(tool:&str,args:&[String])->Vec<String> {
+    if matches!(tool,"file_diff"|"diff_unified"|"dir_compare") {return args.iter().take(2).cloned().collect();}
+    if matches!(tool,"list_dir"|"search_files"|"grep_content"|"git_status"|"git_diff"|"git_log"|"git_branches") {return vec![args.first().cloned().unwrap_or_else(||"workspace:/".into())];}
+    if tool=="lsp_query" {return serde_json::from_str::<Value>(&args.join(" ")).ok().and_then(|v|v["path"].as_str().map(str::to_owned)).into_iter().collect();}
+    if tool=="git_commit" {return serde_json::from_str::<Value>(&args.join(" ")).ok().and_then(|v|v["paths"].as_array().cloned()).unwrap_or_default().iter().filter_map(|v|v.as_str().map(str::to_owned)).collect();}
     if matches!(tool,"rename_path"|"move_tree") {return args.iter().take(2).cloned().collect();}
     if tool=="read_file" {let (parts,_,_)=crate::api::parse_read_file_args(args);return vec![parts.join(" ")];}
     if matches!(tool,"write_file"|"write_code") {return crate::api::parse_write_file_request(args).map(|(path,_)|vec![path]).unwrap_or_default();}
@@ -497,9 +506,12 @@ impl Operation {
             .optional()
             .map_err(|e| e.to_string())?;
         // Cached evidence is still subject to today's argument-level policy.
-        if matches!(tool,"run_command"|"run_terminal"|"run_command_background") && args.first().is_none_or(|program|!policy.can_run_command(program)) {
-            return Err("cached/current command denied by current policy".into());
+        if matches!(tool,"run_command"|"run_terminal"|"run_command_background") {
+            let (_,cwd,program,_)=crate::api_tool_dispatch::process_ops::parse_run_command_args(args);
+            if !policy.can_run_command(&program) {return Err("cached/current command denied by current policy".into());}
+            crate::api_tool_dispatch::process_ops::resolve_run_command_working_dir(cwd.as_deref(),Some(&canonical),policy)?;
         }
+        if crate::studio_delivery::is_delivery_tool(tool) && (!policy.can_run_command("git") || matches!(tool,"git_delivery_status"|"github_pr_status"|"git_push"|"github_create_pr") && !policy.can_run_command("gh")) {return Err("cached/current delivery executable denied by policy".into());}
         for raw in paths_for_tool(tool,args) {
             let path=bounded_path(&canonical,&raw)?;let plain=crate::api::strip_verbatim_prefix(path);
             if !policy.can_read(&plain) || is_file_mutation(tool) && !policy.can_write(&plain) {return Err("cached/current path denied by current policy".into());}

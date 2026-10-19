@@ -404,3 +404,10 @@ async fn operator_delivery_accepts_stopped_tasks_while_agent_operations_stay_blo
     assert!(contracts::Operation::begin(&db,id,"git_commit",&args,dir.path(),&p,None).await.is_err());
     let op=contracts::Operation::begin_operator(&db,id,"git_commit",&args,dir.path(),&p,None).await.unwrap();op.finish(false,"test only").unwrap();
 }
+
+#[tokio::test]
+async fn command_cwd_is_parsed_before_cached_policy_checks() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("task.db");let id=Uuid::new_v4();running_task(&db,id);let p=policy(dir.path());
+    let cmd=contracts::decode(&json!({"schema_version":1,"tool":"run_command","arguments":{"program":"git","args":["status"],"cwd":"workspace:/"}}).to_string()).unwrap();
+    let op=contracts::Operation::begin(&db,id,"run_command",&cmd.argv,dir.path(),&p,Some(&cmd)).await.unwrap();op.finish(true,"inspection test").unwrap();
+}
