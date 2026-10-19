@@ -33,6 +33,7 @@ struct Scope {
     key: String,
     request: String,
     started_at: String,
+    receipt_floor: i64,
     goals: Vec<Goal>,
     renames: Vec<Rename>,
 }
@@ -130,6 +131,37 @@ fn key(request: &str, root: &Path) -> String {
         Sha256::digest(format!("{}\n{request}", root.display()).as_bytes())
     )
 }
+fn receipt_floor(db: &Path) -> Result<i64, String> {
+    crate::studio_tool_contract::ensure_ledger(db)?;
+    rusqlite::Connection::open(db)
+        .map_err(|e| e.to_string())?
+        .query_row(
+            "SELECT COALESCE(MAX(rowid),0) FROM studio_operations",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())
+}
+fn hydrate(scope: &mut Scope, db: &Path, task: Uuid) -> Result<(), String> {
+    crate::studio_tool_contract::ensure_ledger(db)?;
+    let c = rusqlite::Connection::open(db).map_err(|e| e.to_string())?;
+    let mut stmt=c.prepare("WITH RECURSIVE lineage(id) AS (SELECT ?1 UNION SELECT t.id FROM tasks t JOIN lineage p ON t.parent_task_id=p.id WHERE t.status='completed') SELECT o.result FROM studio_operations o WHERE o.task IN (SELECT id FROM lineage) AND o.state='completed' AND o.rowid>?2").map_err(|e|e.to_string())?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![task.to_string(), scope.receipt_floor],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    for raw in rows {
+        if let Some(value) = raw
+            .map_err(|e| e.to_string())?
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        {
+            scope.receipt(&value);
+        }
+    }
+    Ok(())
+}
 fn database(db: &Path) -> Result<rusqlite::Connection, String> {
     let c = rusqlite::Connection::open(db).map_err(|e| e.to_string())?;
     c.busy_timeout(std::time::Duration::from_secs(10))
@@ -196,10 +228,14 @@ fn state(path: &Path, budget: &mut (u64, usize)) -> Result<String, String> {
     Ok(format!("file:{mode}:{:x}", hash.finalize()))
 }
 pub(crate) fn capture_paths(paths: &[PathBuf]) -> Result<BTreeMap<String, String>, String> {
-    let mut budget = (0, 0);
-    paths
+    let unique = paths
         .iter()
-        .map(|p| Ok((p.to_string_lossy().to_string(), state(p, &mut budget)?)))
+        .map(|p| (p.to_string_lossy().to_string(), p))
+        .collect::<BTreeMap<_, _>>();
+    let mut budget = (0, 0);
+    unique
+        .into_iter()
+        .map(|(key, path)| Ok((key, state(path, &mut budget)?)))
         .collect()
 }
 pub(crate) fn scoped_paths(
@@ -415,7 +451,7 @@ pub(crate) fn refresh(
     let mut scope = match stored {
         Ok(raw) => {
             let s: Scope = serde_json::from_str(&raw).map_err(|_| "invalid file-effect state")?;
-            if s.version != 1
+            if s.version != 2
                 || s.key != expected_key
                 || s.goals
                     .iter()
@@ -440,10 +476,11 @@ pub(crate) fn refresh(
                 return Ok(());
             }
             let mut s = Scope {
-                version: 1,
+                version: 2,
                 key: expected_key,
                 request: request.into(),
                 started_at: chrono::Utc::now().to_rfc3339(),
+                receipt_floor: receipt_floor(db)?,
                 goals,
                 renames,
             };
@@ -455,23 +492,8 @@ pub(crate) fn refresh(
         }
         Err(e) => return Err(e.to_string()),
     };
-    // Restore completed effects lost between an operation receipt and a checkpoint.
-    let _ = crate::studio_tool_contract::recovery_summary(db, task)?;
-    let c = rusqlite::Connection::open(db).map_err(|e| e.to_string())?;
-    let mut stmt=c.prepare("WITH RECURSIVE lineage(id) AS (SELECT ?1 UNION SELECT t.id FROM tasks t JOIN lineage p ON t.parent_task_id=p.id WHERE t.status='completed') SELECT result FROM studio_operations WHERE task IN (SELECT id FROM lineage) AND state='completed' AND updated_at>=?2").map_err(|e|e.to_string())?;
-    let records = stmt
-        .query_map(rusqlite::params![task.to_string(), scope.started_at], |r| {
-            r.get::<_, Option<String>>(0)
-        })
-        .map_err(|e| e.to_string())?;
-    for raw in records {
-        if let Some(value) = raw
-            .map_err(|e| e.to_string())?
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        {
-            scope.receipt(&value);
-        }
-    }
+    // Only trusted ledger receipts from this scope generation can attest effects.
+    hydrate(&mut scope, db, task)?;
     let current = capture_paths(&scope.paths())?;
     persist(db, task, &scope)?;
     scope.outcome(outcome, &current);
@@ -535,10 +557,11 @@ pub(crate) fn human_reply(
         return Ok(());
     }
     let mut scope = Scope {
-        version: 1,
+        version: 2,
         key: key(original, root),
         request,
         started_at: chrono::Utc::now().to_rfc3339(),
+        receipt_floor: receipt_floor(db)?,
         goals,
         renames,
     };
@@ -550,27 +573,18 @@ pub(crate) fn human_reply(
     scope.outcome(outcome, &current);
     Ok(())
 }
-pub(crate) fn before(
-    _outcome: &crate::task_outcome::RunOutcome,
-    _tool: &str,
-) -> Result<Option<BTreeMap<String, String>>, String> {
-    Ok(None)
-}
 pub(crate) fn after(
     db: &Path,
     task: Uuid,
     outcome: &mut crate::task_outcome::RunOutcome,
-    before: Option<&BTreeMap<String, String>>,
-    receipt: &str,
 ) -> Result<(), String> {
     let Some(mut scope) = from_outcome(outcome)? else {
         return Ok(());
     };
+    // Tool output is untrusted data. Read server-generated receipts, never
+    // an arbitrary file_effects property returned by a tool or MCP server.
+    hydrate(&mut scope, db, task)?;
     let current = capture_paths(&scope.paths())?;
-    let _ = before;
-    if let Ok(value) = serde_json::from_str::<Value>(receipt) {
-        scope.receipt(&value);
-    }
     persist(db, task, &scope)?;
     scope.outcome(outcome, &current);
     Ok(())
@@ -589,10 +603,11 @@ mod tests {
     fn scope(root: &Path, request: &str) -> Scope {
         let (goals, renames) = paths_for_request(root, request, &policy(root)).unwrap();
         let mut scope = Scope {
-            version: 1,
+            version: 2,
             key: key(request, root),
             request: request.into(),
             started_at: chrono::Utc::now().to_rfc3339(),
+            receipt_floor: 0,
             goals,
             renames,
         };
@@ -713,6 +728,7 @@ mod tests {
         )
         .unwrap();
         assert!(!outcome.confirmed_file_mutation());
+        assert!(!outcome.has_file_effect_progress());
         let before = capture_paths(&[path.clone()]).unwrap();
         std::fs::write(&path, "new").unwrap();
         let receipt = json!({"success":true,"file_effects":receipt_effects(&before).unwrap()});
@@ -729,6 +745,7 @@ mod tests {
         )
         .unwrap();
         assert!(restored.confirmed_file_mutation());
+        assert!(restored.has_file_effect_progress());
         let restored: crate::task_outcome::RunOutcome =
             serde_json::from_str(&serde_json::to_string(&restored).unwrap()).unwrap();
         assert!(restored.confirmed_file_mutation());

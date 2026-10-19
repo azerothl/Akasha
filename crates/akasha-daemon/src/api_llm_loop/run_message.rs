@@ -2115,7 +2115,8 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
             let no_parseable_tools_this_round = parsed_tool_calls.is_none();
-            if code_studio_disk_task && no_parseable_tools_this_round && !explicit_file_goals.is_empty() {
+            // Targeted missing-file recovery follows verified progress; a zero-effect claim still fails as a tool error.
+            if code_studio_disk_task && no_parseable_tools_this_round && !explicit_file_goals.is_empty() && run_outcome.has_file_effect_progress() {
                 let current=if let Some(executor)=tools_executor.as_ref(){Some(executor.read().await.clone())}else{tools_executor_snapshot.clone()};
                 if let Some(executor)=current {
                     let checks={
@@ -2930,7 +2931,6 @@ pub(crate) async fn run_message_via_llm(
                         let approved_delivery_envelope=delivery_approval_identity.as_ref().map(|identity| {
                             vec![serde_json::json!({"schema_version":1,"operation_id":typed_call.as_ref().map(|call|call.envelope.operation_id).unwrap_or_else(Uuid::new_v4),"tool":actual_tool,"arguments":serde_json::from_str::<serde_json::Value>(&tool_args.join(" ")).unwrap_or_default(),"approval_identity":identity}).to_string()]
                         });
-                        let file_effect_before=match crate::studio_file_effects::before(&run_outcome,&actual_tool){Ok(value)=>value,Err(error)=>{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}};
                         let (success, res, captured_image): (bool, String, Option<String>) =
                             if actual_tool == "ask_user" {
                                 // Human in the loop: register pending request, emit event, wait for user reply.
@@ -3414,7 +3414,7 @@ pub(crate) async fn run_message_via_llm(
                         } else { run_outcome.failed_tool_calls += 1; }
                         if serde_json::from_str::<serde_json::Value>(&res).ok().is_some_and(|value|value["result_unknown"]==true){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Operation result unknown; inspect effects and use explicit recovery before continuing. {res}");break 'tool_rounds;}
 
-                        if success {if let Err(error)=crate::studio_file_effects::after(&store_path,task_id,&mut run_outcome,file_effect_before.as_ref(),&res){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
+                        if success {if let Err(error)=crate::studio_file_effects::after(&store_path,task_id,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                         if matches!(effective_role_tool, "run_command" | "run_terminal" | "run_in_container") {
                             run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":effective_role_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }

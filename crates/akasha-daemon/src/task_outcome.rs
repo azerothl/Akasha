@@ -27,6 +27,7 @@ pub(crate) struct RunOutcome {
 
 impl RunOutcome {
     pub fn confirmed_file_mutation(&self)->bool {self.checks.iter().any(|c|c["kind"]=="requested_file_effects" && c["confirmed"]==true)}
+    pub fn has_file_effect_progress(&self)->bool {self.checks.iter().any(|c|c["kind"]=="requested_file_effects" && c["scope"]["goals"].as_array().is_some_and(|goals|goals.iter().any(|g|g["changed"]==true)))}
     pub fn requires_file_effect(&self)->bool {self.checks.iter().any(|c|c["kind"]=="requested_file_effects")}
     pub fn failed(&self) -> bool {
         self.termination != TerminationReason::Success

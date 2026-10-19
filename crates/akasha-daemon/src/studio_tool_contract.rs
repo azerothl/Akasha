@@ -435,6 +435,7 @@ fn file_path(tool: &str, args: &[String]) -> Option<String> {
         None
     }
 }
+pub(crate) fn ensure_ledger(path:&Path)->Result<(),String>{connection(path).map(|_|())}
 fn connection(path: &Path) -> Result<Connection, String> {
     let connection = Connection::open(path).map_err(|e| e.to_string())?;
     connection
