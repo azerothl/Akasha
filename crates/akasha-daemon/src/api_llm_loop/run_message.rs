@@ -2115,20 +2115,6 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
             let no_parseable_tools_this_round = parsed_tool_calls.is_none();
-            if code_studio_disk_task && no_parseable_tools_this_round
-                && !run_outcome.confirmed_file_mutation()
-                && run_outcome.requires_file_effect()
-                && tools_executor_snapshot.as_ref().is_some_and(|e|policy_allows_primary_disk_write(&e.policy))
-            {
-                if studio_zero_tool_promise_nags >= 3 {
-                    run_outcome.termination=TerminationReason::ToolError;
-                    reply_text="No file mutation was confirmed for the explicit file request; reads and failed edits do not validate the requested change.".into();
-                    break 'tool_rounds;
-                }
-                studio_zero_tool_promise_nags += 1;
-                current_prompt.push_str("\n[Execution still missing] No successful file mutation has been confirmed. Reads and failed edits do not implement the requested change. Execute the original requested file operation now with native studio_call or the structured JSON tool branch (schema_version, tool, arguments including path/content/expected_version). Do not return a final response until the actual tool result confirms the requested effects.\n");
-                continue;
-            }
             if code_studio_disk_task && no_parseable_tools_this_round && !explicit_file_goals.is_empty() {
                 let current=if let Some(executor)=tools_executor.as_ref(){Some(executor.read().await.clone())}else{tools_executor_snapshot.clone()};
                 if let Some(executor)=current {
@@ -2148,6 +2134,20 @@ pub(crate) async fn run_message_via_llm(
                         continue;
                     }
                 }
+            }
+            if code_studio_disk_task && no_parseable_tools_this_round
+                && !run_outcome.confirmed_file_mutation()
+                && run_outcome.requires_file_effect()
+                && tools_executor_snapshot.as_ref().is_some_and(|e|policy_allows_primary_disk_write(&e.policy))
+            {
+                if studio_zero_tool_promise_nags >= 3 {
+                    run_outcome.termination=TerminationReason::ToolError;
+                    reply_text="No file mutation was confirmed for the explicit file request; reads and failed edits do not validate the requested change.".into();
+                    break 'tool_rounds;
+                }
+                studio_zero_tool_promise_nags += 1;
+                current_prompt.push_str("\n[Execution still missing] No successful file mutation has been confirmed. Reads and failed edits do not implement the requested change. Execute the original requested file operation now with native studio_call or the structured JSON tool branch (schema_version, tool, arguments including path/content/expected_version). Do not return a final response until the actual tool result confirms the requested effects.\n");
+                continue;
             }
             let response_plain = response
                 .lines()
