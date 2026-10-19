@@ -82,13 +82,15 @@ pub(crate) async fn execute_tool_call_impl(
                 None,
             );
         }
-        let Some((server, mcp_tool)) = crate::mcp_runtime::parse_mcp_tool_name(tool_name) else {
+        let Some(descriptor) = crate::mcp_runtime::discovered_tool(tool_name) else {
             return (
                 false,
                 format!("[{tool_name}] invalid MCP tool name (expected mcp_<server>_<tool>)"),
                 None,
             );
         };
+        let server = descriptor.server;
+        let mcp_tool = descriptor.tool;
         if !executor.policy.can_use_mcp_tool(&server, &mcp_tool) {
             return (
                 false,
@@ -110,13 +112,18 @@ pub(crate) async fn execute_tool_call_impl(
                 );
             }
         }
-        crate::mcp_budget::record_call(task_id);
         let args_json = if args.is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::json!({ "input": args.join(" ") })
+            match serde_json::from_str::<serde_json::Value>(&args.join(" ")) {
+                Ok(value) if value.is_object() => value,
+                _ => return (false, format!("[{tool_name}] arguments must be one JSON object matching the discovered schema"), None),
+            }
         };
-        return match crate::mcp_runtime::tools_call(&mcp_tool, args_json).await {
+        let Some(descriptor) = crate::mcp_runtime::discovered_tool(tool_name) else {return (false,"MCP tool no longer discovered".into(),None);};
+        if let Err(error)=crate::mcp_runtime::validate_arguments(&descriptor,&args_json) {return (false,error,None);}
+        crate::mcp_budget::record_call(task_id);
+        return match crate::mcp_runtime::call_discovered(tool_name, args_json).await {
             Ok(v) => {
                 let preview = v.to_string();
                 let (p, total, trunc) = crate::tool_output::truncate_utf8_by_bytes(&preview, 12_000);
@@ -126,7 +133,8 @@ pub(crate) async fn execute_tool_call_impl(
                     total,
                     "MCP response truncated",
                 );
-                (true, msg, None)
+                let success = v.get("error").is_none() && !v.pointer("/result/isError").and_then(|value| value.as_bool()).unwrap_or(false);
+                (success, msg, None)
             }
             Err(e) => (false, format!("[{tool_name}] MCP error: {e}"), None),
         };
@@ -166,6 +174,12 @@ pub(crate) async fn execute_tool_call_impl(
         }
     };
     let result = match tool_name {
+        "list_tools" => {
+            let Some(role) = assigned_agent_for_task.as_deref() else { return (false, "[list_tools] task role unavailable".into(), None); };
+            let tools = crate::studio_capabilities::catalogue(&executor.policy, role).into_iter()
+                .filter(|tool| args.first().map_or(tool.announced, |name| tool.name == *name)).collect::<Vec<_>>();
+            (true, serde_json::to_string(&tools).unwrap_or_default(), None)
+        }
         "workspace_graph_search" => {
             let Some(sp) = store_path else {
                 return (
@@ -895,90 +909,14 @@ pub(crate) async fn execute_tool_call_impl(
             }
         }
         "terminal_session" => {
-            let sub = args.get(0).map(String::as_str).unwrap_or("");
-            match sub {
-                "list" => {
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().list_sessions()).await {
-                        Ok(Ok(v)) => (true, serde_json::to_string_pretty(&v).unwrap_or_else(|_| "[]".to_string()), None),
-                        Ok(Err(e)) => (false, format!("[terminal_session list] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session list] join: {}", e), None),
-                    }
-                }
-                "start" => {
-                    let create = crate::terminal_pty::PtyCreateBody {
-                        argv: None,
-                        cwd: None,
-                        transcript_name: Some(format!("session-{}", uuid::Uuid::new_v4())),
-                        idle_timeout_secs: Some(900),
-                        cols: 80,
-                        rows: 24,
-                    };
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().create(create)).await {
-                        Ok(Ok(v)) => (
-                            true,
-                            format!(
-                                "[terminal_session start] session_id={} idle_timeout_secs={} (use terminal_session read|write|resize|stop)",
-                                v.session_id, v.idle_timeout_secs
-                            ),
-                            None
-                        ),
-                        Ok(Err(e)) => (false, format!("[terminal_session start] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session start] join: {}", e), None),
-                    }
-                }
-                "read" => {
-                    let sid = args.get(1).cloned().unwrap_or_default();
-                    if sid.trim().is_empty() {
-                        return (false, "[terminal_session read] usage: terminal_session read <session_id> [max]".to_string(), None);
-                    }
-                    let max = args.get(2).and_then(|x| x.parse::<usize>().ok()).unwrap_or(4096);
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().read_output(&sid, max)).await {
-                        Ok(Ok(v)) => (true, serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string()), None),
-                        Ok(Err(e)) => (false, format!("[terminal_session read] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session read] join: {}", e), None),
-                    }
-                }
-                "write" => {
-                    let sid = args.get(1).cloned().unwrap_or_default();
-                    let payload = args.get(2..).unwrap_or(&[]).join(" ");
-                    if sid.trim().is_empty() || payload.is_empty() {
-                        return (false, "[terminal_session write] usage: terminal_session write <session_id> <text...>".to_string(), None);
-                    }
-                    let body = crate::terminal_pty::PtyInputBody { text: Some(payload), bytes_b64: None };
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().write_input(&sid, body)).await {
-                        Ok(Ok(_)) => (true, "[terminal_session write] ok".to_string(), None),
-                        Ok(Err(e)) => (false, format!("[terminal_session write] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session write] join: {}", e), None),
-                    }
-                }
-                "resize" => {
-                    let sid = args.get(1).cloned().unwrap_or_default();
-                    let cols = args.get(2).and_then(|x| x.parse::<u16>().ok()).unwrap_or(80);
-                    let rows = args.get(3).and_then(|x| x.parse::<u16>().ok()).unwrap_or(24);
-                    if sid.trim().is_empty() {
-                        return (false, "[terminal_session resize] usage: terminal_session resize <session_id> <cols> <rows>".to_string(), None);
-                    }
-                    let body = crate::terminal_pty::PtyResizeBody { cols, rows };
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().resize(&sid, body)).await {
-                        Ok(Ok(_)) => (true, "[terminal_session resize] ok".to_string(), None),
-                        Ok(Err(e)) => (false, format!("[terminal_session resize] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session resize] join: {}", e), None),
-                    }
-                }
-                "stop" => {
-                    let sid = args.get(1).cloned().unwrap_or_default();
-                    if sid.trim().is_empty() {
-                        return (false, "[terminal_session stop] usage: terminal_session stop <session_id>".to_string(), None);
-                    }
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().close(&sid)).await {
-                        Ok(Ok(_)) => (true, "[terminal_session stop] ok".to_string(), None),
-                        Ok(Err(e)) => (false, format!("[terminal_session stop] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session stop] join: {}", e), None),
-                    }
-                }
-                _ => (true, "[terminal_session] usage: terminal_session start|list|read|write|resize|stop. HTTP API: GET /api/terminal/capabilities.".to_string(), None),
+            let (Some(store_path), Some(root)) = (store_path, workspace_root) else {
+                return (false, "[terminal_session] task and workspace context required".into(), None);
+            };
+            match crate::studio_observation::agent_terminal(&executor.policy, store_path, task_id, root, args).await {
+                Ok(output) => (true, output, None),
+                Err(error) => (false, format!("[terminal_session] {error}"), None),
             }
-        },
+        }
         "process" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
             match (process_registry, sub) {
@@ -1913,16 +1851,17 @@ pub(crate) async fn execute_tool_call_impl(
                 let mut g = registry.write().await;
                 let session = if let Some(mut s) = g.remove(&task_id) {
                     drop(g);
-                    let res = s.send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } })).await;
-                    // Always reinsert the session — a navigate failure doesn't mean the browser is dead.
-                    registry.write().await.insert(task_id, s);
+                    let res = s.send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "navigate", "params": { "url": url, "allow_http": true, "timeout_secs": action_timeout } })).await;
+                    // Preserve application failures only while the IPC session remains reusable.
+                    if s.reusable() { registry.write().await.insert(task_id, s); }
                     res
                 } else {
                     drop(g);
-                    match crate::browser::create_browser_session(&runner_path, headless, action_timeout).await {
+                    let created = if is_studio_workspace { crate::browser::create_browser_session_once(&runner_path, headless, action_timeout).await } else { crate::browser::create_browser_session(&runner_path, headless, action_timeout).await };
+                    match created {
                         Ok(mut new_session) => {
                             let res = new_session
-                                .send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } }))
+                                .send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "navigate", "params": { "url": url, "allow_http": true, "timeout_secs": action_timeout } }))
                                 .await;
                             // Only register if IPC still works; on Err (e.g. runner stdout EOF) the child may
                             // already be reaped — inserting a dead session poisons later navigate/snapshot calls.
@@ -1974,8 +1913,8 @@ pub(crate) async fn execute_tool_call_impl(
                     return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
                 };
                 drop(g);
-                let resp = session.send_command(&serde_json::json!({ "cmd": "snapshot" })).await;
-                registry.write().await.insert(task_id, session);
+                let resp = session.send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "snapshot" })).await;
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2013,9 +1952,9 @@ pub(crate) async fn execute_tool_call_impl(
                 };
                 drop(g);
                 let resp = session
-                    .send_command(&serde_json::json!({ "cmd": "screenshot", "params": { "full_page": false } }))
+                    .send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "screenshot", "params": { "full_page": false } }))
                     .await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2024,6 +1963,13 @@ pub(crate) async fn execute_tool_call_impl(
                                 .pointer("/result/data_base64")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
+                            let artifact = (|| -> Result<serde_json::Value,String> {
+                                use base64::Engine;
+                                let data_dir=store_path.and_then(|p|p.parent()).ok_or("Task data directory unavailable")?;
+                                let bytes=base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e|e.to_string())?;
+                                crate::studio_artifacts::save(data_dir,task_id,"browser_screenshot","image/png",&bytes,serde_json::json!({"url":resp.pointer("/result/url"),"viewport":resp.pointer("/result/viewport")}))
+                            })();
+                            let artifact_note=match artifact {Ok(ref record)=>format!("Evidence saved: {}.",record["id"]),Err(ref error)=>format!("Evidence NOT saved: {error}.")};
                             let vision_attach_enabled = std::env::var("AKASHA_BROWSER_SCREENSHOT_VISION")
                                 .map(|v| {
                                     let l = v.to_lowercase();
@@ -2049,7 +1995,7 @@ pub(crate) async fn execute_tool_call_impl(
                                 crate::tool_output::BROWSER_SCREENSHOT_B64_MAX,
                             );
                             let base = format!(
-                                "[browser] Screenshot PNG (base64, {} bytes of payload):\n{}",
+                                "[browser] {artifact_note} Screenshot PNG (base64, {} bytes of payload):\n{}",
                                 total, preview
                             );
                             let msg = crate::tool_output::with_truncation_footer(
@@ -2058,7 +2004,7 @@ pub(crate) async fn execute_tool_call_impl(
                                 total,
                                 "truncated base64 in text; full frame attached for vision on next model turn when enabled (AKASHA_BROWSER_SCREENSHOT_VISION)",
                             );
-                            (true, msg, captured_for_llm)
+                            (artifact.is_ok(), msg, captured_for_llm)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("screenshot failed");
                             let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
@@ -2069,6 +2015,28 @@ pub(crate) async fn execute_tool_call_impl(
                         let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
                         (false, format!("[browser] error: {}", msg), None)
                     }
+                }
+            } else if matches!(sub,"console"|"network"|"viewport") {
+                let params=if sub=="viewport" {
+                    let width=args.get(1).and_then(|s|s.parse::<u64>().ok());
+                    let height=args.get(2).and_then(|s|s.parse::<u64>().ok());
+                    if width.is_none() || height.is_none() {return (false,"[browser] usage: browser viewport <width> <height>".into(),None);}
+                    serde_json::json!({"width":width,"height":height})
+                } else {serde_json::json!({})};
+                let Some(mut session)=registry.write().await.remove(&task_id) else {return (false,"[browser] Navigate first.".into(),None);};
+                let response=session.send_with_policy(&executor.policy,&serde_json::json!({"cmd":sub,"params":params})).await;
+                if session.reusable() { registry.write().await.insert(task_id,session); }
+                match response {
+                    Ok(response) if response["ok"]==true => {
+                        let result=&response["result"];
+                        if sub=="viewport" {return (true,format!("[browser] {result}"),None);}
+                        let bytes=serde_json::to_vec(result).unwrap_or_default();
+                        let saved=store_path.and_then(|p|p.parent()).ok_or_else(||"Task data directory unavailable".to_string()).and_then(|dir|crate::studio_artifacts::save(dir,task_id,&format!("browser_{sub}"),"application/json",&bytes,serde_json::json!({"entries":result.get("entries").and_then(|v|v.as_array()).map(|v|v.len())})));
+                        let preview=crate::tool_output::truncate_utf8_by_bytes(&String::from_utf8_lossy(&bytes),12000).0.to_string();
+                        match saved {Ok(record)=>(true,format!("[browser] evidence {}\n{preview}",record["id"]),None),Err(error)=>(false,format!("[browser] Evidence NOT saved: {error}\n{preview}"),None)}
+                    }
+                    Ok(response)=>(false,format!("[browser] {}",response["error"]),None),
+                    Err(error)=>(false,format!("[browser] {error}"),None)
                 }
             } else if sub == "click" {
                 let selector = args[1..].join(" ").trim().to_string();
@@ -2081,12 +2049,12 @@ pub(crate) async fn execute_tool_call_impl(
                 };
                 drop(g);
                 let resp = session
-                    .send_command(&serde_json::json!({
+                    .send_with_policy(&executor.policy, &serde_json::json!({
                         "cmd": "click",
                         "params": { "selector": selector, "timeout_secs": action_timeout }
                     }))
                     .await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2126,12 +2094,12 @@ pub(crate) async fn execute_tool_call_impl(
                 };
                 drop(g);
                 let resp = session
-                    .send_command(&serde_json::json!({
+                    .send_with_policy(&executor.policy, &serde_json::json!({
                         "cmd": "fill",
                         "params": { "selector": sel, "value": value, "timeout_secs": action_timeout }
                     }))
                     .await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2171,8 +2139,8 @@ pub(crate) async fn execute_tool_call_impl(
                         "params": { "selector": arg, "timeout_secs": action_timeout }
                     })
                 };
-                let resp = session.send_command(&cmd).await;
-                registry.write().await.insert(task_id, session);
+                let resp = session.send_with_policy(&executor.policy, &cmd).await;
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2190,7 +2158,7 @@ pub(crate) async fn execute_tool_call_impl(
                     }
                 }
             } else {
-                (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot | browser click <selector> | browser fill <selector> <text> | browser wait <selector|ms>".to_string(), None)
+                (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot | browser click <selector> | browser fill <selector> <text> | browser wait <selector|ms> | browser viewport <width> <height> | browser console | browser network".to_string(), None)
             }
         }
         "install_playwright" => {
