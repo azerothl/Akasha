@@ -16,9 +16,36 @@ pub(crate) fn is_active(task: Uuid) -> bool {
         .map(|runs| runs.contains(&task))
         .unwrap_or(true)
 }
+/// Serialize admission with resume's stopped->queued transition and enqueue.
+/// Workers wait briefly here instead of losing an already queued execution.
+pub(crate) fn with_admission<T>(task:Uuid,action:impl FnOnce()->T)->Result<T,String> {
+    use std::sync::{Arc,Mutex,OnceLock,Weak};
+    static LOCKS:OnceLock<Mutex<std::collections::HashMap<Uuid,Weak<Mutex<()>>>>>=OnceLock::new();
+    let lock={
+        let mut locks=LOCKS.get_or_init(||Mutex::new(std::collections::HashMap::new())).lock().map_err(|_|"task admission registry unavailable")?;
+        if locks.len()>1024 {locks.retain(|_,lock|lock.strong_count()>0);}
+        match locks.get(&task).and_then(Weak::upgrade) {
+            Some(lock)=>lock,
+            None=>{let lock=Arc::new(Mutex::new(()));locks.insert(task,Arc::downgrade(&lock));lock}
+        }
+    };
+    let _guard=lock.lock().map_err(|_|"task admission unavailable")?;
+    Ok(action())
+}
+
 pub(crate) struct ActiveRun(Uuid);
 impl ActiveRun {
     pub(crate) fn enter(task: Uuid) -> Result<Self, String> {
+        with_admission(task,||Self::enter_admitted(task))?
+    }
+    pub(crate) fn enter_stopped(db:&Path,task:Uuid)->Result<Self,String> {
+        with_admission(task,||{
+            let record=akasha_store::TaskStore::open(db).map_err(|error|error.to_string())?.get(task).map_err(|error|error.to_string())?.ok_or("task not found")?;
+            if !matches!(record.status,akasha_store::TaskStatus::Paused|akasha_store::TaskStatus::Interrupted|akasha_store::TaskStatus::Completed|akasha_store::TaskStatus::Failed|akasha_store::TaskStatus::Cancelled) {return Err("operator delivery requires a stopped task".into());}
+            Self::enter_admitted(task)
+        })?
+    }
+    fn enter_admitted(task:Uuid)->Result<Self,String> {
         if !active_runs()
             .lock()
             .map_err(|_| "active execution lock unavailable")?

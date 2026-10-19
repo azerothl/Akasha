@@ -60,16 +60,21 @@ fn resolve_program(root:&Path,program:&str,paths:&std::ffi::OsStr)->Result<PathB
 // Every delivery subprocess (including Git launched by gh) uses the same isolated
 // config scopes. Repository configuration is inspected while its lock is held.
 fn isolate_git_configuration(command: &mut Command) {
-    command.env("GH_HOST","github.com").env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" })
-        .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_COUNT", "0")
-        .env_remove("GIT_CONFIG_PARAMETERS").env_remove("GIT_CONFIG")
-        .env_remove("GIT_SSH_COMMAND").env_remove("GIT_SSH").env_remove("GIT_SSH_VARIANT");
-    for (key, _) in std::env::vars_os() {
-        let key_upper=key.to_string_lossy().to_ascii_uppercase();
-        if key_upper.starts_with("GIT_CONFIG_KEY_") || key_upper.starts_with("GIT_CONFIG_VALUE_") {
+    // Keep authentication tokens, but discard inherited Git execution/config,
+    // TLS-root/verification and proxy overrides for these pinned destinations.
+    let mut keys=std::env::vars_os().map(|(key,_)|key).collect::<Vec<_>>();
+    keys.extend(command.as_std().get_envs().map(|(key,_)|key.to_owned()));
+    for key in keys {
+        let name=key.to_string_lossy().to_ascii_uppercase();
+        if name.starts_with("GIT_") || matches!(name.as_str(),"HTTP_PROXY"|"HTTPS_PROXY"|"ALL_PROXY"|"NO_PROXY"|"SSL_CERT_FILE"|"SSL_CERT_DIR"|"CURL_CA_BUNDLE"|"REQUESTS_CA_BUNDLE"|"NODE_EXTRA_CA_CERTS"|"NODE_TLS_REJECT_UNAUTHORIZED"|"GH_DEBUG") {
             command.env_remove(key);
         }
     }
+    for key in ["GIT_SSL_NO_VERIFY","GIT_SSL_CAINFO","GIT_SSL_CAPATH","GIT_SSH_COMMAND","GIT_SSH","GIT_SSH_VARIANT","GIT_CONFIG_PARAMETERS","GIT_CONFIG","HTTPS_PROXY","https_proxy","HTTP_PROXY","http_proxy","ALL_PROXY","all_proxy","SSL_CERT_FILE","SSL_CERT_DIR","CURL_CA_BUNDLE"] {command.env_remove(key);}
+    command.env("GH_HOST","github.com")
+        .env("GIT_CONFIG_GLOBAL",if cfg!(windows){"NUL"}else{"/dev/null"})
+        .env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_COUNT","0")
+        .env("GIT_ALLOW_PROTOCOL","https");
 }
 
 fn safe_global_identity(git:&Path)->Vec<(String,String)> {
@@ -1328,7 +1333,7 @@ pub(crate) async fn route(
     {
         return Some(json_response("409 Conflict",&json!({"error":"task must belong to this project and be stopped before operator delivery"}).to_string()));
     }
-    let _active_operation = match crate::studio_recovery::ActiveRun::enter(operator.task_id) {
+    let _active_operation = match crate::studio_recovery::ActiveRun::enter_stopped(&db,operator.task_id) {
         Ok(guard) => guard,
         Err(error) => {
             return Some(json_response(
@@ -1609,11 +1614,13 @@ mod ssh_routing_tests {
         }
         assert!(canonical_target("https://github.com:8443/owner/repo.git").is_err());
         let mut command=Command::new("git");
-        command.env("GIT_SSH_COMMAND","unapproved-command").env("GH_HOST","unapproved.invalid");
+        command.env("GIT_SSH_COMMAND","unapproved-command").env("GH_HOST","unapproved.invalid")
+            .env("GIT_SSL_NO_VERIFY","true").env("HTTPS_PROXY","http://unapproved.invalid:8080")
+            .env("SSL_CERT_FILE","unapproved.pem").env("GIT_OBJECT_DIRECTORY","unapproved-objects");
         isolate_git_configuration(&mut command);
         let values=command.as_std().get_envs().collect::<Vec<_>>();
         assert!(values.iter().any(|(name,value)|*name==std::ffi::OsStr::new("GH_HOST") && *value==Some(std::ffi::OsStr::new("github.com"))));
-        for key in ["GIT_SSH_COMMAND","GIT_SSH","GIT_SSH_VARIANT"] {
+        for key in ["GIT_SSH_COMMAND","GIT_SSH","GIT_SSH_VARIANT","GIT_SSL_NO_VERIFY","HTTPS_PROXY","SSL_CERT_FILE","GIT_OBJECT_DIRECTORY"] {
             assert!(values.iter().any(|(name,value)|*name==std::ffi::OsStr::new(key) && value.is_none()));
         }
     }

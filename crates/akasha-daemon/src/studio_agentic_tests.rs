@@ -477,3 +477,33 @@ async fn cached_legacy_write_still_respects_policy_and_missing_file_requires_a_n
     let recreated=contracts::Operation::begin(&db,id,"write_file",&args,dir.path(),&p,None).await.unwrap();
     assert!(recreated.cached.is_none());drop(recreated);
 }
+
+#[test]
+fn queued_resume_cannot_be_admitted_as_stopped_operator_delivery() {
+    use crate::studio_recovery::{with_admission,ActiveRun};
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let id=Uuid::new_v4();running_task(&db,id);
+    let store=akasha_store::TaskStore::open(&db).unwrap();store.update_status(id,akasha_store::TaskStatus::Paused).unwrap();
+    let (started_tx,started_rx)=std::sync::mpsc::channel();
+    let copied_db=db.clone();
+    let worker=with_admission(id,||{
+        let worker=std::thread::spawn(move||{started_tx.send(()).unwrap();ActiveRun::enter_stopped(&copied_db,id)});
+        started_rx.recv().unwrap();
+        assert!(store.transition_if(id,&[akasha_store::TaskStatus::Paused],akasha_store::TaskStatus::Queued).unwrap());
+        worker
+    }).unwrap();
+    assert!(worker.join().unwrap().is_err());
+    assert!(!crate::studio_recovery::is_active(id));
+    let worker=ActiveRun::enter(id).unwrap();assert!(crate::studio_recovery::is_active(id));drop(worker);
+}
+#[test]
+fn worker_admission_waits_until_resume_has_enqueued_and_released_admission() {
+    use crate::studio_recovery::{with_admission,ActiveRun};
+    let id=Uuid::new_v4();let (started_tx,started_rx)=std::sync::mpsc::channel();let (admitted_tx,admitted_rx)=std::sync::mpsc::channel();
+    let worker=with_admission(id,||{
+        let worker=std::thread::spawn(move||{started_tx.send(()).unwrap();let guard=ActiveRun::enter(id).unwrap();admitted_tx.send(guard).unwrap();});
+        started_rx.recv().unwrap();
+        assert!(admitted_rx.try_recv().is_err());
+        worker
+    }).unwrap();
+    let guard=admitted_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();assert!(crate::studio_recovery::is_active(id));drop(guard);worker.join().unwrap();
+}
