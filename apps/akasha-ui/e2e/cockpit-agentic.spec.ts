@@ -62,6 +62,8 @@ test.describe("Cockpit agentic (P6)", () => {
   });
 
   test("subagent threads inspect and cancel-all (P6-B4)", async ({ page }) => {
+    // Inspecting orchestration details is an Expert-mode feature.
+    await page.addInitScript(() => localStorage.setItem("akasha_ui_mode", "expert"));
     await page.unroute("**/api/tasks");
     await page.route("**/api/tasks", async (route) => {
       await route.fulfill({
