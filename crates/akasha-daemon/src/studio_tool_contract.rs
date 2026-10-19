@@ -655,6 +655,21 @@ impl Operation {
         } else {
             None
         };
+        // Legacy text calls have no operation identity. Reuse a confirmed receipt
+        // only for an identical write whose on-disk version still matches it.
+        // Policy, stopped-task and uncertain-effect checks above still apply.
+        if typed.is_none() && matches!(tool,"write_file"|"write_code") && before.as_deref()!=Some("missing") {
+            let receipt:Option<String>=transaction.query_row(
+                "SELECT result FROM studio_operations WHERE task=?1 AND tool=?2 AND digest=?3 AND state='completed' ORDER BY updated_at DESC LIMIT 1",
+                params![task.to_string(),tool,fingerprint],|row|row.get(0)).optional().map_err(|error|error.to_string())?;
+            if let Some(mut value)=receipt.and_then(|raw|serde_json::from_str::<Value>(&raw).ok()) {
+                if value["success"]==true && value["result_unknown"]!=true && value["file_version"].as_str()==before.as_deref() && before.is_some() {
+                    value["replayed"]=json!(true);
+                    value["retry_hint"]=json!("Identical write already confirmed and current file version verified; no new disk effect. Continue with the next requested operation or conclude after all checks.");
+                    return Ok(Self{db:db.into(),task,id,tool:tool.into(),path:None,before:None,_lock:lock,cached:Some((true,value.to_string()))});
+                }
+            }
+        }
         if is_file_mutation(tool) {
             let path = path.as_ref().ok_or("file mutation path missing")?;
             let expected = if let Some(typed) = typed {

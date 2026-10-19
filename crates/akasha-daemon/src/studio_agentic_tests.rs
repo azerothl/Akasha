@@ -447,3 +447,33 @@ async fn git_only_profiles_can_start_local_delivery_inspection() {
     let status=crate::studio_delivery::preflight(dir.path(),&root,&local,"origin").await.unwrap();assert_eq!(status["github"]["accessible"],false);assert!(status["remote_head"].is_null());
 
 }
+
+#[tokio::test]
+async fn repeated_legacy_write_reuses_confirmed_receipt_only_while_bytes_match() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let id=Uuid::new_v4();running_task(&db,id);
+    let p=policy(dir.path());let args=vec!["workspace:/legacy.txt".into(),"exact".into()];
+    let operation=contracts::Operation::begin(&db,id,"write_file",&args,dir.path(),&p,None).await.unwrap();
+    std::fs::write(dir.path().join("legacy.txt"),"exact").unwrap();
+    let first:Value=serde_json::from_str(&operation.finish(true,"saved").unwrap()).unwrap();
+    let replay=contracts::Operation::begin(&db,id,"write_file",&args,dir.path(),&p,None).await.unwrap();
+    let cached:Value=serde_json::from_str(&replay.cached.as_ref().unwrap().1).unwrap();
+    assert_eq!(cached["operation_id"],first["operation_id"]);assert_eq!(cached["replayed"],true);drop(replay);
+    assert_eq!(contracts::recovery_summary(&db,id).unwrap()["operations"].as_array().unwrap().len(),1);
+    std::fs::write(dir.path().join("legacy.txt"),"external edit").unwrap();
+    assert!(contracts::Operation::begin(&db,id,"write_file",&args,dir.path(),&p,None).await.err().unwrap().contains("stale_file_version"));
+    assert_eq!(std::fs::read_to_string(dir.path().join("legacy.txt")).unwrap(),"external edit");
+}
+#[tokio::test]
+async fn cached_legacy_write_still_respects_policy_and_missing_file_requires_a_new_effect() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let id=Uuid::new_v4();running_task(&db,id);
+    let mut p=policy(dir.path());let args=vec!["workspace:/legacy.txt".into(),"exact".into()];
+    let operation=contracts::Operation::begin(&db,id,"write_file",&args,dir.path(),&p,None).await.unwrap();
+    std::fs::write(dir.path().join("legacy.txt"),"exact").unwrap();operation.finish(true,"saved").unwrap();
+    p.allowed_write_paths.clear();
+    assert!(contracts::Operation::begin(&db,id,"write_file",&args,dir.path(),&p,None).await.is_err());
+    p=policy(dir.path());std::fs::remove_file(dir.path().join("legacy.txt")).unwrap();
+    // A read of the absent file refreshes the expected version for an intentional recreation.
+    let read=contracts::Operation::begin(&db,id,"read_file",&["workspace:/legacy.txt".into()],dir.path(),&p,None).await.unwrap();read.finish(true,"missing").unwrap();
+    let recreated=contracts::Operation::begin(&db,id,"write_file",&args,dir.path(),&p,None).await.unwrap();
+    assert!(recreated.cached.is_none());drop(recreated);
+}
