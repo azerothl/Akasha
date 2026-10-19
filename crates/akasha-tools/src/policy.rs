@@ -326,7 +326,7 @@ impl ToolsPolicy {
         let name=normalize(name);let name_base=normalize(name_base);
         if self.blocked_commands.iter().any(|b| {
             let b = normalize(b.trim().to_lowercase());
-            name_base == b || name.ends_with(&b)
+            name_base == b || name == b
         }) {
             return false;
         }
@@ -335,7 +335,7 @@ impl ToolsPolicy {
         }
         self.allowed_commands.iter().any(|allowed| {
             let a = normalize(allowed.trim().to_lowercase());
-            name_base == a || name.ends_with(&a)
+            name_base == a || name == a
         })
     }
 
@@ -1143,6 +1143,18 @@ mod tests {
 #[cfg(all(test,windows))]
 mod windows_executable_alias_regressions {
     use super::*;
+    #[test] fn command_aliases_require_exact_names_or_exact_paths() {
+        let mut policy=ToolsPolicy {allowed_commands:vec!["git".into(),"node.exe".into()],..Default::default()};
+        for allowed in ["git", "git.exe", r"C:\tools\git.exe", "node", "NODE.EXE"] {assert!(policy.can_run_command(allowed),"{allowed}");}
+        for denied in ["evilgit.exe", "notnode.exe", r"C:\workspace\evilgit.exe", "git.exe.exe"] {assert!(!policy.can_run_command(denied),"{denied}");}
+        policy.allowed_commands=vec![r"C:\tools\git.exe".into()];
+        assert!(policy.can_run_command(r"C:\tools\git.exe"));
+        assert!(!policy.can_run_command(r"C:\evil\C:\tools\git.exe"));
+        assert!(!policy.can_run_command(r"C:\other\git.exe"));
+        policy.allowed_commands=vec!["*".into()];policy.blocked_commands=vec!["git.exe".into()];
+        assert!(!policy.can_run_command(r"C:\tools\git.exe"));
+        assert!(policy.can_run_command("legitgit.exe"));
+    }
     #[test] fn exe_aliases_share_allow_and_deny_decisions() {
         let mut policy=ToolsPolicy {allowed_commands:vec!["cmd".into()],..Default::default()};
         assert!(policy.can_run_command("cmd.exe"));policy.blocked_commands=vec!["cmd.exe".into()];assert!(!policy.can_run_command("cmd"));

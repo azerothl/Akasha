@@ -231,6 +231,16 @@ fn unsafe_config_key(key:&str) -> bool {
     true
 }
 
+fn validate_repository_config(keys: &str) -> Result<(), String> {
+    if keys.lines().any(|key| key.eq_ignore_ascii_case("extensions.objectformat")) {
+        return Err("non-default Git object format (including SHA-256 repositories) is unsupported for Studio delivery; use a SHA-1 repository".into());
+    }
+    if keys.lines().any(unsafe_config_key) {
+        return Err("repository Git helper/network/include configuration is unsupported for delivery".into());
+    }
+    Ok(())
+}
+
 /// Approval identity includes the canonical workspace and the actual publication destination.
 pub(crate) async fn approval_identity(root:&Path,tool:&str,argv:&[String]) -> Result<String,String> {
     let root=root.canonicalize().map_err(|e|e.to_string())?;
@@ -255,9 +265,7 @@ async fn git(root: &Path, args: Vec<String>, index: Option<&Path>) -> Result<Out
     // launchers before any delivery Git command (including read-only preflight).
     let config = run(root, "git", ["config", "--local", "--no-includes", "--name-only", "--list"].iter().map(|x|x.to_string()).collect(), None).await?;
     if config.code != Some(0) {return Err("repository Git configuration cannot be inspected safely; delivery refused".into());}
-    if config.out.lines().any(unsafe_config_key) {
-        return Err("repository Git helper/network/include configuration is unsupported for delivery".into());
-    }
+    validate_repository_config(&config.out)?;
     let hooks = tempfile::tempdir().map_err(|e| e.to_string())?;
     let mut argv = vec![
         "--literal-pathspecs".into(),
@@ -1543,6 +1551,13 @@ pub(crate) async fn route(
 #[cfg(test)]
 mod helper_config_regressions {
     use super::*;
+    #[test] fn sha256_repositories_receive_an_explicit_unsupported_format_error() {
+        let dir=tempfile::tempdir().unwrap();
+        let init=std::process::Command::new("git").args(["init","--object-format=sha256"]).current_dir(dir.path()).output().unwrap();assert!(init.status.success());
+        let config=std::process::Command::new("git").args(["config","--local","--no-includes","--name-only","--list"]).current_dir(dir.path()).output().unwrap();assert!(config.status.success());
+        assert!(validate_repository_config(&String::from_utf8(config.stdout).unwrap()).unwrap_err().contains("SHA-256 repositories"));
+        assert!(validate_repository_config("core.bare\nuser.name\n").is_ok());
+    }
     #[test] fn rejects_repository_process_launchers_and_includes() {
         for key in ["http.proxy","http.sslVerify","http.extraHeader","http.https://github.com/.proxy","gc.recentObjectsHook","filter.evil.clean","credential.helper","core.sshCommand","url.https://evil/.insteadOf","include.path","includeIf.gitdir:foo.path","remote.origin.receivepack"] {assert!(unsafe_config_key(key),"{key}");}
         for key in ["core.repositoryformatversion","core.bare","remote.origin.url","branch.main.merge","user.name"] {assert!(!unsafe_config_key(key),"{key}");}

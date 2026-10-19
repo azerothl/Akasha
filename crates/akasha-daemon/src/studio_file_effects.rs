@@ -26,6 +26,8 @@ struct Rename {
     source: String,
     target: String,
     verified: bool,
+    #[serde(default)]
+    verified_state: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Scope {
@@ -51,7 +53,7 @@ pub(crate) fn implementation_role(agent: &str) -> bool {
 fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
     let path = r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;!?"`]+)"#;
     let pattern = format!(
-        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
+        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
     );
     let re = regex::Regex::new(&pattern).unwrap();
     // Object-before-path requests: "Add logging to config.txt". Keep this
@@ -318,6 +320,7 @@ impl Scope {
             ) {
                 if !missing(a) && missing(b) && a == c {
                     rename.verified = true;
+                    rename.verified_state = Some(a.clone());
                 }
             }
         }
@@ -350,10 +353,11 @@ impl Scope {
                     EndState::Absent => g.changed && missing(v),
                     EndState::RenameDestination => {
                         !missing(v)
-                            && self
-                                .renames
-                                .iter()
-                                .any(|r| r.target == g.path && r.verified)
+                            && self.renames.iter().any(|r| {
+                                r.target == g.path
+                                    && r.verified
+                                    && r.verified_state.as_ref() == Some(v)
+                            })
                     }
                 })
             })
@@ -422,6 +426,7 @@ fn paths_for_request(
                 source,
                 target,
                 verified: false,
+                verified_state: None,
             });
         } else {
             set(
@@ -664,6 +669,9 @@ mod tests {
         for (request, expected) in [
             ("Add logging to config.txt", "config.txt"),
             ("Update dependencies in Cargo.toml", "Cargo.toml"),
+            ("Replace foo with bar in config.toml", "config.toml"),
+            ("Change the port in config.toml", "config.toml"),
+            ("Remplace foo par bar dans config.toml", "config.toml"),
             (
                 "Please add structured request logging to the file `src/main.rs`.",
                 "src/main.rs",
@@ -733,6 +741,15 @@ mod tests {
         std::fs::remove_file(root.path().join("new.ts")).unwrap();
         std::fs::rename(root.path().join("old.ts"), root.path().join("new.ts")).unwrap();
         scope.observe(&before, &capture_paths(&scope.paths()).unwrap());
+        assert!(scope.verified(&capture_paths(&scope.paths()).unwrap()));
+        let renamed = capture_paths(&scope.paths()).unwrap();
+        std::fs::write(root.path().join("new.ts"), "overwritten").unwrap();
+        scope.observe(&renamed, &capture_paths(&scope.paths()).unwrap());
+        assert!(!scope.verified(&capture_paths(&scope.paths()).unwrap()));
+        std::fs::remove_file(root.path().join("new.ts")).unwrap();
+        std::fs::write(root.path().join("new.ts"), "recreated").unwrap();
+        assert!(!scope.verified(&capture_paths(&scope.paths()).unwrap()));
+        std::fs::write(root.path().join("new.ts"), "original").unwrap();
         assert!(scope.verified(&capture_paths(&scope.paths()).unwrap()));
     }
     #[test]
