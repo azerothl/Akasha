@@ -175,7 +175,7 @@ pub(crate) async fn agent_terminal(
                 PtyManager::studio().write_input(sid,body).map_err(|e| e.to_string())?; json!({"ok":true})
             }
             "resize" => {PtyManager::studio().resize(sid,PtyResizeBody {cols:args.get(2).and_then(|n| n.parse::<u16>().ok()).unwrap_or(80).clamp(20,240),rows:args.get(3).and_then(|n| n.parse::<u16>().ok()).unwrap_or(24).clamp(5,100)}).map_err(|e| e.to_string())?;json!({"ok":true})}
-            "stop" => {PtyManager::studio().close(sid).map_err(|e| e.to_string())?;archive(sid);owners().lock().map_err(|_| "terminal lock unavailable")?.remove(sid);json!({"ok":true})}
+            "stop" => {let exit=PtyManager::studio().close_with_exit_code(sid).map_err(|e| e.to_string())?;archive(sid,exit);owners().lock().map_err(|_| "terminal lock unavailable")?.remove(sid);json!({"ok":true})}
             _ => return Err("terminal_session start [JSON]|list|read <id>|write <id> {\"text\":\"command\\r\"}|resize <id> cols rows|stop <id>".into()),
         };
         Ok(value.to_string())
@@ -191,7 +191,7 @@ fn check_input(body: &PtyInputBody) -> Result<(), String> {
     Ok(())
 }
 
-fn archive(id: &str) {
+fn archive(id: &str, exit_code:Option<u32>) {
     use std::io::Read;
     let owner = owners()
         .lock()
@@ -217,7 +217,7 @@ fn archive(id: &str) {
             "terminal_transcript",
             "text/plain",
             &bytes,
-            json!({"session_id":id,"program":owner.program,"truncated":truncated,"exit_code":PtyManager::studio().list_sessions().ok().and_then(|sessions|sessions.into_iter().find(|session|session.session_id==id)).and_then(|session|session.exit_code)}),
+            json!({"session_id":id,"program":owner.program,"truncated":truncated,"exit_code":exit_code}),
         );
     }
 }
@@ -279,8 +279,8 @@ pub(crate) async fn close_project(project: &str) {
         .unwrap_or_default();
     for id in ids {
         let _ = tokio::task::spawn_blocking(move || {
-            let _ = PtyManager::studio().close(&id);
-            archive(&id);
+            let exit = PtyManager::studio().close_with_exit_code(&id).ok().flatten();
+            archive(&id,exit);
             if let Ok(mut map) = owners().lock() {
                 map.remove(&id);
             }
@@ -302,8 +302,8 @@ pub(crate) async fn close_task(task: Uuid) {
         .unwrap_or_default();
     for id in ids {
         let _ = tokio::task::spawn_blocking(move || {
-            let _ = PtyManager::studio().close(&id);
-            archive(&id);
+            let exit = PtyManager::studio().close_with_exit_code(&id).ok().flatten();
+            archive(&id,exit);
             if let Ok(mut map) = owners().lock() {
                 map.remove(&id);
             }

@@ -507,3 +507,22 @@ fn worker_admission_waits_until_resume_has_enqueued_and_released_admission() {
     }).unwrap();
     let guard=admitted_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();assert!(crate::studio_recovery::is_active(id));drop(guard);worker.join().unwrap();
 }
+
+#[test]
+fn confirmed_file_mutation_is_distinct_from_reads_and_survives_checkpoints() {
+    let mut outcome=crate::task_outcome::RunOutcome::default();outcome.successful_tool_calls=1;outcome.record_file_mutation("read_file");assert!(!outcome.confirmed_file_mutation());outcome.failed_tool_calls=1;assert!(!outcome.confirmed_file_mutation());
+    outcome.record_file_mutation("write_file");assert!(outcome.confirmed_file_mutation());
+    let restored:crate::task_outcome::RunOutcome=serde_json::from_str(&serde_json::to_string(&outcome).unwrap()).unwrap();assert!(restored.confirmed_file_mutation());assert_eq!(restored.json(None)["confirmed_file_mutation"],true);
+}
+#[test]
+fn only_confirmed_mutations_of_this_task_or_completed_children_restore_effects() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let root=Uuid::new_v4();let child=Uuid::new_v4();running_task(&db,root);running_task(&db,child);
+    assert_eq!(contracts::confirmed_file_mutation(&db,root).unwrap(),None);
+    let connection=rusqlite::Connection::open(&db).unwrap();connection.execute("UPDATE tasks SET parent_task_id=?1 WHERE id=?2",rusqlite::params![root.to_string(),child.to_string()]).unwrap();
+    for (id,task,tool,state,result) in [("read",root,"read_file","completed",json!({"success":true})),("failed",root,"write_file","completed",json!({"success":false})),("unknown",root,"write_file","started",json!({"success":true,"result_unknown":true})),("child-write",child,"write_file","completed",json!({"success":true}))] {
+        connection.execute("INSERT INTO studio_operations(task,operation,version,tool,digest,state,result,updated_at) VALUES(?1,?2,1,?3,'test',?4,?5,'now')",rusqlite::params![task.to_string(),id,tool,state,result.to_string()]).unwrap();
+    }
+    assert_eq!(contracts::confirmed_file_mutation(&db,root).unwrap(),None);
+    akasha_store::TaskStore::open(&db).unwrap().update_status(child,akasha_store::TaskStatus::Completed).unwrap();
+    assert_eq!(contracts::confirmed_file_mutation(&db,root).unwrap(),Some("write_file".into()));
+}

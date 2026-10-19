@@ -66,6 +66,9 @@ pub(super) fn user_request(message: &str) -> &str {
         .unwrap_or(message)
         .trim()
 }
+pub(super) fn requires_file_effect(message:&str,agent:&str)->bool {
+    explicit_file_request(message) && matches!(agent,"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code"|"studio_project_manager")
+}
 pub(super) fn explicit_file_request(message: &str) -> bool {
     let request = user_request(message).to_lowercase();
     let imperative = request.split_whitespace().next().is_some_and(|word| {
@@ -317,6 +320,9 @@ mod tests {
     }
     #[test]
     fn only_the_explicit_user_scope_triggers_the_no_effect_guard() {
+        assert!(requires_file_effect("Modify config.txt", "studio_fullstack"));
+        assert!(!requires_file_effect("Modify config.txt", "studio_planner"));
+        assert!(!requires_file_effect("Modify config.txt", "studio_reviewer"));
         assert!(explicit_file_request("Modify config.txt to replace old with new."));
         assert!(explicit_file_request("Modifie config.txt pour remplacer old par new."));
         assert!(explicit_file_request("[Current user request — task scope]\nCrée FIRST.md puis lis le fichier.\n[End current user request]"));

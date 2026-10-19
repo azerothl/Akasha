@@ -744,6 +744,21 @@ impl Operation {
     }
 }
 
+pub(crate) fn is_confirmable_file_mutation(tool:&str)->bool {
+    is_file_mutation(tool) || matches!(tool,"rename_path"|"move_tree"|"lsp_apply_rename")
+}
+pub(crate) fn confirmed_file_mutation(db:&Path,task:Uuid)->Result<Option<String>,String> {
+    let connection=connection(db)?;
+    // Only completed children can attest an effect for a delegating parent.
+    let mut statement=connection.prepare("WITH RECURSIVE lineage(id) AS (SELECT ?1 UNION SELECT t.id FROM tasks t JOIN lineage p ON t.parent_task_id=p.id WHERE t.status='completed') SELECT tool,result FROM studio_operations WHERE task IN (SELECT id FROM lineage) AND state='completed'").map_err(|e|e.to_string())?;
+    let mut rows=statement.query([task.to_string()]).map_err(|e|e.to_string())?;
+    while let Some(row)=rows.next().map_err(|e|e.to_string())? {
+        let tool:String=row.get(0).map_err(|e|e.to_string())?;if !is_confirmable_file_mutation(&tool){continue;}
+        let raw:Option<String>=row.get(1).map_err(|e|e.to_string())?;
+        if raw.and_then(|s|serde_json::from_str::<Value>(&s).ok()).is_some_and(|v|v["success"]==true && v["result_unknown"]!=true){return Ok(Some(tool));}
+    }
+    Ok(None)
+}
 pub(crate) fn recovery_summary(db: &Path, task: Uuid) -> Result<Value, String> {
     let connection = connection(db)?;
     let unknown: i64 = connection

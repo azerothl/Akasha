@@ -1523,6 +1523,9 @@ pub(crate) async fn run_message_via_llm(
             resume_overlay=format!("[Resumed execution — apply CURRENT system/rules/permissions; do not replay operations]\n[Recorded operation results; unknown effects require operator resolution]\n{}\n[Pending human input at interruption: {}. Ask again; no old approval is restored.]\n[CURRENT task instructions]\n{}\n[Saved execution state]\n",ledger,checkpoint.waiting.as_ref().map(|v|v.to_string()).unwrap_or_else(||"none".into()),current_prompt);
             current_prompt=checkpoint.prompt.clone();
             run_outcome=checkpoint.outcome.clone();run_outcome.termination=TerminationReason::Success;
+            if !run_outcome.confirmed_file_mutation() {
+                match crate::studio_tool_contract::confirmed_file_mutation(&store_path,task_id) {Ok(Some(tool))=>run_outcome.record_file_mutation(&tool),Ok(None)=>{},Err(error)=>{abort_recovery!(error);}}
+            }
         }
         if let Some(saved)=recovery_checkpoint.as_ref().and_then(|checkpoint|checkpoint.max_tool_rounds) {max_tool_rounds=saved;}
         let mut round = recovery_checkpoint.as_ref().map(|checkpoint|checkpoint.round).unwrap_or(0);
@@ -1747,7 +1750,7 @@ pub(crate) async fn run_message_via_llm(
                 })
             }else{None};
             let request = CompletionRequest {
-                require_tool: code_studio_disk_task && ((super::studio_conversation::explicit_file_request(&user_message) && run_outcome.successful_tool_calls == 0)
+                require_tool: code_studio_disk_task && ((super::studio_conversation::requires_file_effect(&user_message,&assigned_agent) && !run_outcome.confirmed_file_mutation())
                     || (!explicit_file_goals.is_empty() && super::studio_completion::requires_tool_retry(&current_prompt,&run_outcome.checks)))
                     && (matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code")
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
@@ -2112,17 +2115,17 @@ pub(crate) async fn run_message_via_llm(
             }
             let no_parseable_tools_this_round = parsed_tool_calls.is_none();
             if code_studio_disk_task && no_parseable_tools_this_round
-                && run_outcome.successful_tool_calls == 0 && run_outcome.failed_tool_calls == 0
-                && super::studio_conversation::explicit_file_request(&user_message)
+                && !run_outcome.confirmed_file_mutation()
+                && super::studio_conversation::requires_file_effect(&user_message,&assigned_agent)
                 && tools_executor_snapshot.as_ref().is_some_and(|e|policy_allows_primary_disk_write(&e.policy))
             {
                 if studio_zero_tool_promise_nags >= 3 {
                     run_outcome.termination=TerminationReason::ToolError;
-                    reply_text="No tool operation was executed for the explicit file request; model claims of file creation are not validated.".into();
+                    reply_text="No file mutation was confirmed for the explicit file request; reads and failed edits do not validate the requested change.".into();
                     break 'tool_rounds;
                 }
                 studio_zero_tool_promise_nags += 1;
-                current_prompt.push_str("\n[Execution still missing] No tool operation has run. A statement that files were created is not a tool execution. Execute the original requested file operation now with native studio_call or the structured JSON tool branch (schema_version, tool, arguments including path/content/expected_version). Do not return a final response until the actual tool result confirms the requested effects.\n");
+                current_prompt.push_str("\n[Execution still missing] No successful file mutation has been confirmed. Reads and failed edits do not implement the requested change. Execute the original requested file operation now with native studio_call or the structured JSON tool branch (schema_version, tool, arguments including path/content/expected_version). Do not return a final response until the actual tool result confirms the requested effects.\n");
                 continue;
             }
             if code_studio_disk_task && no_parseable_tools_this_round && !explicit_file_goals.is_empty() {
@@ -3408,6 +3411,12 @@ pub(crate) async fn run_message_via_llm(
                         } else { run_outcome.failed_tool_calls += 1; }
                         if serde_json::from_str::<serde_json::Value>(&res).ok().is_some_and(|value|value["result_unknown"]==true){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Operation result unknown; inspect effects and use explicit recovery before continuing. {res}");break 'tool_rounds;}
 
+                        if success {
+                            run_outcome.record_file_mutation(&actual_tool);
+                            if actual_tool=="delegate_to_agent" && !run_outcome.confirmed_file_mutation() {
+                                match crate::studio_tool_contract::confirmed_file_mutation(&store_path,task_id) {Ok(Some(tool))=>run_outcome.record_file_mutation(&tool),Ok(None)=>{},Err(error)=>{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
+                            }
+                        }
                         if matches!(effective_role_tool, "run_command" | "run_terminal" | "run_in_container") {
                             run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":effective_role_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }
@@ -4595,6 +4604,9 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         );
     }
 
+    if code_studio_disk_task && !run_outcome.failed() && super::studio_conversation::requires_file_effect(&user_message,&assigned_agent) && !run_outcome.confirmed_file_mutation() {
+        run_outcome.termination=TerminationReason::ToolError;reply_text="No confirmed file mutation; reads and prose cannot attest the requested edit.".into();
+    }
     if code_studio_disk_task && !run_outcome.failed() && run_outcome.failed_tool_calls > 0 && run_outcome.successful_tool_calls == 0 {
         run_outcome.termination = TerminationReason::ToolError;
         reply_text = "No tool operation succeeded; the requested effects are not validated.\n".to_string() + &reply_text;

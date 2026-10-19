@@ -26,6 +26,12 @@ pub(crate) struct RunOutcome {
 }
 
 impl RunOutcome {
+    pub fn confirmed_file_mutation(&self)->bool {self.checks.iter().any(|c|c["kind"]=="file_mutation" && c["status"]=="passed")}
+    pub fn record_file_mutation(&mut self,tool:&str) {
+        if crate::studio_tool_contract::is_confirmable_file_mutation(tool) && !self.confirmed_file_mutation() {
+            self.checks.push(serde_json::json!({"kind":"file_mutation","tool":tool,"status":"passed","source":"confirmed_operation_receipt"}));
+        }
+    }
     pub fn failed(&self) -> bool {
         self.termination != TerminationReason::Success
     }
@@ -37,6 +43,7 @@ impl RunOutcome {
             "result": if !self.failed() { "succeeded" } else if self.successful_tool_calls > 0 { "partial" } else { "failed" },
             "successful_tool_calls": self.successful_tool_calls,
             "failed_tool_calls": self.failed_tool_calls,
+            "confirmed_file_mutation": self.confirmed_file_mutation(),
             "verification": self.checks,
             // A normal model termination is never itself evidence of acceptance.
             "acceptance_verified": !self.failed() && !self.checks.is_empty()
