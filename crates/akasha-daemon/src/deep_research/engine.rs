@@ -82,7 +82,16 @@ pub fn spawn_research_run(
     let cancel_spawn = cancel.clone();
     tokio::spawn(async move {
         store.insert(run, cancel_spawn).await;
-        if let Err(e) = run_engine(&ctx, &run_id_spawn, &topic, &config, &cancel).await {
+        let result = run_until_cancelled(&cancel,
+            run_engine(&ctx, &run_id_spawn, &topic, &config, &cancel)).await;
+        if result.is_none() {
+            store.update(&run_id_spawn, |r| {
+                r.phase = ResearchPhase::Cancelled;
+                r.finished_at = Some(chrono::Utc::now().to_rfc3339());
+                r.report_markdown = None;
+                r.report_meta = None;
+            }).await;
+        } else if let Some(Err(e)) = result {
             store
                 .update(&run_id_spawn, |r| {
                     r.phase = ResearchPhase::Error;
@@ -94,6 +103,18 @@ pub fn spawn_research_run(
     });
 
     run_id
+}
+
+async fn run_until_cancelled<F: std::future::Future>(cancel: &AtomicBool, work: F) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        _ = async {
+            while !cancel.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        } => None,
+        result = work => Some(result),
+    }
 }
 
 async fn run_engine(
@@ -389,7 +410,13 @@ async fn run_engine(
         )
         .await;
         findings.extend(round_findings);
-        report = synthesize_report(ctx, topic, &findings, &report, config, &user_ctx).await;
+        report = if round_num == config.max_rounds && findings.iter().any(|finding| !finding.url.is_empty()) {
+            // No later search needs a generated working draft. Keep the original
+            // passages as notes and write the final report directly from them.
+            format_source_manifest(&findings).0
+        } else {
+            synthesize_report(ctx, topic, &findings, &report, config, &user_ctx).await
+        };
         store
             .update(run_id, |r| {
                 r.evolving_report = report.clone();
@@ -496,6 +523,11 @@ async fn run_engine(
     store.update(run_id, |r| r.search_degraded = search_degraded).await;
     let report_word_target = config.min_final_report_words.min(REPORT_OUTPUT_TOKENS as usize / 2);
     let (manifest, represented_pages, omitted_sources) = format_source_manifest(&findings);
+    if represented_pages == 0 && findings.iter().any(|finding| !finding.url.is_empty()) {
+        finish_sub_agent(run_id, &branch_final, &sa_writer, StepStatus::Error).await;
+        finish_branch(run_id, &branch_final, StepStatus::Error).await;
+        return Err("research_no_evidence".into());
+    }
     let final_report = {
         let mut md = require_report(final_report(
             ctx,
@@ -819,7 +851,7 @@ async fn fetch_and_extract(
     let prompt = EXTRACTOR_PROMPT
         .replace("{goal}", goal)
         .replace("{source_url}", url)
-        .replace("{webpage_content}", &content);
+        .replace("{webpage_content}", &numbered_source_content(&content));
 
     let response = llm_complete(ctx, prompt, None, 3072, 0.2, "utility").await?;
 
@@ -832,7 +864,9 @@ async fn fetch_and_extract(
         if is_low_quality_summary(&summary) {
             return None;
         }
-        let evidence = extracted_evidence(&parsed);
+        // Only original source passages may enter the evidence manifest. A model
+        // summary (including an incorrect translation) is not a source quotation.
+        let evidence = verified_source_evidence(&parsed, &content)?;
         let image_url = parsed
             .get("image_urls")
             .and_then(|v| v.as_array())
@@ -847,18 +881,38 @@ async fn fetch_and_extract(
             url: url.to_string(),
             title: title.to_string(),
             summary,
-            evidence,
+            evidence: Some(evidence),
             image_url,
         });
     }
 
-    Some(ResearchFinding {
-        url: url.to_string(),
-        title: title.to_string(),
-        summary: response.chars().take(500).collect(),
-        evidence: Some(response.chars().take(3000).collect()),
-        image_url: og_image,
-    })
+    None
+}
+
+fn verified_source_evidence(parsed: &serde_json::Value, content: &str) -> Option<String> {
+    if let Some(ids) = parsed.get("evidence_ids") {
+        let lines: Vec<_> = content.lines().collect();
+        let mut seen = HashSet::new();
+        let passages: Vec<_> = ids.as_array()?.iter().filter_map(|id| {
+            let index = usize::try_from(id.as_u64()?).ok()?.checked_sub(1)?;
+            let line = lines.get(index)?.trim();
+            (line.len() >= 20 && seen.insert(index)).then_some(line)
+        }).take(12).collect();
+        return (!passages.is_empty()).then(|| passages.join("\n"));
+    }
+    let normalize = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let source = normalize(content);
+    let evidence = extracted_evidence(parsed)?;
+    let mut seen = HashSet::new();
+    let quotes: Vec<_> = evidence.lines().map(normalize)
+        .filter(|quote| quote.len() >= 20 && source.contains(quote) && seen.insert(quote.clone()))
+        .take(6).collect();
+    (!quotes.is_empty()).then(|| quotes.join("\n"))
+}
+
+fn numbered_source_content(content: &str) -> String {
+    content.lines().enumerate().map(|(index, line)| format!("L{}: {line}", index + 1))
+        .collect::<Vec<_>>().join("\n")
 }
 
 // Some providers return an array despite the requested string schema. Preserve its
@@ -1027,7 +1081,7 @@ fn report_source_quality(discovery_unavailable: bool, pages: usize, required: us
 
 const REPORT_PROMPT_BYTES: usize = 5632;
 const REPORT_OUTPUT_TOKENS: u32 = 2048;
-const MANIFEST_BYTES: usize = 2000;
+const MANIFEST_BYTES: usize = 2800;
 
 fn clip_prompt(text: &str, limit: usize) -> String {
     if text.len() <= limit { return text.to_string(); }
@@ -1048,17 +1102,27 @@ fn format_source_manifest(findings: &[ResearchFinding]) -> (String, usize, bool)
     let mut reserved = manifest.len() + note.len();
     for source in &sources {
         let header = format!("\n### [{}]({})\n", clip_prompt(&source.title, 64), source.url);
-        if reserved + header.len() + 32 <= MANIFEST_BYTES {
-            reserved += header.len() + 32;
-            selected.push((*source, header));
+        let evidence = source.evidence.as_deref().unwrap_or(&source.summary);
+        let minimum = evidence.lines().filter(|line| !line.trim().is_empty()).map(str::len).min().unwrap_or(0);
+        if minimum > 0 && reserved + header.len() + minimum <= MANIFEST_BYTES {
+            reserved += header.len() + minimum;
+            selected.push((*source, header, minimum));
         }
     }
     let represented = selected.len();
     let omitted = represented < sources.len();
-    let per_excerpt = 32 + MANIFEST_BYTES.saturating_sub(reserved) / represented.max(1);
-    for (source, header) in selected {
+    let extra = MANIFEST_BYTES.saturating_sub(reserved) / represented.max(1);
+    for (source, header, minimum) in selected {
         let evidence = source.evidence.as_deref().unwrap_or(&source.summary);
-        let excerpt = clip_prompt(evidence, per_excerpt.min(480));
+        let limit = (minimum + extra).min(800.max(minimum));
+        let mut excerpt = String::new();
+        for line in evidence.lines().filter(|line| !line.trim().is_empty()) {
+            let separator = usize::from(!excerpt.is_empty());
+            if excerpt.len() + separator + line.len() <= limit {
+                if separator > 0 { excerpt.push('\n'); }
+                excerpt.push_str(line);
+            }
+        }
         manifest.push_str(&header);
         manifest.push_str(&excerpt);
     }
@@ -1068,8 +1132,13 @@ fn format_source_manifest(findings: &[ResearchFinding]) -> (String, usize, bool)
 
 fn report_prompt(template: &str, topic: &str, report: &str, manifest: &str,
     user_ctx: &str, extra: &str, min_words: usize) -> Option<String> {
+    // The evolving draft can contain model errors. Do not feed it back as facts
+    // once attributed page excerpts exist; keep it only for model-only reports.
+    let draft = if manifest.contains("\n### [") {
+        "(Omitted: write from the attributed source excerpts only.)".to_string()
+    } else { clip_prompt(report, 800) };
     let body = template.replace("{question}", &clip_prompt(topic, 768))
-        .replace("{report}", &clip_prompt(report, 800))
+        .replace("{report}", &draft)
         .replace("{source_manifest}", manifest)
         .replace("{min_words}", &min_words.to_string())
         .replace("{category_override}", &clip_prompt(extra, 384))
@@ -1376,6 +1445,56 @@ fn truncate_label(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn cancellation_drops_in_flight_work_instead_of_resuming_analysis() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); }
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert_eq!(super::run_until_cancelled(&cancel, async { 42 }).await, Some(42));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = DropFlag(dropped.clone());
+        let signal = cancel.clone();
+        let trigger = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            signal.store(true, Ordering::SeqCst);
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2),
+            super::run_until_cancelled(&cancel, async move {
+                let _guard = guard;
+                std::future::pending::<u32>().await
+            })).await.unwrap();
+        trigger.await.unwrap();
+        assert_eq!(result, None);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn evidence_is_verbatim_not_a_model_paraphrase_or_translation() {
+        let content = "OriginalType supports amortized O(1) push and O(1) pop.\nThe buffer is contiguous.";
+        let parsed = serde_json::json!({"evidence":[
+            "OriginalType supports amortized O(1) push and O(1) pop.",
+            "OriginalType supports amortized O(1) pop.",
+            "OtherType supports push_front.",
+            "OriginalType a un retrait amorti.",
+            "The buffer   is contiguous."]});
+        let evidence = super::verified_source_evidence(&parsed, content).unwrap();
+        assert_eq!(evidence, "OriginalType supports amortized O(1) push and O(1) pop.\nThe buffer is contiguous.");
+        assert!(super::verified_source_evidence(&serde_json::json!({"evidence":"InventedType supports constant cost for every operation."}), content).is_none());
+    }
+
+    #[test]
+    fn evidence_ids_copy_source_rows_and_legends_without_model_rewriting() {
+        let content = "Costs marked * are amortized.\n| Type | insert(i) | remove(i)\n| Example | O(n-i)* | O(n-i)\nOther context.";
+        assert!(super::numbered_source_content(content).contains("L3: | Example | O(n-i)* | O(n-i)"));
+        let parsed = serde_json::json!({"evidence_ids":[3,1,3,0,999,-1,"2"]});
+        assert_eq!(super::verified_source_evidence(&parsed, content).unwrap(),
+            "| Example | O(n-i)* | O(n-i)\nCosts marked * are amortized.");
+        assert!(super::verified_source_evidence(&serde_json::json!({"evidence_ids":[0,999]}), content).is_none());
+    }
+
     #[test]
     fn fetched_page_sufficiency_does_not_depend_on_discovery() {
         assert_eq!(super::report_source_quality(true, 12, 12), (true, true));
@@ -1385,10 +1504,25 @@ mod tests {
     }
 
     #[test]
+    fn manifest_never_cuts_a_passage_before_its_qualifier() {
+        let findings = vec![super::ResearchFinding {
+            url: "https://example.org/qualified".into(), title: "Qualified source".into(),
+            summary: "Summary is not the original evidence.".into(),
+            evidence: Some(format!("{} only under an amortized bound.", "A lengthy source passage ".repeat(200))),
+            image_url: None,
+        }];
+        let (manifest, represented, omitted) = super::format_source_manifest(&findings);
+        assert_eq!(represented, 0);
+        assert!(omitted);
+        assert!(!manifest.contains("A lengthy source passage"));
+        assert!(!manifest.contains("Summary is not"));
+    }
+
+    #[test]
     fn manifest_shares_evidence_budget_and_quality_uses_represented_pages() {
         let findings: Vec<_> = (0..12).map(|index| super::ResearchFinding {
             url: format!("https://example.org/{index}"), title: format!("Source {index}"),
-            summary: "evidence with a necessary qualifier ".repeat(100),
+            summary: "Evidence with a necessary qualifier.\n".repeat(100),
             evidence: None, image_url: None,
         }).collect();
         let (manifest, represented, omitted) = super::format_source_manifest(&findings);
@@ -1415,11 +1549,11 @@ mod tests {
     fn evidence_and_final_prompts_have_utf8_byte_budgets() {
         let findings: Vec<_> = (0..100).map(|index| super::ResearchFinding {
             url: format!("https://example.org/source/{index}"), title: "Documentation é 🦀".repeat(100),
-            summary: "summary".repeat(1000), evidence: Some("preuve 🦀".repeat(3000)), image_url: None,
+            summary: "summary".repeat(1000), evidence: Some("Complete proof 🦀 with its qualifier.\n".repeat(3000)), image_url: None,
         }).collect();
         let (manifest, _, _) = super::format_source_manifest(&findings);
         assert!(manifest.len() <= super::MANIFEST_BYTES);
-        assert!(manifest.contains("[truncated]"));
+        assert!(manifest.contains("Complete proof 🦀 with its qualifier."));
         assert!(manifest.contains("[Additional sources omitted for context]"));
         for url in super::super::parse::question_source_urls(&manifest, 200) {
             assert!(findings.iter().any(|f| f.url == url), "source URLs must never be cut");
@@ -1429,6 +1563,7 @@ mod tests {
             let prompt = super::report_prompt(template, &long, &long, &manifest, &long, &long, 1024).unwrap();
             assert!(prompt.len() <= super::REPORT_PROMPT_BYTES);
             assert!(!prompt.contains("{source_manifest}"));
+            assert!(!prompt.contains(&super::clip_prompt(&long, 800)), "the evolving model draft must not be passed back as page evidence");
         }
         for limit in 0..=32 { assert!(super::clip_prompt(&long, limit).len() <= limit); }
         assert!(super::report_prompt(super::FINAL_REPORT_PROMPT, "Q", "draft", &long, "", "", 1024).is_none());
