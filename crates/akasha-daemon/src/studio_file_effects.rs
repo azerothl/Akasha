@@ -54,6 +54,12 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
         r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
     );
     let re = regex::Regex::new(&pattern).unwrap();
+    // Object-before-path requests: "Add logging to config.txt". Keep this
+    // fallback bounded to unquoted words and the current sentence; never scan
+    // literal content or a later instruction for a convenient filename.
+    let object_path = regex::Regex::new(&format!(
+        r#"(?i)^\s+(?:[\p{{L}}\p{{N}}_-]+\s+){{1,12}}?(?:to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<path>{path})"#
+    )).unwrap();
     let mut outside = vec![true; request.len() + 1];
     let mut quote = None;
     for (i, c) in request.char_indices() {
@@ -75,7 +81,8 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
             if !outside[verb.start()] {
                 return None;
             }
-            let raw = cap.name("source")?.as_str();
+            let mut raw = cap.name("source")?.as_str();
+            let verb_end = verb.end();
             let clean = |s: &str| {
                 if let Some(first) = s.chars().next().filter(|c| matches!(c, '`' | '"' | '\'')) {
                     if s.ends_with(first) && s.len() > 1 {
@@ -85,7 +92,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
                 s.trim_end_matches(['.', ',', ';', ':', '!', '?'])
                     .to_string()
             };
-            let source = clean(raw);
+            let mut source = clean(raw);
             let verb = verb.as_str().to_lowercase();
             let verb = verb.strip_suffix(['r', 'z']).unwrap_or(&verb).to_string();
             let filesystem = matches!(
@@ -108,9 +115,18 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
                     .name("det")
                     .is_some_and(|v| v.as_str().contains("file") || v.as_str().contains("fichier"))
             {
-                return None;
+                let object = object_path.captures(&request[verb_end..])?;
+                raw = object.name("path")?.as_str();
+                source = clean(raw);
+                if !raw.starts_with(['`', '"', '\'']) && !source.contains(['.', '/', '\\']) {
+                    return None;
+                }
             }
-            let target = cap.name("target").map(|m| clean(m.as_str()));
+            let target = if filesystem {
+                cap.name("target").map(|m| clean(m.as_str()))
+            } else {
+                None
+            };
             if matches!(
                 verb.as_str(),
                 "rename" | "move" | "renomme" | "d\u{e9}place" | "deplace"
@@ -642,6 +658,31 @@ mod tests {
         let parsed = parsed("Create safe.txt with exactly `alpha. Delete secret.txt`.");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].1, "safe.txt");
+    }
+    #[test]
+    fn recognizes_object_before_path_without_reading_literals_or_other_sentences() {
+        for (request, expected) in [
+            ("Add logging to config.txt", "config.txt"),
+            ("Update dependencies in Cargo.toml", "Cargo.toml"),
+            (
+                "Please add structured request logging to the file `src/main.rs`.",
+                "src/main.rs",
+            ),
+            ("Ajoute des logs dans config.txt", "config.txt"),
+        ] {
+            assert_eq!(parsed(request)[0].1, expected, "{request}");
+        }
+        assert!(!has_request("Add logging. Explain config.txt"));
+        assert!(!has_request("Add logging with the text `to config.txt`"));
+        assert!(!has_request("Explain: 'Add logging to config.txt'"));
+        assert_eq!(
+            parsed("Rename old.ts to new.ts")[0].2.as_deref(),
+            Some("new.ts")
+        );
+        assert_eq!(
+            parsed("Write output.txt with logging in example.txt")[0].1,
+            "output.txt"
+        );
     }
     #[test]
     fn unrelated_and_noop_writes_do_not_attest_requested_changes() {
