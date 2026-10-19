@@ -87,28 +87,39 @@ impl NativeCalls {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn finish(self,text:String,finish:Option<&str>)->Result<String,ProviderError>{
+        self.finish_with_functions(text,finish,&[])
+    }
+    pub(crate) fn finish_with_functions(self,text:String,finish:Option<&str>,functions:&[String])->Result<String,ProviderError>{
         if self.0.is_empty(){return Ok(text);}
         if !matches!(finish,Some("tool_calls"|"stop")){return Err(ProviderError::Api("native tool generation incomplete; nothing executed".into()));}
         let mut output=Vec::new();
         for (_, (name,arguments)) in self.0 {
-            if name!="studio_call"{return Err(ProviderError::Api("unsupported native function".into()));}
+            if name!="studio_call" && !functions.contains(&name){return Err(ProviderError::Api("unsupported native function; nothing executed".into()));}
             let value:serde_json::Value=serde_json::from_str(&arguments).map_err(|_|ProviderError::Api("malformed native arguments; nothing executed".into()))?;
             if !value.is_object(){return Err(ProviderError::Api("native arguments must be an object".into()));}
+            let value=if name=="studio_call"{value}else{serde_json::json!({"schema_version":1,"tool":name,"arguments":value})};
             output.push(format!("TOOL_JSON: {value}"));
         }
         Ok(output.join("\n"))
     }
 }
 
+pub(crate) fn advertised_function_names(body:&serde_json::Value)->Vec<String>{
+    body["tools"].as_array().into_iter().flatten().filter_map(|tool|tool.pointer("/function/name").and_then(serde_json::Value::as_str).map(str::to_owned)).collect()
+}
 fn normalize_native_completion(json:&serde_json::Value,text:String)->Result<String,ProviderError>{
+    normalize_native_completion_with_functions(json,text,&[])
+}
+fn normalize_native_completion_with_functions(json:&serde_json::Value,text:String,functions:&[String])->Result<String,ProviderError>{
     let choice=&json["choices"][0];
     let mut calls=NativeCalls::default();
     if let Some(list)=choice.pointer("/message/tool_calls").and_then(|v|v.as_array()) {
         let list=list.iter().enumerate().map(|(index,call)|{let mut call=call.clone();call["index"]=serde_json::json!(index);call}).collect::<Vec<_>>();
         calls.apply(&serde_json::json!({"tool_calls":list}))?;
     }
-    calls.finish(text,choice["finish_reason"].as_str())
+    calls.finish_with_functions(text,choice["finish_reason"].as_str(),functions)
 }
 
 #[cfg(test)]
@@ -151,7 +162,8 @@ mod studio_native_tests {
         assert!(url.ends_with("/api/generate"));
         assert_eq!(raw["raw"],true);
         let prompt=raw["prompt"].as_str().unwrap();
-        assert!(prompt.starts_with("<|im_start|>system\nCurrent policy<|im_end|>"));
+        assert!(prompt.starts_with("<|startoftext|><|im_start|>system\nCurrent policy"));
+        assert!(prompt.contains("<|im_start|>tool\n"));
         assert!(prompt.contains("Write then verify both files"));
         assert!(prompt.contains("second still pending"));
         assert!(prompt.ends_with("<|im_start|>assistant\n"));
@@ -203,6 +215,61 @@ mod studio_native_tests {
         server.join().unwrap();
     }
 
+
+    #[tokio::test]
+    async fn lfm_native_stream_validates_before_exposing_any_tool_payload() {
+        use std::io::{Read,Write};
+        for reason in ["stop","length"] {
+            let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address=listener.local_addr().unwrap();
+            let reply=r#"<|tool_call_start|>[write_file(path="workspace:/é.md", content="é🙂", expected_version="missing")]<|tool_call_end|>"#;
+            let body=format!("{}\n{}\n",json!({"response":reply,"done":false}),json!({"done":true,"done_reason":reason}));
+            let server=std::thread::spawn(move || {
+                let (mut socket,_)=listener.accept().unwrap();
+                let mut request=vec![];let mut buffer=[0u8;1024];
+                let header_end=loop {
+                    let n=socket.read(&mut buffer).unwrap();assert!(n>0);request.extend_from_slice(&buffer[..n]);
+                    if let Some(pos)=request.windows(4).position(|w|w==b"\r\n\r\n"){break pos+4;}
+                };
+                let headers=std::str::from_utf8(&request[..header_end]).unwrap();
+                let length=headers.lines().find_map(|line|line.to_lowercase().strip_prefix("content-length:").map(|n|n.trim().parse::<usize>().unwrap())).unwrap();
+                while request.len()<header_end+length {let n=socket.read(&mut buffer).unwrap();assert!(n>0);request.extend_from_slice(&buffer[..n]);}
+                let value:serde_json::Value=serde_json::from_slice(&request[header_end..header_end+length]).unwrap();
+                assert_eq!(value["raw"],true);assert!(value.get("format").is_none());assert!(value["prompt"].as_str().unwrap().contains("<|tool_call_start|>"));
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            });
+            let provider=OllamaProvider::new(Some(format!("http://{address}")));
+            provider.chat_templates.lock().unwrap().insert("lfm".into(),OllamaConversationTemplate::Lfm2ChatMl);
+            let request:CompletionRequest=serde_json::from_value(json!({"prompt":"write exact content","conversation":[],"require_tool":true,"tools":[{"type":"function","function":{"name":"studio_call","parameters":{"properties":{"tool":{"enum":["write_file"]}}}}}]})).unwrap();
+            let (tx,rx)=std::sync::mpsc::channel();
+            let response=provider.complete_stream_async(&request,"lfm",Duration::from_secs(5),&tx).await;
+            if reason=="stop" {
+                let text=response.unwrap().text;
+                assert!(text.starts_with("TOOL_JSON:"));assert!(text.contains("é🙂"));
+                assert_eq!(rx.try_iter().collect::<Vec<_>>(),vec![text]);
+            } else {assert!(response.is_err());assert!(rx.try_iter().next().is_none());}
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn lfm_vendor_defaults_do_not_override_explicit_sampling() {
+        let provider=OllamaProvider::new(None);
+        provider.chat_templates.lock().unwrap().insert("lfm".into(),OllamaConversationTemplate::Lfm2ChatMl);
+        let request:CompletionRequest=serde_json::from_value(json!({"prompt":"hello","conversation":[]})).unwrap();
+        let (_,body)=provider.build_generate_body(&request,"lfm",false);
+        assert_eq!(body["options"]["temperature"],0.1);
+        assert_eq!(body["options"]["top_k"],50);
+        assert_eq!(body["options"]["repeat_penalty"],1.05);
+        let custom:CompletionRequest=serde_json::from_value(json!({"prompt":"hello","conversation":[],"temperature":0.3,"top_k":21,"repeat_penalty":1.2})).unwrap();
+        let (_,body)=provider.build_generate_body(&custom,"lfm",false);
+        assert_eq!(body["options"]["top_k"],21);
+        assert!((body["options"]["temperature"].as_f64().unwrap()-0.3).abs()<0.00001);
+        assert!((body["options"]["repeat_penalty"].as_f64().unwrap()-1.2).abs()<0.00001);
+        let (_,other)=provider.build_generate_body(&request,"unrelated",false);
+        assert!(other["options"].get("repeat_penalty").is_none());
+    }
+
     fn delta(name: &str, arguments: &str) -> serde_json::Value {
         json!({"tool_calls":[{"index":0,"function":{"name":name,"arguments":arguments}}]})
     }
@@ -214,6 +281,30 @@ mod studio_native_tests {
         calls.apply(&delta("", "🙂\"}")).unwrap();
         let result = calls.finish(String::new(), Some("tool_calls")).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(result.strip_prefix("TOOL_JSON: ").unwrap()).unwrap()["content"], "é🙂");
+    }
+    #[test]
+    fn advertised_functions_use_the_typed_contract_and_reject_unknown_or_incomplete_calls() {
+        let args=json!({"path":"workspace:/é.txt","content":"Exact\n🙂","expected_version":"missing"}).to_string();
+        let mut calls=NativeCalls::default();calls.apply(&delta("write_file",&args)).unwrap();
+        let output=calls.finish_with_functions("ignored prose".into(),Some("tool_calls"),&["write_file".into()]).unwrap();
+        let value:serde_json::Value=serde_json::from_str(output.strip_prefix("TOOL_JSON: ").unwrap()).unwrap();
+        assert_eq!(value["schema_version"],1);assert_eq!(value["tool"],"write_file");assert_eq!(value["arguments"]["content"],"Exact\n🙂");
+        for (name,finish) in [("unknown","tool_calls"),("write_file","length")] {
+            let mut calls=NativeCalls::default();calls.apply(&delta(name,&args)).unwrap();
+            assert!(calls.finish_with_functions(String::new(),Some(finish),&["write_file".into()]).is_err());
+        }
+    }
+    #[test]
+    fn openai_advertises_tool_specific_functions_instead_of_a_union_wrapper() {
+        let request:CompletionRequest=serde_json::from_value(json!({"prompt":"write","require_tool":true,"tools":[{"type":"function","function":{"name":"studio_call","parameters":{"properties":{"tool":{"enum":["write_file","read_file"]}},"oneOf":[
+            {"properties":{"tool":{"enum":["write_file"]},"arguments":{"type":"object","required":["path","content","expected_version"],"properties":{"content":{"type":"string"}}}}},
+            {"properties":{"tool":{"enum":["read_file"]},"arguments":{"type":"object","required":["path"]}}}
+        ]}}}]})).unwrap();
+        let body=OpenAIProvider::new(None,None).build_chat_completions_body(&request,"test");
+        assert_eq!(advertised_function_names(&body),vec!["write_file","read_file"]);
+        assert_eq!(body["tools"][0]["function"]["parameters"]["required"],json!(["path","content","expected_version"]));
+        assert_eq!(body["tools"][1]["function"]["parameters"]["required"],json!(["path"]));
+        assert_eq!(body["tool_choice"],"required");
     }
 
     #[test]
@@ -625,26 +716,13 @@ impl OllamaProvider {
             } else {request.ollama_messages()};
             if let Some(tools)=request.tools.as_ref().filter(|tools|!tools.is_empty()) {body["tools"]=serde_json::json!(tools);}
         } else if matches!(mode,OllamaConversationTemplate::Lfm2ChatMl) {
-            // LiquidAI's text-only ChatML framing for a broken/raw imported Modelfile.
-            // https://huggingface.co/LiquidAI/LFM2-24B-A2B/blob/main/chat_template.jinja
-            // No native tool syntax is advertised on this textual adapter.
-            let mut messages=request.ollama_messages();
-            if let Some(definition)=request.tools.as_ref().and_then(|tools|tools.first()) {
-                let schema=definition.pointer("/function/parameters").unwrap_or(&serde_json::Value::Null).to_string();
-                let guidance=format!("\n[Structured text tool adapter]\nA tool request is a single line TOOL_JSON: followed by one JSON object matching this schema: {schema}\nUse the exact requested path/content. For new files pass expected_version as the string missing. Do not use CLI flags such as --content. Return plain text only when no requested operation remains.\n");
-                let list=messages.as_array_mut().unwrap();
-                if list.first().is_some_and(|m|m["role"]=="system") {
-                    let content=list[0]["content"].as_str().unwrap_or("").to_string()+&guidance;
-                    list[0]["content"]=serde_json::json!(content);
-                } else {list.insert(0,serde_json::json!({"role":"system","content":guidance}));}
-            }
-            let mut framed=String::new();
-            for message in messages.as_array().unwrap() {
-                framed.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n",message["role"].as_str().unwrap_or("user"),message["content"].as_str().unwrap_or("")));
-            }
-            framed.push_str("<|im_start|>assistant\n");
-            body["prompt"]=serde_json::json!(framed);
+            body["prompt"]=serde_json::json!(request.lfm2_chatml_prompt());
             body["raw"]=serde_json::json!(true);
+            // Vendor defaults for this architecture, only when not configured.
+            // Keep explicit user sampling settings intact.
+            if request.temperature.is_none() {body["options"]["temperature"]=serde_json::json!(0.1);}
+            if request.top_k.is_none() {body["options"]["top_k"]=serde_json::json!(50);}
+            if request.repeat_penalty.is_none() {body["options"]["repeat_penalty"]=serde_json::json!(1.05);}
         }
         (url, body)
     }
@@ -718,6 +796,7 @@ impl OllamaProvider {
         let mut native_calls=Vec::new();
         ollama_collect_native_calls(&json,&mut native_calls)?;
         let text=ollama_finish_native_calls(text,native_calls,json["done"].as_bool()==Some(true),json["done_reason"].as_str())?;
+        let text=if body["raw"]==true && request.tools.as_ref().is_some_and(|tools|!tools.is_empty()) {request.lfm2_reply(&text,json["done"]==true && json["done_reason"]=="stop").map_err(ProviderError::Api)?}else{text};
         if text.trim().is_empty() {
             let full = serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string());
             warn!(
@@ -799,6 +878,9 @@ impl OllamaProvider {
             return Err(ProviderError::Api(format!("status {}", resp.status())));
         }
 
+        let structured=body["raw"]==true && request.tools.as_ref().is_some_and(|tools|!tools.is_empty());
+        let (buffer_tx,_buffer_rx)=std::sync::mpsc::channel();
+        let output_tx=if structured {&buffer_tx}else{chunk_tx};
         let mut pending:Vec<u8> = Vec::new();
         let mut accumulated_text = String::new();
         let mut thinking_buf = String::new();
@@ -845,7 +927,7 @@ impl OllamaProvider {
                     &mut thinking_buf,
                     &mut thinking_final,
                     &mut last_done_json,
-                    chunk_tx,
+                    output_tx,
                 )?;
                 ollama_check_stream_body_cap(
                     &accumulated_text,
@@ -863,7 +945,7 @@ impl OllamaProvider {
                 &mut thinking_buf,
                 &mut thinking_final,
                 &mut last_done_json,
-                chunk_tx,
+                output_tx,
             )?;
             ollama_check_stream_body_cap(
                 &accumulated_text,
@@ -883,7 +965,8 @@ impl OllamaProvider {
         let json = last_done_json.as_ref();
         let had_calls=!native_calls.is_empty();
         let text=ollama_finish_native_calls(accumulated_text,native_calls,json.and_then(|j|j["done"].as_bool())==Some(true),json.and_then(|j|j["done_reason"].as_str()))?;
-        if had_calls {let _=chunk_tx.send(text.clone());}
+        let text=if structured {request.lfm2_reply(&text,json.is_some_and(|j|j["done"]==true && j["done_reason"]=="stop")).map_err(ProviderError::Api)?}else{text};
+        if had_calls || structured {let _=chunk_tx.send(text.clone());}
         if text.trim().is_empty() {
             let full = json
                 .map(|j| serde_json::to_string_pretty(j).unwrap_or_else(|_| j.to_string()))
@@ -1002,7 +1085,7 @@ impl OpenAIProvider {
             }
             _ => serde_json::json!(request.prompt),
         };
-        let messages = request.chat_messages(user_content);
+        let messages = request.native_chat_messages(user_content);
 
         let mut body = serde_json::json!({
             "model": model,
@@ -1025,7 +1108,7 @@ impl OpenAIProvider {
                 body["reasoning_effort"] = serde_json::json!(level);
             }
         }
-        if let Some(tools)=request.tools.as_ref().filter(|tools|!tools.is_empty()) {body["tools"]=serde_json::json!(tools);body["parallel_tool_calls"]=serde_json::json!(false);if request.require_tool {body["tool_choice"]=serde_json::json!("required");}}
+        if request.tools.as_ref().is_some_and(|tools|!tools.is_empty()) {body["tools"]=serde_json::json!(request.native_functions().into_iter().map(|function|serde_json::json!({"type":"function","function":function})).collect::<Vec<_>>());body["parallel_tool_calls"]=serde_json::json!(false);if request.require_tool {body["tool_choice"]=serde_json::json!("required");}}
         body
     }
 
@@ -1078,7 +1161,7 @@ impl OpenAIProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let text=normalize_native_completion(&json,text)?;
+        let text=normalize_native_completion_with_functions(&json,text,&advertised_function_names(&body))?;
         let usage = json.get("usage").map(|u| TokenUsage {
             prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),

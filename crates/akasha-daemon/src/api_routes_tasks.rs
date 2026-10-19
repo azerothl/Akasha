@@ -2215,7 +2215,13 @@ if method == "POST" && path == "/api/message" {
         );
     }
     if let Some(ref root) = studio_disk_root {
-        if let Some(plan) = crate::api_studio::studio_code_plan_message_prefix(root) {
+        let direct_files=studio_delegate_single_level && studio_code_mode.as_deref()!=Some("plan")
+            && !matches!(composer_mode.as_deref(),Some("ask"|"architect")) && studio_ticket_id.is_none()
+            && studio_evolution_branch.is_none()
+            && crate::api_llm_loop::scoped_file_request(&raw_user_message);
+        let plan=if direct_files {crate::api_studio::scoped_file_plan_context(root)} else {crate::api_studio::studio_code_plan_message_prefix(root)};
+        let prune_plan_chunks=direct_files && plan.as_deref().is_some_and(|prefix|prefix.starts_with(crate::api_llm_loop::DIRECT_FILE_TASK_MARKER));
+        if let Some(plan) = plan {
             message_for_llm = format!("{plan}{message_for_llm}");
         }
         if let Some(s) = crate::api_studio::studio_project_summary_prefix(root) {
@@ -2289,12 +2295,15 @@ if method == "POST" && path == "/api/message" {
                     .unwrap_or(6_000);
                 let code_ctx = tokio::task::spawn_blocking(move || {
                     let store = crate::code_rag::CodeRagStore::new(&data_dir);
-                    let chunks = store.retrieve(
+                    let mut chunks = store.retrieve(
                         &pid,
                         &root,
                         &query,
                         crate::code_rag::RetrieveOptions { top_k, max_chars },
                     )?;
+                    // The direct-file prefix already preserves plan constraints.
+                    // Do not reintroduce its maintenance templates through RAG.
+                    if prune_plan_chunks {chunks.retain(|chunk|!chunk.path.eq_ignore_ascii_case("CODE_STUDIO_PLAN.md"));}
                     Ok::<_, anyhow::Error>(crate::code_rag::format_retrieved_chunks(
                         &chunks, max_chars,
                     ))

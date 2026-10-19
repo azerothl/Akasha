@@ -3,6 +3,7 @@
 pub mod classifier;
 pub mod config;
 mod conversation;
+mod lfm2;
 pub use conversation::{ConversationMessage, MessageRole};
 pub mod discovery;
 pub mod fallback;

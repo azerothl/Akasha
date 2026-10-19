@@ -26,9 +26,17 @@ fn apply_openai_delta(
 }
 
 pub async fn read_openai_compatible_sse_stream(
+    resp: reqwest::Response,
+    model_fallback: &str,
+    chunk_tx: &std::sync::mpsc::Sender<String>,
+) -> Result<CompletionResponse, ProviderError> {
+    read_openai_sse_with_functions(resp,model_fallback,chunk_tx,&[]).await
+}
+async fn read_openai_sse_with_functions(
     mut resp: reqwest::Response,
     model_fallback: &str,
     chunk_tx: &std::sync::mpsc::Sender<String>,
+    functions: &[String],
 ) -> Result<CompletionResponse, ProviderError> {
     if resp.status().as_u16() == 429 {
         return Err(ProviderError::RateLimit);
@@ -146,7 +154,7 @@ pub async fn read_openai_compatible_sse_stream(
     }
 
     Ok(CompletionResponse {
-        text: native_calls.finish(full_text,finish_reason.as_deref())?,
+        text: native_calls.finish_with_functions(full_text,finish_reason.as_deref(),functions)?,
         usage: last_usage,
         model_used: model_used.unwrap_or_else(|| model_fallback.to_string()),
         cost_usd: None,
@@ -379,11 +387,38 @@ pub async fn post_openai_chat_completions_stream(
             ProviderError::Api(e.to_string())
         }
     })?;
-    read_openai_compatible_sse_stream(resp, model_fallback, chunk_tx).await
+    read_openai_sse_with_functions(resp, model_fallback, chunk_tx,&crate::provider::advertised_function_names(&body)).await
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn posted_native_function_catalogue_controls_sse_normalization() {
+        use std::io::{Read,Write};
+        use serde_json::json;
+        for name in ["write_file","unadvertised"] {
+            let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+            let worker=std::thread::spawn(move || {
+                let (mut socket,_)=listener.accept().unwrap();let mut bytes=vec![];let mut buffer=[0u8;1024];
+                let end=loop {let count=socket.read(&mut buffer).unwrap();assert!(count>0);bytes.extend_from_slice(&buffer[..count]);if let Some(pos)=bytes.windows(4).position(|w|w==b"\r\n\r\n"){break pos+4;}};
+                let header=std::str::from_utf8(&bytes[..end]).unwrap();
+                let length=header.lines().find_map(|line|line.to_lowercase().strip_prefix("content-length:").map(|n|n.trim().parse::<usize>().unwrap())).unwrap();
+                while bytes.len()<end+length {let count=socket.read(&mut buffer).unwrap();assert!(count>0);bytes.extend_from_slice(&buffer[..count]);}
+                let request:serde_json::Value=serde_json::from_slice(&bytes[end..end+length]).unwrap();
+                assert_eq!(request["tools"][0]["function"]["name"],"write_file");assert_eq!(request["stream"],true);
+                let arguments=json!({"path":"workspace:/é.txt","content":"Exact\n🙂","expected_version":"missing"}).to_string();
+                let chunk=json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":name,"arguments":arguments}}]},"finish_reason":"tool_calls"}]});
+                let body=format!("data: {chunk}\n\ndata: [DONE]\n\n");
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            });
+            let (tx,rx)=std::sync::mpsc::channel();
+            let body=json!({"messages":[],"tools":[{"type":"function","function":{"name":"write_file","parameters":{"type":"object"}}}]});
+            let response=super::post_openai_chat_completions_stream(&reqwest::Client::new(),&format!("http://{address}"),|r|r,body,std::time::Duration::from_secs(5),"fixture",&tx).await;
+            if name=="write_file" {let text=response.unwrap().text;let value:serde_json::Value=serde_json::from_str(text.strip_prefix("TOOL_JSON: ").unwrap()).unwrap();assert_eq!(value["arguments"]["content"],"Exact\n🙂");}
+            else {assert!(response.is_err());assert!(rx.try_iter().all(|chunk|chunk.is_empty()),"Only empty progress heartbeats may precede validation");}
+            worker.join().unwrap();
+        }
+    }
     #[tokio::test]
     async fn final_native_sse_frame_without_newline_keeps_finish_reason() {
         use std::io::{BufRead,Write};

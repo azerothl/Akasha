@@ -86,7 +86,7 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
         "read_file" | "write_file" | "write_code" | "edit_file" | "delete_file" | "apply_patch"
         | "search_replace" => {
             let arg: FileArgs = serde_json::from_value(envelope.arguments.clone())
-                .map_err(|_| "invalid file arguments")?;
+                .map_err(|error| format!("invalid file arguments: {error}. Use only the declared argument names; workspace paths belong in path."))?;
             if arg.path.trim().is_empty() || arg.path.contains(['\0', '\n', '\r']) {
                 return Err("invalid file path".into());
             }

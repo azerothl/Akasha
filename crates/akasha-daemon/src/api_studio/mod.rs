@@ -668,8 +668,37 @@ pub fn studio_code_plan_message_prefix(project_root: &Path) -> Option<String> {
         cleaned
     };
     Some(format!(
-        "[Contexte projet — CODE_STUDIO_PLAN.md (gabarit à sections fixes ; à respecter tant que l’utilisateur ne demande pas explicitement autre chose ; les agents doivent le mettre à jour **par section**, pas en réécriture totale systématique) :\n{body}\n]\n\n"
+        "[Contexte projet — contenu de CODE_STUDIO_PLAN.md. Le gabarit et ses titres s’appliquent uniquement à CODE_STUDIO_PLAN.md ; ne pas les copier dans les fichiers demandés. Mettre ce plan à jour par section seulement si la tâche le nécessite, sans réécriture totale systématique :\n{body}\n]\n\n"
     ))
+}
+
+/// Keep product constraints for direct file tasks without unrelated history/templates.
+pub(crate) fn scoped_file_plan_context(project_root: &Path) -> Option<String> {
+    let raw=match fs::read_to_string(project_root.join("CODE_STUDIO_PLAN.md")) {
+        Ok(raw)=>raw,
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>String::new(),
+        Err(_)=>return None,
+    };
+    let mut selected=String::new();
+    let mut keep=true;
+    let mut canonical_heading=false;
+    let mut fenced=false;
+    for line in raw.lines() {
+        if line.trim_start().starts_with("```") {fenced=!fenced;}
+        if !fenced && line.starts_with("## ") {
+            if !CODE_STUDIO_PLAN_SECTION_HEADINGS.contains(&line.trim()) {
+                return studio_code_plan_message_prefix(project_root);
+            }
+            canonical_heading=true;
+            keep=matches!(line.trim(),"## Scope"|"## Stack"|"## Structure du projet"|"## Commandes"|"## Fichiers hors scope"|"## Recommandations");
+        }
+        if keep {selected.push_str(line);selected.push('\n');}
+    }
+    let constraints=sanitize_for_prompt(&selected,MAX_CODE_STUDIO_PLAN_INJECT_CHARS);
+    if (!raw.trim().is_empty() && (!canonical_heading || constraints.is_empty())) || selected.trim().chars().count()>constraints.chars().count() {
+        return studio_code_plan_message_prefix(project_root);
+    }
+    Some(format!("{}\nExecute only the user's named file operations, with the exact requested contents and reads in order. Do not add unrelated product planning or copy project maintenance examples into these files. AGENTS.md, tool permissions and the project constraints below still apply. If present, read CODE_STUDIO_PLAN.md with read_file when further project context is needed.\n[Project constraints from CODE_STUDIO_PLAN.md]\n{constraints}\n\n",crate::api_llm_loop::DIRECT_FILE_TASK_MARKER))
 }
 
 /// Build the tech-stack prefix from an already-loaded `StudioMeta`.
@@ -3005,6 +3034,20 @@ fn guess_mime_and_text(rel: &str, bytes: &[u8]) -> (&'static str, bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_file_context_retains_constraints_without_copying_maintenance_examples() {
+        let dir=tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CODE_STUDIO_PLAN.md"),"# Title\nPREAMBLE_CONSTRAINT\n## Scope\nPRODUCT_SCOPE\n## Stack\nSTACK_CONSTRAINT\n## Fichiers hors scope\nKEEP.txt must remain unchanged\n## Demandes d'évolutions utilisateur par phase\nMAINTENANCE_EXAMPLE_BAIT\n## Recommandations\nSTYLE_CONSTRAINT\n## Todos\nUNRELATED_BACKLOG").unwrap();
+        let context=super::scoped_file_plan_context(dir.path()).unwrap();
+        for retained in ["PREAMBLE_CONSTRAINT","PRODUCT_SCOPE","STACK_CONSTRAINT","KEEP.txt","STYLE_CONSTRAINT"] {assert!(context.contains(retained));}
+        assert!(!context.contains("MAINTENANCE_EXAMPLE_BAIT"));
+        assert!(!context.contains("UNRELATED_BACKLOG"));
+        assert!(super::studio_code_plan_message_prefix(dir.path()).unwrap().contains("MAINTENANCE_EXAMPLE_BAIT"));
+        std::fs::write(dir.path().join("CODE_STUDIO_PLAN.md"),"## Custom constraints\nCUSTOM_RULE_MUST_REMAIN").unwrap();
+        let custom=super::scoped_file_plan_context(dir.path()).unwrap();
+        assert!(custom.contains("CUSTOM_RULE_MUST_REMAIN"));
+        assert!(!custom.contains(crate::api_llm_loop::DIRECT_FILE_TASK_MARKER));
+    }
     use super::{ensure_main_or_master_branch, git_list_branches, studio_command_from_argv};
     use std::ffi::OsStr;
 

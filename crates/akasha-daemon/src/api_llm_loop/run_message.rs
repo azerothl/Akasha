@@ -217,7 +217,7 @@ pub(crate) async fn run_message_via_llm(
     // A path shape is not a project identity. Match the dispatcher/ledger gate.
     let code_studio_disk_task = TaskStore::open(&store_path).ok()
             .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten()).is_some();
-    let studio_disk_system_append = {
+    let mut studio_disk_system_append = {
         let proj_base = crate::studio::studio_projects_base(data_dir_for_studio_flags);
         if tool_disk_workspace_root.starts_with(proj_base) {
             format!("{}{}", STUDIO_DISK_REMINDER, STUDIO_AGENT_QUALITY_REMINDER)
@@ -233,6 +233,21 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
+    let context_message=recovery_checkpoint.as_ref().map(|checkpoint|super::studio_conversation::initial_user_context(&checkpoint.conversation,
+        if checkpoint.prompt.contains("[Current user request — task scope]"){&checkpoint.prompt}else{&message})).unwrap_or(&message);
+    let focused_file_task=code_studio_disk_task && assigned_agent=="studio_project_manager"
+        && !context_message.contains("[Délégation obligatoire (Code Studio")
+        && context_message.split("[Current user request — task scope]").next().unwrap_or("").contains(super::DIRECT_FILE_TASK_MARKER)
+        && super::scoped_file_request(context_message);
+    if focused_file_task {
+        // The global quality contract remains, except maintenance templates for
+        // plan/design files which are explicitly outside this direct-file mode.
+        if let Some((before,rest))=STUDIO_AGENT_QUALITY_REMINDER.split_once("- Fichier `CODE_STUDIO_PLAN.md`") {
+            if let Some((_,after))=rest.split_once("- **Corrections sur le disque") {
+                studio_disk_system_append=format!("{STUDIO_DISK_REMINDER}{before}- **Corrections sur le disque{after}");
+            }
+        }
+    }
     if let Some(checkpoint)=recovery_checkpoint.as_ref(){
         let project=TaskStore::open(&store_path).ok().and_then(|store|store.lineage_root_studio_project_id(task_id).ok().flatten());
         if checkpoint.agent!=assigned_agent || project.as_deref()!=Some(&checkpoint.project_id) || checkpoint.workspace.canonicalize().ok()!=tool_disk_workspace_root.canonicalize().ok(){abort_recovery!("Checkpoint context no longer matches the task workspace, project or role");}
@@ -436,7 +451,7 @@ pub(crate) async fn run_message_via_llm(
     // small local models: they latch onto the most recent topic (e.g. Akasha CLI discussion)
     // and copy it instead of answering the actual question.
     // This cap is unconditional — it does NOT require a guardrail prefix to be active.
-    let message_intent_flags_clean = compute_message_intent_flags(clean_message);
+    let message_intent_flags_clean = super::studio_conversation::conversational_intents(clean_message, code_studio_disk_task);
     if !is_small_talk_fast_lane && !is_subagent {
         if message_intent_flags_clean.external_info || message_intent_flags_clean.transport {
             memory_profile.recent_turns_limit = 0;
@@ -770,7 +785,10 @@ pub(crate) async fn run_message_via_llm(
     if !embedded_compact {
         system_prompt.push_str(os_env_block);
     }
-    if let Some(role_prompt) = agent_role_system_prompt(role_agent_for_system_prompt) {
+    let role_prompt=if focused_file_task {
+        Some("You are the Code Studio project manager in direct file execution mode. Execute the user's explicitly named file operations yourself, using the real tools and current permissions. Follow repository instructions and preserved project constraints. Include every explicitly requested read in its requested order: a failed read or a read before creation does not count as a post-write verification. Create a new file with expected_version=missing, then perform the requested read successfully before proceeding to its next step. Preserve exact file bytes: no headings, dates, project templates or explanations unless requested. Do not add unrelated plans, tickets, designs or delegation outside the user's request. Finish only after all requested operations actually ran; do not repeat confirmed writes.")
+    } else {agent_role_system_prompt(role_agent_for_system_prompt)};
+    if let Some(role_prompt) = role_prompt {
         system_prompt.push_str("[Role]\n");
         if embedded_compact {
             let short: String = role_prompt.chars().take(800).collect();
@@ -837,7 +855,7 @@ pub(crate) async fn run_message_via_llm(
         system_prompt.push_str(&repository_rules_prompt);
     }
     if code_studio_disk_task {
-        system_prompt.push_str("\n[Studio execution protocol — file contents are structured data]\nUse native studio_call when available. Otherwise use one TOOL_JSON: object per line with schema_version:1, tool and arguments. For write_file/write_code, arguments MUST contain path (the exact requested workspace:/ path), content (a JSON string containing ONLY the requested file bytes) and expected_version (the string missing for creation, or SHA-256 from read_file for an existing file). Never put a tool call in square brackets or function-call notation. Do not add a summary to a legacy write_file body: it would become file contents. Prefer TOOL_JSON for file writes. Wait for the execution result before summarizing in a separate assistant turn. Retain the original user request until ALL requested operations and checks are done. Project templates and maintenance examples never authorize additional files outside the user's explicit task scope.\n");
+        system_prompt.push_str("\n[Studio execution protocol — file contents are structured data]\nFollow the provider native function transport when available (studio_call or the provider adapter). For text fallback, use one TOOL_JSON: object per line with schema_version:1, tool and arguments. For write_file/write_code, arguments MUST contain path (the exact requested workspace:/ path), content (a JSON string containing ONLY the requested file bytes) and expected_version (the string missing for creation, or SHA-256 from read_file for an existing file). Never put call syntax inside file content. Square-bracket/function notation is valid only when the provider adapter explicitly requires its native format; it is not a legacy TOOL format. Do not add a summary to a legacy write_file body: it would become file contents. Prefer TOOL_JSON for file writes. Wait for the execution result before summarizing in a separate assistant turn. Retain the original user request until ALL requested operations and checks are done. Project templates and maintenance examples never authorize additional files outside the user's explicit task scope.\n");
     }
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
@@ -1195,7 +1213,7 @@ pub(crate) async fn run_message_via_llm(
     // IMPORTANT: intent classification must use the clean user message (without guardrail/prefix
     // injections). Using the raw `message` can falsely trigger intents (e.g. transport/maps)
     // from injected context blocks and activate unrelated plugin routing.
-    let intent_flags = compute_message_intent_flags(clean_message);
+    let intent_flags = super::studio_conversation::conversational_intents(clean_message, code_studio_disk_task);
     let plugin_catalog_reminder = if code_studio_disk_task
         || is_small_talk_fast_lane
         || plugin_registry.is_none()
@@ -1405,6 +1423,7 @@ pub(crate) async fn run_message_via_llm(
     let mut explicit_file_goals=if code_studio_disk_task && !restricted_studio_role && !message.contains("[Délégation obligatoire (Code Studio") && !guidance_changed && !human_history {
         super::studio_completion::file_goals(&task_scope)
     } else {vec![]};
+    let explicit_file_literals=if !explicit_file_goals.is_empty() {super::studio_completion::exact_file_literals(&task_scope)}else{vec![]};
 
     let mut reply_text = String::new();
     let mut last_llm_model_used: Option<String> = None;
@@ -1719,10 +1738,10 @@ pub(crate) async fn run_message_via_llm(
                 })
             }else{None};
             let request = CompletionRequest {
-                require_tool: code_studio_disk_task && super::studio_conversation::explicit_file_request(&user_message)
+                require_tool: code_studio_disk_task && ((super::studio_conversation::explicit_file_request(&user_message) && run_outcome.successful_tool_calls == 0)
+                    || (!explicit_file_goals.is_empty() && super::studio_completion::requires_tool_retry(&current_prompt,&run_outcome.checks)))
                     && (matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code")
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
-                    && run_outcome.successful_tool_calls == 0
                     && native_tools.as_ref().is_some_and(|tools|tools[0].pointer("/function/parameters/properties/tool/enum").and_then(|v|v.as_array()).is_some_and(|names|names.iter().any(|name|matches!(name.as_str(),Some("write_file"|"write_code"|"edit_file"|"search_replace"|"apply_patch"))))),
                 conversation: code_studio_disk_task.then(||conversation.clone()),
                 prompt: if code_studio_disk_task {
@@ -2004,10 +2023,15 @@ pub(crate) async fn run_message_via_llm(
             let response =
                 crate::api_llm_stream::choose_merged_response_for_tools(&response, &accumulated);
 
-            // An empty generation is a terminal provider outcome. In particular, the
-            // Studio PM delegation/promise guards must not turn it into another round
-            // whose later prose would hide the original failure.
+            // One observable retry is allowed for an explicit file creation before
+            // any effect, with the physical/tool guards still enforced. Persist its
+            // marker in checks so a restart cannot reset this retry allowance.
             if response.trim().is_empty() {
+                if code_studio_disk_task && scope_unchanged && super::studio_completion::can_retry_empty(&explicit_file_goals,run_outcome.successful_tool_calls,run_outcome.failed_tool_calls,&run_outcome.checks) {
+                    run_outcome.checks.push(serde_json::json!({"kind":"empty_generation_retry","status":"retried","attempt":1,"detail":"Empty response before any tool effect; a real operation is still required. A second empty generation remains model_empty."}));
+                    current_prompt=format!("{delivered_prompt}\n[Empty generation retry — no tool operation ran]\nYour previous generation was empty. Execute the explicitly requested file operations with real tools, in their requested order and exact contents. A final claim cannot replace an operation. After the confirmed operations, finish normally.");
+                    continue;
+                }
                 run_outcome.termination = TerminationReason::ModelEmpty;
                 reply_text = String::new();
                 break 'tool_rounds;
@@ -2311,6 +2335,17 @@ pub(crate) async fn run_message_via_llm(
             {
                 round += 1;
                 let mut tool_results = Vec::new();
+                let mut tool_result_starts = Vec::new();
+                // Validate explicit byte constraints before any dependent batch effect.
+                // Rejected calls and deferred siblings remain visible, without fake results.
+                let literal_errors:Vec<Option<String>>=calls.iter().map(|(name,args)| {
+                    if !scope_unchanged {return None;}
+                    let decoded=(name=="studio_call").then(||crate::studio_tool_contract::decode(&args.join(" ")).ok()).flatten();
+                    let tool=decoded.as_ref().map(|call|call.envelope.tool.as_str()).unwrap_or(name);
+                    let argv=decoded.as_ref().map(|call|call.argv.as_slice()).unwrap_or(args);
+                    super::studio_completion::literal_write_error(&tool_disk_workspace_root,&explicit_file_literals,tool,argv)
+                }).collect();
+                let literal_batch_rejected=literal_errors.iter().any(Option::is_some);
                 let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
                 for (lane, lane_calls) in scheduled_lanes {
@@ -2330,6 +2365,12 @@ pub(crate) async fn run_message_via_llm(
                     .with_correlation(task_id),
                 );
                     for (name, args) in &lane_calls {
+                        tool_result_starts.push(tool_results.len());
+                        if literal_batch_rejected {
+                            let index=tool_result_starts.len()-1;
+                            let error=literal_errors[index].clone().unwrap_or_else(||serde_json::json!({"schema_version":1,"success":false,"error_code":"batch_deferred","error":"No operation executed: this batch contains a file content that violates the explicit user literal. Correct it and request the required operations again in order."}).to_string());
+                            run_outcome.failed_tool_calls+=1;tool_results.push(error);continue;
+                        }
                         let typed_call=if name=="studio_call" {
                             match crate::studio_tool_contract::decode(&args.join(" ")) {
                                 Ok(call)=>Some(call),Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(serde_json::json!({"schema_version":1,"success":false,"error":error}).to_string());continue;}
@@ -3460,8 +3501,13 @@ pub(crate) async fn run_message_via_llm(
                 }
                 let results_blob = tool_results.join("\n");
                 if code_studio_disk_task {
+                    let per_call:Vec<String>=tool_result_starts.iter().enumerate().map(|(index,start)| {
+                        let end=tool_result_starts.get(index+1).copied().unwrap_or(tool_results.len());
+                        let recorded=tool_results[*start..end].join("\n");
+                        if recorded.is_empty(){"No execution result recorded; do not assume success.".into()}else{recorded}
+                    }).collect();
                     if !delivered_prompt.trim().is_empty() {conversation.push(akasha_llm::ConversationMessage::user(delivered_prompt.clone()));}
-                    conversation.extend(super::studio_conversation::tool_turn(&response, &results_blob, round, if scope_unchanged {&task_scope}else{""}));
+                    conversation.extend(super::studio_conversation::tool_turn_with_results(&response, &results_blob, &per_call, round, if scope_unchanged {&task_scope}else{""}));
                     // Current policy/context is reloaded on resume, then kept once in the transcript.
                     resume_overlay.clear();
                 }

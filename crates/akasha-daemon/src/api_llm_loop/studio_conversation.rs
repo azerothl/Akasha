@@ -1,6 +1,18 @@
 use akasha_llm::ConversationMessage;
 use serde_json::{json, Value};
 
+pub(super) fn initial_user_context<'a>(history: &'a [ConversationMessage], fallback: &'a str) -> &'a str {
+    history.iter().find(|message| matches!(message.role,akasha_llm::MessageRole::User) && message.content.contains("[Current user request — task scope]"))
+        .map(|message|message.content.as_str()).unwrap_or(fallback)
+}
+
+pub(super) fn conversational_intents(message: &str, studio: bool) -> crate::api::MessageIntentFlags {
+    // Studio tasks already have their repository/tool contract. Contextual words
+    // such as route, image or camera are often code, not a conversational intent.
+    // These reminders must not tell a code agent to stop editing its workspace.
+    crate::api::compute_message_intent_flags(if studio {""} else {message})
+}
+
 pub(super) fn history_has_question(history: &[ConversationMessage]) -> bool {
     history.iter().any(|message| {
         message.content.contains("TOOL: ask_user") || message.content.contains("[ask_user]")
@@ -55,6 +67,9 @@ pub(super) fn explicit_file_request(message: &str) -> bool {
 
 pub(super) fn parse_calls(response: &str) -> Vec<(String, Vec<String>)> {
     let stripped = crate::api_tool_parser::strip_redacted_reasoning_blocks(response);
+    if let Some(calls) = json_function_calls(&stripped) {
+        return calls;
+    }
     if stripped.trim_start().starts_with("[TOOL:")
         || ["[write_file(", "[write_code(", "[edit_file(", "[read_file("]
             .iter()
@@ -77,14 +92,40 @@ pub(super) fn parse_calls(response: &str) -> Vec<(String, Vec<String>)> {
     calls
 }
 
+// Some chat-compatible models return the function request as message.content.
+// Accept only a complete standalone JSON function envelope, never JSON embedded
+// in prose/examples, and run it through the same typed execution contract.
+fn json_function_calls(response: &str) -> Option<Vec<(String, Vec<String>)>> {
+    if response.len() > 1024 * 1024 { return None; }
+    let value: Value = serde_json::from_str(response.trim()).ok()?;
+    let items = value.as_array().cloned().unwrap_or_else(||vec![value]);
+    if items.is_empty() || !items.iter().all(|item| item["name"]=="studio_call" && item.get("arguments").is_some()
+        && item.as_object().is_some_and(|object|object.keys().all(|key|matches!(key.as_str(),"name"|"arguments")))) {
+        return None;
+    }
+    if items.len()>128 {
+        return Some(vec![("studio_call".into(),vec!["JSON function batch exceeds 128 calls".into()])]);
+    }
+    Some(items.into_iter().map(|item| {
+        let args=&item["arguments"];
+        let encoded=if let Some(text)=args.as_str(){text.to_owned()}else{args.to_string()};
+        ("studio_call".into(),vec![encoded])
+    }).collect())
+}
+
 /// Reconstruct complete native call/result pairs from the normalized wire response.
 /// Legacy text calls remain assistant text followed by an explicitly labelled result.
+#[cfg(test)]
 pub(super) fn tool_turn(
     response: &str,
     results: &str,
     round: u32,
     request: &str,
 ) -> Vec<ConversationMessage> {
+    tool_turn_with_results(response,results,&[],round,request)
+}
+
+pub(super) fn tool_turn_with_results(response:&str, results:&str, per_call:&[String], round:u32, request:&str) -> Vec<ConversationMessage> {
     // Keep the small original goal near the observed result, without issuing a new
     // user "continue" request or reinjecting the full project template/catalogue.
     let scope = user_request(request).chars().take(8000).collect::<String>();
@@ -93,18 +134,18 @@ pub(super) fn tool_turn(
     } else {
         format!("[Recorded execution results]\n{results}\n\n[Original user task — compare these requirements with the recorded effects, including remaining operations]\n{scope}")
     };
-    let calls = crate::api_tool_parser::parse_tool_calls(response);
+    let calls = parse_calls(response);
     if !calls.is_empty()
         && calls.iter().all(|(name, args)| {
             name == "studio_call" && serde_json::from_str::<Value>(&args.join(" ")).is_ok()
         })
     {
         let mut assistant = ConversationMessage::assistant(
-            response
+            if json_function_calls(response).is_some() {String::new()} else {response
                 .lines()
                 .filter(|line| !line.trim_start().starts_with("TOOL_JSON:"))
                 .collect::<Vec<_>>()
-                .join("\n"),
+                .join("\n")},
         );
         let mut outputs = vec![];
         for (index, (_, args)) in calls.iter().enumerate() {
@@ -113,7 +154,11 @@ pub(super) fn tool_turn(
             assistant.tool_calls.push(json!({"id":id,"type":"function","function":{"name":"studio_call","arguments":arguments}}));
             // Reports include operation IDs and any rules/deferred effects for this batch.
             // Never invent successful output for calls rejected before execution.
-            outputs.push(ConversationMessage::tool(id, results.clone()));
+            let content=per_call.get(index).map(|result| {
+                if scope.is_empty() {format!("[Recorded execution result]\n{result}")}
+                else {format!("[Recorded execution result]\n{result}\n\n[Original user task — remaining operations]\n{scope}")}
+            }).unwrap_or_else(||results.clone());
+            outputs.push(ConversationMessage::tool(id, content));
         }
         let mut messages = vec![assistant];
         messages.extend(outputs);
@@ -131,6 +176,35 @@ pub(super) fn tool_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checkpoint_keeps_the_initial_context_mode_after_tool_rounds() {
+        let initial="[Direct file task — explicit paths]\n[Current user request — task scope]\nCrée one.md.\n[End current user request]";
+        let history=vec![ConversationMessage::user(initial.into()),ConversationMessage::assistant("next".into()),ConversationMessage::tool("call".into(),"saved".into())];
+        assert_eq!(initial_user_context(&history,""),initial);
+        assert_eq!(initial_user_context(&[],"fallback"),"fallback");
+    }
+    #[test]
+    fn studio_context_cannot_inject_travel_or_other_conversational_reminders() {
+        let message="Quels sont les horaires du train Paris Lyon ?";
+        assert!(conversational_intents(message,false).transport);
+        let studio=conversational_intents(message,true);
+        assert!(!studio.transport && !studio.external_info && !studio.code_generation && !studio.image_generation && !studio.camera_or_mic);
+    }
+    #[test]
+    fn standalone_json_function_read_uses_the_typed_contract_and_native_history() {
+        let response=r#"[{"name":"studio_call","arguments":{"schema_version":1,"tool":"read_file","arguments":{"path":"workspace:/FIRST.md"}}}]"#;
+        let calls=parse_calls(response);
+        assert_eq!(calls.len(),1);
+        let decoded=crate::studio_tool_contract::decode(&calls[0].1.join(" ")).unwrap();
+        assert_eq!(decoded.envelope.tool,"read_file");
+        let history=tool_turn(response,"alpha",2,"");
+        assert!(history[0].content.is_empty());
+        assert_eq!(history[0].tool_calls[0]["function"]["name"],"studio_call");
+        assert_eq!(history[1].tool_call_id.as_deref(),Some("call_studio_2_0"));
+        assert!(parse_calls(&format!("Example: {response}")).is_empty());
+        assert!(parse_calls(r#"[{"name":"other_function","arguments":{}}]"#).is_empty());
+        assert!(crate::studio_tool_contract::decode(&parse_calls(r#"{"name":"studio_call","arguments":{"tool":"read_file"}}"#)[0].1.join(" ")).is_err());
+    }
     #[test]
     fn native_human_question_remains_visible_after_its_wait_is_cleared() {
         let history=tool_turn(r#"TOOL_JSON: {"schema_version":1,"tool":"ask_user","arguments":{"argv":["question"]}}"#,"[ask_user] User replied: change scope",1,"");
@@ -155,6 +229,15 @@ mod tests {
         );
         assert_eq!(turn[0].tool_calls[0]["function"]["name"], "studio_call");
         assert!(turn[1].content.contains("saved"));
+    }
+    #[test]
+    fn native_batch_results_belong_only_to_their_corresponding_calls() {
+        let call=r#"TOOL_JSON: {"schema_version":1,"tool":"read_file","arguments":{"path":"a.md"}}"#;
+        let response=format!("{call}\n{call}");
+        let turn=tool_turn_with_results(&response,"first result\nsecond result",&["first result".into(),"second result".into()],1,"verify");
+        assert!(turn[1].content.contains("first result") && !turn[1].content.contains("second result"));
+        assert!(turn[2].content.contains("second result") && !turn[2].content.contains("first result"));
+        assert_eq!(turn[0].tool_calls[1]["id"],turn[2].tool_call_id.as_deref().unwrap());
     }
     #[test]
     fn legacy_failed_and_deferred_results_are_preserved_as_data() {

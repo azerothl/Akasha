@@ -3100,8 +3100,8 @@ pub(crate) const CODE_STUDIO_APP_CONTEXT: &str = concat!(
     "Concentre-toi sur le code et la documentation de ce dépôt — pas sur l’interface générale d’Akasha (TUI, onglets, skills hors projet, caméra, météo). ",
     "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
     "Réponds dans la même langue que le dernier message utilisateur. ",
-    "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n",
-    "Sur le premier lot d’un projet : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant de commencer le développement applicatif si ce fichier est absent.\n",
+    "Avant de modifier un fichier existant : le lire ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.). Pour créer un fichier absent, utiliser expected_version=missing ; une lecture échouée avant création ne remplace pas une lecture de vérification demandée après l’écriture.\n",
+    "Pour créer ou faire évoluer une application : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant le développement applicatif si ce fichier est absent. Pour une demande ciblée sur des fichiers précis, respecter uniquement son périmètre et son contenu ; les gabarits du projet ne sont pas des modèles de contenu pour ces fichiers.\n",
     "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_code` pour le code source, `write_file` pour markdown/json/config, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
     "Si un outil d’écriture échoue ou est interdit, expliquer clairement la raison avant toute solution de secours.\n\n",
 );
