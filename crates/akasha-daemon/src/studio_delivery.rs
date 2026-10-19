@@ -49,13 +49,22 @@ impl Output {
         }
     }
 }
+fn resolve_program(root:&Path,program:&str,paths:&std::ffi::OsStr)->Result<PathBuf,String> {
+    let root=root.canonicalize().map_err(|e|e.to_string())?;
+    let suffixes=if cfg!(windows) {vec![".exe",".cmd",".bat",".com",""]}else{vec![""]};
+    let candidate=std::env::split_paths(paths).filter(|dir|dir.is_absolute()).flat_map(|dir|suffixes.iter().map(move |suffix|dir.join(format!("{program}{suffix}")))).find(|path|path.is_file()).ok_or_else(||format!("{program} unavailable on absolute PATH"))?;
+    if candidate.canonicalize().map_err(|e|e.to_string())?.starts_with(&root) || candidate.parent().and_then(|p|p.canonicalize().ok()).is_some_and(|p|p.starts_with(&root)) {return Err("workspace-controlled delivery executable refused".into());}
+    Ok(candidate)
+}
+
 async fn run(
     root: &Path,
     program: &str,
     args: Vec<String>,
     index: Option<&Path>,
 ) -> Result<Output, String> {
-    let mut command = Command::new(program);
+    let executable=resolve_program(root,program,&std::env::var_os("PATH").unwrap_or_default())?;
+    let mut command = Command::new(executable);
     command
         .current_dir(root)
         .args(args)
@@ -121,12 +130,17 @@ async fn run(
     })
 }
 fn unsafe_config_key(key:&str) -> bool {
+    // Repository config is writable by the agent: admit only metadata that these
+    // explicit delivery commands need. New Git launcher/network knobs fail closed.
     let key=key.to_ascii_lowercase();
-    key.starts_with("filter.") || key.starts_with("credential.") || key.starts_with("url.")
-        || key.starts_with("include.") || key.starts_with("includeif.")
-        || key=="core.sshcommand" || key=="core.gitproxy" || key=="core.attributesfile"
-        || key=="core.worktree" || key=="extensions.worktreeconfig"
-        || key.starts_with("remote.") && (key.ends_with(".uploadpack") || key.ends_with(".receivepack") || key.ends_with(".vcs") || key.ends_with(".proxy"))
+    if matches!(key.as_str(),"core.repositoryformatversion"|"core.filemode"|"core.bare"|"core.logallrefupdates"|"core.ignorecase"|"core.precomposeunicode"|"core.autocrlf"|"core.safecrlf"|"core.symlinks"|"core.protectntfs"|"core.protecthfs"|"user.name"|"user.email"|"init.defaultbranch") {return false;}
+    if let Some(rest)=key.strip_prefix("remote.") {
+        return !rest.rsplit_once('.').is_some_and(|(name,field)|valid_name(name) && matches!(field,"url"|"pushurl"|"fetch"));
+    }
+    if let Some(rest)=key.strip_prefix("branch.") {
+        return !rest.rsplit_once('.').is_some_and(|(name,field)|valid_ref(name) && matches!(field,"remote"|"merge"|"pushremote"));
+    }
+    true
 }
 
 /// Approval identity includes the canonical workspace and the actual publication destination.
@@ -141,8 +155,9 @@ async fn git(root: &Path, args: Vec<String>, index: Option<&Path>) -> Result<Out
     // Config inspection does not execute helpers. Reject repository-controlled
     // launchers before any delivery Git command (including read-only preflight).
     let config = run(root, "git", ["config", "--local", "--no-includes", "--name-only", "--list"].iter().map(|x|x.to_string()).collect(), None).await?;
-    if config.code == Some(0) && config.out.lines().any(unsafe_config_key) {
-        return Err("repository Git helper/include configuration is unsupported for delivery".into());
+    if config.code != Some(0) {return Err("repository Git configuration cannot be inspected safely; delivery refused".into());}
+    if config.out.lines().any(unsafe_config_key) {
+        return Err("repository Git helper/network/include configuration is unsupported for delivery".into());
     }
     let hooks = tempfile::tempdir().map_err(|e| e.to_string())?;
     let mut argv = vec![
@@ -1234,7 +1249,19 @@ pub(crate) async fn route(
 mod helper_config_regressions {
     use super::*;
     #[test] fn rejects_repository_process_launchers_and_includes() {
-        for key in ["filter.evil.clean","credential.helper","core.sshCommand","url.https://evil/.insteadOf","include.path","includeIf.gitdir:foo.path","remote.origin.receivepack"] {assert!(unsafe_config_key(key),"{key}");}
+        for key in ["http.proxy","http.sslVerify","http.extraHeader","http.https://github.com/.proxy","gc.recentObjectsHook","filter.evil.clean","credential.helper","core.sshCommand","url.https://evil/.insteadOf","include.path","includeIf.gitdir:foo.path","remote.origin.receivepack"] {assert!(unsafe_config_key(key),"{key}");}
         for key in ["core.repositoryformatversion","core.bare","remote.origin.url","branch.main.merge","user.name"] {assert!(!unsafe_config_key(key),"{key}");}
+    }
+}
+
+#[cfg(test)]
+mod executable_regressions {
+    use super::*;
+    #[test] fn workspace_cannot_supply_the_delivery_executable() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path().join("workspace");std::fs::create_dir(&root).unwrap();
+        let name=if cfg!(windows) {"git.exe"}else{"git"};std::fs::write(root.join(name),"must not run").unwrap();
+        let paths=std::env::join_paths([root.as_path()]).unwrap();assert!(resolve_program(&root,"git",&paths).is_err());
+        let tools=dir.path().join("trusted");std::fs::create_dir(&tools).unwrap();std::fs::write(tools.join(name),"fixture only").unwrap();
+        let paths=std::env::join_paths([tools.as_path()]).unwrap();assert_eq!(resolve_program(&root,"git",&paths).unwrap(),tools.join(name));
     }
 }
