@@ -351,13 +351,18 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
     (serverRunId: string, initialRun: ResearchRun): Promise<void> => {
       serverRunIdRef.current = serverRunId;
       let current = initialRun;
+      let polling = false;
+      let terminal = false;
       stopPolling();
       return new Promise<void>((resolve, reject) => {
         const tick = async () => {
+          if (polling || terminal) return;
+          polling = true;
           try {
             const server = await pollRun(serverRunId, current);
             current = serverToRun(server, current);
             if (server.phase === "done" || server.phase === "error" || server.phase === "cancelled") {
+              terminal = true;
               stopPolling();
               if (server.phase === "error") {
                 reject(new ResearchPollingError(server.error ?? (en ? "Research failed" : "Recherche échouée"), current));
@@ -367,8 +372,11 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
               }
             }
           } catch (e) {
+            terminal = true;
             stopPolling();
             reject(new ResearchPollingError(e instanceof Error ? e.message : String(e), current));
+          } finally {
+            polling = false;
           }
         };
         void tick();
@@ -416,10 +424,17 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   const cancelRun = async () => {
     const sid = serverRunIdRef.current;
     if (!sid) return;
-    await fetchEndpoint(`/api/research/deep/runs/${encodeURIComponent(sid)}/cancel`, { method: "POST" });
-    stopPolling();
-    setLoading(false);
-    setPhase("idle");
+    setErr(null);
+    try {
+      const res = await fetchEndpoint(`/api/research/deep/runs/${encodeURIComponent(sid)}/cancel`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // The watcher must receive and persist the terminal snapshot before it
+      // resolves. Stopping it here left history running and its promise pending.
+    } catch {
+      setErr(en
+        ? "Cancellation could not be confirmed. Research is still being tracked; try cancelling again."
+        : "L’annulation n’a pas pu être confirmée. Le suivi de la recherche continue ; réessayez d’annuler.");
+    }
   };
 
   const run = async () => {
@@ -558,8 +573,8 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   const inDraft = selectedId === null;
   const branches = inDraft ? [] : (selected?.branches ?? []);
   const reportReady = !inDraft && selected?.status === "complete" && quality !== "empty" && !loading;
-  const reportError = !inDraft && !loading
-    ? err || selected?.error || (selected?.status === "complete" && quality === "empty" ? "research_no_evidence" : null)
+  const reportError = !inDraft
+    ? err || (!loading ? selected?.error || (selected?.status === "complete" && quality === "empty" ? "research_no_evidence" : null) : null)
     : null;
 
   useNotifyOnMessage(err, "error", t("tabs.research"));
