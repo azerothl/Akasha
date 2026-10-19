@@ -90,3 +90,8 @@ Les références Markdown sont résolues avec le parseur sur le document complet
 ### Blocs Markdown et légendes après tableau
 
 Le découpage utilise les limites des blocs du parseur Markdown et conserve les exemples de code, listes et tableaux entiers. Les citations sont ajoutées dans un paragraphe séparé pour préserver les clôtures de code. La collecte recherche aussi les qualifications dans les 14 lignes suivant le tableau. Trois régressions supplémentaires : 59 tests Rust Recherche réussis.
+
+
+### Débits et limites par unité
+
+Le parseur écarte les nombres de mots suivis de « per », « par » ou « / » : un débit de génération ou une limite par élément ne devient pas une contrainte sur la longueur totale du rapport. Les tests couvrent aussi la coexistence d’un débit et d’une véritable limite de réponse ; 59 tests Rust Recherche réussis.

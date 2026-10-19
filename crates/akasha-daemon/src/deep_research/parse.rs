@@ -249,7 +249,12 @@ pub fn requested_max_words(topic: &str) -> Option<usize> {
     let re = LIMIT.get_or_init(|| Regex::new(
         r"(?i)(?:\b(\d{1,6})\s+(?:mots?|words?)\s+(?:au\s+maximum|maximum|max\b|au plus)|(?:maximum(?:\s+(?:de|of))?|au plus|at most|no more than|up to|do not exceed|ne pas dépasser|limit\s+(?:the\s+)?(?:answer|report|response)\s+to|limiter\s+(?:la réponse|le rapport)\s+à)\s+(\d{1,6})\s+(?:mots?|words?)\b|(?:\bunder|\bmoins de)\s+(\d{1,6})\s+(?:mots?|words?)\b)"
     ).expect("word limit regex"));
+    static PER_UNIT: OnceLock<Regex> = OnceLock::new();
+    let per_unit = PER_UNIT.get_or_init(|| Regex::new(r"(?i)^\s*(?:per\b|par\b|/)").expect("per-unit word bound"));
     re.captures_iter(topic).filter_map(|cap| {
+        // A throughput or per-item constraint is not the report's total length.
+        let matched = cap.get(0)?;
+        if per_unit.is_match(&topic[matched.end()..]) { return None; }
         let exclusive = cap.get(3).is_some();
         let value = cap.get(1).or_else(|| cap.get(2)).or_else(|| cap.get(3))?
             .as_str().parse::<usize>().ok()?;
@@ -418,6 +423,10 @@ mod tests {
         assert_eq!(requested_max_words("moins de 400 mots"), Some(399));
         assert_eq!(requested_max_words("2026 : 4 sources, 400 mots minimum"), None);
         assert_eq!(requested_max_words("at least 400 words, 3 sources minimum"), None);
+        for metric in ["Which systems can generate up to 10 words per second?", "maximum 400 mots par minute", "up to 10 words/s", "under 20 words per item"] {
+            assert_eq!(requested_max_words(metric), None, "{metric}");
+        }
+        assert_eq!(requested_max_words("up to 10 words per second; answer in 400 words maximum"), Some(400));
         assert_eq!(requested_max_words("0 words max"), None);
         assert_eq!(requested_max_words("500 words maximum, at most 300 words"), Some(300));
     }
