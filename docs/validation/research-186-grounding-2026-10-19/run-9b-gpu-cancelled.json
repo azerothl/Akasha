@@ -1,0 +1,75 @@
+{
+  "id": "dr_f7120e33262c46e9a2d9292f24866e88",
+  "topic": "Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) : organisation mémoire, accès par indice, ajout/retrait au début et à la fin, complexités amorties et usages. Citer les documents lus et signaler les limites, sans développement hors sujet. Sources officielles à lire :\nhttps://doc.rust-lang.org/std/vec/index.html\nhttps://doc.rust-lang.org/std/collections/vec_deque/index.html\nhttps://doc.rust-lang.org/std/collections/index.html\nhttps://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+  "phase": "analyzing",
+  "round": 1,
+  "max_rounds": 1,
+  "branches": [
+    {
+      "id": "branch_plan",
+      "label": "Planning",
+      "status": "done",
+      "sub_agents": [
+        {
+          "id": "branch_plan_planner_1674b8bc886043bd94ad8796e9f5f5a3",
+          "parent_branch_id": "branch_plan",
+          "role": "planner",
+          "label": "Research plan",
+          "status": "done"
+        },
+        {
+          "id": "branch_plan_classifier_cac79f69fb304059b775675d1bc43167",
+          "parent_branch_id": "branch_plan",
+          "role": "classifier",
+          "label": "Category",
+          "status": "done"
+        }
+      ]
+    },
+    {
+      "id": "round_1",
+      "label": "Round 1",
+      "status": "running",
+      "sub_agents": [
+        {
+          "id": "round_1_query_gen_50f6145a6c2d43f38d7ff017537a00a4",
+          "parent_branch_id": "round_1",
+          "role": "query_gen",
+          "label": "Generating queries",
+          "status": "done"
+        },
+        {
+          "id": "round_1_reader_ffc34d60737641eb85645db0ba75af5a",
+          "parent_branch_id": "round_1",
+          "role": "reader",
+          "label": "https://doc.rust-lang.org/std/vec/index.…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_analyst_5cfe7eaaadd3418a8e83d09185b7a891",
+          "parent_branch_id": "round_1",
+          "role": "analyst",
+          "label": "Synthesizing",
+          "status": "running"
+        }
+      ]
+    }
+  ],
+  "evolving_report": "",
+  "findings": [
+    {
+      "url": "https://doc.rust-lang.org/std/vec/index.html",
+      "title": "https://doc.rust-lang.org/std/vec/index.html",
+      "summary": "La documentation de Vec décrit un tableau contigu à croissance dynamique avec des contenus alloués sur le tas. Il offre une complexité d'accès par indice en O(1), un ajout amorti en O(1) à la fin et un retrait en O(1) depuis la fin. Le texte précise également les contraintes d'allocation mémoire (maximale à isize::MAX) et les règles de conversion avec des pointeurs bruts pour les types non-zéro-taille.",
+      "evidence": "A contiguous growable array type with heap-allocated contents, written Vec<T>.\nVectors have O(1) indexing, amortized O(1) push (to the end) and O(1) pop (from the end).\nVectors ensure they never allocate more than isize::MAX bytes.\nWhen the type is non-zero-sized and the capacity is nonzero, Vec uses the Global allocator for its allocation.\nFor zero-sized types (ZSTs), or when the capacity is zero, the Vec pointer must be non-null and sufficiently aligned.\nThe recommended way to build a Vec of ZSTs if vec! cannot be used is to use ptr::NonNull::dangling."
+    }
+  ],
+  "category": "comparison",
+  "providers_used": [],
+  "research_plan": "",
+  "plan_sub_questions": [],
+  "report_markdown": null,
+  "report_meta": null,
+  "search_degraded": false,
+  "started_at": "2026-10-19T18:50:52.463493500+00:00"
+}
