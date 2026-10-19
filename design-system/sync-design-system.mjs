@@ -38,9 +38,10 @@ function buildAkashaAppBundle() {
   console.log(`  → ${outPath}`);
 }
 
+const uiOnly = process.argv.includes("--ui-only");
 console.log("Syncing design-system…");
-for (const target of TARGETS) {
+for (const target of uiOnly ? TARGETS.slice(0, 1) : TARGETS) {
   syncToDir(target);
 }
-buildAkashaAppBundle();
+if (!uiOnly) buildAkashaAppBundle();
 console.log("Done.");
