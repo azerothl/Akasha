@@ -21,7 +21,6 @@ pub(crate) fn allows_tool(role: &str, tool: &str) -> bool {
             | "git_diff"
             | "git_log"
             | "git_rev_parse"
-            | "workspace_graph_search"
             | "ask_user"
             | "list_skills"
             | "read_skill"
@@ -46,6 +45,35 @@ pub(crate) fn check(
     }
     if role.eq_ignore_ascii_case("studio_planner") && tool == "write_file" {
         planner_plan_path(args, root)?;
+    }
+    if restricted_role(role) {
+        let paths = match tool {
+            "read_file" => {
+                let (tokens, _, _) = crate::api_path_utils::parse_read_file_args(args);
+                vec![tokens.join(" ")]
+            }
+            "file_diff" | "diff_unified" | "dir_compare" => args.iter().take(2).cloned().collect(),
+            "search_files" | "grep_content" | "git_status" | "git_diff" | "git_log"
+            | "git_rev_parse" => args.first().cloned().into_iter().collect(),
+            _ => Vec::new(),
+        };
+        if !paths.is_empty() {
+            let root = root
+                .ok_or("[studio] restricted role requires a workspace")?
+                .canonicalize()
+                .map_err(|e| e.to_string())?;
+            for path in paths {
+                let resolved = crate::api::resolve_tool_disk_path(&path, Some(&root));
+                let resolved = resolved
+                    .canonicalize()
+                    .map_err(|e| format!("[{tool}] read target unavailable: {e}"))?;
+                if !resolved.starts_with(&root) {
+                    return Err(format!(
+                        "[{tool}] {role} can only inspect its task workspace"
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }

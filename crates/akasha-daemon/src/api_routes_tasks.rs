@@ -2148,10 +2148,10 @@ if method == "POST" && path == "/api/message" {
         .and_then(|v| v.get("studio_assigned_agent").and_then(|x| x.as_str()))
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
-    // Code Studio : toujours router vers le chef de projet ; la valeur UI devient une préférence pour les sous-agents.
+    // Plan mode uses the technically restricted planner. Other Studio modes use the manager.
     // Chat composer modes: architect/code force the matching specialist when not in Studio.
     let studio_forced_agent = if studio_disk_root.is_some() {
-        Some("studio_project_manager".to_string())
+        Some(if studio_code_mode.as_deref() == Some("plan") { "studio_planner" } else { "studio_project_manager" }.to_string())
     } else if let Some(ref mode) = composer_mode {
         match mode.as_str() {
             "architect" | "code" => Some(mode.clone()),
@@ -2334,7 +2334,9 @@ if method == "POST" && path == "/api/message" {
                 }
             }
         }
-        if studio_delegate_single_level {
+        if studio_code_mode.as_deref() == Some("plan") {
+            message_for_llm = format!("[Planification bornée : utiliser les outils de lecture et uniquement CODE_STUDIO_PLAN.md pour l’écriture. Aucune délégation ni commande système.]\n\n{}", message_for_llm);
+        } else if studio_delegate_single_level {
             message_for_llm = format!(
                 "[Délégation : privilégier une seule passe agent — éviter les sous-agents ou tâches parallèles implicites sans accord utilisateur.]\n\n{}",
                 message_for_llm

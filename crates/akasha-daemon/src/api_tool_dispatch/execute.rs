@@ -45,8 +45,14 @@ pub(crate) async fn execute_tool_call_impl(
     workspace_root: Option<&std::path::Path>,
     session_id: Option<&str>,
 ) -> (bool, String, Option<String>) {
-    let is_studio_workspace =
-        crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
+    let studio_project_id = store_path.and_then(|sp| TaskStore::open(sp).ok())
+        .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten());
+    let studio_ticket_workspace = studio_project_id.as_deref().and_then(|pid| {
+        let data_dir = store_path?.parent()?;
+        let root = crate::studio::resolve_studio_project_dir(data_dir, pid).ok()?;
+        (root.is_dir() && crate::studio::is_strictly_under_studio_root(&root, &crate::studio::studio_projects_base(data_dir))).then_some(root)
+    }).or_else(|| crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root));
+    let is_studio_workspace = studio_project_id.is_some() || studio_ticket_workspace.is_some();
     let task_for_role = store_path
             .and_then(|sp| TaskStore::open(sp).ok())
             .and_then(|store| store.get(task_id).ok().flatten());
@@ -61,6 +67,11 @@ pub(crate) async fn execute_tool_call_impl(
     if let Some(role) = assigned_agent_for_task.as_deref() {
         if let Err(reason) = crate::studio_role_policy::check(role, tool_name, args, workspace_root) {
             return (false, reason, None);
+        }
+        if is_studio_workspace {
+            if let Err(reason) = crate::studio_capabilities::check(&executor.policy, role, tool_name) {
+                return (false, reason, None);
+            }
         }
     }
     if tool_name.starts_with("mcp_") {
@@ -125,7 +136,7 @@ pub(crate) async fn execute_tool_call_impl(
     let studio_ticket_tool_ok = matches!(
         tool_name,
         "studio_list_tickets" | "studio_create_ticket" | "studio_update_ticket"
-    ) && crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
+    ) && studio_ticket_workspace.is_some();
     let can_use_named_tool =
         executor.policy.can_use_tool(tool_name) || studio_ticket_tool_ok;
     let can_use_plugin_call =
@@ -427,7 +438,7 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "studio_list_tickets" => {
             let Some(root) =
-                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+                studio_ticket_workspace.clone()
             else {
                 return (
                     false,
@@ -458,7 +469,7 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "studio_create_ticket" => {
             let Some(root) =
-                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+                studio_ticket_workspace.clone()
             else {
                 return (
                     false,
@@ -490,7 +501,7 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "studio_update_ticket" => {
             let Some(root) =
-                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+                studio_ticket_workspace.clone()
             else {
                 return (
                     false,
@@ -2356,6 +2367,14 @@ pub(crate) async fn execute_tool_call_impl(
                     } else {
                         format!("[search_files] failed: {}", res.summary)
                     };
+                    let msg = if is_studio_workspace && res.success {
+                        let Some(root)=workspace_root else {return (false,"Studio workspace missing".into(),None);};
+                        let Some(data_dir)=store_path.and_then(Path::parent) else {return (false,"Studio task store missing".into(),None);};
+                        match crate::studio_project_context::rules_for_results(root,&paths.iter().take(20).cloned().collect::<Vec<_>>(),&executor.policy,data_dir,task_id) {
+                            Ok(rules)=>format!("{rules}{msg}"),
+                            Err(error)=>return (false,error,None),
+                        }
+                    } else {msg};
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[search_files] failed: {}", e), None),
@@ -2413,6 +2432,14 @@ pub(crate) async fn execute_tool_call_impl(
                     } else {
                         format!("[grep_content] failed: {}", res.summary)
                     };
+                    let msg = if is_studio_workspace && res.success {
+                        let Some(root)=workspace_root else {return (false,"Studio workspace missing".into(),None);};
+                        let Some(data_dir)=store_path.and_then(Path::parent) else {return (false,"Studio task store missing".into(),None);};
+                        match crate::studio_project_context::rules_for_results(root,&matches.iter().take(30).map(|(path,_,_)|path.clone()).collect::<Vec<_>>(),&executor.policy,data_dir,task_id) {
+                            Ok(rules)=>format!("{rules}{msg}"),
+                            Err(error)=>return (false,error,None),
+                        }
+                    } else {msg};
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[grep_content] failed: {}", e), None),
@@ -2456,6 +2483,29 @@ pub(crate) async fn execute_tool_call_impl(
                 );
             }
             if is_workspace_virtual_path(&path_str) {
+                // Studio workspaces are disk repositories. A memory-only update is
+                // never a successful Studio write; apply policy to the resolved path.
+                if is_studio_workspace {
+                    let Some(root) = workspace_root else {
+                        return (false, format!("[{usage_tag}] Studio disk workspace missing"), None);
+                    };
+                    let rewritten = rewrite_workspace_plan_path_str(&path_str, task_id, store_path);
+                    let disk_path = strip_verbatim_prefix(resolve_tool_disk_path(&rewritten, Some(root)));
+                    if !crate::studio::is_strictly_under_studio_root(&disk_path, root) {
+                        return (false, format!("[{usage_tag}] path escapes Studio workspace"), None);
+                    }
+                    if let Some(reason) = crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content) {
+                        return (false, format!("[{usage_tag}] {reason}"), None);
+                    }
+                    return match executor.write_file(&disk_path, &content).await {
+                        Ok(result) if result.success => {
+                            sync_workspace_store_from_disk(workspace_store, task_id, store_path, &rewritten, &disk_path).await;
+                            (true, format!("[{usage_tag} {}] saved (disk).", disk_path.display()), None)
+                        }
+                        Ok(result) => (false, format!("[{usage_tag}] {}", result.summary), None),
+                        Err(error) => (false, format!("[{usage_tag}] disk write failed: {error}"), None),
+                    };
+                }
                 match workspace_store {
                     Some(ws) => {
                         let key = path_str

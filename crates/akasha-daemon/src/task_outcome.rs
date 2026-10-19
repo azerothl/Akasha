@@ -13,6 +13,7 @@ pub(crate) enum TerminationReason {
     Timeout,
     ToolRoundLimit,
     VerificationFailed,
+    ContextUnavailable,
 }
 
 #[derive(Default)]
