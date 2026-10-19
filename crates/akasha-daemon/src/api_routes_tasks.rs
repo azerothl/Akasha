@@ -1486,7 +1486,26 @@ pub(crate) fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> St
     const LABEL_MAX: usize = 100;
     match initial_message {
         Some(m) if !m.trim().is_empty() => {
-            let s = m.trim();
+            // Labels describe the request, never the private instructions prepended for the LLM.
+            // Unwrap before truncating, otherwise the user's words can be lost entirely.
+            let mut s = m.trim();
+            if s.starts_with("[Task]\nObjective: ") {
+                s = s.trim_start_matches("[Task]\nObjective: ");
+                s = s.split("\nContext: ").next().unwrap_or(s);
+                s = s.split("\nSuccess criteria:").next().unwrap_or(s);
+            }
+            if s.starts_with("[Orchestrated — disk deliverables REQUIRED]") {
+                s = s.splitn(2, "\n\n").nth(1).unwrap_or("").trim();
+            }
+            if s.starts_with("[Composer mode:") {
+                s = s.splitn(2, "\n\n").nth(1).unwrap_or("").trim();
+            }
+            if s.starts_with("[Pièce(s) jointe(s) à ce message") {
+                s = s.splitn(2, "\n\nMessage : ").nth(1).unwrap_or("");
+                s = s.split("\n\n--- Document(s) joint(s) ---").next().unwrap_or(s).trim();
+            }
+            let clean = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            let s = if clean.is_empty() { "Tâche" } else { clean.as_str() };
             if s.chars().count() > LABEL_MAX {
                 format!("{}…", s.chars().take(LABEL_MAX).collect::<String>())
             } else {
@@ -2629,6 +2648,18 @@ mod tests {
     use akasha_store::Task;
     use chrono::Utc;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn task_label_unwraps_private_instructions_before_truncation() {
+        let id = Uuid::nil();
+        let long_instruction = "Internal instruction. ".repeat(30);
+        let message = format!("[Composer mode: ask]\n{long_instruction}\n\nComparer Vec et HashMap\n  en français");
+        assert_eq!(task_label(Some(&message), &id), "Comparer Vec et HashMap en français");
+        let attachment = "[Composer mode: ask]\nRead only.\n\n[Pièce(s) jointe(s) à ce message : aide]\n\nMessage : Résumer ce document\n\n--- Document(s) joint(s) ---\nsecret attachment body".to_string();
+        assert_eq!(task_label(Some(&attachment), &id), "Résumer ce document");
+        let child = "[Task]\nObjective: [Orchestrated — disk deliverables REQUIRED]\nInternal tools requirement.\n\nCréer le rapport\nContext: private shared plan\nSuccess criteria: secret".to_string();
+        assert_eq!(task_label(Some(&child), &id), "Créer le rapport");
+    }
 
     #[test]
     fn tasks_paths_smoke() {

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type
 import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./chatTranscriptExport";
 import { invoke } from "@tauri-apps/api/core";
 import { E2E_WEB, e2eDaemonGetJson, e2eDaemonHttpUrl } from "./e2eDaemon";
+import { taskTitle, taskStatus } from "./tasks/presentation";
 
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
 import {
@@ -3817,7 +3818,7 @@ function App() {
     return filteredRows.slice(-maxRows);
   }, [tasksEvents, extractTaskDiscussionHighlights, isSimpleMode, taskOrchestrationDebugLevel]);
 
-  const taskDisplayLabel = (task: TaskListItem) => (task.label && task.label.trim() ? task.label.trim() : t("tasks.task_unnamed") + task.id.slice(-8));
+  const taskDisplayLabel = (task: TaskListItem) => taskTitle(task.label, t("tasks.task_unnamed") + task.id.slice(-8));
 
   const exportAdvancedViewCsv = useCallback((visual: EventAdvancedView) => {
     try {
@@ -6492,6 +6493,7 @@ function App() {
             <ActiveWorkDrawer
               locale={locale}
               tasks={activeWorkTasks}
+              simple={isSimpleMode}
               onOpenTask={(taskId) => openChatTaskDetail(taskId)}
               onOpenSession={(sid) => void selectChatThread(sid)}
               onCancel={async (taskId) => {
@@ -6559,6 +6561,7 @@ function App() {
               <button
                 type="button"
                 className={`btn-secondary btn-tiny ${chatDualPane ? "active" : ""}`}
+                aria-pressed={chatDualPane}
                 onClick={() => {
                   const next = !chatDualPane;
                   setChatDualPane(next);
@@ -6752,7 +6755,7 @@ function App() {
                       <span>{t("chat.sending")}</span>
                     </div>
                   )}
-                  {Object.keys(runningTaskChips).length > 0 && (
+                  {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && (
                     <div className="chat-chips">
                       {Object.entries(runningTaskChips).map(([tid, { pct, message }]) => {
                         const chipAskUser = parseAskUserMessage(message ?? "");
@@ -6784,6 +6787,10 @@ function App() {
                 <div className="chat-task-summary-bar">
                   <span>{t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}</span>
                   <button type="button" className="chat-task-summary-btn" onClick={() => setTab("tasks")}>{t("chat.open_tasks")}</button>
+                  {Object.keys(pendingHumanInput).map(tid => <button key={tid} type="button" className="chat-task-summary-btn"
+                    onClick={() => { setHumanInputModalTaskId(tid); setHumanInputFreeText(""); }}>
+                    {locale === "en" ? "Reply to the pending question" : "Répondre à la question en attente"}
+                  </button>)}
                 </div>
               )}
               {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && chatToolBatchSummary && (
@@ -6793,7 +6800,7 @@ function App() {
               )}
               <div ref={chatEndRef} aria-hidden />
             </div>
-            {Object.keys(runningTaskChips).length > 0 && (
+            {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && (
                 <div className="chat-subagents-panel">
                   <button
                     type="button"
@@ -7603,7 +7610,7 @@ function App() {
                         <span className={"task-tree-kind-badge " + (selectedTask.parent_task_id ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
                           {selectedTask.parent_task_id ? t("tasks.subtask_badge") : t("tasks.root_badge")}
                         </span>
-                        {selectedTaskHierarchy.length > 1 && (
+                        {!isSimpleMode && selectedTaskHierarchy.length > 1 && (
                           <span className="task-tree-path-summary">
                             {selectedTaskHierarchy.map((task, index) => (
                               <span key={task.id} className="task-tree-path-segment">
@@ -7615,8 +7622,8 @@ function App() {
                         )}
                       </div>
                       <div className="task-center-selected-meta">
-                        <span className={"activity-task-status-pill status-" + selectedTask.status}>{selectedTask.status}</span>
-                        {selectedTask.assigned_agent && <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(selectedTask.assigned_agent)}>{selectedTask.assigned_agent}</span>}
+                        <span className={"activity-task-status-pill status-" + selectedTask.status}>{taskStatus(selectedTask.status, locale)}</span>
+                        {!isSimpleMode && selectedTask.assigned_agent && <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(selectedTask.assigned_agent)}>{selectedTask.assigned_agent}</span>}
                         {selectedTaskSummary?.progressPct != null && selectedTask.status === "running" && (
                           <span className="task-live-progress-pill">
                             {t("tasks.progress_pct_summary").replace("{{pct}}", String(selectedTaskSummary.progressPct))}
@@ -7625,10 +7632,10 @@ function App() {
                         {selectedTask.created_at && <span>{formatRelativeTimeLabel(selectedTask.created_at, locale)}</span>}
                       </div>
                     </div>
-                    {selectedTaskSummary?.routeHint ? (
+                    {!isSimpleMode && selectedTaskSummary?.routeHint ? (
                       <p className="task-center-selected-route">{selectedTaskSummary.routeHint}</p>
                     ) : null}
-                    {selectedTaskSummary?.latestSummary ? (
+                    {isSimpleMode ? null : selectedTaskSummary?.latestSummary ? (
                       <p className="task-center-selected-text">{selectedTaskSummary.latestSummary}</p>
                     ) : selectedTaskSummary?.runningChip?.message ? (
                       <p className="task-center-selected-text">{trimPreview(selectedTaskSummary.runningChip.message, 180)}</p>
@@ -7648,7 +7655,23 @@ function App() {
               <p>{locale === "en" ? "Create a task here or describe what you need in Chat. Its progress and result will appear here." : "Créez une tâche ici ou décrivez votre besoin dans le Chat. Son avancement et son résultat apparaîtront ici."}</p>
               <button type="button" className="btn-secondary" onClick={() => setTab("chat")}>{locale === "en" ? "Open Chat" : "Ouvrir le Chat"}</button>
             </div>}
-            {!tasksLoading && tasksList.length > 0 && (
+            {!tasksLoading && tasksList.length > 0 && isSimpleMode && (
+              <div className="task-simple-details">
+                <p>{locale === "en" ? "Progress appears above. The conversation contains the response; Expert mode shows the execution details."
+                  : "L’avancement est affiché ci-dessus. La réponse se trouve dans la conversation ; le mode Expert donne accès aux détails d’exécution."}</p>
+                <button type="button" className="btn-secondary" onClick={() => {
+                  const sid = selectedTask?.session_id ?? loadTaskSessionMap()[selectedTask?.id ?? ""];
+                  if (sid) void selectChatThread(sid);
+                  setTab("chat");
+                }}>
+                  {locale === "en" ? "Open Chat" : "Ouvrir le Chat"}
+                </button>{" "}
+                <button type="button" className="btn-secondary" onClick={() => setUiModeAndSave("expert")}>
+                  {locale === "en" ? "Show technical details" : "Afficher les détails techniques"}
+                </button>
+              </div>
+            )}
+            {!tasksLoading && tasksList.length > 0 && !isSimpleMode && (
               <div className="activity-panel-body">
                 <div
                   className={

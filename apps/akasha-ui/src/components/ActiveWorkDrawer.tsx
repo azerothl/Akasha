@@ -1,4 +1,5 @@
 import { Fragment, useState } from "react";
+import { taskStatus, taskTitle } from "../tasks/presentation";
 
 type ActiveTask = {
   id: string;
@@ -11,6 +12,7 @@ type ActiveTask = {
 
 type Props = {
   locale: "fr" | "en";
+  simple?: boolean;
   tasks: ActiveTask[];
   onOpenTask: (taskId: string) => void;
   onOpenSession?: (sessionId: string) => void;
@@ -41,6 +43,7 @@ function groupTasks(tasks: ActiveTask[]): { roots: ActiveTask[]; childrenOf: Map
 
 export function ActiveWorkDrawer({
   locale,
+  simple = true,
   tasks,
   onOpenTask,
   onOpenSession,
@@ -60,10 +63,10 @@ export function ActiveWorkDrawer({
       <Fragment key={t.id}>
         <li className={`active-work-item${nested ? " active-work-item-child" : ""}`}>
           <button type="button" className="active-work-label" onClick={() => onOpenTask(t.id)}>
-            <span className="active-work-status">{t.status}</span>
+            <span className="active-work-status">{taskStatus(t.status, locale)}</span>
             <span className="active-work-title">
               {nested ? "↳ " : ""}
-              {t.label?.trim() || t.id.slice(0, 8)}
+              {taskTitle(t.label, en ? "Current request" : "Demande en cours")}
             </span>
           </button>
           <div className="active-work-actions">
@@ -72,7 +75,7 @@ export function ActiveWorkDrawer({
                 {en ? "Session" : "Session"}
               </button>
             ) : null}
-            {!nested && kids.length > 0 ? (
+            {!simple && !nested && kids.length > 0 ? (
               <button
                 type="button"
                 className="btn-secondary btn-tiny"
@@ -88,7 +91,7 @@ export function ActiveWorkDrawer({
                 {en ? "Cancel all" : "Tout annuler"}
               </button>
             ) : null}
-            {!nested && kids.length > 0 && onCancelChildren ? (
+            {!simple && !nested && kids.length > 0 && onCancelChildren ? (
               <button type="button" className="btn-secondary btn-tiny" onClick={() => onCancelChildren(t.id)}>
                 {en ? "Cancel children" : "Annuler enfants"}
               </button>
@@ -103,7 +106,7 @@ export function ActiveWorkDrawer({
             </button>
           </div>
         </li>
-        {inspecting && kids.length > 0 ? (
+        {!simple && inspecting && kids.length > 0 ? (
           <li
             id={`active-work-inspect-${t.id}`}
             className="active-work-inspect"
@@ -133,7 +136,7 @@ export function ActiveWorkDrawer({
             </ul>
           </li>
         ) : null}
-        {kids.map((c) => renderRow(c, true))}
+        {!simple && kids.map((c) => renderRow(c, true))}
       </Fragment>
     );
   };
@@ -141,7 +144,7 @@ export function ActiveWorkDrawer({
     <div className="active-work-drawer" role="region" aria-label={en ? "Active work" : "Travail actif"}>
       <div className="active-work-drawer-header">
         <strong>{en ? "Active work" : "Travail actif"}</strong>
-        <span className="muted">({tasks.length})</span>
+        <span className="muted">({simple ? roots.length : tasks.length})</span>
       </div>
       <ul className="active-work-list">{roots.map((t) => renderRow(t, false))}</ul>
     </div>
