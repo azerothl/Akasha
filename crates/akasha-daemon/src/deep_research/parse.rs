@@ -153,15 +153,26 @@ fn markdown_citation_urls(text: &str) -> Vec<String> {
 }
 
 pub fn strip_html(html: &str) -> String {
-    fn append(element: scraper::ElementRef<'_>, text: &mut String) {
+    fn append(element: scraper::ElementRef<'_>, text: &mut String, in_pre: bool) {
         let name = element.value().name();
         if matches!(name, "script" | "style" | "nav" | "aside" | "header" | "footer") { return; }
+        let in_pre = in_pre || name == "pre";
         let block = matches!(name, "p" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "pre" | "br");
         if block { text.push('\n'); }
         if matches!(name, "td" | "th") { text.push_str(" | "); }
         for child in element.children() {
-            if let scraper::Node::Text(value) = child.value() { text.push_str(value); }
-            else if let Some(child) = scraper::ElementRef::wrap(child) { append(child, text); }
+            if let scraper::Node::Text(value) = child.value() {
+                if in_pre { text.push_str(value); }
+                else {
+                    // Source formatting newlines are not paragraph boundaries.
+                    // Keep inline spacing without joining words around code tags.
+                    for ch in value.chars() {
+                        if ch.is_whitespace() {
+                            if !text.ends_with([' ', '\n']) { text.push(' '); }
+                        } else { text.push(ch); }
+                    }
+                }
+            } else if let Some(child) = scraper::ElementRef::wrap(child) { append(child, text, in_pre); }
         }
         if block { text.push('\n'); }
     }
@@ -169,7 +180,7 @@ pub fn strip_html(html: &str) -> String {
     let selector = scraper::Selector::parse("main, article").expect("content selector");
     let root = document.select(&selector).next().unwrap_or_else(|| document.root_element());
     let mut text = String::new();
-    append(root, &mut text);
+    append(root, &mut text, false);
     text.lines().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n")
 }
@@ -382,6 +393,16 @@ fn normalize_image_url(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_line_wraps_do_not_split_a_qualified_sentence() {
+        let html = "<main><p>Vectors have O(1) indexing, amortized O(1) push (to the end) and\nO(1) pop (from the end).</p><p>Written <code>Vec&lt;T&gt;</code>, not another type.</p><pre>line 1\nline 2</pre></main>";
+        let text = strip_html(html);
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines[0], "Vectors have O(1) indexing, amortized O(1) push (to the end) and O(1) pop (from the end).");
+        assert_eq!(lines[1], "Written Vec<T>, not another type.");
+        assert!(text.contains("line 1\nline 2"));
+    }
 
     #[test]
     fn page_text_preserves_tables_qualifiers_and_excludes_navigation() {
