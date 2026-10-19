@@ -178,9 +178,9 @@ mod studio_native_tests {
     fn ollama_native_arguments_are_complete_and_never_exposed_after_truncation() {
         let frame=json!({"message":{"tool_calls":[{"function":{"name":"studio_call","arguments":{"schema_version":1,"tool":"write_file","arguments":{"path":"workspace:/a.md","content":"é🙂","expected_version":"missing"}}}}]}});
         let mut calls=vec![];ollama_collect_native_calls(&frame,&mut calls).unwrap();
-        assert!(ollama_finish_native_calls(String::new(),calls.clone(),true,Some("length"),&["write_file".into()]).is_err());
-        assert!(ollama_finish_native_calls(String::new(),calls.clone(),false,None,&["write_file".into()]).is_err());
-        let output=ollama_finish_native_calls(String::new(),calls,true,Some("stop"),&["write_file".into()]).unwrap();
+        assert!(ollama_finish_native_calls(String::new(),calls.clone(),true,Some("length"),&["write_file".into()],false).is_err());
+        assert!(ollama_finish_native_calls(String::new(),calls.clone(),false,None,&["write_file".into()],false).is_err());
+        let output=ollama_finish_native_calls(String::new(),calls,true,Some("stop"),&["write_file".into()],false).unwrap();
         assert!(output.starts_with("TOOL_JSON:"));assert!(output.contains("é🙂"));
         let invalid=json!({"message":{"tool_calls":[{"function":{"name":"studio_call","arguments":"incomplete"}}]}});
         assert!(ollama_collect_native_calls(&invalid,&mut vec![]).is_err());
@@ -191,10 +191,32 @@ mod studio_native_tests {
         let valid=json!({"schema_version":1,"tool":"write_file","arguments":{"path":"workspace:/a","content":"safe","expected_version":"missing"}});
         let invalid=json!({"schema_version":1,"tool":"run_command","arguments":{"program":"node"}});
         for calls in [vec![invalid.clone()],vec![valid.clone(),invalid]] {
-            assert!(ollama_finish_native_calls(String::new(),calls,true,Some("stop"),&["write_file".into(),"read_file".into()]).is_err());
+            assert!(ollama_finish_native_calls(String::new(),calls,true,Some("stop"),&["write_file".into(),"read_file".into()],false).is_err());
         }
-        assert!(ollama_finish_native_calls(String::new(),vec![valid.clone()],true,Some("stop"),&[]).is_err());
-        assert!(ollama_finish_native_calls(String::new(),vec![valid],true,Some("stop"),&["write_file".into()]).is_ok());
+        assert!(ollama_finish_native_calls(String::new(),vec![valid.clone()],true,Some("stop"),&[],false).is_err());
+        assert!(ollama_finish_native_calls(String::new(),vec![valid],true,Some("stop"),&["write_file".into()],false).is_ok());
+    }
+    #[tokio::test]
+    async fn ollama_chat_requires_native_calls_in_both_response_paths() {
+        use std::io::{Read,Write};
+        assert!(ollama_finish_native_calls("Just prose".into(),vec![],true,Some("stop"),&["write_file".into()],true).is_err());
+        assert_eq!(ollama_finish_native_calls("Final answer".into(),vec![],true,Some("stop"),&[],false).unwrap(),"Final answer");
+        for stream in [false,true] {
+            let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+            let worker=std::thread::spawn(move||{
+                let (mut socket,_)=listener.accept().unwrap();let mut bytes=vec![];let mut buffer=[0u8;1024];
+                let end=loop{let n=socket.read(&mut buffer).unwrap();assert!(n>0);bytes.extend_from_slice(&buffer[..n]);if let Some(pos)=bytes.windows(4).position(|w|w==b"\r\n\r\n"){break pos+4;}};
+                let header=std::str::from_utf8(&bytes[..end]).unwrap();let length=header.lines().find_map(|line|line.to_lowercase().strip_prefix("content-length:").map(|v|v.trim().parse::<usize>().unwrap())).unwrap();
+                while bytes.len()<end+length{let n=socket.read(&mut buffer).unwrap();assert!(n>0);bytes.extend_from_slice(&buffer[..n]);}
+                let request:serde_json::Value=serde_json::from_slice(&bytes[end..end+length]).unwrap();assert!(request["tools"].is_array());
+                let body=json!({"message":{"content":"I modified the file."},"done":true,"done_reason":"stop"}).to_string()+if stream{"\n"}else{""};
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            });
+            let provider=OllamaProvider::new(Some(format!("http://{address}")));provider.chat_templates.lock().unwrap().insert("test".into(),OllamaConversationTemplate::Chat);
+            let request:CompletionRequest=serde_json::from_value(json!({"prompt":"modify config.txt","conversation":[],"require_tool":true,"tools":[{"type":"function","function":{"name":"studio_call","parameters":{"properties":{"tool":{"enum":["write_file"]}}}}}]})).unwrap();
+            let result=if stream{let (tx,_rx)=std::sync::mpsc::channel();provider.complete_stream_async(&request,"test",Duration::from_secs(5),&tx).await}else{provider.complete(&request,Duration::from_secs(5),Some("test")).await};
+            assert!(result.is_err());assert!(result.unwrap_err().to_string().contains("required native tool call missing"));worker.join().unwrap();
+        }
     }
     #[tokio::test]
     async fn ollama_native_stream_retains_utf8_split_between_http_chunks() {
@@ -545,8 +567,8 @@ fn ollama_collect_native_calls(frame:&serde_json::Value, calls:&mut Vec<serde_js
     Ok(())
 }
 
-fn ollama_finish_native_calls(text:String,calls:Vec<serde_json::Value>,done:bool,reason:Option<&str>,functions:&[String]) -> Result<String,ProviderError> {
-    if calls.is_empty() {return Ok(text);}
+fn ollama_finish_native_calls(text:String,calls:Vec<serde_json::Value>,done:bool,reason:Option<&str>,functions:&[String],require_tool:bool) -> Result<String,ProviderError> {
+    if calls.is_empty() {return if require_tool {Err(ProviderError::Api("Ollama required native tool call missing; nothing executed".into()))} else {Ok(text)};}
     if !done || reason!=Some("stop") {return Err(ProviderError::Api("Ollama native tool generation incomplete; nothing executed".into()));}
     if calls.iter().any(|call|!call["arguments"].is_object() || !call["tool"].as_str().is_some_and(|name|functions.iter().any(|allowed|allowed==name))) {
         return Err(ProviderError::Api("Ollama wrapped tool is outside the advertised catalogue; nothing executed".into()));
@@ -823,7 +845,7 @@ impl OllamaProvider {
         let text = json.get("response").or_else(||json.pointer("/message/content")).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let mut native_calls=Vec::new();
         ollama_collect_native_calls(&json,&mut native_calls)?;
-        let text=ollama_finish_native_calls(text,native_calls,json["done"].as_bool()==Some(true),json["done_reason"].as_str(),&request.native_functions().iter().filter_map(|f|f["name"].as_str().map(str::to_owned)).collect::<Vec<_>>())?;
+        let text=ollama_finish_native_calls(text,native_calls,json["done"].as_bool()==Some(true),json["done_reason"].as_str(),&request.native_functions().iter().filter_map(|f|f["name"].as_str().map(str::to_owned)).collect::<Vec<_>>(),request.require_tool && body.get("messages").is_some())?;
         let text=if body["raw"]==true && request.tools.as_ref().is_some_and(|tools|!tools.is_empty()) {request.lfm2_reply(&text,json["done"]==true && json["done_reason"]=="stop").map_err(ProviderError::Api)?}else{text};
         if text.trim().is_empty() {
             let full = serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string());
@@ -992,7 +1014,7 @@ impl OllamaProvider {
 
         let json = last_done_json.as_ref();
         let had_calls=!native_calls.is_empty();
-        let text=ollama_finish_native_calls(accumulated_text,native_calls,json.and_then(|j|j["done"].as_bool())==Some(true),json.and_then(|j|j["done_reason"].as_str()),&request.native_functions().iter().filter_map(|f|f["name"].as_str().map(str::to_owned)).collect::<Vec<_>>())?;
+        let text=ollama_finish_native_calls(accumulated_text,native_calls,json.and_then(|j|j["done"].as_bool())==Some(true),json.and_then(|j|j["done_reason"].as_str()),&request.native_functions().iter().filter_map(|f|f["name"].as_str().map(str::to_owned)).collect::<Vec<_>>(),request.require_tool && body.get("messages").is_some())?;
         let text=if structured {request.lfm2_reply(&text,json.is_some_and(|j|j["done"]==true && j["done_reason"]=="stop")).map_err(ProviderError::Api)?}else{text};
         if had_calls || structured {let _=chunk_tx.send(text.clone());}
         if text.trim().is_empty() {
