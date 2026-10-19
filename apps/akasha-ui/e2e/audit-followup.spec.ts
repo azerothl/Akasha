@@ -142,6 +142,17 @@ for (const mode of ['simple','expert']) {
     if(mode==='simple') {
       await expect(sidebar.locator('.sidebar-right-task-snippet,.sidebar-right-task-progress,.task-tree-toggle')).toHaveCount(0);
       await expect(page.locator('.task-tree-toolbar-sidebar')).toHaveCount(0);
+      await expect(page.locator('.task-center-chip-running')).toContainText('1');
+    } else {
+      await sidebar.locator('.sidebar-right-task-card-inner').filter({hasText:'Sous-tâche interne'}).click();
+      await expect(page.locator('.task-center-selected-title')).toHaveText('Sous-tâche interne');
+      await page.locator('#tab-settings').click();
+      await page.locator('select').filter({has:page.locator('option[value="simple"]')}).selectOption('simple');
+      await page.getByText('Plus d’outils',{exact:true}).click();
+      await page.locator('#tab-tasks').click();
+      await expect(page.locator('.task-center-selected-title')).toHaveText('Demande principale');
+      await expect(page.getByText('Sous-tâche interne',{exact:true})).toHaveCount(0);
+      await expect(sidebar.locator('.sidebar-right-task-card.selected')).toHaveCount(1);
     }
   });
 }

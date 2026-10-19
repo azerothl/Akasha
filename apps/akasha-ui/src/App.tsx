@@ -3608,7 +3608,24 @@ function App() {
     return { byId, visibleIds, childrenByParent, branchIds, roots };
   }, [tasksList, filteredTasksList]);
 
-  const selectedTask = tasksList[tasksSelected] ?? null;
+  const selectedTask = useMemo(() => {
+    let task: TaskListItem | null = tasksList[tasksSelected] ?? null;
+    if (!isSimpleMode) return task;
+    // Derive a safe selection during render: switching modes cannot expose a child for one frame.
+    const seen = new Set<string>();
+    while (task?.parent_task_id) {
+      if (seen.has(task.id)) return null;
+      seen.add(task.id);
+      task = taskTreeData.byId.get(task.parent_task_id) ?? null;
+    }
+    return task;
+  }, [tasksList, tasksSelected, isSimpleMode, taskTreeData]);
+
+  useEffect(() => {
+    if (isSimpleMode && selectedTask && tasksList[tasksSelected]?.id !== selectedTask.id) {
+      setTasksSelected(tasksList.findIndex((task) => task.id === selectedTask.id));
+    }
+  }, [isSimpleMode, selectedTask, tasksList, tasksSelected]);
 
   useEffect(() => {
     setCollapsedTaskBranches((prev) => {
@@ -3719,16 +3736,17 @@ function App() {
   const taskStatusCounts = useMemo(() => {
     return tasksList.reduce(
       (acc, task) => {
+        if (isSimpleMode && task.parent_task_id) return acc;
         const status = (task.status ?? "").toLowerCase();
         if (status === "running") acc.running += 1;
-        else if (status === "pending") acc.pending += 1;
+        else if (["pending", "queued", "waiting_user_input"].includes(status)) acc.pending += 1;
         else if (status === "completed") acc.completed += 1;
         else if (status === "failed") acc.failed += 1;
         return acc;
       },
       { running: 0, pending: 0, completed: 0, failed: 0 }
     );
-  }, [tasksList]);
+  }, [tasksList, isSimpleMode]);
 
   const taskExecutionView = useMemo(() => {
     return buildExecutionSteps(tasksEvents, tasksList, selectedTask?.id, taskStepsTodos);
