@@ -80,10 +80,15 @@ fn function_response_without_leading_reasoning(response: &str) -> &str {
     function_response
 }
 
+pub(super) fn parse_calls_for_turn(response: &str, allowed: Option<&[String]>) -> Vec<(String, Vec<String>)> {
+    if let Some(calls)=json_function_calls(function_response_without_leading_reasoning(response),allowed) {return calls;}
+    parse_calls(response)
+}
+
 pub(super) fn parse_calls(response: &str) -> Vec<(String, Vec<String>)> {
     // A complete JSON function response is data, including any markup in args.
     // Remove only leading reasoning, never tags inside a JSON string argument.
-    if let Some(calls) = json_function_calls(function_response_without_leading_reasoning(response)) {
+    if let Some(calls) = json_function_calls(function_response_without_leading_reasoning(response), None) {
         return calls;
     }
     let stripped = crate::api_tool_parser::strip_redacted_reasoning_blocks(response);
@@ -113,7 +118,7 @@ pub(super) fn parse_calls(response: &str) -> Vec<(String, Vec<String>)> {
 // Some chat-compatible models return the function request as message.content.
 // Accept only a complete standalone JSON function envelope, never JSON embedded
 // in prose/examples, and run it through the same typed execution contract.
-fn json_function_calls(response: &str) -> Option<Vec<(String, Vec<String>)>> {
+fn json_function_calls(response: &str, allowed: Option<&[String]>) -> Option<Vec<(String, Vec<String>)>> {
     if response.len() > 1024 * 1024 { return None; }
     let value: Value = serde_json::from_str(response.trim()).ok()?;
     let items = value.as_array().cloned().unwrap_or_else(||vec![value]);
@@ -123,6 +128,15 @@ fn json_function_calls(response: &str) -> Option<Vec<(String, Vec<String>)>> {
     }
     if items.len()>128 {
         return Some(vec![("studio_call".into(),vec!["JSON function batch exceeds 128 calls".into()])]);
+    }
+    if let Some(allowed) = allowed {
+        for item in &items {
+            let args=item["arguments"].as_str().and_then(|raw|serde_json::from_str::<Value>(raw).ok()).unwrap_or_else(||item["arguments"].clone());
+            let actual=if item["name"]=="studio_call" {args["tool"].as_str()} else {item["name"].as_str()};
+            if !actual.is_some_and(|name|allowed.iter().any(|known|known==name)) {
+                return Some(vec![("studio_call".into(),vec!["JSON content function is outside the advertised turn catalogue; no batch call executed".into()])]);
+            }
+        }
     }
     Some(items.into_iter().map(|item| {
         let args=&item["arguments"];
@@ -164,7 +178,7 @@ pub(super) fn tool_turn_with_results(response:&str, results:&str, per_call:&[Str
         })
     {
         let mut assistant = ConversationMessage::assistant(
-            if json_function_calls(function_response_without_leading_reasoning(response)).is_some() {String::new()} else {response
+            if json_function_calls(function_response_without_leading_reasoning(response), None).is_some() {String::new()} else {response
                 .lines()
                 .filter(|line| !line.trim_start().starts_with("TOOL_JSON:"))
                 .collect::<Vec<_>>()
@@ -300,5 +314,23 @@ mod tests {
         assert!(explicit_file_request("[Current user request — task scope]\nCrée FIRST.md puis lis le fichier.\n[End current user request]"));
         assert!(!explicit_file_request("Create example.md in project context.\n[Current user request — task scope]\nExplique le module.\n[End current user request]"));
         assert!(!explicit_file_request("Explique comment créer un fichier."));
+    }
+}
+
+#[cfg(test)]
+mod content_catalogue_tests {
+    use super::*;
+    #[test] fn json_content_functions_validate_the_whole_batch_against_the_turn() {
+        let allowed=vec!["read_file".to_string(),"write_file".to_string()];
+        for response in [
+            r#"{"name":"run_command","arguments":{"program":"node"}}"#,
+            r#"{"name":"studio_call","arguments":{"schema_version":1,"tool":"run_command","arguments":{}}}"#,
+            r#"[{"name":"write_file","arguments":{"path":"workspace:/a.txt"}},{"name":"run_command","arguments":{}}]"#,
+        ] {
+            let calls=parse_calls_for_turn(response,Some(&allowed));assert_eq!(calls.len(),1);assert!(calls[0].1[0].contains("outside the advertised turn catalogue"));assert!(crate::studio_tool_contract::decode(&calls[0].1.join(" ")).is_err());
+        }
+        let read=r#"{"name":"read_file","arguments":{"path":"workspace:/a.txt"}}"#;
+        let calls=parse_calls_for_turn(read,Some(&allowed));assert!(crate::studio_tool_contract::decode(&calls[0].1.join(" ")).is_ok());
+        assert!(!parse_calls_for_turn("TOOL: write_file a.txt\nhello",Some(&allowed)).is_empty());
     }
 }

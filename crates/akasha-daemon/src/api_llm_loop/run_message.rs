@@ -1750,6 +1750,7 @@ pub(crate) async fn run_message_via_llm(
                     (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else{crate::studio_tool_contract::native_definition(names)}])
                 })
             }else{None};
+            let turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             let request = CompletionRequest {
                 require_tool: code_studio_disk_task && ((run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation())
                     || (!explicit_file_goals.is_empty() && super::studio_completion::requires_tool_retry(&current_prompt,&run_outcome.checks)))
@@ -2074,7 +2075,7 @@ pub(crate) async fn run_message_via_llm(
             }
 
             let parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
-                let calls = if code_studio_disk_task {super::studio_conversation::parse_calls(&response)} else {parse_tool_calls(&response)};
+                let calls = if code_studio_disk_task {super::studio_conversation::parse_calls_for_turn(&response,turn_tool_names.as_deref())} else {parse_tool_calls(&response)};
                 if calls.is_empty() {
                     None
                 } else {

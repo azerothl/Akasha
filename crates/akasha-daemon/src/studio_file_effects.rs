@@ -62,6 +62,9 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
     let object_path = regex::Regex::new(&format!(
         r#"(?i)^\s+(?:[\p{{L}}\p{{N}}_-]+\s+){{1,12}}?(?:to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<path>{path})"#
     )).unwrap();
+    let path_list = regex::Regex::new(&format!(
+        r#"(?i)^\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et|&)\s+)(?:(?:the|le|la|fichier|file)\s+)*(?P<path>{path})"#
+    )).unwrap();
     let mut outside = vec![true; request.len() + 1];
     let mut quote = None;
     for (i, c) in request.char_indices() {
@@ -85,6 +88,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
             }
             let mut raw = cap.name("source")?.as_str();
             let verb_end = verb.end();
+            let mut list_end = cap.get(0)?.end();
             let clean = |s: &str| {
                 if let Some(first) = s.chars().next().filter(|c| matches!(c, '`' | '"' | '\'')) {
                     if s.ends_with(first) && s.len() > 1 {
@@ -118,6 +122,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
                     .is_some_and(|v| v.as_str().contains("file") || v.as_str().contains("fichier"))
             {
                 let object = object_path.captures(&request[verb_end..])?;
+                list_end = verb_end + object.get(0)?.end();
                 raw = object.name("path")?.as_str();
                 source = clean(raw);
                 if !raw.starts_with(['`', '"', '\'']) && !source.contains(['.', '/', '\\']) {
@@ -136,8 +141,21 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>)> {
             {
                 return None;
             }
-            Some((verb, source, target))
+            let mut goals = vec![(verb.clone(), source, target.clone())];
+            if target.is_none() {
+                while let Some(item) = path_list.captures(&request[list_end..]) {
+                    let raw = item.name("path")?.as_str();
+                    let path = clean(raw);
+                    if !raw.starts_with(['`', '"', '\'']) && !path.contains(['.', '/', '\\']) {
+                        break;
+                    }
+                    goals.push((verb.clone(), path, None));
+                    list_end += item.get(0)?.end();
+                }
+            }
+            Some(goals)
         })
+        .flatten()
         .collect()
 }
 pub(crate) fn has_request(request: &str) -> bool {
@@ -691,6 +709,39 @@ mod tests {
             parsed("Write output.txt with logging in example.txt")[0].1,
             "output.txt"
         );
+    }
+    #[test]
+    fn conjunctive_paths_keep_the_governing_operation() {
+        for request in [
+            "Create a.txt and b.txt",
+            "Create a.txt, b.txt and c.txt",
+            "Delete a.txt et b.txt",
+        ] {
+            let goals = parsed(request);
+            assert!(goals.len() >= 2, "{request}");
+            assert_eq!(goals[1].1, "b.txt");
+            assert_eq!(goals[0].0, goals[1].0);
+        }
+        assert_eq!(
+            parsed("Update dependencies in Cargo.toml and Cargo.lock").len(),
+            2
+        );
+        assert_eq!(parsed("Create `a b.txt` and 'c d.txt'")[1].1, "c d.txt");
+        assert_eq!(parsed("Create a.txt and explain the result").len(), 1);
+        assert_eq!(
+            parsed("Create a.txt with exactly `alpha and secret.txt`").len(),
+            1
+        );
+        let root = tempfile::tempdir().unwrap();
+        let mut scoped = scope(root.path(), "Create a.txt and b.txt");
+        let before = capture_paths(&scoped.paths()).unwrap();
+        std::fs::write(root.path().join("a.txt"), "a").unwrap();
+        scoped.observe(&before, &capture_paths(&scoped.paths()).unwrap());
+        assert!(!scoped.verified(&capture_paths(&scoped.paths()).unwrap()));
+        let before = capture_paths(&scoped.paths()).unwrap();
+        std::fs::write(root.path().join("b.txt"), "b").unwrap();
+        scoped.observe(&before, &capture_paths(&scoped.paths()).unwrap());
+        assert!(scoped.verified(&capture_paths(&scoped.paths()).unwrap()));
     }
     #[test]
     fn unrelated_and_noop_writes_do_not_attest_requested_changes() {
