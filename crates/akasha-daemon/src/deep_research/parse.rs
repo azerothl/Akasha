@@ -118,16 +118,38 @@ fn balanced_url_prefix(text: &str) -> &str {
 }
 
 fn markdown_citation_urls(text: &str) -> Vec<String> {
-    // Resolve CommonMark references, collapsed/shortcut links and autolinks.
-    // Code examples, unused definitions and image destinations are not citations.
-    pulldown_cmark::Parser::new(text).filter_map(|event| {
-        if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link(_, destination, _)) = event {
-            if destination.starts_with("https://") || destination.starts_with("http://") {
-                return Some(destination.into_string());
-            }
+    // Match the UI's CommonMark + raw HTML + GFM autolink surface. Parsing HTML
+    // also decodes character references and normalizes attribute/tag casing.
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, pulldown_cmark::Parser::new(text));
+    let fragment = scraper::Html::parse_fragment(&html);
+    let anchors = scraper::Selector::parse("a[href]").expect("anchor selector");
+    let mut urls = Vec::new();
+    let external = |raw: &str| {
+        let raw = raw.trim();
+        let raw = if raw.starts_with("//") { format!("https:{raw}") } else { raw.to_string() };
+        url::Url::parse(&raw).ok().filter(|url| matches!(url.scheme(), "http" | "https"))
+            .map(|url| url.to_string())
+    };
+    for anchor in fragment.select(&anchors) {
+        if let Some(url) = anchor.value().attr("href").and_then(external) { urls.push(url); }
+    }
+    let mut finder = linkify::LinkFinder::new();
+    finder.kinds(&[linkify::LinkKind::Url]);
+    finder.url_must_have_scheme(false);
+    for node in fragment.tree.nodes() {
+        let scraper::Node::Text(value) = node.value() else { continue; };
+        if node.ancestors().any(|ancestor| ancestor.value().as_element()
+            .map(|element| matches!(element.name(), "a" | "code" | "pre" | "script" | "style"))
+            .unwrap_or(false)) { continue; }
+        for link in finder.links(value) {
+            let raw = link.as_str();
+            // GFM links bare www. prefixes, but not arbitrary scheme-less domains.
+            let raw = if raw.starts_with("www.") { format!("http://{raw}") } else { raw.to_string() };
+            if let Some(url) = external(&raw) { urls.push(url); }
         }
-        None
-    }).collect()
+    }
+    urls
 }
 
 pub fn strip_html(html: &str) -> String {
@@ -209,7 +231,10 @@ pub fn count_markdown_link_citations(text: &str) -> usize {
 /// Report links must resolve to a page actually retained as evidence. A fragment
 /// is allowed, but a different path/query is a different, unconsulted page.
 pub fn unconsulted_citation_urls(markdown: &str, sources: &[&str]) -> Vec<String> {
-    let page = |url: &str| url.split('#').next().unwrap_or(url).to_string();
+    let page = |raw: &str| url::Url::parse(raw).map(|mut url| {
+        url.set_fragment(None);
+        url.to_string()
+    }).unwrap_or_else(|_| raw.split('#').next().unwrap_or(raw).to_string());
     let known: HashSet<String> = sources.iter().map(|url| page(url)).collect();
     let mut unknown = Vec::new();
     for url in markdown_citation_urls(markdown) {
@@ -344,6 +369,16 @@ fn normalize_image_url(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gfm_and_html_links_cannot_bypass_consulted_source_validation() {
+        let md = "https://invented.example/bare, www.invented.example/page\n\n<A HREF='https://invented.example/html?a=1&amp;b=2'>claim</A> <a href=//invented.example/relative>claim</a>\n\n<a href='HTTPS://KNOWN.EXAMPLE/page#part'>known</a>\n\n<img src='https://images.example/image.png'> `https://code.example/page`\n\n```html\n<a href='https://example.example/code'>example</a>\n```";
+        assert_eq!(count_markdown_link_citations(md), 5);
+        assert_eq!(unconsulted_citation_urls(md, &["https://known.example/page"]), vec![
+            "http://www.invented.example/page", "https://invented.example/bare",
+            "https://invented.example/html?a=1&b=2", "https://invented.example/relative",
+        ]);
+    }
 
     #[test]
     fn reference_citations_resolve_definitions_without_counting_examples_or_images() {
