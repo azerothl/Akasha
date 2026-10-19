@@ -155,6 +155,9 @@ function serverToRun(server: ServerRun, existing?: ResearchRun): ResearchRun {
 function formatDaemonError(message: string, locale: "fr" | "en"): string {
   const en = locale === "en";
   const lower = message.toLowerCase();
+  if (lower.includes("research_report_generation_failed")) return en
+    ? "The final report could not be written from its sources. Retry with a shorter topic or check the model settings."
+    : "Le rapport final n’a pas pu être rédigé à partir des sources. Réessayez avec un sujet plus court ou vérifiez les paramètres du modèle.";
   if (lower.includes("research_no_evidence")) return en
     ? "No usable sources were found. Try a more specific topic, or check web access in Settings before retrying."
     : "Aucune source exploitable n’a été trouvée. Précisez le sujet ou vérifiez l’accès au Web dans Paramètres, puis réessayez.";

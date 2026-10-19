@@ -100,37 +100,19 @@ Reply with ONLY "YES" or "NO" followed by a brief one-sentence reason.
 Example: "NO — Only 4 pages and 2 domains; missing academic and official documentation."
 Example: "YES — 20+ pages across wiki, arxiv, news, and github with plan covered.""#;
 
-pub const FINAL_REPORT_PROMPT: &str = r#"Write a **rigorous, evidence-based** research report answering this question.
-
-**Question:** {question}
-
-**Source manifest (pages read — cite these URLs for claims):**
+pub const FINAL_REPORT_PROMPT: &str = r#"Write a concise evidence-based report in the question's language.
+Question: {question}
+Pages read and attributed excerpts (may be shortened for context):
 {source_manifest}
-
-**All collected evidence and synthesis (working draft):**
+Working draft, NOT independent evidence:
 {report}
-
-**Quality requirements:**
-- The usual length target is {min_words} words, but evidence takes priority: write a shorter report whenever the sources do not support more detail. Never pad or repeat sections to reach a word count.
-- Do NOT use the user's raw question as the document title (a professional cover title is generated separately)
-- Do NOT open with a personal greeting (no "Bonjour", "Hello", etc.)
-- One executive summary section at the top (## Executive summary OR ## Résumé exécutif — match the report language, **never both**)
-- Use clear ## and ### headings; multiple paragraphs per section
-- **Synthesize and analyze** — explain mechanisms, trade-offs, context; compare viewpoints
-- Include **specific data points**, statistics, dates, and named entities **only when they appear in the evidence**
-- Every major claim MUST have an inline citation [source title](url) from the source manifest
-- The manifest includes extracted evidence; the working draft is NOT an independent source. Correct contradictions in the draft against the extracted evidence. Omit claims not supported by that evidence.
-- Cite the exact URL that supports each claim; never invent or rewrite a URL. Keep historical, stable, and nightly versions distinct. A feature in one version is not evidence for another.
-- Preserve exact API/method names and distinguish length from capacity, amortized from worst-case costs, and documented guarantees from implementation details. Do not infer benchmarks, growth factors, or cache behavior without supporting evidence.
-- Mark uncertain or single-source claims explicitly (e.g. "According to one blog post…", "Evidence is mixed…")
-- Include ## Sources and methodology — list key references and briefly describe how sources were selected
-- Include ## Limitations and confidence — gaps, conflicts between sources, what was not verified
-- Prefer ordinary markdown tables or lists for comparisons. Do not add Mermaid diagrams, invented scores, or chart coordinates. Use plain O(1) notation without LaTeX delimiters.
-- Include **2-4 illustrative images** only when https URLs exist in the evidence
-- Add tables for comparisons when appropriate
-- End with a ## Conclusion that directly answers the question and states confidence level (high / medium / low)
-- Tone: **professional, neutral, precise** — like an analyst briefing or technical white paper. Avoid hype ("revolutionary", "decisive leap", "major competitive advantage") unless a cited source uses that language in quotes.
-- Do NOT invent product features, paper titles, statistics, or codebase details absent from the evidence.
+Rules:
+- Aim for {min_words} words only if evidence supports them; never pad. Respect requested length.
+- Correct the draft against the excerpts. Omit unsupported facts, mechanisms and comparisons.
+- Preserve exact API names, versions and qualifiers (amortized versus worst-case, guarantees versus implementation details). Do not transfer properties between options or versions.
+- Cite important claims inline as [title](exact URL from the manifest). Never invent or rewrite URLs.
+- Use clear Markdown headings, a short summary, comparisons when useful, sources/methodology, limitations/confidence and a conclusion. No greeting or copied question as title.
+- Do not invent benchmarks, features, growth factors, cache claims, images or diagram scores. Use tables/lists, no Mermaid or LaTeX.
 {category_override}"#;
 
 pub const FINAL_REPORT_RETRY_PROMPT: &str = r#"Revise this research report to meet quality standards.

@@ -490,34 +490,30 @@ async fn run_engine(
         finish_branch(run_id, &branch_final, StepStatus::Error).await;
         return Err("research_no_evidence".to_string());
     }
-    let final_report = if report.is_empty() && !findings.is_empty() {
-        fallback_report(topic, &findings)
-    } else if report.is_empty() {
-        if search_degraded {
-            "No information could be gathered. Enable web search (web_search_enabled: true in tools_policy.yaml; Brave key optional — SearXNG/DuckDuckGo work without keys).".to_string()
-        } else {
-            "No information could be gathered for this question.".to_string()
-        }
-    } else {
+    // A disabled discovery provider is not model-only research when pages were read.
+    let (search_degraded, enough_pages) = report_source_quality(search_degraded,
+        findings.iter().filter(|f| !f.url.is_empty()).count(), config.min_sources_for_report as usize);
+    store.update(run_id, |r| r.search_degraded = search_degraded).await;
+    let report_word_target = config.min_final_report_words.min(REPORT_OUTPUT_TOKENS as usize / 2);
+    let final_report = {
         let manifest = format_source_manifest(&findings);
-        let mut md = final_report(
+        let mut md = require_report(final_report(
             ctx,
             topic,
             &report,
             &category,
             &manifest,
-            config.min_final_report_words,
+            report_word_target,
             &user_ctx,
-        )
-        .await;
+        ).await, run_id, &branch_final, &sa_writer).await?;
         let pages = findings.iter().filter(|f| !f.url.is_empty()).count();
-        let sources_ok = !search_degraded && pages >= config.min_sources_for_report as usize;
+        let sources_ok = enough_pages;
         let quality = assess_report_quality(
             &md,
             pages,
             sources_ok,
             search_degraded,
-            config.min_final_report_words,
+            report_word_target,
         );
         let source_urls: Vec<_> = findings.iter()
             .filter(|f| !f.url.is_empty())
@@ -527,12 +523,13 @@ async fn run_engine(
             let issues = format!(
                 "- Word count {} (target {})\n- Inline link citations {} (target at least {})\n- Add citations from the source manifest for major claims",
                 quality.words,
-                config.min_final_report_words,
+                report_word_target,
                 quality.citations,
                 pages.min(14)
             );
             let issues = format!("{issues}\n- Remove citations to pages not consulted: {}. Replace only when extracted evidence supports the claim; otherwise remove the claim.", unknown.join(", "));
-            md = final_report_retry(ctx, topic, &md, &manifest, &issues, &user_ctx).await;
+            md = require_report(final_report_retry(ctx, topic, &md, &manifest, &issues, &user_ctx).await,
+                run_id, &branch_final, &sa_writer).await?;
         }
         md
     };
@@ -566,16 +563,18 @@ async fn run_engine(
     let unique_domains = unique_domains_from_urls(sources.iter().map(|s| s.url.as_str()));
     let source_urls: Vec<_> = sources.iter().map(|s| s.url.as_str()).collect();
     let unknown_citations = unconsulted_citation_urls(&final_report, &source_urls);
-    let enough_pages = !search_degraded && pages_for_meta >= config.min_sources_for_report;
     let sources_sufficient = enough_pages && unknown_citations.is_empty();
     let mut quality_warnings = assess_report_quality(
         &final_report,
         sources.len(),
         enough_pages,
         search_degraded,
-        config.min_final_report_words,
+        report_word_target,
     )
     .warnings;
+    if format_source_manifest(&findings).contains("[Additional sources omitted for context]") {
+        quality_warnings.push("Some source excerpts were omitted to fit the model context; conclusions may be incomplete.".into());
+    }
     if !unknown_citations.is_empty() {
         quality_warnings.push(format!("Report cites pages not consulted; verify these references: {}", unknown_citations.join(", ")));
     }
@@ -1019,23 +1018,63 @@ fn fallback_title_from_topic(topic: &str) -> String {
     s
 }
 
+// Conservative UTF-8 byte budgets leave room in the default 8192-token context
+// even for byte-level tokenization. Full findings remain in the live run data.
+fn report_source_quality(discovery_unavailable: bool, pages: usize, required: usize) -> (bool, bool) {
+    (discovery_unavailable && pages == 0, pages >= required)
+}
+
+const REPORT_PROMPT_BYTES: usize = 5632;
+const REPORT_OUTPUT_TOKENS: u32 = 2048;
+const MANIFEST_BYTES: usize = 2000;
+
+fn clip_prompt(text: &str, limit: usize) -> String {
+    if text.len() <= limit { return text.to_string(); }
+    let marker = " [truncated]";
+    let mut end = limit.saturating_sub(marker.len()).min(text.len());
+    while !text.is_char_boundary(end) { end -= 1; }
+    format!("{}{}", &text[..end], &marker[..marker.len().min(limit)])
+}
+
 fn format_source_manifest(findings: &[ResearchFinding]) -> String {
-    let mut lines: Vec<String> = findings
-        .iter()
-        .filter(|f| !f.url.is_empty())
-        .map(|f| format!(
-            "### [{}]({})\nSummary: {}\nExtracted evidence (only for this URL):\n{}",
-            f.title, f.url, f.summary,
-            f.evidence.as_deref().unwrap_or("(No detailed evidence extracted.)")
-        ))
-        .collect();
-    lines.sort();
-    lines.dedup();
-    if lines.is_empty() {
-        "(No web pages were successfully read.)".to_string()
-    } else {
-        lines.join("\n")
+    let mut sources: Vec<_> = findings.iter().filter(|f| !f.url.is_empty()).collect();
+    sources.sort_by(|a, b| a.url.cmp(&b.url));
+    sources.dedup_by(|a, b| a.url == b.url);
+    let mut manifest = String::from("Selected source excerpts; complete findings are retained in live run data.\n");
+    for source in sources {
+        // Never cut an URL: omit a record when its complete header cannot fit.
+        let header = format!("\n### [{}]({})\n", clip_prompt(&source.title, 64), source.url);
+        let note = "\n[Additional sources omitted for context]";
+        let remaining = MANIFEST_BYTES.saturating_sub(manifest.len() + note.len());
+        if header.len() + 64 > remaining {
+            manifest.push_str(note);
+            break;
+        }
+        let evidence = source.evidence.as_deref().unwrap_or(&source.summary);
+        let excerpt = clip_prompt(evidence, (remaining - header.len()).min(480));
+        manifest.push_str(&header);
+        manifest.push_str(&excerpt);
     }
+    manifest
+}
+
+fn report_prompt(template: &str, topic: &str, report: &str, manifest: &str,
+    user_ctx: &str, extra: &str, min_words: usize) -> Option<String> {
+    let body = template.replace("{question}", &clip_prompt(topic, 768))
+        .replace("{report}", &clip_prompt(report, 800))
+        .replace("{source_manifest}", manifest)
+        .replace("{min_words}", &min_words.to_string())
+        .replace("{category_override}", &clip_prompt(extra, 384))
+        .replace("{quality_issues}", &clip_prompt(extra, 512));
+    let prompt = format!("{}\n{}", clip_prompt(user_ctx, 256), body);
+    (prompt.len() <= REPORT_PROMPT_BYTES).then_some(prompt)
+}
+
+async fn require_report(report: Option<String>, run_id: &str, branch: &str, writer: &str) -> Result<String, String> {
+    if let Some(report) = report.filter(|text| !text.trim().is_empty()) { return Ok(report); }
+    finish_sub_agent(run_id, branch, writer, StepStatus::Error).await;
+    finish_branch(run_id, branch, StepStatus::Error).await;
+    Err("research_report_generation_failed".into())
 }
 
 async fn final_report(
@@ -1046,29 +1085,21 @@ async fn final_report(
     source_manifest: &str,
     min_words: usize,
     user_ctx: &str,
-) -> String {
+) -> Option<String> {
     let override_text = category_prompt_override(category);
-    let prompt = format!(
-        "{user_ctx}{}",
-        FINAL_REPORT_PROMPT
-            .replace("{question}", topic)
-            .replace("{report}", report)
-            .replace("{source_manifest}", source_manifest)
-            .replace("{min_words}", &min_words.to_string())
-            .replace("{category_override}", override_text)
-    );
+    let prompt = report_prompt(FINAL_REPORT_PROMPT, topic, report, source_manifest,
+        user_ctx, override_text, min_words)?;
     llm_complete(
         ctx,
         prompt,
         Some(
             "Evidence-first markdown: ## headings, inline [title](url) citations from the manifest, ## Limitations and confidence, neutral tone, no greeting.".to_string(),
         ),
-        16_384,
+        REPORT_OUTPUT_TOKENS,
         0.35,
         "research",
     )
     .await
-    .unwrap_or_else(|| report.to_string())
 }
 
 async fn final_report_retry(
@@ -1078,25 +1109,18 @@ async fn final_report_retry(
     source_manifest: &str,
     quality_issues: &str,
     user_ctx: &str,
-) -> String {
-    let prompt = format!(
-        "{user_ctx}{}",
-        FINAL_REPORT_RETRY_PROMPT
-            .replace("{question}", topic)
-            .replace("{report}", report)
-            .replace("{source_manifest}", source_manifest)
-            .replace("{quality_issues}", quality_issues)
-    );
+) -> Option<String> {
+    let prompt = report_prompt(FINAL_REPORT_RETRY_PROMPT, topic, report, source_manifest,
+        user_ctx, quality_issues, 0)?;
     llm_complete(
         ctx,
         prompt,
         Some("Full revised markdown only.".to_string()),
-        16_384,
+        REPORT_OUTPUT_TOKENS,
         0.3,
         "research",
     )
     .await
-    .unwrap_or_else(|| report.to_string())
 }
 
 /// Run search+fetch for a list of queries (booster round); updates shared state.
@@ -1234,13 +1258,6 @@ fn format_findings(findings: &[ResearchFinding]) -> String {
         .join("\n")
 }
 
-fn fallback_report(topic: &str, findings: &[ResearchFinding]) -> String {
-    format!(
-        "# Research: {topic}\n\n## Gathered findings\n\n{}",
-        format_findings(findings)
-    )
-}
-
 async fn llm_complete(
     ctx: &ResearchContext,
     prompt: String,
@@ -1346,6 +1363,46 @@ fn truncate_label(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fetched_page_sufficiency_does_not_depend_on_discovery() {
+        assert_eq!(super::report_source_quality(true, 12, 12), (false, true));
+        assert_eq!(super::report_source_quality(true, 4, 12), (false, false));
+        assert_eq!(super::report_source_quality(true, 0, 12), (true, false));
+        assert_eq!(super::report_source_quality(false, 0, 12), (false, false));
+    }
+
+    #[test]
+    fn evidence_and_final_prompts_have_utf8_byte_budgets() {
+        let findings: Vec<_> = (0..100).map(|index| super::ResearchFinding {
+            url: format!("https://example.org/source/{index}"), title: "Documentation é 🦀".repeat(100),
+            summary: "summary".repeat(1000), evidence: Some("preuve 🦀".repeat(3000)), image_url: None,
+        }).collect();
+        let manifest = super::format_source_manifest(&findings);
+        assert!(manifest.len() <= super::MANIFEST_BYTES);
+        assert!(manifest.contains("[truncated]"));
+        assert!(manifest.contains("[Additional sources omitted for context]"));
+        for url in super::super::parse::question_source_urls(&manifest, 200) {
+            assert!(findings.iter().any(|f| f.url == url), "source URLs must never be cut");
+        }
+        let long = "é🦀".repeat(20_000);
+        for template in [super::FINAL_REPORT_PROMPT, super::FINAL_REPORT_RETRY_PROMPT] {
+            let prompt = super::report_prompt(template, &long, &long, &manifest, &long, &long, 1024).unwrap();
+            assert!(prompt.len() <= super::REPORT_PROMPT_BYTES);
+            assert!(!prompt.contains("{source_manifest}"));
+        }
+        for limit in 0..=32 { assert!(super::clip_prompt(&long, limit).len() <= limit); }
+        assert!(super::report_prompt(super::FINAL_REPORT_PROMPT, "Q", "draft", &long, "", "", 1024).is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_final_generation_is_an_error_not_a_draft() {
+        for result in [None, Some("  ".into())] {
+            assert_eq!(super::require_report(result, "no_run", "no_branch", "no_writer").await,
+                Err("research_report_generation_failed".into()));
+        }
+        assert_eq!(super::require_report(Some("## Sourced report".into()), "no_run", "no_branch", "no_writer").await.unwrap(), "## Sourced report");
+    }
+
     #[test]
     fn extraction_preserves_string_and_array_evidence() {
         let text = serde_json::json!({"evidence": " exact method and qualifier "});
