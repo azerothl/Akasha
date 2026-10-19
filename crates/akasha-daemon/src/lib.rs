@@ -40,6 +40,8 @@ pub mod api;
 pub mod api_studio;
 pub mod api_workspace_graph;
 pub mod studio;
+pub(crate) mod studio_role_policy;
+pub(crate) mod task_outcome;
 pub mod studio_worktree;
 pub mod tool_output;
 pub mod autonomous_heartbeat;

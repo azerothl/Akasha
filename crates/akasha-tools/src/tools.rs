@@ -1326,7 +1326,10 @@ async fn git_run(
         timeout,
         tokio::task::spawn_blocking(move || {
             let mut cmd = std::process::Command::new("git");
-            cmd.args(&args)
+            cmd.args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.hooksPath=", "-c", "diff.external=", "-c", "log.showSignature=false"])
+                .args(&args)
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .env_remove("GIT_EXTERNAL_DIFF")
                 .current_dir(&repo)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
@@ -1395,10 +1398,11 @@ pub async fn git_diff(
     } else {
         git_pathspecs_under_repo(repo, pathspecs).map_err(|e| anyhow::anyhow!("{}", e))?
     };
-    let mut args = vec!["diff".to_string()];
+    let mut args = vec!["diff".to_string(), "--no-ext-diff".into(), "--no-textconv".into()];
     if staged {
         args.push("--staged".into());
     }
+    args.push("--".into());
     args.extend(specs);
     git_run(repo, args, "git_diff", policy).await
 }
