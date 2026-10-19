@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type
 import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./chatTranscriptExport";
 import { invoke } from "@tauri-apps/api/core";
 import { E2E_WEB, e2eDaemonGetJson, e2eDaemonHttpUrl } from "./e2eDaemon";
-import RelationGraph from "relation-graph/react";
+import { taskTitle, taskStatus } from "./tasks/presentation";
+
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
 import {
   collapseStreamedProgressEvents,
@@ -12,20 +13,20 @@ import {
 } from "./taskEvents";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
-import { GeoMapView } from "./GeoMapView";
-import { SystemHealthPanel } from "./SystemHealthPanel";
+
+
 import { AppNavigation } from "./components/AppNavigation";
 import { PermissionsBell } from "./components/PermissionsBell";
 import { SteeringQueueBell } from "./components/SteeringQueueBell";
 import { OnboardingWizard, readSetupWizardPending } from "./components/OnboardingWizard";
-import { UserRagPanel } from "./components/UserRagPanel";
-import { PluginCatalogPanel } from "./components/PluginCatalogPanel";
-import { OpenClawMigrationPanel } from "./components/OpenClawMigrationPanel";
-import { CalDavAccountsPanel } from "./components/CalDavAccountsPanel";
-import { ToolsPolicyPanel } from "./components/ToolsPolicyPanel";
-import { ConnectorsPanel } from "./components/ConnectorsPanel";
-import { LifeLayerPanel } from "./components/LifeLayerPanel";
-import { EmbeddedLocalModelSettings } from "./components/EmbeddedLocalModelSettings";
+
+
+
+
+
+
+
+
 import { NotificationCenter } from "./components/NotificationCenter";
 import { AppNotificationsSync } from "./components/AppNotificationsSync";
 import { useNotify } from "./notifications/useNotifyOnMessage";
@@ -33,13 +34,13 @@ import { InfoTip, Tooltip } from "./components/Tooltip";
 import { ChatRenderer } from "./components/ChatRenderer";
 import { ChatCompositionBar, type ComposerMode } from "./components/ChatCompositionBar";
 import { ActiveWorkDrawer } from "./components/ActiveWorkDrawer";
-import { UsageDashboardPanel } from "./components/UsageDashboardPanel";
+
 import { MonoIcon } from "./components/MonoIcon";
 import { useHashRoute } from "./hooks/useHashRoute";
 import { NAV_ITEMS } from "./navigation/types";
-import { ComparePanel } from "./panels/ComparePanel";
-import { CookbookPanel } from "./panels/CookbookPanel";
-import { DeepResearchPanel } from "./panels/DeepResearchPanel";
+
+
+
 import {
   buildMessageWithResearchContext,
   type ChatResearchContext,
@@ -62,14 +63,35 @@ import { recipeLocale, type CookbookRecipeActionContext } from "./cookbookRecipe
 import type { CookbookRecipeHandlers } from "./panels/CookbookRecipesView";
 import { ModelUsageBadge } from "./components/ModelUsageBadge";
 import { TaskExecutionSteps } from "./components/TaskExecutionSteps";
-import { CreateTaskDialog } from "./components/CreateTaskDialog";
-import { NotesPanel } from "./components/NotesPanel";
-import { ThemeEditorPanel, applyThemeOverrides, loadThemeOverrides } from "./components/ThemeEditorPanel";
+
+
+import { applyThemeOverrides, loadThemeOverrides } from "./themeOverrides";
 import { buildExecutionSteps } from "./tasks/buildExecutionSteps";
 import { pollTaskUntilDone, type PollTaskUntilDoneDeps } from "./tasks/pollTaskUntilDone";
 import { THEME_IDS, THEME_STORAGE_KEY, type ThemeId } from "./themeTypes";
 
 export type { ThemeId } from "./themeTypes";
+import { deferPanel } from "./components/deferPanel";
+import { useMobileSidebar } from "./hooks/useMobileSidebar";
+import { loadRecoveryDraft, useChatDraftRecovery } from "./hooks/useChatDraftRecovery";
+const RelationGraph = deferPanel(() => import("relation-graph/react"));
+const GeoMapView = deferPanel(() => import("./GeoMapView").then(m => ({ default: m.GeoMapView })));
+const SystemHealthPanel = deferPanel(() => import("./SystemHealthPanel").then(m => ({ default: m.SystemHealthPanel })));
+const UserRagPanel = deferPanel(() => import("./components/UserRagPanel").then(m => ({ default: m.UserRagPanel })));
+const PluginCatalogPanel = deferPanel(() => import("./components/PluginCatalogPanel").then(m => ({ default: m.PluginCatalogPanel })));
+const OpenClawMigrationPanel = deferPanel(() => import("./components/OpenClawMigrationPanel").then(m => ({ default: m.OpenClawMigrationPanel })));
+const CalDavAccountsPanel = deferPanel(() => import("./components/CalDavAccountsPanel").then(m => ({ default: m.CalDavAccountsPanel })));
+const ToolsPolicyPanel = deferPanel(() => import("./components/ToolsPolicyPanel").then(m => ({ default: m.ToolsPolicyPanel })));
+const ConnectorsPanel = deferPanel(() => import("./components/ConnectorsPanel").then(m => ({ default: m.ConnectorsPanel })));
+const LifeLayerPanel = deferPanel(() => import("./components/LifeLayerPanel").then(m => ({ default: m.LifeLayerPanel })));
+const EmbeddedLocalModelSettings = deferPanel(() => import("./components/EmbeddedLocalModelSettings").then(m => ({ default: m.EmbeddedLocalModelSettings })));
+const UsageDashboardPanel = deferPanel(() => import("./components/UsageDashboardPanel").then(m => ({ default: m.UsageDashboardPanel })));
+const ComparePanel = deferPanel(() => import("./panels/ComparePanel").then(m => ({ default: m.ComparePanel })));
+const CookbookPanel = deferPanel(() => import("./panels/CookbookPanel").then(m => ({ default: m.CookbookPanel })));
+const DeepResearchPanel = deferPanel(() => import("./panels/DeepResearchPanel").then(m => ({ default: m.DeepResearchPanel })));
+const NotesPanel = deferPanel(() => import("./components/NotesPanel").then(m => ({ default: m.NotesPanel })));
+const CreateTaskDialog = deferPanel(() => import("./components/CreateTaskDialog").then(m => ({ default: m.CreateTaskDialog })));
+const ThemeEditorPanel = deferPanel(() => import("./components/ThemeEditorPanel").then(m => ({ default: m.ThemeEditorPanel })));
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -1422,7 +1444,9 @@ function App() {
   );
   const { tab, setTab } = useHashRoute("chat");
   const [sidebarNavCollapsed, setSidebarNavCollapsed] = useState(false);
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const { open: mobileSidebarOpen, setOpen: setMobileSidebarOpen, narrow: narrowSidebar, sidebarRef, contentRef, toggleRef } = useMobileSidebar();
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set([tab]));
+  useEffect(() => { setVisitedTabs(previous => previous.has(tab) ? previous : new Set([...previous, tab])); }, [tab]);
   const [uiDensity, setUiDensity] = useState<UiDensity>(() => {
     try {
       const s = localStorage.getItem(DENSITY_STORAGE_KEY);
@@ -1446,7 +1470,7 @@ function App() {
     } catch {
       /* ignore */
     }
-    return true;
+    return false;
   });
   const [createTaskDialogOpen, setCreateTaskDialogOpen] = useState(false);
   const [eventTriggers, setEventTriggers] = useState<
@@ -1709,7 +1733,7 @@ function App() {
     []
   );
   const [health, setHealth] = useState<HealthState | null>(null);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState(loadRecoveryDraft);
   const [chatResearchContext, setChatResearchContext] = useState<ChatResearchContext | null>(null);
   const [chatNoteContext, setChatNoteContext] = useState<ChatNoteContext | null>(null);
   const [notePickerOpen, setNotePickerOpen] = useState(false);
@@ -2413,6 +2437,7 @@ function App() {
       return null;
     }
   });
+  useChatDraftRecovery(message, sessionId);
   const [chatThreads, setChatThreads] = useState<ChatThreadEntry[]>(() => loadChatThreadsInitial());
   const [chatThreadSearch, setChatThreadSearch] = useState("");
   const [chatThreadFolderFilter, setChatThreadFolderFilter] = useState("");
@@ -2521,7 +2546,7 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const subagentsDetailRef = useRef<HTMLDivElement>(null);
   const chatInlineReplyRef = useRef<HTMLDivElement>(null);
-  const chatInputRef = useRef<HTMLInputElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
   const humanInputAutoOpenedRef = useRef<Set<string>>(new Set());
@@ -3186,7 +3211,8 @@ function App() {
   useEffect(() => {
     if (tab === "chat") {
       requestAnimationFrame(() => {
-        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        if (messages.length > 0) chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        else chatEndRef.current?.parentElement?.scrollTo({ top: 0, behavior: "auto" });
       });
     }
   }, [messages, loading, tab]);
@@ -3214,19 +3240,41 @@ function App() {
     }
   }, [humanInputModalTaskId]);
   useEffect(() => {
-    if (tab === "chat") chatInputRef.current?.focus();
-  }, [tab]);
+    if (tab === "chat" && !showOnboarding) chatInputRef.current?.focus();
+  }, [tab, showOnboarding]);
 
   // Restore focus on chat input when loading finishes (task completed, failed, or slash command done)
   const prevLoadingRef = useRef(loading);
   useEffect(() => {
-    if (prevLoadingRef.current === true && loading === false && tab === "chat") {
+    if (prevLoadingRef.current === true && loading === false && tab === "chat" && !showOnboarding) {
       requestAnimationFrame(() => {
         chatInputRef.current?.focus();
       });
     }
     prevLoadingRef.current = loading;
-  }, [loading, tab]);
+  }, [loading, tab, showOnboarding]);
+
+  useEffect(() => {
+    const input = chatInputRef.current;
+    if (!input) return;
+    const resize = () => {
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 200) + "px";
+    };
+    resize();
+    let width = input.clientWidth;
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", resize);
+      return () => window.removeEventListener("resize", resize);
+    }
+    const observer = new ResizeObserver(() => {
+      if (input.clientWidth === width) return;
+      width = input.clientWidth;
+      resize();
+    });
+    observer.observe(input);
+    return () => observer.disconnect();
+  }, [message, tab]);
 
   // Close pending-actions dropdown when clicking outside
   useEffect(() => {
@@ -3560,7 +3608,24 @@ function App() {
     return { byId, visibleIds, childrenByParent, branchIds, roots };
   }, [tasksList, filteredTasksList]);
 
-  const selectedTask = tasksList[tasksSelected] ?? null;
+  const selectedTask = useMemo(() => {
+    let task: TaskListItem | null = tasksList[tasksSelected] ?? null;
+    if (!isSimpleMode) return task;
+    // Derive a safe selection during render: switching modes cannot expose a child for one frame.
+    const seen = new Set<string>();
+    while (task?.parent_task_id) {
+      if (seen.has(task.id)) return null;
+      seen.add(task.id);
+      task = taskTreeData.byId.get(task.parent_task_id) ?? null;
+    }
+    return task;
+  }, [tasksList, tasksSelected, isSimpleMode, taskTreeData]);
+
+  useEffect(() => {
+    if (isSimpleMode && selectedTask && tasksList[tasksSelected]?.id !== selectedTask.id) {
+      setTasksSelected(tasksList.findIndex((task) => task.id === selectedTask.id));
+    }
+  }, [isSimpleMode, selectedTask, tasksList, tasksSelected]);
 
   useEffect(() => {
     setCollapsedTaskBranches((prev) => {
@@ -3627,6 +3692,10 @@ function App() {
     return rows;
   }, [taskTreeData, collapsedTaskBranches]);
 
+  const sidebarTaskRows = isSimpleMode
+    ? taskTreeRows.filter((row) => !row.task.parent_task_id)
+    : taskTreeRows;
+
   const visibleTaskEvents = useMemo(() => {
     const compact = collapseStreamedProgressEvents(tasksEvents, selectedTask?.id ?? "root");
     if (!isSimpleMode) return compact;
@@ -3667,16 +3736,17 @@ function App() {
   const taskStatusCounts = useMemo(() => {
     return tasksList.reduce(
       (acc, task) => {
+        if (isSimpleMode && task.parent_task_id) return acc;
         const status = (task.status ?? "").toLowerCase();
         if (status === "running") acc.running += 1;
-        else if (status === "pending") acc.pending += 1;
+        else if (["pending", "queued", "waiting_user_input"].includes(status)) acc.pending += 1;
         else if (status === "completed") acc.completed += 1;
         else if (status === "failed") acc.failed += 1;
         return acc;
       },
       { running: 0, pending: 0, completed: 0, failed: 0 }
     );
-  }, [tasksList]);
+  }, [tasksList, isSimpleMode]);
 
   const taskExecutionView = useMemo(() => {
     return buildExecutionSteps(tasksEvents, tasksList, selectedTask?.id, taskStepsTodos);
@@ -3770,7 +3840,7 @@ function App() {
     return filteredRows.slice(-maxRows);
   }, [tasksEvents, extractTaskDiscussionHighlights, isSimpleMode, taskOrchestrationDebugLevel]);
 
-  const taskDisplayLabel = (task: TaskListItem) => (task.label && task.label.trim() ? task.label.trim() : t("tasks.task_unnamed") + task.id.slice(-8));
+  const taskDisplayLabel = (task: TaskListItem) => taskTitle(task.label, t("tasks.task_unnamed") + task.id.slice(-8));
 
   const exportAdvancedViewCsv = useCallback((visual: EventAdvancedView) => {
     try {
@@ -5671,7 +5741,7 @@ function App() {
       replyWithTtsRef,
       selectedTaskIdForTodosRef,
       fetchTasksEventsRef,
-      chatInputRef: chatInputRef as unknown as MutableRefObject<HTMLTextAreaElement | null>,
+      chatInputRef,
       akashaSessionIdKey: AKASHA_SESSION_ID_KEY,
       normalizeTaskEventsInvokeResponse,
       extractChatMapVisualFromTaskEvents,
@@ -5751,9 +5821,9 @@ function App() {
     }
   }, [health?.ok, sessionId, tasksList, trackTaskUntilDone, fetchTasksList]);
 
-  const handleSend = async (overrideMessage?: string, fromVoice?: boolean) => {
-    const content = (overrideMessage ?? message).trim();
-    const hasContent = content || attachments.length > 0;
+  const handleSend = async (overrideMessage?: string, fromVoice?: boolean, deliveryOverride?: "immediate" | "steering" | "follow_up") => {
+    const content = overrideMessage ?? message;
+    const hasContent = content.trim() || attachments.length > 0;
     if (!hasContent || loading) return;
 
     if (fromVoice) replyWithTtsRef.current = true;
@@ -5765,6 +5835,12 @@ function App() {
       messageToSend = buildMessageWithResearchContext(userMessage, researchCtx, locale);
     } else if (noteCtx) {
       messageToSend = buildMessageWithNoteContext(userMessage, noteCtx, locale);
+    }
+    if (chatWebSearch && !userMessage.startsWith("/")) {
+      // A preference in the agent context; tools_policy remains the authority for web access.
+      messageToSend += locale === "en"
+        ? "\n\n[Response preference: prefer web_search to verify current information and cite the sources used. If web search is unavailable, say so explicitly.]"
+        : "\n\n[Préférence de réponse : privilégie web_search pour vérifier les informations actuelles et cite les sources utilisées. Si la recherche web est indisponible, indique-le explicitement.]";
     }
     if (researchCtx) setChatResearchContext(null);
     if (noteCtx) setChatNoteContext(null);
@@ -5813,8 +5889,9 @@ function App() {
       if (useNewSession) pendingNewSessionAfterSlashRef.current = false;
       const sessionAtSend = sessionId;
       const runningIds = Object.keys(runningTaskChips);
+      const deliveryMode = deliveryOverride ?? chatDeliveryMode;
       const steerTarget =
-        chatDeliveryMode !== "immediate" && runningIds.length > 0 ? runningIds[0] : undefined;
+        deliveryMode !== "immediate" && runningIds.length > 0 ? runningIds[0] : undefined;
       const ack = await invoke<{
         task_id: string;
         session_id: string;
@@ -5825,7 +5902,7 @@ function App() {
         sessionId: sessionId,
         attachments: attachmentsPayload,
         newSession: useNewSession ? true : undefined,
-        queueMode: steerTarget ? chatDeliveryMode : undefined,
+        queueMode: steerTarget ? deliveryMode : undefined,
         targetTaskId: steerTarget,
         incognito: chatIncognito ? true : undefined,
         composerMode: composerMode !== "agent" ? composerMode : undefined,
@@ -5837,9 +5914,9 @@ function App() {
           {
             role: "system",
             text:
-              chatDeliveryMode === "steering"
-                ? "Message mis en file steering (injection prioritaire)."
-                : "Message mis en file follow-up (après le tour en cours).",
+              deliveryMode === "steering"
+                ? (locale === "en" ? "Message queued for the next turn." : "Message en attente pour la prochaine étape.")
+                : (locale === "en" ? "Message queued after the current task." : "Message en attente après la tâche en cours."),
           },
         ]);
       }
@@ -5936,7 +6013,7 @@ function App() {
         userRagError={userRagError}
         projectGraphError={projectGraphError}
       />
-      <a href="#main-content" className="skip-link">Aller au contenu principal</a>
+      <a href="#main-content" className="skip-link">{locale === "en" ? "Skip to main content" : "Aller au contenu principal"}</a>
       {updateBannerInfo && (
         <div className="update-banner" role="region" aria-label={t("update.banner_label")}>
           <div className="update-banner-inner">
@@ -5985,12 +6062,13 @@ function App() {
             onClick={() => setMobileSidebarOpen(false)}
           />
         ) : null}
-        <aside className={`sidebar-left${mobileSidebarOpen ? " sidebar-left--open" : ""}${sidebarNavCollapsed ? " sidebar-left--collapsed" : ""}`} aria-label="Navigation principale">
+        <aside id="primary-navigation" ref={sidebarRef} aria-hidden={narrowSidebar && !mobileSidebarOpen} className={`sidebar-left${mobileSidebarOpen ? " sidebar-left--open" : ""}${sidebarNavCollapsed ? " sidebar-left--collapsed" : ""}`} aria-label="Navigation principale">
           <div className="sidebar-left-top">
+            <button type="button" className="sidebar-mobile-close btn-secondary" onClick={() => setMobileSidebarOpen(false)} aria-label={t("common.close")}>{t("common.close")}</button>
             <h1 className="logo">Akasha</h1>
             <p className="tagline">Local-first AI assistant</p>
           </div>
-          <AppNavigation tab={tab} setTab={(t) => { setTab(t); setMobileSidebarOpen(false); }} t={t} collapsed={sidebarNavCollapsed} onToggleCollapse={() => setSidebarNavCollapsed((c) => !c)} />
+          <AppNavigation tab={tab} setTab={(t) => { setTab(t); setMobileSidebarOpen(false); }} t={t} simple={isSimpleMode} collapsed={sidebarNavCollapsed} onToggleCollapse={() => setSidebarNavCollapsed((c) => !c)} />
           <div className="sidebar-left-bottom">
             <div className="daemon-status" role="status" aria-live="polite">
               <span
@@ -6057,7 +6135,7 @@ function App() {
           </div>
         </aside>
 
-        <div className="container-main">
+        <div className="container-main" ref={contentRef}>
           <div className="container-main-inner">
             <header className="view-header">
               <div className="view-header-main">
@@ -6069,10 +6147,12 @@ function App() {
               <div className="view-header-actions">
                 <button
                   type="button"
+                  ref={toggleRef}
                   className="sidebar-mobile-toggle"
+                  aria-controls="primary-navigation"
                   onClick={() => setMobileSidebarOpen((o) => !o)}
                   aria-expanded={mobileSidebarOpen}
-                  aria-label={t("nav.toggle_sidebar")}
+                  aria-label={mobileSidebarOpen ? t("common.close") : t("nav.open_sidebar")}
                 >
                   ☰
                 </button>
@@ -6100,7 +6180,7 @@ function App() {
                     <button
                       type="button"
                       className="sidebar-right-toggle"
-                      onClick={() => setRightSidebarOpen((o) => !o)}
+                      onClick={() => setTaskSidebarOpen(!rightSidebarOpen)}
                       aria-expanded={rightSidebarOpen}
                       aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
                     >
@@ -6429,12 +6509,13 @@ function App() {
           >
             {chatIncognito ? (
               <p className="chat-incognito-banner" role="status">
-                {locale === "en" ? "Incognito — memory promotion disabled for this session (UI flag)." : "Incognito — promotion mémoire désactivée pour cette session (indicateur UI)."}
+                {locale === "en" ? "Incognito — memory promotion disabled for this session." : "Incognito — promotion mémoire désactivée pour cette session."}
               </p>
             ) : null}
             <ActiveWorkDrawer
               locale={locale}
               tasks={activeWorkTasks}
+              simple={isSimpleMode}
               onOpenTask={(taskId) => openChatTaskDetail(taskId)}
               onOpenSession={(sid) => void selectChatThread(sid)}
               onCancel={async (taskId) => {
@@ -6502,6 +6583,7 @@ function App() {
               <button
                 type="button"
                 className={`btn-secondary btn-tiny ${chatDualPane ? "active" : ""}`}
+                aria-pressed={chatDualPane}
                 onClick={() => {
                   const next = !chatDualPane;
                   setChatDualPane(next);
@@ -6612,13 +6694,17 @@ function App() {
             <div className="chat-area">
               {messages.length === 0 ? (
                 <div className="chat-placeholder">
-                  <p>Écrivez un message pour commencer.</p>
-                  <p>
-                    Commandes <code>/</code> : <code>/help</code> pour l’aide, <code>/status</code>, <code>/config list</code>, etc.
-                  </p>
-                  <p>
-                    Daemon : <code>akasha start</code>
-                  </p>
+                  <h3>{t("chat.start_title")}</h3>
+                  <p>{t("chat.start_hint")}</p>
+                  <div className="chat-starters">
+                    {["summarize", "plan", "explain"].map(key => (
+                      <button key={key} type="button" className="btn-secondary" onClick={() => {
+                        setMessage(t("chat.starter_" + key + "_prompt"));
+                        chatInputRef.current?.focus();
+                      }}>{t("chat.starter_" + key)}</button>
+                    ))}
+                  </div>
+                  {!isSimpleMode && <p>{t("chat.commands_hint")} <code>/help</code> · <code>/status</code> · <code>/config list</code></p>}
                 </div>
               ) : (
                 <ChatRenderer
@@ -6691,7 +6777,7 @@ function App() {
                       <span>{t("chat.sending")}</span>
                     </div>
                   )}
-                  {Object.keys(runningTaskChips).length > 0 && (
+                  {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && (
                     <div className="chat-chips">
                       {Object.entries(runningTaskChips).map(([tid, { pct, message }]) => {
                         const chipAskUser = parseAskUserMessage(message ?? "");
@@ -6723,6 +6809,10 @@ function App() {
                 <div className="chat-task-summary-bar">
                   <span>{t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}</span>
                   <button type="button" className="chat-task-summary-btn" onClick={() => setTab("tasks")}>{t("chat.open_tasks")}</button>
+                  {Object.keys(pendingHumanInput).map(tid => <button key={tid} type="button" className="chat-task-summary-btn"
+                    onClick={() => { setHumanInputModalTaskId(tid); setHumanInputFreeText(""); }}>
+                    {locale === "en" ? "Reply to the pending question" : "Répondre à la question en attente"}
+                  </button>)}
                 </div>
               )}
               {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && chatToolBatchSummary && (
@@ -6732,7 +6822,7 @@ function App() {
               )}
               <div ref={chatEndRef} aria-hidden />
             </div>
-            {Object.keys(runningTaskChips).length > 0 && (
+            {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && (
                 <div className="chat-subagents-panel">
                   <button
                     type="button"
@@ -7089,8 +7179,8 @@ function App() {
               <Tooltip
                 content={
                   locale === "en"
-                    ? "Steering injects mid-task; follow-up runs after the current turn"
-                    : "Steering : injection prioritaire ; follow-up : après le tour en cours"
+                    ? "Send during the task, or queue a message for when it finishes"
+                    : "Pendant la tâche : message prioritaire ; après la tâche : message en attente"
                 }
               >
                 <div className="input-group chat-delivery-group" role="group" aria-label={locale === "en" ? "Delivery mode" : "Mode d'envoi"}>
@@ -7108,8 +7198,8 @@ function App() {
                     aria-labelledby="chat-delivery-mode-label"
                   >
                     <option value="immediate">{locale === "en" ? "Immediate" : "Immédiat"}</option>
-                    <option value="steering">Steering</option>
-                    <option value="follow_up">Follow-up</option>
+                    <option value="steering">{locale === "en" ? "During task" : "Pendant la tâche"}</option>
+                    <option value="follow_up">{locale === "en" ? "After task" : "Après la tâche"}</option>
                   </select>
                 </div>
               </Tooltip>
@@ -7215,24 +7305,20 @@ function App() {
                 <label htmlFor="chat-input" className="sr-only">
                   {locale === "en" ? "Your message" : "Votre message"}
                 </label>
-                <input
+                <textarea
                   ref={chatInputRef}
                   id="chat-input"
-                  type="text"
+                  rows={2}
                   className="input-group-field"
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key !== "Enter" || e.shiftKey) return;
+                    if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
                     e.preventDefault();
-                    if (e.altKey) {
-                      setChatDeliveryMode("follow_up");
-                    } else if (runningTaskChips && Object.keys(runningTaskChips).length > 0) {
-                      setChatDeliveryMode("steering");
-                    } else {
-                      setChatDeliveryMode("immediate");
-                    }
-                    void handleSend();
+                    const mode = e.altKey ? "follow_up"
+                      : Object.keys(runningTaskChips).length > 0 ? "steering" : "immediate";
+                    setChatDeliveryMode(mode);
+                    void handleSend(undefined, false, mode);
                   }}
                   placeholder={locale === "en" ? "Your message…" : "Votre message…"}
                   disabled={loading}
@@ -7251,16 +7337,16 @@ function App() {
                 </div>
               </div>
             </div>
-            <p id="send-hint" className="hint sr-only">
+            <p id="send-hint" className="hint chat-send-hint">
               {locale === "en"
-                ? "Enter to send (steering when a task is running; Alt+Enter for follow-up)"
-                : "Entrée pour envoyer (steering si tâche active ; Alt+Entrée pour follow-up)"}
+                ? "Enter to send · Shift+Enter for a new line · Alt+Enter to queue after the current task"
+                : "Entrée pour envoyer · Maj+Entrée pour une nouvelle ligne · Alt+Entrée pour envoyer après la tâche en cours"}
             </p>
           </section>
         )}
 
-        {tab === "compare" && (
-          <section id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" className="panel compare-panel-wrap">
+        {(tab === "compare" || visitedTabs.has("compare")) && (
+          <section id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" className="panel compare-panel-wrap" hidden={tab !== "compare"}>
             <ComparePanel
               fetchEndpoint={fetchSystemEndpoint}
               locale={locale}
@@ -7278,15 +7364,15 @@ function App() {
           hidden={tab !== "research"}
           aria-hidden={tab !== "research"}
         >
-          <DeepResearchPanel
+          {(tab === "research" || visitedTabs.has("research")) && <DeepResearchPanel
             fetchEndpoint={fetchSystemEndpoint}
             locale={locale}
             onDiscussReport={discussResearchReport}
-          />
+          />}
         </section>
 
-        {tab === "cookbook" && (
-          <section id="panel-cookbook" role="tabpanel" aria-labelledby="tab-cookbook" className="panel cookbook-panel-wrap">
+        {(tab === "cookbook" || visitedTabs.has("cookbook")) && (
+          <section id="panel-cookbook" role="tabpanel" aria-labelledby="tab-cookbook" className="panel cookbook-panel-wrap" hidden={tab !== "cookbook"}>
             <CookbookPanel
               fetchEndpoint={fetchSystemEndpoint}
               locale={locale}
@@ -7297,8 +7383,8 @@ function App() {
           </section>
         )}
 
-        {tab === "notes" && (
-          <section id="panel-notes" role="tabpanel" aria-labelledby="tab-notes" className="panel notes-panel-wrap">
+        {(tab === "notes" || visitedTabs.has("notes")) && (
+          <section id="panel-notes" role="tabpanel" aria-labelledby="tab-notes" className="panel notes-panel-wrap" hidden={tab !== "notes"}>
             <NotesPanel t={t} locale={locale} daemonPort={DAEMON_PORT} onDiscussNote={discussNote} />
           </section>
         )}
@@ -7503,7 +7589,7 @@ function App() {
             className="panel activity-panel"
           >
             <div className="task-center-toolbar">
-              <h2 className="panel-title task-center-toolbar-title">{t("tasks.title")}</h2>
+              <span className="task-center-toolbar-title">{t("tasks.workspace_actions")}</span>
               <div className="task-center-toolbar-actions">
                 <Tooltip content={rightSidebarOpen ? t("tasks.hide_task_list") : t("tasks.show_task_list")}>
                   <button
@@ -7546,7 +7632,7 @@ function App() {
                         <span className={"task-tree-kind-badge " + (selectedTask.parent_task_id ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
                           {selectedTask.parent_task_id ? t("tasks.subtask_badge") : t("tasks.root_badge")}
                         </span>
-                        {selectedTaskHierarchy.length > 1 && (
+                        {!isSimpleMode && selectedTaskHierarchy.length > 1 && (
                           <span className="task-tree-path-summary">
                             {selectedTaskHierarchy.map((task, index) => (
                               <span key={task.id} className="task-tree-path-segment">
@@ -7558,8 +7644,8 @@ function App() {
                         )}
                       </div>
                       <div className="task-center-selected-meta">
-                        <span className={"activity-task-status-pill status-" + selectedTask.status}>{selectedTask.status}</span>
-                        {selectedTask.assigned_agent && <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(selectedTask.assigned_agent)}>{selectedTask.assigned_agent}</span>}
+                        <span className={"activity-task-status-pill status-" + selectedTask.status}>{taskStatus(selectedTask.status, locale)}</span>
+                        {!isSimpleMode && selectedTask.assigned_agent && <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(selectedTask.assigned_agent)}>{selectedTask.assigned_agent}</span>}
                         {selectedTaskSummary?.progressPct != null && selectedTask.status === "running" && (
                           <span className="task-live-progress-pill">
                             {t("tasks.progress_pct_summary").replace("{{pct}}", String(selectedTaskSummary.progressPct))}
@@ -7568,10 +7654,10 @@ function App() {
                         {selectedTask.created_at && <span>{formatRelativeTimeLabel(selectedTask.created_at, locale)}</span>}
                       </div>
                     </div>
-                    {selectedTaskSummary?.routeHint ? (
+                    {!isSimpleMode && selectedTaskSummary?.routeHint ? (
                       <p className="task-center-selected-route">{selectedTaskSummary.routeHint}</p>
                     ) : null}
-                    {selectedTaskSummary?.latestSummary ? (
+                    {isSimpleMode ? null : selectedTaskSummary?.latestSummary ? (
                       <p className="task-center-selected-text">{selectedTaskSummary.latestSummary}</p>
                     ) : selectedTaskSummary?.runningChip?.message ? (
                       <p className="task-center-selected-text">{trimPreview(selectedTaskSummary.runningChip.message, 180)}</p>
@@ -7586,7 +7672,28 @@ function App() {
                 {t("common.loading")}
               </p>
             )}
-            {!tasksLoading && (
+            {!tasksLoading && tasksList.length === 0 && <div className="task-empty-intro">
+              <h3>{locale === "en" ? "Start your first task" : "Commencez votre première tâche"}</h3>
+              <p>{locale === "en" ? "Create a task here or describe what you need in Chat. Its progress and result will appear here." : "Créez une tâche ici ou décrivez votre besoin dans le Chat. Son avancement et son résultat apparaîtront ici."}</p>
+              <button type="button" className="btn-secondary" onClick={() => setTab("chat")}>{locale === "en" ? "Open Chat" : "Ouvrir le Chat"}</button>
+            </div>}
+            {!tasksLoading && tasksList.length > 0 && isSimpleMode && (
+              <div className="task-simple-details">
+                <p>{locale === "en" ? "Progress appears above. The conversation contains the response; Expert mode shows the execution details."
+                  : "L’avancement est affiché ci-dessus. La réponse se trouve dans la conversation ; le mode Expert donne accès aux détails d’exécution."}</p>
+                <button type="button" className="btn-secondary" onClick={() => {
+                  const sid = selectedTask?.session_id ?? loadTaskSessionMap()[selectedTask?.id ?? ""];
+                  if (sid) void selectChatThread(sid);
+                  setTab("chat");
+                }}>
+                  {locale === "en" ? "Open Chat" : "Ouvrir le Chat"}
+                </button>{" "}
+                <button type="button" className="btn-secondary" onClick={() => setUiModeAndSave("expert")}>
+                  {locale === "en" ? "Show technical details" : "Afficher les détails techniques"}
+                </button>
+              </div>
+            )}
+            {!tasksLoading && tasksList.length > 0 && !isSimpleMode && (
               <div className="activity-panel-body">
                 <div
                   className={
@@ -7670,7 +7777,7 @@ function App() {
                       className="task-panel-section-body task-panel-events-body"
                     >
                   <div className="task-events-controls">
-                    <label className="task-events-debug-level-control" htmlFor="task-debug-level-select">
+                    {!isSimpleMode && <label className="task-events-debug-level-control" htmlFor="task-debug-level-select">
                       <span className="task-events-debug-level-label">{t("tasks.debug_orchestration_level_label")}</span>
                       <select
                         id="task-debug-level-select"
@@ -7683,7 +7790,7 @@ function App() {
                         <option value="normal">{t("tasks.debug_level_normal")}</option>
                         <option value="full">{t("tasks.debug_level_full")}</option>
                       </select>
-                    </label>
+                    </label>}
                   </div>
                   <div className="task-panel-events-scroll">
                     {taskDiscussionHighlights.length > 0 && (
@@ -9833,7 +9940,7 @@ function App() {
             className="panel settings-panel"
           >
             <div className="settings-panel-header">
-              <h2 className="panel-title settings-panel-title">{t("settings.title")}</h2>
+
               <nav className="settings-tabs" role="tablist" aria-label={t("settings.sections_label")}>
                 <button role="tab" aria-selected={settingsSection === "display"} className={settingsSection === "display" ? "active" : ""} onClick={() => setSettingsSection("display")}>{t("settings.section_display")}</button>
                 <button role="tab" aria-selected={settingsSection === "system"} className={settingsSection === "system" ? "active" : ""} onClick={() => setSettingsSection("system")}>{t("settings.section_system")}</button>
@@ -9848,7 +9955,7 @@ function App() {
               <dt>{t("settings.theme")}</dt>
               <dd>
                 <select
-                  aria-label="Choisir le thème d’affichage"
+                  aria-label={locale === "en" ? "Choose display theme" : "Choisir le thème d’affichage"}
                   className="settings-theme-select"
                   value={theme}
                   onChange={(e) => setThemeAndSave(e.target.value as ThemeId)}
@@ -11067,7 +11174,7 @@ function App() {
               <button
                 type="button"
                 className="sidebar-right-close"
-                onClick={() => (tab === "tasks" ? setTaskSidebarOpen(false) : setRightSidebarOpen(false))}
+                onClick={() => setTaskSidebarOpen(false)}
                 aria-label={tab === "chat" ? t("sidebar.hide_tasks") : t("sidebar.hide_tasks")}
               >
                 ×
@@ -11263,7 +11370,7 @@ function App() {
                       aria-label={t("tasks.search_placeholder")}
                     />
                   </div>
-                  {taskTreeData.branchIds.size > 0 && (
+                  {!isSimpleMode && taskTreeData.branchIds.size > 0 && (
                     <div className="task-tree-toolbar task-tree-toolbar-sidebar" role="group" aria-label={t("tasks.tree_actions")}>
                       <button
                         type="button"
@@ -11289,7 +11396,7 @@ function App() {
               {!tasksLoading && tasksList.length === 0 && (
                 <p className="empty-state">{t("tasks.empty")}</p>
               )}
-              {!tasksLoading && tasksList.length > 0 && taskTreeRows.length === 0 && (
+              {!tasksLoading && tasksList.length > 0 && sidebarTaskRows.length === 0 && (
                 <p className="empty-state">{t("tasks.no_match_filter")}</p>
               )}
               {tab === "tasks" && eventTriggers.length > 0 && (
@@ -11305,9 +11412,9 @@ function App() {
                   </ul>
                 </div>
               )}
-              {!tasksLoading && taskTreeRows.length > 0 && (
+              {!tasksLoading && sidebarTaskRows.length > 0 && (
                 <ul className="sidebar-right-task-list" role="list">
-                  {taskTreeRows.map((row) => {
+                  {sidebarTaskRows.map((row) => {
                     const task = row.task;
                     const isSelected = tasksList[tasksSelected]?.id === task.id;
                     const isAncestor = !isSelected && selectedTaskAncestorIds.has(task.id);
@@ -11350,7 +11457,7 @@ function App() {
                           <div className="sidebar-right-task-card-head">
                             <div className="sidebar-right-task-card-heading">
                               <div className="task-tree-title-row">
-                                {row.hasChildren ? (
+                                {!isSimpleMode && row.hasChildren ? (
                                   <button
                                     type="button"
                                     className="task-tree-toggle"
@@ -11372,31 +11479,31 @@ function App() {
                                   {taskDisplayLabel(task)}
                                 </span>
                               </div>
-                              <div className="task-tree-meta-row">
+                              {!isSimpleMode && <div className="task-tree-meta-row">
                                 <span className={"task-tree-kind-badge " + (row.depth > 0 ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
                                   {hierarchyLabel}
                                 </span>
                                 {row.hasChildren && <span className="task-tree-child-count">{childCountLabel}</span>}
-                              </div>
+                              </div>}
                             </div>
                             <span className={"sidebar-right-task-status-pill status-" + task.status}>
-                              {task.status}
+                              {taskStatus(task.status, locale)}
                             </span>
                           </div>
-                          {task.status === "running" && runningChip != null && (
+                          {!isSimpleMode && task.status === "running" && runningChip != null && (
                             <div className="sidebar-right-task-progress">
                               <div className="sidebar-right-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
                               <span className="sidebar-right-task-progress-pct">{runningChip.pct ?? 0}%</span>
                             </div>
                           )}
-                          {isSimpleMode && runningChip?.message && (
+                          {!isSimpleMode && runningChip?.message && (
                             <p className="sidebar-right-task-snippet">{trimPreview(runningChip.message, 96)}</p>
                           )}
                           <div className="sidebar-right-task-meta">
                             {!isSimpleMode && <span className="sidebar-right-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>}
                             {createdLabel && <span className="sidebar-right-task-created">{createdLabel}</span>}
                             {task.created_at && <span className="sidebar-right-task-relative">{formatRelativeTimeLabel(task.created_at, locale)}</span>}
-                            {task.assigned_agent && <span className="sidebar-right-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
+                            {!isSimpleMode && task.assigned_agent && <span className="sidebar-right-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
                           </div>
                           <button
                             type="button"
@@ -11417,7 +11524,7 @@ function App() {
           </aside>
         )}
       </div>
-      <CreateTaskDialog
+      {createTaskDialogOpen && <CreateTaskDialog
         open={createTaskDialogOpen}
         onClose={() => setCreateTaskDialogOpen(false)}
         sessionId={sessionId ?? ""}
@@ -11438,7 +11545,7 @@ function App() {
         onTriggerCreated={() => {
           void fetchEventTriggers();
         }}
-      />
+      />}
     </div>
   );
 }

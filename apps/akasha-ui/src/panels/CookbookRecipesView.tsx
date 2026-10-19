@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import MarkdownContent from "../MarkdownContent";
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
+const MarkdownContent = lazy(() => import("../MarkdownContent"));
 import { InfoTip } from "../components/Tooltip";
 import { useNotifyOnMessage } from "../notifications/useNotifyOnMessage";
 import { useI18n } from "../useI18n";
@@ -410,7 +410,7 @@ export function CookbookRecipesView({ fetchEndpoint, locale, handlers }: Props) 
 
               <section className="cookbook-recipe-steps">
                 <h5>{t("cookbook.recipes_steps")}</h5>
-                <MarkdownContent>{loc.steps_md}</MarkdownContent>
+                <Suspense fallback={<span role="status">…</span>}><MarkdownContent>{loc.steps_md}</MarkdownContent></Suspense>
               </section>
 
               {(recipe.actions?.length ?? 0) > 0 ? (

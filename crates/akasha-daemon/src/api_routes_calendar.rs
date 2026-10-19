@@ -70,17 +70,7 @@ fn calendar_sync_token_ok(headers: &[(String, String)]) -> bool {
 }
 
 fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> String {
-    if let Some(msg) = initial_message {
-        let trimmed = msg.trim();
-        if !trimmed.is_empty() {
-            let one_line = trimmed.lines().next().unwrap_or(trimmed);
-            let short: String = one_line.chars().take(80).collect();
-            return short;
-        }
-    }
-    let s = task_id.to_string();
-    let suffix = &s[s.len().saturating_sub(8)..];
-    format!("Tâche …{suffix}")
+    crate::api_routes_tasks::task_label(initial_message, task_id).chars().take(80).collect()
 }
 
 fn event_to_json(e: &ExternalCalendarEvent) -> serde_json::Value {
