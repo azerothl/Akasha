@@ -1482,6 +1482,11 @@ pub(crate) async fn schedule_run_now(
     }
 }
 
+fn composer_message(mode: &str, prompt: &str, message: &str) -> String {
+    // Byte length preserves arbitrary multi-paragraph prompts without ambiguous delimiters.
+    format!("[Composer mode: {mode}; prompt_bytes: {}]\n{prompt}\n\n{message}", prompt.len())
+}
+
 pub(crate) fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> String {
     const LABEL_MAX: usize = 100;
     match initial_message {
@@ -1498,7 +1503,13 @@ pub(crate) fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> St
                 s = s.splitn(2, "\n\n").nth(1).unwrap_or("").trim();
             }
             if s.starts_with("[Composer mode:") {
-                s = s.splitn(2, "\n\n").nth(1).unwrap_or("").trim();
+                // Old envelopes have no unambiguous end for a user-managed prompt.
+                // Keep their labels generic instead of exposing private paragraphs.
+                s = s.split_once("]\n").and_then(|(header, rest)| {
+                    let (_, length) = header.rsplit_once("; prompt_bytes: ")?;
+                    let length = length.parse::<usize>().ok()?;
+                    rest.get(length..)?.strip_prefix("\n\n")
+                }).unwrap_or("").trim();
             }
             if s.starts_with("[Pièce(s) jointe(s) à ce message") {
                 s = s.splitn(2, "\n\nMessage : ").nth(1).unwrap_or("");
@@ -2358,10 +2369,12 @@ if method == "POST" && path == "/api/message" {
             .filter(|s| !s.is_empty())
             .or_else(|| crate::api::agent_role_system_prompt(mode).map(|s| s.to_string()));
         if let Some(p) = prefix {
-            message_for_llm = format!("[Composer mode: {mode}]\n{p}\n\n{message_for_llm}");
+            message_for_llm = composer_message(mode, &p, &message_for_llm);
         } else if mode == "ask" {
-            message_for_llm = format!(
-                "[Composer mode: ask]\nAnswer questions only. Use read-only tools if needed. Do not write files or run mutating shell commands.\n\n{message_for_llm}"
+            message_for_llm = composer_message(
+                "ask",
+                "Answer questions only. Use read-only tools if needed. Do not write files or run mutating shell commands.",
+                &message_for_llm,
             );
         }
     }
@@ -2653,10 +2666,21 @@ mod tests {
     fn task_label_unwraps_private_instructions_before_truncation() {
         let id = Uuid::nil();
         let long_instruction = "Internal instruction. ".repeat(30);
-        let message = format!("[Composer mode: ask]\n{long_instruction}\n\nComparer Vec et HashMap\n  en français");
+        let message = composer_message("ask", &long_instruction, "Comparer Vec et HashMap\n  en français");
         assert_eq!(task_label(Some(&message), &id), "Comparer Vec et HashMap en français");
-        let attachment = "[Composer mode: ask]\nRead only.\n\n[Pièce(s) jointe(s) à ce message : aide]\n\nMessage : Résumer ce document\n\n--- Document(s) joint(s) ---\nsecret attachment body".to_string();
+        let attachment = "[Pièce(s) jointe(s) à ce message : aide]\n\nMessage : Résumer ce document\n\n--- Document(s) joint(s) ---\nsecret attachment body".to_string();
+        let attachment = composer_message("ask", "Read only.\n\nInstructions privées et caractères accentués.", &attachment);
         assert_eq!(task_label(Some(&attachment), &id), "Résumer ce document");
+        let prompt = "Premier paragraphe privé.\n\nSecond paragraphe privé : été 🦀.\n\nDernière consigne.";
+        let message = composer_message("custom", prompt, "Ma vraie demande\n\nAvec un second paragraphe");
+        assert_eq!(task_label(Some(&message), &id), "Ma vraie demande Avec un second paragraphe");
+        for legacy in [
+            "[Composer mode: custom]\nPrivate first paragraph\n\nPrivate second paragraph\n\nUser request",
+            "[Composer mode: custom; prompt_bytes: 1]\né\n\nUser request",
+            "[Composer mode: custom; prompt_bytes: 999999]\nprivate",
+        ] {
+            assert_eq!(task_label(Some(&legacy.to_string()), &id), "Tâche");
+        }
         let child = "[Task]\nObjective: [Orchestrated — disk deliverables REQUIRED]\nInternal tools requirement.\n\nCréer le rapport\nContext: private shared plan\nSuccess criteria: secret".to_string();
         assert_eq!(task_label(Some(&child), &id), "Créer le rapport");
     }
