@@ -262,6 +262,22 @@ fn file_hash(path: &Path) -> Result<String, String> {
         Err(error) => Err(error.to_string()),
     }
 }
+// Delivery versions are opaque approval tokens, distinct from content-only
+// editor versions and from the raw index checksum used for reconciliation.
+fn selected_file_version(path: &Path) -> Result<String, String> {
+    let content = file_hash(path)?;
+    if content == "missing" { return Ok(content); }
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).map_err(|e|e.to_string())?.permissions().mode() & 0o111 != 0
+    };
+    #[cfg(not(unix))]
+    let executable = false;
+    // Preserve existing non-executable version tokens; executable files have a
+    // separate hash domain, so chmod still invalidates either direction.
+    if executable { Ok(sha(format!("delivery-file-executable-v1:{content}").as_bytes())) } else { Ok(content) }
+}
 fn selected_path(
     root: &Path,
     raw: &str,
@@ -338,17 +354,25 @@ fn bound_metadata(data_dir: &Path, root: &Path) -> Result<(PathBuf,PathBuf),Stri
         dir.join(relative.trim()).canonicalize().map_err(|e|e.to_string())?
     }else{dir.clone()};
     if actual_common!=common {return Err("Git common metadata belongs to another project".into());}
-    // Git can also follow symlinks in refs, reflogs, objects, HEAD or index.
-    // Refuse them rather than allowing a repository to redirect a later mutation.
-    let mut pending=vec![common.clone()];let mut visited=0;
+    inspect_git_metadata(&common)?;
+    if common.join("objects/info/alternates").exists() {return Err("external Git object alternates are unsupported for delivery".into());}
+    Ok((dir,common))
+}
+
+fn inspect_git_metadata(common: &Path) -> Result<usize,String> {
+    // Check mutable controls and object-store directories, not every immutable
+    // loose object. A shard can contain millions of objects without redirecting
+    // writes; a symlinked shard/info/pack directory can redirect them and fails.
+    let objects = common.join("objects");
+    let mut pending=vec![common.to_path_buf()];let mut visited=0;
     while let Some(path)=pending.pop() {
         visited+=1;if visited>100_000 {return Err("Git metadata inspection limit exceeded".into());}
         let metadata=std::fs::symlink_metadata(&path).map_err(|e|e.to_string())?;
         if metadata.file_type().is_symlink() {return Err("Git metadata symlinks are unsupported for delivery".into());}
-        if metadata.is_dir() {for entry in std::fs::read_dir(path).map_err(|e|e.to_string())? {pending.push(entry.map_err(|e|e.to_string())?.path());}}
+        let loose_shard = path.parent()==Some(objects.as_path()) && path.file_name().and_then(|name|name.to_str()).is_some_and(|name|name.len()==2 && name.bytes().all(|b|b.is_ascii_hexdigit()));
+        if metadata.is_dir() && !loose_shard {for entry in std::fs::read_dir(path).map_err(|e|e.to_string())? {pending.push(entry.map_err(|e|e.to_string())?.path());}}
     }
-    if common.join("objects/info/alternates").exists() {return Err("external Git object alternates are unsupported for delivery".into());}
-    Ok((dir,common))
+    Ok(visited)
 }
 async fn repository(
     data_dir: &Path,
@@ -514,12 +538,12 @@ pub(crate) async fn preflight(
         }
         let status = &item[..2];
         let path = &item[3..];
-        let version = selected_path(&root, path, policy).and_then(|path| file_hash(&path));
+        let version = selected_path(&root, path, policy).and_then(|path| selected_file_version(&path));
         files.insert(path.to_string(),json!({"path":path,"status":status,"version":version.as_ref().ok(),"unavailable":version.err()}));
         if status.contains(['R', 'C']) {
             let old = parts.next().ok_or("Git rename source missing")?;
             if status.contains('R') {
-                let version = selected_path(&root, old, policy).and_then(|path| file_hash(&path));
+                let version = selected_path(&root, old, policy).and_then(|path| selected_file_version(&path));
                 files.insert(old.into(),json!({"path":old,"status":"rename_source","version":version.as_ref().ok(),"unavailable":version.err()}));
             }
         }
@@ -596,7 +620,7 @@ pub(crate) async fn commit(
             .expected_versions
             .get(raw)
             .ok_or("selected path version missing")?;
-        if file_hash(&path)? != *expected {
+        if selected_file_version(&path)? != *expected {
             return Err("stale selected file version; refresh before commit".into());
         }
         paths.push(path);
@@ -636,7 +660,7 @@ pub(crate) async fn commit(
     add.extend(paths.iter().map(|path|path.strip_prefix(&root).unwrap().components().map(|part|part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")));
     git(&root, add, Some(&index)).await?.checked()?;
     for (path, raw) in paths.iter().zip(&request.paths) {
-        if file_hash(path)? != request.expected_versions[raw] {
+        if selected_file_version(path)? != request.expected_versions[raw] {
             return Err("selected file changed during staging".into());
         }
         if path.is_file() {
@@ -1358,6 +1382,34 @@ mod pinned_publication_tests {
 #[cfg(test)]
 mod metadata_binding_tests {
     use super::*;
+    #[test]
+    fn object_count_does_not_expand_the_control_scan() {
+        let data=tempfile::tempdir().unwrap();let common=data.path();
+        let shard=common.join("objects/ab");std::fs::create_dir_all(&shard).unwrap();
+        for i in 0..1024 { std::fs::write(shard.join(format!("{i:038x}")),"fixture object").unwrap(); }
+        assert_eq!(inspect_git_metadata(common).unwrap(),3);
+        #[cfg(unix)] {
+            std::os::unix::fs::symlink(&shard,common.join("objects/cd")).unwrap();
+            assert!(inspect_git_metadata(common).unwrap_err().contains("symlink"));
+        }
+    }
+    #[test]
+    fn delivery_versions_bind_contents_and_executable_permissions() {
+        let data=tempfile::tempdir().unwrap();let path=data.path().join("script.sh");
+        assert_eq!(selected_file_version(&path).unwrap(),"missing");
+        std::fs::write(&path,"echo fixture").unwrap();
+        let initial=selected_file_version(&path).unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            let content=file_hash(&path).unwrap();
+            std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(file_hash(&path).unwrap(),content);
+            assert_ne!(selected_file_version(&path).unwrap(),initial);
+            std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(selected_file_version(&path).unwrap(),initial);
+        }
+        std::fs::write(&path,"different").unwrap();assert_ne!(selected_file_version(&path).unwrap(),initial);
+    }
     #[test] fn local_project_cannot_retarget_commondir_or_become_a_cross_project_gitfile() {
         let data=tempfile::tempdir().unwrap();
         let a=data.path().join("studio-projects").join(Uuid::new_v4().to_string());

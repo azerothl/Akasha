@@ -47,6 +47,10 @@ mod approval_scope_regressions {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].0, "studio_call");
             assert_eq!(serde_json::from_str::<Value>(&calls[0].1[0]).unwrap(), args);
+            let history = tool_turn(&response, "saved", 1, "");
+            assert!(history[0].content.is_empty());
+            assert_eq!(history[0].tool_calls.len(), 1);
+            assert_eq!(history[0].tool_calls[0]["id"], history[1].tool_call_id.as_deref().unwrap());
         }
     }
 }
@@ -92,15 +96,19 @@ pub(super) fn explicit_file_request(message: &str) -> bool {
         .any(|hint| request.contains(hint))
 }
 
-pub(super) fn parse_calls(response: &str) -> Vec<(String, Vec<String>)> {
-    // A complete JSON function response is data, including any markup in args.
-    // Remove only leading reasoning, never tags inside a JSON string argument.
+fn function_response_without_leading_reasoning(response: &str) -> &str {
     let mut function_response = response.trim_start();
     while function_response.get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case("<think>")) {
         let Some(end) = function_response.to_ascii_lowercase().find("</think>") else { break; };
         function_response = function_response[end + 8..].trim_start();
     }
-    if let Some(calls) = json_function_calls(function_response) {
+    function_response
+}
+
+pub(super) fn parse_calls(response: &str) -> Vec<(String, Vec<String>)> {
+    // A complete JSON function response is data, including any markup in args.
+    // Remove only leading reasoning, never tags inside a JSON string argument.
+    if let Some(calls) = json_function_calls(function_response_without_leading_reasoning(response)) {
         return calls;
     }
     let stripped = crate::api_tool_parser::strip_redacted_reasoning_blocks(response);
@@ -181,7 +189,7 @@ pub(super) fn tool_turn_with_results(response:&str, results:&str, per_call:&[Str
         })
     {
         let mut assistant = ConversationMessage::assistant(
-            if json_function_calls(response).is_some() {String::new()} else {response
+            if json_function_calls(function_response_without_leading_reasoning(response)).is_some() {String::new()} else {response
                 .lines()
                 .filter(|line| !line.trim_start().starts_with("TOOL_JSON:"))
                 .collect::<Vec<_>>()
