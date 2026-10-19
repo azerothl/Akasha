@@ -4,7 +4,7 @@ use super::parse::{
     assess_report_quality, extract_og_image_from_html, is_low_quality_summary,
     is_unreadable_fetched_content, parse_category, parse_json_array, parse_json_object,
     parse_search_results, parse_stop_decision, question_source_urls, strip_html, truncate_content,
-    unique_domains_from_urls, unconsulted_citation_urls, word_count,
+    unique_domains_from_urls, unconsulted_citation_urls, word_count, requested_max_words,
 };
 use super::queries::{booster_queries, specialized_site_queries};
 use super::prompts::{
@@ -521,7 +521,9 @@ async fn run_engine(
     let (search_degraded, enough_pages) = report_source_quality(search_degraded,
         findings.iter().filter(|f| !f.url.is_empty()).count(), config.min_sources_for_report as usize);
     store.update(run_id, |r| r.search_degraded = search_degraded).await;
-    let report_word_target = config.min_final_report_words.min(REPORT_OUTPUT_TOKENS as usize / 2);
+    let requested_word_limit = requested_max_words(topic);
+    let report_word_target = config.min_final_report_words.min(REPORT_OUTPUT_TOKENS as usize / 2)
+        .min(requested_word_limit.map(|n| n.saturating_mul(3) / 4).unwrap_or(usize::MAX));
     let (manifest, represented_pages, omitted_sources) = format_source_manifest(&findings);
     if represented_pages == 0 && findings.iter().any(|finding| !finding.url.is_empty()) {
         finish_sub_agent(run_id, &branch_final, &sa_writer, StepStatus::Error).await;
@@ -551,7 +553,8 @@ async fn run_engine(
             .filter(|f| !f.url.is_empty())
             .map(|f| f.url.as_str()).collect();
         let unknown = unconsulted_citation_urls(&md, &source_urls);
-        if quality.needs_retry || !unknown.is_empty() {
+        let over_word_limit = requested_word_limit.is_some_and(|limit| word_count(&md) > limit);
+        if quality.needs_retry || !unknown.is_empty() || over_word_limit {
             let issues = format!(
                 "- Word count {} (target {})\n- Inline link citations {} (target at least {})\n- Add citations from the source manifest for major claims",
                 quality.words,
@@ -560,6 +563,9 @@ async fn run_engine(
                 pages.min(12)
             );
             let issues = format!("{issues}\n- Remove citations to pages not consulted: {}. Replace only when extracted evidence supports the claim; otherwise remove the claim.", unknown.join(", "));
+            let issues = if let Some(limit) = requested_word_limit {
+                format!("{issues}\n- Hard maximum: {limit} words including headings. Shorten; omit secondary sections, never truncate a quotation or drop its qualifier.")
+            } else { issues };
             let revision = final_report_retry(ctx, topic, &md, &manifest, &issues, &user_ctx).await;
             md = require_report(select_report_revision(revision, md, !unknown.is_empty()),
                 run_id, &branch_final, &sa_writer).await?;
@@ -605,6 +611,11 @@ async fn run_engine(
         report_word_target,
     )
     .warnings;
+    if let Some(limit) = requested_word_limit {
+        if word_count(&final_report) > limit {
+            quality_warnings.push(format!("Report exceeds the requested maximum of {limit} words."));
+        }
+    }
     if omitted_sources {
         quality_warnings.push("Some source excerpts were omitted to fit the model context; conclusions may be incomplete.".into());
     }
@@ -1178,7 +1189,7 @@ async fn final_report(
             "Evidence-first markdown: ## headings, inline [title](url) citations from the manifest, ## Limitations and confidence, neutral tone, no greeting.".to_string(),
         ),
         REPORT_OUTPUT_TOKENS,
-        0.35,
+        0.0,
         "research",
     )
     .await
@@ -1199,7 +1210,7 @@ async fn final_report_retry(
         prompt,
         Some("Full revised markdown only.".to_string()),
         REPORT_OUTPUT_TOKENS,
-        0.3,
+        0.0,
         "research",
     )
     .await

@@ -100,19 +100,19 @@ Reply with ONLY "YES" or "NO" followed by a brief one-sentence reason.
 Example: "NO — Only 4 pages and 2 domains; missing academic and official documentation."
 Example: "YES — 20+ pages across wiki, arxiv, news, and github with plan covered.""#;
 
-pub const FINAL_REPORT_PROMPT: &str = r#"Write a concise evidence-based report in the question's language.
+pub const FINAL_REPORT_PROMPT: &str = r#"Write a factual report in the question's language.
 Question: {question}
-Pages read and attributed excerpts (may be shortened for context):
+Attributed source excerpts:
 {source_manifest}
-Working draft, NOT independent evidence:
+Working draft (not evidence):
 {report}
-Rules:
-- Aim for {min_words} words only if evidence supports them; never pad. Respect requested length.
-- Correct the draft against the excerpts. Omit unsupported facts, mechanisms and comparisons.
-- Preserve API ownership and qualifiers. A table row describing an operation is NOT a method name shared by every option. Give each option's exact documented API separately; omit unknown names. Keep amortized, expected and worst-case costs distinct, including footnotes.
-- Cite important claims inline as [title](exact URL from the manifest). Never invent or rewrite URLs.
-- Use clear Markdown headings, a short summary, comparisons when useful, sources/methodology, limitations/confidence and a conclusion. No greeting or copied question as title.
-- Do not invent benchmarks, features, growth factors, cache claims, images or diagram scores. Use tables/lists, no Mermaid or LaTeX.
+Rules, before category formatting:
+- User scope and word maximum take priority. Aim for {min_words} words only if supported. No padding or redundant verdicts.
+- State only facts explicit in excerpts. No inferred mechanisms, allocation frequency, optimality or benchmark claims. Missing facts belong in limitations.
+- Quote technical guarantees briefly, then explain faithfully. Keep each operation's own bound and qualifier (amortized, expected, worst-case); never merge them. Explain notation only if defined in evidence.
+- Use exact APIs per option; generic table operation labels are not shared method names.
+- Cite claims inline as [title](exact manifest URL). Never invent URLs, facts, scores or images.
+- Few Markdown headings and a short limitations section. No greeting, repeated question, Mermaid or LaTeX.
 {category_override}"#;
 
 pub const FINAL_REPORT_RETRY_PROMPT: &str = r#"Revise this research report to meet quality standards.
@@ -132,7 +132,7 @@ Requirements:
 - Verify each major claim against the extracted evidence in the manifest, correcting contradictions and removing unsupported claims
 - Use only exact URLs from the manifest that support the associated claim; do not transfer features between options or documentation versions
 - Add missing inline [title](url) citations from the source manifest for major claims
-- Expand thin sections only when extracted evidence supports it; a shorter honest report is preferable to padding
+- Respect the user word maximum before category formatting. Omit secondary sections rather than padding. Keep technical guarantees and operation-specific qualifiers faithful to the original excerpts; do not add explanations of mechanisms absent from them.
 - Preserve exact API names and complexity qualifiers; use markdown tables rather than diagrams or invented scores
 - Keep ## Limitations and confidence section
 - Neutral analytical tone; no greeting; no hype
@@ -230,9 +230,7 @@ const COMPARISON_CATEGORY: &str = r#"
 IMPORTANT FORMAT OVERRIDE — this is a COMPARISON report:
 - Compare only criteria supported by the excerpts; a table is optional. Use neutral operation labels, with exact API names separately per option. Never assume an operation label is a method shared by all options.
 - Explain trade-offs in prose using only documented properties; do not invent scores or benchmark results
-- Write a ## section per option with strengths, weaknesses, and ideal use case
-- End with ## Best For verdicts
-- Include a ## Shared Considerations section"#;
+- Organize by supported comparison criteria. Recommend a use case only if explicitly supported; otherwise state the missing evidence. Avoid redundant verdict sections for short answers."#;
 
 const HOWTO_CATEGORY: &str = r#"
 IMPORTANT FORMAT OVERRIDE — this is a HOW-TO guide:

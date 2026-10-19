@@ -243,6 +243,17 @@ pub fn is_unreadable_fetched_content(body: &str, url: &str) -> bool {
     false
 }
 
+/// Recognize explicit upper word bounds, not arbitrary numbers or minimums.
+pub fn requested_max_words(topic: &str) -> Option<usize> {
+    static LIMIT: OnceLock<Regex> = OnceLock::new();
+    let re = LIMIT.get_or_init(|| Regex::new(
+        r"(?i)(?:\b(\d{1,6})\s+(?:mots?|words?)\s+(?:maximum|max\b|au plus)|(?:maximum(?:\s+(?:de|of))?|au plus|at most|no more than|up to)\s+(\d{1,6})\s+(?:mots?|words?)\b)"
+    ).expect("word limit regex"));
+    re.captures_iter(topic).filter_map(|cap| {
+        cap.get(1).or_else(|| cap.get(2))?.as_str().parse::<usize>().ok().filter(|n| *n > 0)
+    }).min()
+}
+
 pub fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
 }
@@ -393,6 +404,16 @@ fn normalize_image_url(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_word_maximum_does_not_confuse_sources_dates_or_minimums() {
+        for text in ["400 mots maximum", "400 words max", "au plus 400 mots", "maximum de 400 mots", "at most 400 words", "no more than 400 words", "up to 400 words"] {
+            assert_eq!(requested_max_words(text), Some(400), "{text}");
+        }
+        assert_eq!(requested_max_words("2026 : 4 sources, 400 mots minimum"), None);
+        assert_eq!(requested_max_words("0 words max"), None);
+        assert_eq!(requested_max_words("500 words maximum, at most 300 words"), Some(300));
+    }
 
     #[test]
     fn source_line_wraps_do_not_split_a_qualified_sentence() {
