@@ -116,6 +116,38 @@ for(const outcome of ['ready','direct','limited','empty','error','report-error',
   });
 }
 
+for (const accepted of [true, false]) {
+  test(`research cancel button persists only confirmed terminal status: ${accepted}`, async ({page}) => {
+    await fixture(page); let cancelled=false;
+    await page.route('**/__e2e_daemon/api/research/deep/start', route => route.fulfill(
+      route.request().postDataJSON().topic ? {json:{run_id:'dr_cancel_button'}} : {status:400,json:{error:'missing_topic'}}));
+    await page.route('**/__e2e_daemon/api/research/deep/runs/dr_cancel_button', route => route.fulfill({json:{
+      id:'dr_cancel_button',topic:'Cancellation control',phase:cancelled?'cancelled':'reading',
+      round:1,max_rounds:1,branches:[],evolving_report:'Original source notes',search_degraded:false,
+      report_markdown:null,report_meta:null,
+    }}));
+    await page.route('**/__e2e_daemon/api/research/deep/runs/dr_cancel_button/cancel', route => {
+      cancelled=accepted;
+      return route.fulfill(accepted?{json:{ok:true}}:{status:503,json:{error:'unavailable'}});
+    });
+    await page.goto('/#/research');
+    await page.locator('.research-content textarea').fill('Cancellation control');
+    await page.getByRole('button',{name:'Lancer la recherche',exact:true}).click();
+    await page.getByRole('button',{name:'Annuler',exact:true}).click();
+    if (accepted) {
+      await expect(page.getByRole('button',{name:'Lancer la recherche',exact:true})).toBeEnabled();
+      await expect.poll(()=>page.evaluate(()=>JSON.parse(localStorage.getItem('akasha_deep_research_v2')??'[]')[0]?.status)).toBe('cancelled');
+      await page.reload();
+      await expect(page.getByRole('button',{name:'Lancer la recherche',exact:true})).toBeVisible();
+      expect(await page.evaluate(()=>JSON.parse(localStorage.getItem('akasha_deep_research_v2')??'[]')[0]?.status)).toBe('cancelled');
+    } else {
+      await expect(page.getByRole('button',{name:'Annuler',exact:true})).toBeVisible();
+      expect(await page.evaluate(()=>JSON.parse(localStorage.getItem('akasha_deep_research_v2')??'[]')[0]?.status)).toBe('running');
+      await expect(page.locator('.research-result-notice[role="alert"]')).toContainText('L’annulation n’a pas pu être confirmée');
+    }
+  });
+}
+
 test('failed deferred chunk keeps chat draft and offers keyboard recovery',async({page})=>{
   await fixture(page);await page.goto('/');await page.locator('#chat-input').fill('Brouillon protégé');
   await page.route('**/assets/DeepResearchPanel-*.js',r=>r.abort());
