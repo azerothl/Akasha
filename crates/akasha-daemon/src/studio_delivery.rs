@@ -64,7 +64,9 @@ async fn run(
     index: Option<&Path>,
 ) -> Result<Output, String> {
     let executable=resolve_program(root,program,&std::env::var_os("PATH").unwrap_or_default())?;
+    let (git_dir,common_dir)=bound_metadata(&delivery_data_dir(root)?,root)?;
     let mut command = Command::new(executable);
+    command.env("GIT_DIR",git_environment_path(&git_dir)).env("GIT_COMMON_DIR",git_environment_path(&common_dir)).env("GIT_WORK_TREE",git_environment_path(root));
     command
         .current_dir(root)
         .args(args)
@@ -146,9 +148,10 @@ fn unsafe_config_key(key:&str) -> bool {
 /// Approval identity includes the canonical workspace and the actual publication destination.
 pub(crate) async fn approval_identity(root:&Path,tool:&str,argv:&[String]) -> Result<String,String> {
     let root=root.canonicalize().map_err(|e|e.to_string())?;
+    let (git_dir,common_dir)=bound_metadata(&delivery_data_dir(&root)?,&root)?;
     let payload:Value=serde_json::from_str(&argv.join(" ")).map_err(|e|e.to_string())?;
     let (repo,publication_url)=if matches!(tool,"git_push"|"github_create_pr") {let (repo,url)=remote_target(&root,payload["remote"].as_str().unwrap_or("origin")).await?;(repo,Some(url))}else{("local".into(),None)};
-    Ok(json!({"workspace":root,"repository":repo,"publication_url":publication_url,"tool":tool,"arguments":payload}).to_string())
+    Ok(json!({"workspace":root,"git_dir":git_dir,"git_common_dir":common_dir,"repository":repo,"publication_url":publication_url,"tool":tool,"arguments":payload}).to_string())
 }
 
 async fn git(root: &Path, args: Vec<String>, index: Option<&Path>) -> Result<Output, String> {
@@ -285,6 +288,58 @@ fn selected_path(
     }
     Ok(path)
 }
+fn git_environment_path(path: &Path) -> String {
+    let raw=path.to_string_lossy();
+    if cfg!(windows) {
+        if let Some(unc)=raw.strip_prefix(r"\\?\UNC\") {return format!("//{}",unc.replace('\\',"/"));}
+        if let Some(disk)=raw.strip_prefix(r"\\?\") {return disk.into();}
+    }
+    raw.into_owned()
+}
+fn delivery_data_dir(root: &Path) -> Result<PathBuf,String> {
+    root.ancestors().skip(1).find(|path| path.file_name().is_some_and(|name|name=="studio-projects" || name=="studio-worktrees"))
+        .and_then(Path::parent).map(|path|PathBuf::from(git_environment_path(path))).ok_or_else(||"delivery requires a bound Studio workspace".into())
+}
+// Bind metadata before Git reads configuration or follows commondir/gitfiles.
+fn bound_metadata(data_dir: &Path, root: &Path) -> Result<(PathBuf,PathBuf),String> {
+    let projects=data_dir.join("studio-projects").canonicalize().map_err(|e|e.to_string())?;
+    let local=root.parent()==Some(projects.as_path()) && root.file_name().and_then(|id|id.to_str()).is_some_and(|id|Uuid::parse_str(id).is_ok());
+    let project=if local {root.to_path_buf()}else{crate::studio_worktree::delivery_project_root(data_dir,root)?};
+    let expected=project.join(".git");
+    if std::fs::symlink_metadata(&expected).map_err(|e|e.to_string())?.file_type().is_symlink() {return Err("project Git metadata symlink refused".into());}
+    let common=expected.canonicalize().map_err(|e|e.to_string())?;
+    if !common.is_dir() {return Err("project Git metadata must be an owned directory".into());}
+    let dotgit=root.join(".git");
+    if std::fs::symlink_metadata(&dotgit).map_err(|e|e.to_string())?.file_type().is_symlink() {return Err("workspace Git metadata symlink refused".into());}
+    let dir=if local {
+        common.clone()
+    }else{
+        let raw=std::fs::read_to_string(&dotgit).map_err(|e|e.to_string())?;
+        let target=raw.trim().strip_prefix("gitdir:").ok_or("registered worktree requires a gitfile")?.trim();
+        let dir=root.join(target).canonicalize().map_err(|e|e.to_string())?;
+        if !dir.starts_with(common.join("worktrees")) {return Err("worktree Git metadata belongs to another project".into());}
+        let backlink=std::fs::read_to_string(dir.join("gitdir")).map_err(|e|e.to_string())?;
+        if Path::new(backlink.trim()).canonicalize().map_err(|e|e.to_string())?!=dotgit.canonicalize().map_err(|e|e.to_string())? {return Err("worktree Git backlink mismatch".into());}
+        dir
+    };
+    let commonfile=dir.join("commondir");
+    let actual_common=if commonfile.exists() {
+        let relative=std::fs::read_to_string(commonfile).map_err(|e|e.to_string())?;
+        dir.join(relative.trim()).canonicalize().map_err(|e|e.to_string())?
+    }else{dir.clone()};
+    if actual_common!=common {return Err("Git common metadata belongs to another project".into());}
+    // Git can also follow symlinks in refs, reflogs, objects, HEAD or index.
+    // Refuse them rather than allowing a repository to redirect a later mutation.
+    let mut pending=vec![common.clone()];let mut visited=0;
+    while let Some(path)=pending.pop() {
+        visited+=1;if visited>100_000 {return Err("Git metadata inspection limit exceeded".into());}
+        let metadata=std::fs::symlink_metadata(&path).map_err(|e|e.to_string())?;
+        if metadata.file_type().is_symlink() {return Err("Git metadata symlinks are unsupported for delivery".into());}
+        if metadata.is_dir() {for entry in std::fs::read_dir(path).map_err(|e|e.to_string())? {pending.push(entry.map_err(|e|e.to_string())?.path());}}
+    }
+    if common.join("objects/info/alternates").exists() {return Err("external Git object alternates are unsupported for delivery".into());}
+    Ok((dir,common))
+}
 async fn repository(
     data_dir: &Path,
     root: &Path,
@@ -294,6 +349,7 @@ async fn repository(
         return Err("git unavailable or denied".into());
     }
     let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let (expected_dir,expected_common)=bound_metadata(data_dir,&root)?;
     let toplevel = git(&root, args(&["rev-parse", "--show-toplevel"]), None)
         .await?
         .checked()?;
@@ -307,13 +363,11 @@ async fn repository(
     let dir = git(&root, args(&["rev-parse", "--absolute-git-dir"]), None)
         .await?
         .checked()?;
-    if !Path::new(dir.trim())
-        .canonicalize()
-        .map_err(|e| e.to_string())?
-        .starts_with(data_dir.canonicalize().map_err(|e| e.to_string())?)
-    {
-        return Err("Git metadata outside daemon data directory is unsupported".into());
+    if Path::new(dir.trim()).canonicalize().map_err(|e|e.to_string())?!=expected_dir {
+        return Err("Git metadata identity changed".into());
     }
+    let common=git(&root,args(&["rev-parse","--path-format=absolute","--git-common-dir"]),None).await?.checked()?;
+    if Path::new(common.trim()).canonicalize().map_err(|e|e.to_string())?!=expected_common {return Err("Git common metadata identity changed".into());}
     Ok(root)
 }
 fn repo_from_url(remote: &str) -> Result<String, String> {
@@ -1317,5 +1371,43 @@ mod pinned_publication_tests {
     #[cfg(unix)]
     #[test] fn symlink_blobs_are_not_versioned_as_target_contents() {
         let dir=tempfile::tempdir().unwrap();let a=dir.path().join("a");let link=dir.path().join("link");std::fs::write(&a,"same").unwrap();std::os::unix::fs::symlink(&a,&link).unwrap();assert!(file_hash(&link).is_err());
+    }
+}
+
+#[cfg(test)]
+mod metadata_binding_tests {
+    use super::*;
+    #[test] fn local_project_cannot_retarget_commondir_or_become_a_cross_project_gitfile() {
+        let data=tempfile::tempdir().unwrap();
+        let a=data.path().join("studio-projects").join(Uuid::new_v4().to_string());
+        let b=data.path().join("studio-projects").join(Uuid::new_v4().to_string());
+        for root in [&a,&b] {std::fs::create_dir_all(root.join(".git")).unwrap();}
+        let a=a.canonicalize().unwrap();let b=b.canonicalize().unwrap();
+        assert!(bound_metadata(data.path(),&a).is_ok());
+        std::fs::write(a.join(".git/commondir"),b.join(".git").to_string_lossy().as_bytes()).unwrap();
+        assert!(bound_metadata(data.path(),&a).unwrap_err().contains("another project"));
+        std::fs::remove_file(a.join(".git/commondir")).unwrap();std::fs::remove_dir(a.join(".git")).unwrap();
+        std::fs::write(a.join(".git"),format!("gitdir: {}",b.join(".git").display())).unwrap();
+        assert!(bound_metadata(data.path(),&a).is_err());
+    }
+}
+
+#[cfg(test)]
+mod registered_metadata_tests {
+    use super::*;
+    #[tokio::test] async fn registered_worktree_keeps_its_project_metadata_and_git_only_inspection() {
+        let data=tempfile::tempdir().unwrap();let project=Uuid::new_v4().to_string();let task=Uuid::new_v4();
+        let root=data.path().join("studio-projects").join(&project);std::fs::create_dir_all(&root).unwrap();
+        let call=|args:Vec<String>| {let out=std::process::Command::new("git").current_dir(&root).args(args).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));};
+        call(args(&["init","-q"]));call(args(&["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","commit","--allow-empty","-m","init"]));
+        let suffix=&task.simple().to_string()[..8];let path=data.path().join("studio-worktrees").join(task.to_string()).join(suffix);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();let branch=format!("wt/{}/{suffix}",task.simple());
+        call(vec!["worktree".into(),"add".into(),"-b".into(),branch.clone(),path.to_string_lossy().into_owned(),"HEAD".into()]);
+        let record=json!({"task_id":task,"root_task_id":task,"project_id":project,"project_root":root,"base_branch":"main","base_sha":"unused","worktree_branch":branch,"worktree_path":path,"lifecycle_state":"active","integration_status":null,"conflict_state":null});
+        std::fs::write(data.path().join("studio-worktrees/registry.json"),json!([record]).to_string()).unwrap();
+        let path=path.canonicalize().unwrap();let (dir,common)=bound_metadata(data.path(),&path).unwrap();
+        assert_eq!(common,root.join(".git").canonicalize().unwrap());assert!(dir.starts_with(common.join("worktrees")));
+        let mut policy=akasha_tools::ToolsPolicy::default();policy.allowed_commands=vec!["git".into()];policy.allowed_read_paths=vec![data.path().to_string_lossy().into_owned()];
+        let status=preflight(data.path(),&path,&policy,"origin").await.unwrap();assert_eq!(status["branch"],branch);assert_eq!(status["github"]["accessible"],false);
     }
 }
