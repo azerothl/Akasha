@@ -13,6 +13,7 @@ Bienvenue dans la documentation intégrée d'Akasha. Utilisez le menu à gauche 
 | Mission autonome | Heartbeats, objectifs de fond, rapports |
 | Données et mémoire | RAG utilisateur, mémoire, graphe projet |
 | Workspace | Cookbook, Comparer, Recherche, Notes (v0.9) |
+| Companion LAN | Découverte UDP, appairage, API `/api/companion/*` (sans matériel ESP32) |
 | Skills, plugins et canaux | Extensions, galerie, Telegram, Matrix, etc. |
 | Dépannage | `akasha doctor`, problèmes fréquents |
 | Nouveautés | Changements récents |

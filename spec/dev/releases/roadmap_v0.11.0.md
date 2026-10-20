@@ -148,7 +148,7 @@ APIs Companion LAN livrées via #122 (bind LAN, discovery UDP, `/api/companion/*
 ### Stretch
 
 - [ ] Spec + chemin MVP **Freenove FNK0104** (voix-first + avatar) — repo `Akasha_companion`, `/api/voice/*`, présence VAD (`companion_presence.json`)
-- [ ] Doc user Companion LAN (pairing secret, discovery :3877)
+- [x] Doc user Companion LAN (pairing secret, discovery :3877) — `docs/user/companion-lan.md` ([#163](https://github.com/azerothl/Akasha/issues/163))
 - [ ] Smoke LAN : daemon bind + device factice / maquette
 
 ### Hors scope P6
