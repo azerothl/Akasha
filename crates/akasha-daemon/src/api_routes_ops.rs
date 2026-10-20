@@ -487,23 +487,21 @@ pub async fn try_handle(
             "Playwright runner not found (use release layout, AKASHA_PLAYWRIGHT_RUNNER, or data dir)".to_string()
         }
     }));
-        checks.push(serde_json::json!({
-            "id": "playwright_node",
-            "ok": node_on_path,
-            "description": if node_on_path {
-                format!(
-                    "node on PATH ({})",
-                    node_version_line.as_deref().unwrap_or("?")
-                )
-            } else {
-                "node not found on PATH (install Node.js for managed browser)".to_string()
-            }
-        }));
-        checks.push(serde_json::json!({
-            "id": "playwright_npm",
-            "ok": npm_on_path,
-            "description": if npm_on_path { "npm on PATH" } else { "npm not found on PATH" }
-        }));
+        checks.push(crate::doctor_checks::build_optional_runtime_check(
+            "playwright_node",
+            node_on_path,
+            &format!(
+                "node on PATH ({})",
+                node_version_line.as_deref().unwrap_or("?")
+            ),
+            "node not found on PATH (install Node.js for managed browser)",
+        ));
+        checks.push(crate::doctor_checks::build_optional_runtime_check(
+            "playwright_npm",
+            npm_on_path,
+            "npm on PATH",
+            "npm not found on PATH (install npm for managed browser)",
+        ));
         checks.push(serde_json::json!({
             "id": "playwright_package",
             "ok": playwright_pkg_ok,

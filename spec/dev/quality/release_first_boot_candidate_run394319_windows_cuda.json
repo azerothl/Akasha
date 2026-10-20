@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "run_id": 39431939285,
+  "run_url": "https://github.com/azerothl/Akasha/actions/runs/39431939285",
+  "commit": "705d6981f9be844dd5cb848d2c26e4d0edc4cc8a",
+  "release_published": false,
+  "candidate": {
+    "artifact": "akasha-windows-x86_64-cuda",
+    "version": "0.11.0",
+    "target": "x86_64-pc-windows-msvc",
+    "daemon_sha256": "0858b6fc9211cbc3cf2c008c234580b462a16b5b4b40d46aed11e64e1f4932c9"
+  },
+  "environment": {
+    "os": "GitHub Actions windows-2022",
+    "architecture": "x86_64",
+    "nvidia_driver_dll_present": false
+  },
+  "loader_audit": {
+    "direct_driver_import": true,
+    "missing_import": "nvcuda.dll",
+    "startup_exit_code": 3221225781,
+    "startup_exit_hex": "0xC0000135",
+    "startup_elapsed_seconds": 0.047,
+    "backend_selection_reached": false,
+    "gguf_present_inference": "not reached",
+    "gguf_absent_inference": "not reached",
+    "inference_validated": false,
+    "verdict": "NO_GO"
+  },
+  "size_comparison": {
+    "cpu_standalone_archive_bytes": 34036657,
+    "cuda_standalone_archive_bytes": 612143000,
+    "cpu_full_archive_bytes": 45413685,
+    "cuda_full_archive_bytes": 623520023,
+    "cpu_extracted_staging_bytes": 99154138,
+    "cuda_extracted_staging_bytes": 912871104
+  },
+  "build_runner_seconds": {
+    "windows_clients_shared_job": 513.955,
+    "windows_cpu_daemon_job": 1326.375,
+    "windows_cuda_daemon_job": 2777.461
+  },
+  "result": "keep_separate_cpu_and_cuda_distributions",
+  "notes": [
+    "The CUDA daemon fails during Windows DLL loading before backend or GGUF selection on a host without the NVIDIA driver.",
+    "The GGUF-present and GGUF-absent inference checks could not run because the loader fails first.",
+    "A real CUDA inference was separately validated in bench_ar_qwen25_cuda_20261020.json; its CI GPU job remains queued for a self-hosted runner."
+  ]
+}
