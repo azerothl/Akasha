@@ -81,8 +81,10 @@ fn explicit_path_kind(det: &str) -> Option<bool> {
 }
 fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> {
     let path = r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;!?"`]+)"#;
+    // At most one typed noun: adjectives must not consume a later list item.
+    let det = r"(?:(?:the|an?|new|le|la|un|une|les|des|uniquement|only|seulement)\s+)*(?:(?:[\p{L}-]+\s+){0,4}?(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{e9}pertoires?)(?:\s+(?:empty|blank|vide|vides))?(?:\s+(?:named|called|nomm\x{e9}e?s?|appel\x{e9}e?s?))?\s+)?";
     let pattern = format!(
-        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|les|des|(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{{e9}}pertoires?)(?:\s+(?:named|called|nomm\x{{e9}}e?s?|appel\x{{e9}}e?s?))?|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
+        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>{det})(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
     );
     let re = regex::Regex::new(&pattern).unwrap();
     // Object-before-path requests: "Add logging to config.txt". Keep this
@@ -91,11 +93,12 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
     let object_atom =
         r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[\p{L}\p{N}_/\\:.=@+-]*[\p{L}\p{N}_/\\:=@+-])"#;
     let object_path = regex::Regex::new(&format!(
-        r#"(?i)^\s+(?:{object_atom}\s+){{1,12}}?(?P<prep>to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?P<det>(?:(?:the|le|la|les|des|(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{{e9}}pertoires?)(?:\s+(?:named|called|nomm\x{{e9}}e?s?|appel\x{{e9}}e?s?))?)\s+)*)(?P<path>{path})"#
+        r#"(?i)^\s+(?:{object_atom}\s+){{1,12}}?(?P<prep>to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?P<det>{det})(?P<path>{path})"#
     )).unwrap();
     let path_list = regex::Regex::new(&format!(
-        r#"(?i)^\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et|&)\s+)(?P<det>(?:(?:the|a|new|le|la|un|une|les|des|(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{{e9}}pertoires?)(?:\s+(?:named|called|nomm\x{{e9}}e?s?|appel\x{{e9}}e?s?))?)\s+)*)(?P<path>{path})"#
-    )).unwrap();
+        r#"(?i)^\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et|&)\s+)(?P<det>{det})(?P<path>{path})"#
+    ))
+    .unwrap();
     let mut outside = vec![true; request.len() + 1];
     let mut quote = None;
     for (i, c) in request.char_indices() {
@@ -979,6 +982,27 @@ mod tests {
                 effect.observe(&before, &after);
                 assert_eq!(effect.verified(&after), index == 1, "{request}");
             }
+        }
+    }
+    #[test]
+    fn adjectival_named_targets_still_require_the_named_effect() {
+        for request in [
+            "Create an empty file named report.txt",
+            "Create a completely blank new file called report.txt",
+            "Crée un fichier vide nommé report.txt",
+        ] {
+            let goals = parsed(request);
+            assert_eq!(goals.len(), 1, "{request}");
+            assert_eq!(goals[0].1, "report.txt", "{request}");
+            assert_eq!(goals[0].3, Some(false), "{request}");
+            let root = tempfile::tempdir().unwrap();
+            let mut effect = scope(root.path(), request);
+            let before = capture_paths(&effect.paths()).unwrap();
+            assert!(!effect.verified(&before));
+            std::fs::write(root.path().join("report.txt"), "").unwrap();
+            let after = capture_paths(&effect.paths()).unwrap();
+            effect.observe(&before, &after);
+            assert!(effect.verified(&after), "{request}");
         }
     }
     #[test]

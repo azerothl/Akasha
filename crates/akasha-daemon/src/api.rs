@@ -181,6 +181,17 @@ pub(crate) fn save_permission_mode(data_dir: &Path, state: &PermissionModeState)
 /// `args[0]` = chemin ; le reste = « ancien » puis ` | ` (recommandé) ou `|`, puis « nouveau ».
 /// Retire les `|` initiaux issus du découpage (`path | old | new` → `old | new`).
 pub(crate) fn parse_search_replace_payload(args: &[String]) -> Result<(String, String), &'static str> {
+    // Typed calls use a marked JSON pair to preserve pipes, whitespace and
+    // newlines. Unmarked legacy TOOL arguments keep their original grammar.
+    if args.get(1).is_some_and(|arg| arg == "--studio-search-replace-v1") {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Pair { search: String, replacement: String }
+        if args.len() != 3 { return Err("usage"); }
+        let pair: Pair = serde_json::from_str(&args[2]).map_err(|_| "usage")?;
+        if pair.search.is_empty() { return Err("empty_search"); }
+        return Ok((pair.search, pair.replacement));
+    }
     let mut rest: String = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
     rest = rest.trim().to_string();
     while rest.starts_with('|') {

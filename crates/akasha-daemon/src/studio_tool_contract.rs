@@ -43,6 +43,20 @@ struct FileArgs {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SearchReplaceArgs {
+    path: String,
+    search: String,
+    replacement: String,
+    expected_version: String,
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SearchReplaceInput {
+    Structured(SearchReplaceArgs),
+    Legacy(FileArgs),
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommandArgs {
     program: String,
     #[serde(default)]
@@ -86,8 +100,35 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
     }
     let mut expected = None;
     let argv = match envelope.tool.as_str() {
+        "search_replace" => {
+            let input: SearchReplaceInput = serde_json::from_value(envelope.arguments.clone())
+                .map_err(|error| format!("invalid search_replace arguments: {error}"))?;
+            // Version 1 clients may still send the old delimiter payload. The
+            // native catalogue advertises only the structured, literal form.
+            let arg = match input {
+                SearchReplaceInput::Structured(arg) => arg,
+                SearchReplaceInput::Legacy(arg) => {
+                    if arg.start_line.is_some() || arg.end_line.is_some() || arg.full
+                        || arg.offset_line.is_some() || arg.limit_lines.is_some() {
+                        return Err("invalid legacy search_replace arguments".into());
+                    }
+                    let pair = crate::api::parse_search_replace_payload(&[
+                        arg.path.clone(), arg.content.ok_or("search and replacement required")?])
+                        .map_err(|_| "legacy content requires old | new; prefer search and replacement")?;
+                    SearchReplaceArgs { path: arg.path, search: pair.0, replacement: pair.1,
+                        expected_version: arg.expected_version.ok_or("expected_version required")? }
+                }
+            };
+            if arg.path.trim().is_empty() || arg.path.contains(['\0', '\n', '\r']) {
+                return Err("invalid file path".into());
+            }
+            if arg.search.is_empty() { return Err("search must not be empty".into()); }
+            expected = Some(arg.expected_version);
+            vec![arg.path, "--studio-search-replace-v1".into(),
+                json!({"search":arg.search,"replacement":arg.replacement}).to_string()]
+        }
         "read_file" | "write_file" | "write_code" | "edit_file" | "delete_file" | "apply_patch"
-        | "search_replace" => {
+        => {
             let arg: FileArgs = serde_json::from_value(envelope.arguments.clone())
                 .map_err(|error| format!("invalid file arguments: {error}. Use only the declared argument names; workspace paths belong in path."))?;
             if arg.path.trim().is_empty() || arg.path.contains(['\0', '\n', '\r']) {
@@ -139,7 +180,7 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
                         arg.content.ok_or("content required")?,
                     ]
                 }
-                "apply_patch" | "search_replace" => {
+                "apply_patch" => {
                     vec![arg.path, arg.content.ok_or("patch content required")?]
                 }
                 _ => {
@@ -253,6 +294,16 @@ pub(crate) fn supports_typed(tool: &str) -> bool {
 }
 
 pub(crate) fn argument_schema(tool: &str) -> Value {
+    if tool == "search_replace" {
+        return json!({"type":"object","additionalProperties":false,
+            "required":["path","search","replacement","expected_version"],
+            "properties":{
+                "path":{"type":"string","minLength":1},
+                "search":{"type":"string","minLength":1,"description":"Exact text to find; whitespace and delimiters are literal."},
+                "replacement":{"type":"string","description":"Exact replacement; empty string deletes the match."},
+                "expected_version":{"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"SHA-256 returned by reading the target file."}
+            }});
+    }
     if tool.starts_with("mcp_") {
         return crate::mcp_runtime::discovered_tool(tool).map(|tool|tool.input_schema)
             .unwrap_or_else(||json!({"not":{}}));
@@ -839,6 +890,27 @@ impl WorkflowOperation {
 #[cfg(test)]
 mod native_schema_regressions {
     use super::*;
+    #[test]
+    fn structured_search_replace_round_trips_literal_text_and_empty_replacement() {
+        let schema = jsonschema::JSONSchema::compile(&argument_schema("search_replace")).unwrap();
+        for (search, replacement) in [(" old | value\n", " new | value\n"), ("remove", "")] {
+            let args = json!({"path":"workspace:/a.txt","search":search,
+                "replacement":replacement,"expected_version":"a".repeat(64)});
+            assert!(schema.is_valid(&args));
+            let decoded = decode(&json!({"schema_version":1,"tool":"search_replace","arguments":args}).to_string()).unwrap();
+            assert_eq!(crate::api::parse_search_replace_payload(&decoded.argv).unwrap(),
+                (search.to_string(), replacement.to_string()));
+        }
+        for args in [json!({"path":"a","content":"new","expected_version":"a".repeat(64)}),
+            json!({"path":"a","search":"","replacement":"new","expected_version":"a".repeat(64)})] {
+            assert!(!schema.is_valid(&args));
+            assert!(decode(&json!({"schema_version":1,"tool":"search_replace","arguments":args}).to_string()).is_err());
+        }
+        assert_eq!(crate::api::parse_search_replace_payload(&["a".into(),"old | new".into()]).unwrap(), ("old".into(),"new".into()));
+        let legacy = decode(&json!({"schema_version":1,"tool":"search_replace",
+            "arguments":{"path":"a","content":"old | new","expected_version":"a".repeat(64)}}).to_string()).unwrap();
+        assert_eq!(crate::api::parse_search_replace_payload(&legacy.argv).unwrap(), ("old".into(),"new".into()));
+    }
     #[test] fn full_read_and_line_window_are_exclusive_in_schema_and_decoder() {
         let schema=jsonschema::JSONSchema::compile(&argument_schema("read_file")).unwrap();
         for args in [json!({"path":"a","full":true}),json!({"path":"a","full":false,"limit_lines":1}),json!({"path":"a","offset_line":1})] {assert!(schema.is_valid(&args));}
