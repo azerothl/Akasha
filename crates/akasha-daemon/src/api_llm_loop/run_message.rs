@@ -170,6 +170,9 @@ pub(crate) async fn run_message_via_llm(
         let _=bus.send(EventEnvelope::new(event,Some(serde_json::json!({"task_id":task_id,"status":actual.as_str(),"reason":reason}))).with_correlation(task_id));
         cancel_task_watchdogs(&mut watchdog_cancel,&mut stall_cancel);notify_task_completion(&task_completion_registry,task_id).await;return;
     }}}
+    let studio_execution=match crate::studio_execution::load(&store_path,task_id){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
+    let selected_model_route=match studio_execution.model.as_ref().map(|model|crate::studio_execution::validate_model(&llm_router,model)).transpose(){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
+    let mut goal_tracker=match studio_execution.goal.clone().map(|goal|crate::studio_execution::GoalTracker::new(&store_path,task_id,goal)).transpose(){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
     let recovery_checkpoint=match crate::studio_recovery::load(&store_path,task_id,true){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
     if let Some(checkpoint)=recovery_checkpoint.as_ref(){
         let root=match crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags,&checkpoint.project_id).and_then(|path|path.canonicalize().map_err(|e|e.to_string())){Ok(path)=>path,Err(error)=>{abort_recovery!(error);}};
@@ -1587,6 +1590,10 @@ pub(crate) async fn run_message_via_llm(
                 .or_else(||(checkpoint.round>=max_tool_rounds).then(||serde_json::json!({"tool_round_limit":true,"max_tool_rounds":max_tool_rounds})))
         });
         'tool_rounds: loop {
+            if let Some(goal)=goal_tracker.as_mut() {
+                if goal.exhausted() { run_outcome.termination=TerminationReason::BudgetExhausted;reply_text="Limite de cycles ou de durée de l’objectif atteinte; réussite non confirmée.".into();let _=goal.save(&store_path,task_id,"budget_exhausted",&reply_text);break 'tool_rounds; }
+                if let Err(error)=goal.save(&store_path,task_id,"active","Exécution ou vérification en cours") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
+            }
             if code_studio_disk_task {if let Some(exec)=tools_executor.as_ref(){let policy=exec.read().await.policy.clone();if let Err(error)=crate::studio_file_effects::refresh(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}}
 
             if let Some(waiting) = resumed_limit_wait.take() {
@@ -1770,7 +1777,7 @@ pub(crate) async fn run_message_via_llm(
                 } else {
                     format!("{}{}{}", resume_overlay, current_prompt, tool_instruction)
                 },
-                max_tokens: Some(completion_max_tokens),
+                max_tokens: Some(goal_tracker.as_ref().map(|goal|completion_max_tokens.min(goal.goal.max_tokens.saturating_sub(goal.state.tokens_used) as u32)).unwrap_or(completion_max_tokens)),
                 temperature: Some(completion_temperature),
                 preferred_task_type,
                 // Studio's system block already contains the effective catalogue.
@@ -1790,6 +1797,7 @@ pub(crate) async fn run_message_via_llm(
             // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
             // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
             let delivered_prompt = request.prompt.clone();
+            let estimated_request_tokens=serde_json::to_vec(&request).map(|bytes|bytes.len() as u64).unwrap_or(request.prompt.len() as u64);
             let (stream_tx, std_rx) = std::sync::mpsc::channel::<String>();
             let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             std::thread::Builder::new()
@@ -1803,12 +1811,15 @@ pub(crate) async fn run_message_via_llm(
                 })
                 .ok();
             let router = llm_router.clone();
-            let stream_join =
-                tokio::spawn(async move { router.complete_stream(&request, stream_tx).await });
+            let selected_route = selected_model_route.clone();
+            let stream_join = tokio::spawn(async move {
+                if let Some(route) = selected_route { router.complete_stream_for_entry(&request, &route, stream_tx).await }
+                else { router.complete_stream(&request, stream_tx).await }
+            });
             let mut accumulated = String::new();
             let mut first_wait = true;
             let overall_deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_secs(llm_timeout_secs);
+                tokio::time::Instant::now() + std::time::Duration::from_secs(goal_tracker.as_ref().map(|goal|llm_timeout_secs.min(goal.goal.max_seconds.saturating_sub(goal.state.elapsed_ms/1000).max(1))).unwrap_or(llm_timeout_secs));
             loop {
                 // Check the overall deadline before waiting for a chunk to avoid spurious zero-duration timeouts.
                 if tokio::time::Instant::now() >= overall_deadline {
@@ -1831,7 +1842,7 @@ pub(crate) async fn run_message_via_llm(
                 } else {
                     std::time::Duration::from_secs(idle_timeout_secs)
                 };
-                match tokio::time::timeout(idle, tok_rx.recv()).await {
+                match tokio::time::timeout(idle.min(overall_deadline.saturating_duration_since(tokio::time::Instant::now())), tok_rx.recv()).await {
                     Ok(Some(chunk)) => {
                         if !first_meaningful_progress_sent {
                             first_meaningful_progress_sent = true;
@@ -1948,6 +1959,11 @@ pub(crate) async fn run_message_via_llm(
             } else {
                 match tokio::time::timeout(remaining, stream_join).await {
                     Ok(Ok(Ok(resp))) => {
+                        if let Some(goal)=goal_tracker.as_mut() {
+                            let used=resp.usage.as_ref().map(|usage|usage.prompt_tokens.saturating_add(usage.completion_tokens)).filter(|count|*count>0).unwrap_or(estimated_request_tokens.saturating_add(resp.text.len() as u64));
+                            goal.state.tokens_used=goal.state.tokens_used.saturating_add(used);
+                            if let Err(error)=goal.save(&store_path,task_id,"active","Réponse modèle reçue; consommation enregistrée") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
+                        }
                         last_llm_model_used = Some(resp.model_used.clone());
                         insert_task_tracking_event(
                             store_path.as_path(),
@@ -3711,6 +3727,15 @@ pub(crate) async fn run_message_via_llm(
                 if code_studio_disk_task {
                     if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.round=round;checkpoint.prompt=current_prompt.clone();checkpoint.conversation=conversation.clone();checkpoint.phase="after_tools".into();checkpoint.waiting=None;checkpoint.outcome=run_outcome.clone();if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                 }
+                if let Some(goal)=goal_tracker.as_mut() {
+                    if !matches!(store.get(task_id).ok().flatten().map(|task|task.status),Some(TaskStatus::Running)) {break 'tool_rounds;}
+                    match goal.verify_boundary(&store_path,task_id,&tool_disk_workspace_root,&mut run_outcome).await {
+                        Ok(crate::studio_execution::GoalBoundary::Verified)=>{reply_text=format!("Les critères mécaniques configurés de l’objectif sont vérifiés : {}. Cette validation porte uniquement sur les propriétés définies dans les critères.",goal.goal.criteria.criteria.iter().map(|criterion|criterion.text.as_str()).collect::<Vec<_>>().join("; "));break 'tool_rounds;},
+                        Ok(crate::studio_execution::GoalBoundary::Budget)=>{run_outcome.termination=TerminationReason::BudgetExhausted;reply_text=format!("Objectif non atteint dans les limites configurées : {}",goal.state.detail);break 'tool_rounds;},
+                        Ok(crate::studio_execution::GoalBoundary::Pending(errors))=>{current_prompt.push_str(&format!("\n[Goal verification still failed] {}",errors.join("; ")));},
+                        Err(error)=>{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;},
+                    }
+                }
                 if round >= max_tool_rounds {
                     let response_for_user = response
                         .lines()
@@ -3899,6 +3924,20 @@ pub(crate) async fn run_message_via_llm(
                 last_tool_results_blob.as_deref().unwrap_or("")
             );
                 continue;
+            }
+            if let Some(goal)=goal_tracker.as_mut() {
+                if !matches!(store.get(task_id).ok().flatten().map(|task|task.status),Some(TaskStatus::Running)) {break 'tool_rounds;}
+                match goal.verify_boundary(&store_path,task_id,&tool_disk_workspace_root,&mut run_outcome).await {
+                    Ok(crate::studio_execution::GoalBoundary::Verified)=>{},
+                    Ok(crate::studio_execution::GoalBoundary::Budget)=>{run_outcome.termination=TerminationReason::BudgetExhausted;reply_text=format!("Objectif non atteint dans les limites configurées : {}",goal.state.detail);break 'tool_rounds;},
+                    Ok(crate::studio_execution::GoalBoundary::Pending(errors))=>{
+                        let _=bus.send(EventEnvelope::new(EventType::ProgressUpdate,Some(serde_json::json!({"task_id":task_id,"message":format!("Objectif : cycle {}/{}; critères encore en échec : {}",goal.state.cycles,goal.goal.max_cycles,errors.join("; ")),"progress_pct":60}))).with_correlation(task_id));
+                        conversation.push(akasha_llm::ConversationMessage::assistant(response.clone()));
+                        current_prompt=format!("[Goal not verified — continue within current permissions]\nObjective: {}\nMechanical verification failures: {}\nInspect the current files and recorded tool results. Choose the next useful action; do not replay successful mutations.\nOriginal request:\n{}",goal.goal.objective,errors.join("; "),super::studio_conversation::user_request(&task_scope));
+                        continue;
+                    },
+                    Err(error)=>{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;},
+                }
             }
             let image_md = last_captured_image_base64
                 .as_ref()
@@ -4632,6 +4671,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         }
     }
     if studio_verify_error.is_some() { run_outcome.termination = TerminationReason::VerificationFailed; }
+    if goal_tracker.as_ref().is_some_and(|goal|goal.state.state!="completed") && !run_outcome.failed() {run_outcome.termination=TerminationReason::VerificationFailed;reply_text="Objectif non vérifié : l’exécution est arrêtée ou bloquée.".into();}
     let proposed = if run_outcome.failed() { TaskStatus::Failed } else { TaskStatus::Completed };
     let reason = if run_outcome.failed() {
         Some(studio_verify_display_message.as_deref().unwrap_or(&reply_text).chars().take(2000).collect::<String>())
@@ -4645,6 +4685,11 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             return;
         }
     };
+    if let Some(goal)=goal_tracker.as_mut() {
+        let state=match final_status {TaskStatus::Completed if goal.state.state=="completed"=>"completed",TaskStatus::Paused=>"paused",TaskStatus::Interrupted=>"interrupted",TaskStatus::Cancelled=>"cancelled",TaskStatus::WaitingUserInput=>"waiting_user_input",_ if goal.state.state=="budget_exhausted"=>"budget_exhausted",_=>"blocked"};
+        let detail=if state=="completed" {"Critères mécaniques vérifiés".to_string()}else{reply_text.chars().take(2000).collect()};
+        let _=goal.save(&store_path,task_id,state,&detail);
+    }
     let task_status_snapshot = Some(final_status.clone());
     let is_paused = matches!(final_status, TaskStatus::Paused | TaskStatus::WaitingUserInput);
     let final_event_type = if matches!(task_status_snapshot, Some(TaskStatus::Cancelled)) {

@@ -1688,7 +1688,7 @@ fn allowed_studio_subcommand(cmd: &str, argv: &[String]) -> bool {
     let subcommand = argv.get(1).map(String::as_str);
     match cmd {
         "npm" | "npm.cmd" | "pnpm" | "pnpm.cmd" => {
-            matches!(subcommand, Some("run") | Some("install") | Some("ci"))
+            matches!(subcommand, Some("run") | Some("install") | Some("ci") | Some("test"))
                 || (matches!(subcommand, Some("exec")) && npm_exec_argv_allowed_for_studio_verify(argv))
         }
         "yarn" | "yarn.cmd" => {
@@ -1725,7 +1725,7 @@ fn allowed_studio_subcommand(cmd: &str, argv: &[String]) -> bool {
     }
 }
 
-fn argv_looks_safe(argv: &[String]) -> bool {
+pub(crate) fn argv_looks_safe(argv: &[String]) -> bool {
     if argv.is_empty() {
         return false;
     }
@@ -2580,6 +2580,7 @@ async fn git_output(project_root: &Path, args: &[&str]) -> Result<std::process::
 
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct StudioGitBranch {
+    pub remote: bool,
     pub name: String,
     pub current: bool,
     pub upstream: Option<String>,
@@ -2609,7 +2610,7 @@ pub(super) struct StudioGitCompare {
 pub(super) async fn git_list_branches(project_root: &Path) -> Result<Vec<StudioGitBranch>, String> {
     let out = git_output(
         project_root,
-        &["for-each-ref", "--format=%(refname:short)|%(upstream:short)|%(HEAD)", "refs/heads"],
+        &["for-each-ref", "--format=%(refname:short)|%(upstream:short)|%(HEAD)|%(refname)", "refs/heads", "refs/remotes"],
     )
     .await?;
     if !out.status.success() {
@@ -2646,7 +2647,10 @@ pub(super) async fn git_list_branches(project_root: &Path) -> Result<Vec<StudioG
                 None
             }
         });
+        let remote=parts.get(3).is_some_and(|reference|reference.starts_with("refs/remotes/"));
+        if remote && name.ends_with("/HEAD") {continue;}
         rows.push(StudioGitBranch {
+            remote,
             name: name.to_string(),
             current,
             upstream,

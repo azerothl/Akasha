@@ -3311,6 +3311,7 @@ Langue : aligne-toi sur le dernier message utilisateur."),
         "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
         "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
         "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, write_code, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Shell, background processes, containers, MCP/plugins and delegation are technically disabled for this role. Use git_status, git_log and git_diff for diagnostics. You MAY use write_file ONLY on workspace:/CODE_STUDIO_PLAN.md: read its existing content first and preserve unrelated sections. Other edit/delete/move tools are disabled. Explore with read_file, search_files, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
+        "studio_auditor" => Some("You audit code using repository read tools only. Never modify files, update tickets, execute commands or delegate. Ground each finding in an inspected file and identify unverified behavior."),
         "studio_reviewer" => Some("You are the Code Studio QA/Review agent. STRICTLY NON-MUTATING: never modify application files and never run write tools (write_file, write_code, edit_file, search_replace, apply_patch, delete_file, rename_path, move_tree). Your job in ticket `review` is to verify that the work linked to the ticket is present and behaves as expected, then post structured feedback on the ticket. Shell, background processes, containers, MCP/plugins and delegation are technically disabled for this role. Project verification scripts and autofix are not executed by this role; request a separate implementation/QA task when execution is needed. Use read-only inspection (read_file, grep_content, git_*) and finish by updating the ticket via `studio_update_ticket`: if accepted set review_outcome=approved and status=done; if issues remain set review_outcome=changes_requested, add concrete corrective_steps, and set status=in_progress. Do not rewrite the implementation during review."),
         _ => None,
     }
@@ -4004,13 +4005,13 @@ pub(crate) fn spawn_task_stall_watchdog(
                 }
                 let reason = format!(
                     "La tâche n'a produit aucune progression utile après {} secondes. \
-                     Le worker a peut‑être bloqué ou le fournisseur LLM ne répond pas. \
-                     Réessayez ou redémarrez le daemon.",
+                     Aucun signal utile du worker n’a été reçu. La cause précise n’est pas confirmée. \
+                     Consultez le diagnostic et les fichiers avant toute nouvelle demande.",
                     timeout_secs
                 );
-                if let Ok(store) = TaskStore::open(&store_path) {
-                    let _ = store.update_status(task_id, TaskStatus::Failed);
-                }
+                let outcome=serde_json::json!({"schema_version":1,"termination_reason":"inactivity_timeout","result":"failed","reason":reason,"verification":[],"acceptance_verified":false,"timeout_secs":timeout_secs});
+                let persisted=TaskStore::open(&store_path).and_then(|store|store.finalize_outcome(task_id,TaskStatus::Failed,outcome.clone()));
+                if !matches!(persisted,Ok((TaskStatus::Failed,_))) {return;}
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::ProgressUpdate,
@@ -4028,7 +4029,8 @@ pub(crate) fn spawn_task_stall_watchdog(
                         Some(serde_json::json!({
                             "task_id": task_id.to_string(),
                             "status": "failed",
-                            "reason": reason
+                            "reason": reason,
+                            "outcome": outcome
                         })),
                     )
                     .with_correlation(correlation_id),

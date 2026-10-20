@@ -1690,6 +1690,15 @@ pub async fn try_handle(
     let steering_queue = ctx.steering_queue.clone();
     let task_usage_store = ctx.task_usage_store;
     let body = body.map(|b| b.to_vec());
+if method == "GET" && path_only.starts_with("/api/tasks/") && path_only.ends_with("/goal") {
+    let raw=path_only.trim_start_matches("/api/tasks/").trim_end_matches("/goal");
+    let id=match Uuid::parse_str(raw){Ok(id)=>id,Err(_)=>return Some(json_response("400 Bad Request",r#"{"error":"invalid_task"}"#))};
+    return Some(match crate::studio_execution::state(store_path,id) {
+        Ok(Some(value))=>json_response("200 OK",&serde_json::to_string(&value).unwrap()),
+        Ok(None)=>json_response("404 Not Found",r#"{"error":"no_goal"}"#),
+        Err(_)=>json_response("500 Internal Server Error",r#"{"error":"goal_state_unavailable"}"#),
+    });
+}
 if method == "GET" && path.starts_with("/api/timeline") {
     let (limit, task_id_filter) = path
         .split('?')
@@ -2016,6 +2025,10 @@ if method == "POST" && path == "/api/message" {
         .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let studio_execution = match main_agent.validate_studio_execution(body_json.as_ref().unwrap_or(&serde_json::Value::Null)) {
+        Ok(value) => value,
+        Err(detail) => return Some(json_response("400 Bad Request", &serde_json::json!({"error":"invalid_studio_execution","detail":detail}).to_string())),
+    };
     let mut studio_ticket_id = body_json
         .as_ref()
         .and_then(|v| v.get("studio_ticket_id").and_then(|x| x.as_str()))
@@ -2158,7 +2171,7 @@ if method == "POST" && path == "/api/message" {
     // Plan mode uses the technically restricted planner. Other Studio modes use the manager.
     // Chat composer modes: architect/code force the matching specialist when not in Studio.
     let studio_forced_agent = if studio_disk_root.is_some() {
-        Some(if studio_code_mode.as_deref() == Some("plan") { "studio_planner" } else { "studio_project_manager" }.to_string())
+        Some(if studio_execution.as_ref().and_then(|value|value.action.as_deref())==Some("audit") { "studio_auditor" } else if studio_execution.as_ref().and_then(|value|value.action.as_deref()).is_some() { "studio_fullstack" } else if studio_code_mode.as_deref() == Some("plan") { "studio_planner" } else { "studio_project_manager" }.to_string())
     } else if let Some(ref mode) = composer_mode {
         match mode.as_str() {
             "architect" | "code" => Some(mode.clone()),
@@ -2404,6 +2417,18 @@ if method == "POST" && path == "/api/message" {
             );
         }
     }
+    if let Some(action)=studio_execution.as_ref().and_then(|value|value.action.as_deref()) {
+        let instruction=match action {
+            "debug"=>"Reproduce the reported failure, identify its cause from observed evidence, apply a focused fix and verify it. Report unverified assumptions explicitly.",
+            "audit"=>"Audit using read-only repository tools. Report prioritized findings with file references and evidence. Do not modify files, run shell commands or delegate work.",
+            "test"=>"Inspect the project scripts and choose relevant checks for the request. Run them, preserve real exit codes and report failures. Do not modify source files unless the user requested fixes.",
+            _=>"Pursue the explicit objective. Mechanical checks and hard budgets are enforced by the daemon; do not claim verification without tool evidence.",
+        };
+        message_for_llm=format!("[Studio workflow: {action}]\n{instruction}\n\n{message_for_llm}");
+    }
+    if let Some(goal)=studio_execution.as_ref().and_then(|value|value.goal.as_ref()) {
+        message_for_llm=format!("[Explicit goal contract]\nObjective: {}\nHard limits: {} verification cycles, {} seconds, {} main-loop tokens.\n{}\n{}",goal.objective,goal.max_cycles,goal.max_seconds,goal.max_tokens,crate::api_studio::format_acceptance_prefix_for_llm(&goal.criteria),message_for_llm);
+    }
     let mut envelope = crate::gateway::MessageEnvelope::api(
         session_id.clone(),
         message_for_llm,
@@ -2412,6 +2437,7 @@ if method == "POST" && path == "/api/message" {
         incognito,
     );
     envelope.display_request = Some(display_request);
+    envelope.studio_execution = studio_execution;
     envelope.studio_disk_root = studio_disk_root.clone();
     envelope.studio_forced_agent = studio_forced_agent;
     envelope.studio_evolution_branch = studio_evolution_branch;

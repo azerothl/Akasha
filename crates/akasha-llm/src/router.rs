@@ -376,6 +376,9 @@ impl LLMRouter {
         akasha_embedded_llm::config::apply_persisted_runtime();
     }
 
+    #[cfg(not(feature = "embedded"))]
+    pub fn embedded_apply_runtime(&self) {}
+
     /// Runtime settings snapshot (model, engine mode, tier).
     #[cfg(feature = "embedded")]
     pub fn embedded_settings_view(
@@ -439,9 +442,54 @@ impl LLMRouter {
             .unwrap_or_else(|e| e.into_inner())
             .model_options
             .clone();
+        entry.apply_config_to_request(&mut req);
         prepare_ollama_request(entry, &mut req, &model_options);
         provider
             .complete(&req, timeout, Some(entry.model.as_str()))
+            .await
+            .map_err(|e| crate::provider::format_provider_error(entry.provider.as_str(), &e))
+    }
+
+    /// Stream using one explicitly selected route; never silently fall back.
+    pub async fn complete_stream_for_entry(
+        &self,
+        request: &CompletionRequest,
+        entry: &crate::config::RouteEntry,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, String> {
+        let resolve = self.resolve();
+        let provider = resolve(entry.provider.as_str()).ok_or_else(|| {
+            format!(
+                "provider '{}' is not registered",
+                entry.provider
+            )
+        })?;
+        if self.degraded_mode && !provider.is_local() {
+            return Err(format!(
+                "degraded mode: provider '{}' unavailable",
+                entry.provider
+            ));
+        }
+        let timeout_secs = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .default_timeout_secs
+            .unwrap_or(300);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let mut req = request.clone();
+        let model_options = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .model_options
+            .clone();
+        entry.apply_config_to_request(&mut req);
+        prepare_ollama_request(entry, &mut req, &model_options);
+        if let Some(limit)=request.max_tokens { req.max_tokens=Some(req.max_tokens.unwrap_or(limit).min(limit)); }
+        provider
+            .complete_stream(&req, timeout, Some(entry.model.as_str()), chunk_tx)
             .await
             .map_err(|e| crate::provider::format_provider_error(entry.provider.as_str(), &e))
     }
@@ -908,4 +956,52 @@ mod tests {
             "default config must NOT have an 'orchestrator' route; decomposer falls back to 'system'"
         );
     }
+    struct RecordingModelProvider(Arc<std::sync::Mutex<Vec<String>>>);
+    #[async_trait]
+    impl LLMProvider for RecordingModelProvider {
+        fn name(&self)->&str {"mock_local"}
+        fn is_available(&self)->bool {true}
+        fn is_local(&self)->bool {true}
+        async fn complete(&self, request:&CompletionRequest, timeout:Duration, model:Option<&str>)->Result<crate::provider::CompletionResponse,ProviderError> {
+            self.0.lock().unwrap().push(model.unwrap_or_default().into());
+            assert_eq!(request.num_ctx,Some(4096));
+            let mut response=MockLocalProvider{response_text:"selected response".into()}.complete(request,timeout,model).await?;
+            response.model_used=model.unwrap_or_default().into(); Ok(response)
+        }
+    }
+    #[tokio::test]
+    async fn selected_stream_uses_exact_model_and_never_falls_back() {
+        let calls=Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut router=LLMRouter::new(RoutingConfig::default_config());
+        router.register_provider(Arc::new(RecordingModelProvider(calls.clone())));
+            let request = CompletionRequest {
+                prompt: "Hello".into(),
+                max_tokens: Some(10),
+                temperature: Some(0.0),
+                preferred_task_type: Some("conversation".into()),
+                system_prompt: None,
+                conversation: None,
+                tools: None,
+                require_tool: false,
+                image_data_urls: None,
+                top_p: None,
+                top_k: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                repeat_penalty: None,
+                num_ctx: None,
+                num_gpu: None,
+                thinking_level: None,
+            };
+        let (tx,rx)=std::sync::mpsc::channel();
+        let route=RouteEntry{provider:"mock_local".into(),model:"chosen-v2".into(),config:Some(serde_json::json!({"num_ctx":4096}))};
+        let response=router.complete_stream_for_entry(&request,&route,tx).await.unwrap();
+        assert_eq!(response.model_used,"chosen-v2"); assert_eq!(rx.recv().unwrap(),"selected response");
+        assert_eq!(*calls.lock().unwrap(),vec!["chosen-v2"]);
+        let (tx,_)=std::sync::mpsc::channel();
+        let missing=RouteEntry{provider:"unregistered".into(),..route};
+        assert!(router.complete_stream_for_entry(&request,&missing,tx).await.is_err());
+        assert_eq!(calls.lock().unwrap().len(),1);
+    }
+
 }
