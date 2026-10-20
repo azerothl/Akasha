@@ -1,0 +1,125 @@
+warning: esaxx-rs@0.1.10: cl : Ligne de commande warning D9002 : option '-std=c++11' inconnue ignorée
+warning: unused variable: `router_model`
+   --> crates\akasha-embedded-llm\src\lib.rs:110:9
+    |
+110 |         router_model: Option<&str>,
+    |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_router_model`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `akasha-embedded-llm` (lib) generated 1 warning (run `cargo fix --lib -p akasha-embedded-llm` to apply 1 suggestion)
+   Compiling akasha-daemon v0.11.0 (C:\Users\azero\.codex\worktrees\ui-audit-delivery\Akasha\crates\akasha-daemon)
+warning: unused imports: `MessageIntentFlags`, `SessionRecallIntent`, and `SmallTalkIntent`
+  --> crates\akasha-daemon\src\api_llm_loop\run_message.rs:27:20
+   |
+27 |     MemoryProfile, MessageIntentFlags, PendingHumanInput, ProcessRegistry, SessionRecallIntent,
+   |                    ^^^^^^^^^^^^^^^^^^                                      ^^^^^^^^^^^^^^^^^^^
+28 |     SessionRecallRange, SmallTalkIntent, SmallTalkLanguage, SteeringQueueStore,
+   |                         ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `TaskPriority` and `interpret_message`
+ --> crates\akasha-daemon\src\api.rs:7:21
+  |
+7 | use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
+  |                     ^^^^^^^^^^^^^^^^^                              ^^^^^^^^^^^^
+
+warning: unused imports: `clear_task_milestones`, `emit_timeline_once_for_task`, and `log_latency_metric`
+ --> crates\akasha-daemon\src\api.rs:9:5
+  |
+9 |     clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric,
+  |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^                   ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::protocol_adapter::unknown_external_message_count`
+  --> crates\akasha-daemon\src\api.rs:14:5
+   |
+14 | use crate::protocol_adapter::unknown_external_message_count;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MissionStatusYaml`
+  --> crates\akasha-daemon\src\api.rs:15:65
+   |
+15 | use crate::autonomous_mission_config::{AutonomousMissionConfig, MissionStatusYaml};
+   |                                                                 ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::user_profile::UserProfile`
+  --> crates\akasha-daemon\src\api.rs:16:5
+   |
+16 | use crate::user_profile::UserProfile;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `PluginKind` and `PluginManifest`
+  --> crates\akasha-daemon\src\api.rs:19:25
+   |
+19 | use akasha_plugin_api::{PluginKind, PluginManifest};
+   |                         ^^^^^^^^^^  ^^^^^^^^^^^^^^
+
+warning: unused imports: `ScheduleExceptionType`, `ScheduleException`, `ScheduleStore`, `Schedule`, `TaskRunStatus`, `TodoStatus`, `WorkspaceGraphStore`, `format_todos_plan_block`, and `parse_todos_from_payload`
+  --> crates\akasha-daemon\src\api.rs:22:5
+   |
+22 |     format_todos_plan_block, parse_todos_from_payload, Schedule,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^
+23 |     ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^        ^^^^^^^^^^^^^
+24 |     TaskStore, TodoStatus, WorkspaceGraphStore,
+   |                ^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::cmp::Ordering`
+  --> crates\akasha-daemon\src\api.rs:28:5
+   |
+28 | use std::cmp::Ordering;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `BinaryHeap`
+   --> crates\akasha-daemon\src\api.rs:617:24
+    |
+617 | use std::collections::{BinaryHeap, VecDeque};
+    |                        ^^^^^^^^^^
+
+warning: unused imports: `parse_run_command_args` and `resolve_run_command_working_dir`
+    --> crates\akasha-daemon\src\api.rs:3329:56
+     |
+3329 | pub(crate) use crate::api_tool_dispatch::process_ops::{parse_run_command_args, resolve_run_command_working_dir};
+     |                                                        ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::api_tool_dispatch::web_device_memory_ops::parse_device_invoke_params`
+    --> crates\akasha-daemon\src\api.rs:3331:16
+     |
+3331 | pub(crate) use crate::api_tool_dispatch::web_device_memory_ops::parse_device_invoke_params;
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `rewrite_workspace_plan_key_to_lineage_root`, `rewrite_workspace_plan_path_str`, and `sync_workspace_store_from_disk`
+    --> crates\akasha-daemon\src\api.rs:3333:51
+     |
+3333 | ...:fs_ops::{rewrite_workspace_plan_key_to_lineage_root, rewrite_workspace_plan_path_str, sync_workspace_store_from_disk, workspac...
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `info`
+ --> crates\akasha-daemon\src\user_rag_indexer.rs:5:15
+  |
+5 | use tracing::{info, warn};
+  |               ^^^^
+
+warning: unused import: `SecondBrainSettings`
+ --> crates\akasha-daemon\src\api_routes_memory.rs:3:74
+  |
+3 | use crate::api::{load_second_brain_settings, save_second_brain_settings, SecondBrainSettings};
+  |                                                                          ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `HashMap`
+  --> crates\akasha-daemon\src\api_routes_tasks.rs:19:36
+   |
+19 | use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+   |                                    ^^^^^^^
+
+warning: unused variable: `data_dir_rag`
+    --> crates\akasha-daemon\src\api_llm_loop\run_message.rs:1020:13
+     |
+1020 |         let data_dir_rag = data_dir.to_path_buf();
+     |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_dir_rag`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `akasha-daemon` (lib) generated 17 warnings (run `cargo fix --lib -p akasha-daemon` to apply 17 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 48.45s

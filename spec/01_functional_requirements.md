@@ -6,7 +6,7 @@ FR-001 — Accusé réception < 500ms
 FR-002 — Délégation intelligente automatique
 FR-003 — Reporting temps réel
 FR-004 — Mémoire court terme session
-FR-005 — Mémoire long terme chiffrée
+FR-005 — Mémoire long terme persistante (chiffrement au repos : cible, pas encore livré)
 FR-006 — Protection stricte des secrets
 FR-007 — Support multi-canaux natifs
 FR-008 — Support plugins extensibles

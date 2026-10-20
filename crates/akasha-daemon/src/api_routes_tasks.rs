@@ -1821,7 +1821,7 @@ if method == "POST" && path == "/api/message" {
                         content_base64,
                     ) {
                         let text = if mime == "application/pdf" {
-                            pdf_extract::extract_text_from_mem(&decoded).unwrap_or_else(|_| {
+                            crate::pdf_extract_safe::extract_text_from_mem(&decoded).unwrap_or_else(|_| {
                                 String::from(
                                     "[Extraction du texte PDF impossible ou PDF vide.]",
                                 )

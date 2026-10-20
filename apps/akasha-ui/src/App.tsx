@@ -10166,7 +10166,7 @@ function App() {
                       <dt>{t("settings.daemon_port")}</dt>
                       <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
                       <dt>{t("settings.data_dir")}</dt>
-                      <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
+                      <dd><code>%USERPROFILE%\akasha</code> (Windows) ou <code>~/akasha</code> (Linux/macOS)</dd>
                       <dt>{t("settings.documentation")}</dt>
                       <dd>
                         <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
