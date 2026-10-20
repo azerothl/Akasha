@@ -809,6 +809,9 @@ User message:\n{}",
         if !resumable {
             anyhow::bail!("task not resumable (status: {})", task.status.as_str());
         }
+        if crate::studio_recovery::is_active(task_id){anyhow::bail!("task execution is still stopping; retry resume when it is inactive");}
+        let studio=store.lineage_root_studio_project_id(task_id)?.is_some();
+        let checkpoint=if studio {Some(crate::studio_recovery::request_resume(store_path,task_id).map_err(anyhow::Error::msg)?)}else{None};
         // Remember the original status so we can roll back on channel closure.
         let original_status = task.status;
         let original_outcome = store.get_outcome(task_id)?;
@@ -827,7 +830,7 @@ User message:\n{}",
         };
         // Session and execution mode are not persisted in the task store; use a
         // day-scoped session id and direct conversation mode when resuming.
-        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
+        let session_id = checkpoint.as_ref().map(|checkpoint|checkpoint.session_id.clone()).unwrap_or_else(||format!("day-{}", chrono::Utc::now().format("%Y-%m-%d")));
         let execution_mode = None;
         let tx = self
             .direct_conversation_tx
@@ -839,12 +842,12 @@ User message:\n{}",
             session_id,
             image_data_urls: None,
             execution_mode,
-            preferred_task_type: None,
-            incognito: false,
+            preferred_task_type: checkpoint.as_ref().and_then(|checkpoint|checkpoint.preferred_task_type.clone()),
+            incognito: checkpoint.as_ref().is_some_and(|checkpoint|checkpoint.incognito),
         };
         // Update status to Queued BEFORE enqueuing so the conversation worker won't
         // see a Paused/Interrupted status and silently drop the task.
-        store.update_status(task_id, TaskStatus::Queued)?;
+        if !store.transition_if(task_id,&[TaskStatus::Paused,TaskStatus::Interrupted],TaskStatus::Queued)?{anyhow::bail!("task changed while preparing resume");}
         if let Err(e) = tx.try_send(task_msg) {
             match e {
                 mpsc::error::TrySendError::Full(_) => {

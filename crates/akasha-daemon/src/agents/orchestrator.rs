@@ -1336,6 +1336,7 @@ async fn process_root_task(
     if !akasha_core::Role::OrchestratorAgent.can_spawn_agents() {
         anyhow::bail!("RBAC: orchestrator not allowed to spawn agents");
     }
+    let _active_execution=crate::studio_recovery::ActiveRun::enter(root_task_id).map_err(anyhow::Error::msg)?;
     emit_orchestration_state(&bus, root_task_id, OrchestrationState::Received, None);
 
     // Readiness gates (policy/budget/retries/circuit) before any expensive orchestration.
@@ -1764,6 +1765,7 @@ async fn process_root_task(
         if let Some(tx) = startup_watchdog_tx.take() {
             let _ = tx.send(());
         }
+        drop(_active_execution);
         conversation_tx
             .send(OrchestratorTask {
                 task_id: root_task_id,
@@ -1833,6 +1835,7 @@ async fn process_root_task(
     let retry_timeout = deliverable_retry_timeout();
     let mut startup_watchdog_tx = startup_watchdog_tx;
     tokio::spawn(async move {
+        let _active_execution = _active_execution;
         let workspace_root = store_path_buf
             .parent()
             .map(Path::to_path_buf)

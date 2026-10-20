@@ -224,9 +224,14 @@ pub(crate) fn argument_schema(tool:&str)->Value {
         if matches!(tool,"write_file"|"write_code"|"edit_file"|"apply_patch"){required.push("content");}
         if tool=="edit_file"{required.extend(["start_line","end_line"]);}
         json!({"type":"object","additionalProperties":false,"required":required,"properties":{"path":{"type":"string","minLength":1},"content":{"type":"string"},"expected_version":{"type":"string","description":"SHA-256 from read_file, or missing for creation"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}})
-    }else if matches!(tool,"run_command"|"run_terminal"|"run_command_background") {
+    } else if matches!(
+        tool,
+        "run_command" | "run_terminal" | "run_command_background"
+    ) {
         json!({"type":"object","additionalProperties":false,"required":["program"],"properties":{"program":{"type":"string","minLength":1},"args":{"type":"array","maxItems":128,"items":{"type":"string"}},"cwd":{"type":"string","minLength":1}}})
-    }else{json!({"type":"object","additionalProperties":false,"required":["argv"],"properties":{"argv":{"type":"array","maxItems":128,"items":{"type":"string"}}}})}
+    } else {
+        json!({"type":"object","additionalProperties":false,"required":["argv"],"properties":{"argv":{"type":"array","maxItems":128,"items":{"type":"string"}}}})
+    }
 }
 
 pub(crate) fn native_definition(names: Vec<String>) -> Value {
@@ -385,6 +390,34 @@ impl Operation {
                 )),
             });
         }
+        let unknown: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM studio_operations WHERE task=?1 AND state='started'",
+                [task.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let inspection = matches!(
+            tool,
+            "read_file"
+                | "list_dir"
+                | "search_files"
+                | "grep_content"
+                | "file_diff"
+                | "diff_unified"
+                | "dir_compare"
+                | "git_status"
+                | "git_diff"
+                | "git_log"
+                | "git_branches"
+                | "list_tools"
+        ) || tool == "terminal_session"
+            && args
+                .first()
+                .is_some_and(|sub| matches!(sub.as_str(), "read" | "list" | "stop"));
+        if unknown > 0 && !inspection {
+            return Err("operation_result_unknown: only inspection is allowed until an operator resolves interrupted operations through /api/tasks/:id/recovery".into());
+        }
         let path = file_path(tool, args)
             .map(|raw| {
                 bounded_path(
@@ -470,12 +503,68 @@ impl Operation {
 
 pub(crate) fn recovery_summary(db: &Path, task: Uuid) -> Result<Value, String> {
     let connection = connection(db)?;
-    let mut statement=connection.prepare("SELECT operation,tool,state,updated_at FROM studio_operations WHERE task=?1 ORDER BY updated_at DESC LIMIT 128").map_err(|e|e.to_string())?;
-    let rows=statement.query_map([task.to_string()],|row|Ok(json!({"operation_id":row.get::<_,String>(0)?,"tool":row.get::<_,String>(1)?,"state":row.get::<_,String>(2)?,"updated_at":row.get::<_,String>(3)?}))).map_err(|e|e.to_string())?;
+    let unknown: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM studio_operations WHERE task=?1 AND state='started'",
+            [task.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut statement=connection.prepare("SELECT operation,tool,state,updated_at,result FROM studio_operations WHERE task=?1 ORDER BY CASE WHEN state='started' THEN 0 ELSE 1 END,updated_at DESC LIMIT 32").map_err(|e|e.to_string())?;
+    let rows=statement.query_map([task.to_string()],|row|{
+        let raw:Option<String>=row.get(4)?;
+        let mut result=raw.and_then(|text|serde_json::from_str::<Value>(&text).ok());
+        if let Some(ref mut value)=result{if let Some(output)=value["output"].as_str(){value["output"]=json!(crate::tool_output::truncate_utf8_by_bytes(output,4096).0);}}
+        Ok(json!({"operation_id":row.get::<_,String>(0)?,"tool":row.get::<_,String>(1)?,"state":row.get::<_,String>(2)?,"updated_at":row.get::<_,String>(3)?,"result":result}))
+    }).map_err(|e|e.to_string())?;
     let records = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    Ok(
-        json!({"schema_version":1,"operations":records,"unknown_count":records.iter().filter(|row|row["state"]=="started").count()}),
-    )
+    Ok(json!({"schema_version":1,"operations":records,"unknown_count":unknown}))
+}
+
+/// Workflow effects cannot hold the workspace lock while a delegated child runs.
+pub(crate) struct WorkflowOperation {
+    db: PathBuf,
+    task: Uuid,
+    id: Uuid,
+    tool: String,
+}
+impl WorkflowOperation {
+    pub(crate) fn begin(
+        db: &Path,
+        task: Uuid,
+        tool: &str,
+        args: &[String],
+    ) -> Result<Self, String> {
+        let connection = connection(db)?;
+        let unknown: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM studio_operations WHERE task=?1 AND state='started'",
+                [task.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if unknown > 0 {
+            return Err("operation_result_unknown: resolve interrupted effects before another workflow mutation".into());
+        }
+        let id = Uuid::new_v4();
+        let fingerprint = digest(
+            serde_json::to_string(&(tool, args))
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
+        );
+        connection.execute("INSERT INTO studio_operations(task,operation,version,tool,digest,state,updated_at) VALUES(?1,?2,1,?3,?4,'started',?5)",params![task.to_string(),id.to_string(),tool,fingerprint,chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+        Ok(Self {
+            db: db.into(),
+            task,
+            id,
+            tool: tool.into(),
+        })
+    }
+    pub(crate) fn finish(self, success: bool, text: &str) -> Result<(), String> {
+        let result = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"output":crate::tool_output::truncate_utf8_by_bytes(text,64*1024).0});
+        connection(&self.db)?.execute("UPDATE studio_operations SET state='completed',result=?3,updated_at=?4 WHERE task=?1 AND operation=?2 AND state='started'",params![self.task.to_string(),self.id.to_string(),result.to_string(),chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+        Ok(())
+    }
 }

@@ -55,6 +55,19 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use uuid::Uuid;
 
+async fn studio_round_limit_choice(store: &Option<HumanInputStore>, bus: &EventBus, task: Uuid, round: u32, max: u32) -> Option<String> {
+    let store = store.as_ref()?;
+    let question = "Limite de tours d'outils atteinte. Souhaitez-vous continuer la tâche ?".to_string();
+    let context = format!("La tâche a utilisé {round} tours d'outils (max {max}). Une reprise exige une nouvelle décision ; aucune ancienne approbation n'est réutilisée.");
+    let choices = vec!["Continuer (+10 tours)".to_string(), "Réinitialiser et continuer (+10 tours)".to_string(), "Arrêter".to_string()];
+    let (tx, rx) = oneshot::channel();
+    store.write().await.insert(task, PendingHumanInput { question:question.clone(), context:context.clone(), choices:Some(choices.clone()), response_tx:tx });
+    let _ = bus.send(EventEnvelope::new(EventType::TaskWaitingUserInput, Some(serde_json::json!({"task_id":task,"question":question,"context":context,"choices":choices,"tool_round_limit":true,"current_round":round,"max_tool_rounds":max}))).with_correlation(task));
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(300), rx).await.ok().and_then(Result::ok);
+    store.write().await.remove(&task);
+    answer
+}
+
 fn studio_tool_followup(request: &str, results: &str) -> String {
     // The previous model reply is an executable proposal, not another request.
     // Repeating it here primes text-tool models to emit the same operation again.
@@ -99,9 +112,20 @@ pub(crate) async fn run_message_via_llm(
     studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
     incognito: bool,
 ) {
-    if let Ok(store) = TaskStore::open(&store_path) {
-        let _ = store.update_status(task_id, TaskStatus::Running);
-    }
+    let _active_execution=match crate::studio_recovery::ActiveRun::enter(task_id){Ok(guard)=>guard,Err(error)=>{tracing::warn!(%task_id,%error,"Duplicate task execution refused");return;}};
+    let started=match TaskStore::open(&store_path).and_then(|store|store.transition_if(task_id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running],TaskStatus::Running)) {
+        Ok(started)=>started,
+        Err(error)=>{
+            let reason=format!("Cannot start task execution: {error}");
+            let outcome=serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":"failed","reason":reason,"status":"failed","verification":[],"acceptance_verified":false});
+            let persisted=TaskStore::open(&store_path).and_then(|store|store.finalize_outcome(task_id,TaskStatus::Failed,outcome.clone())).is_ok();
+            tracing::error!(%task_id,%error,persisted,"Task start persistence failed");
+            let _=bus.send(EventEnvelope::new(EventType::TaskFailed,Some(serde_json::json!({"task_id":task_id,"reason":reason,"outcome":outcome,"persisted":persisted}))).with_correlation(task_id));
+            notify_task_completion(&task_completion_registry,task_id).await;return;
+        }
+    };
+    if !started {notify_task_completion(&task_completion_registry,task_id).await;return;}
+
     let _ = bus.send(
         EventEnvelope::new(
             EventType::ProgressUpdate,
@@ -143,6 +167,26 @@ pub(crate) async fn run_message_via_llm(
         crate::api_studio::strip_embedded_acceptance_json(&message);
     let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
     let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+    macro_rules! abort_recovery {($reason:expr)=>{{
+        let reason=$reason.to_string();
+        let proposed=if crate::studio_recovery::load(&store_path,task_id,false).ok().flatten().is_some(){TaskStatus::Interrupted}else{TaskStatus::Failed};
+        let actual=TaskStore::open(&store_path).and_then(|store|store.finalize_outcome(task_id,proposed.clone(),serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":if proposed==TaskStatus::Interrupted{"stopped"}else{"failed"},"reason":reason,"verification":[],"acceptance_verified":false}))).map(|(status,_)|status).unwrap_or(proposed);
+        let event=match actual {TaskStatus::Cancelled=>EventType::TaskCancelled,TaskStatus::Paused|TaskStatus::Interrupted|TaskStatus::WaitingUserInput=>EventType::TaskPaused,_=>EventType::TaskFailed};
+        let _=bus.send(EventEnvelope::new(event,Some(serde_json::json!({"task_id":task_id,"status":actual.as_str(),"reason":reason}))).with_correlation(task_id));
+        cancel_task_watchdogs(&mut watchdog_cancel,&mut stall_cancel);notify_task_completion(&task_completion_registry,task_id).await;return;
+    }}}
+    let recovery_checkpoint=match crate::studio_recovery::load(&store_path,task_id,true){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
+    if let Some(checkpoint)=recovery_checkpoint.as_ref(){
+        let root=match crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags,&checkpoint.project_id).and_then(|path|path.canonicalize().map_err(|e|e.to_string())){Ok(path)=>path,Err(error)=>{abort_recovery!(error);}};
+        if !crate::studio::is_strictly_under_studio_root(&root,&crate::studio::studio_projects_base(data_dir_for_studio_flags)){abort_recovery!("Recorded project escapes Studio project storage");}
+        let expected=match checkpoint.workspace.canonicalize(){Ok(path)=>path,Err(error)=>{abort_recovery!(error);}};
+        if expected!=root {
+            match crate::studio_worktree::restore_for_resume(data_dir_for_studio_flags,&studio_worktree_registry,task_id,&checkpoint.project_id).await {
+                Ok(Some(state)) if state.worktree_path.canonicalize().ok().as_ref()==Some(&expected)=>{},
+                _=>{abort_recovery!("Cannot restore the recorded task worktree; project-root fallback refused");}
+            }
+        }
+    }
     let tool_disk_workspace_root: std::path::PathBuf = {
         if let Some(wt) = crate::studio_worktree::get_worktree_for_task(&studio_worktree_registry, task_id).await
         {
@@ -195,6 +239,10 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
+    if let Some(checkpoint)=recovery_checkpoint.as_ref(){
+        let project=TaskStore::open(&store_path).ok().and_then(|store|store.lineage_root_studio_project_id(task_id).ok().flatten());
+        if checkpoint.agent!=assigned_agent || project.as_deref()!=Some(&checkpoint.project_id) || checkpoint.workspace.canonicalize().ok()!=tool_disk_workspace_root.canonicalize().ok(){abort_recovery!("Checkpoint context no longer matches the task workspace, project or role");}
+    }
     let skill_registry = if code_studio_disk_task {
         match &skill_registry {
             Some(registry) => match registry.for_project(&tool_disk_workspace_root).await {
@@ -1434,7 +1482,15 @@ pub(crate) async fn run_message_via_llm(
                 max_tool_rounds = floor;
             }
         }
-        let mut round = 0u32;
+        let mut resume_overlay=String::new();
+        if let Some(checkpoint)=recovery_checkpoint.as_ref(){
+            let ledger=match crate::studio_tool_contract::recovery_summary(&store_path,task_id){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
+            resume_overlay=format!("[Resumed execution — apply CURRENT system/rules/permissions; do not replay operations]\n[Recorded operation results; unknown effects require operator resolution]\n{}\n[Pending human input at interruption: {}. Ask again; no old approval is restored.]\n[CURRENT task instructions]\n{}\n[Saved execution state]\n",ledger,checkpoint.waiting.as_ref().map(|v|v.to_string()).unwrap_or_else(||"none".into()),current_prompt);
+            current_prompt=checkpoint.prompt.clone();
+            run_outcome=checkpoint.outcome.clone();run_outcome.termination=TerminationReason::Success;
+        }
+        if let Some(saved)=recovery_checkpoint.as_ref().and_then(|checkpoint|checkpoint.max_tool_rounds) {max_tool_rounds=saved;}
+        let mut round = recovery_checkpoint.as_ref().map(|checkpoint|checkpoint.round).unwrap_or(0);
         // Tours d'affilée avec uniquement des outils d'exploration (Code Studio).
         let mut studio_read_only_streak_rounds: u32 = 0;
         let mut social_snapshot_seen = false;
@@ -1488,7 +1544,20 @@ pub(crate) async fn run_message_via_llm(
                 }
             });
 
+        let mut resumed_limit_wait = recovery_checkpoint.as_ref().and_then(|checkpoint| {
+            checkpoint.waiting.as_ref().filter(|v|v["tool_round_limit"]==true).cloned()
+                .or_else(||(checkpoint.round>=max_tool_rounds).then(||serde_json::json!({"tool_round_limit":true,"max_tool_rounds":max_tool_rounds})))
+        });
         'tool_rounds: loop {
+            if let Some(waiting) = resumed_limit_wait.take() {
+                max_tool_rounds = waiting["max_tool_rounds"].as_u64().map(|v|v as u32).unwrap_or(max_tool_rounds);
+                if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",waiting,(&current_prompt,round,max_tool_rounds,&run_outcome)) {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
+                match studio_round_limit_choice(&human_input_store, &bus, task_id, round, max_tool_rounds).await.as_deref() {
+                    Some("Continuer (+10 tours)") => max_tool_rounds = round.max(max_tool_rounds).saturating_add(10),
+                    Some("Réinitialiser et continuer (+10 tours)") => { round=0; max_tool_rounds=max_tool_rounds.saturating_add(10); }
+                    _ => { run_outcome.termination=TerminationReason::ToolRoundLimit; reply_text="Tool round continuation declined or timed out.".into(); break 'tool_rounds; }
+                }
+            }
             match store.get(task_id).ok().flatten().map(|t| t.status) {
                 Some(TaskStatus::Paused)
                 | Some(TaskStatus::Cancelled)
@@ -1622,6 +1691,13 @@ pub(crate) async fn run_message_via_llm(
                     );
                 }
             }
+            if code_studio_disk_task {
+                let project=TaskStore::open(&store_path).ok().and_then(|store|store.lineage_root_studio_project_id(task_id).ok().flatten());
+                let Some(project_id)=project else {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text="Studio project identity unavailable at checkpoint".into();break 'tool_rounds;};
+                let checkpoint=crate::studio_recovery::Checkpoint{schema_version:1,task_id,project_id,workspace:tool_disk_workspace_root.clone(),agent:assigned_agent.clone(),session_id:session_id.clone(),preferred_task_type:preferred_task_type_override.clone(),incognito,round,max_tool_rounds:Some(max_tool_rounds),prompt:current_prompt.clone(),phase:"before_model".into(),waiting:None,outcome:run_outcome.clone()};
+                if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
+            }
+            if round>=max_tool_rounds {run_outcome.termination=TerminationReason::ToolRoundLimit;reply_text="Tool round budget already exhausted at checkpoint; start a new scoped task to continue.".into();break 'tool_rounds;}
             let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
                 tools_executor_snapshot.as_ref().and_then(|exec| {
                     let names:Vec<String>=crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect();
@@ -1630,9 +1706,9 @@ pub(crate) async fn run_message_via_llm(
             }else{None};
             let request = CompletionRequest {
                 prompt: if code_studio_disk_task && round > 0 {
-                    format!("{}\n\n{}", tool_instruction, current_prompt)
+                    format!("{}\n\n{}{}", tool_instruction, resume_overlay, current_prompt)
                 } else {
-                    format!("{}{}", current_prompt, tool_instruction)
+                    format!("{}{}{}", resume_overlay, current_prompt, tool_instruction)
                 },
                 max_tokens: Some(completion_max_tokens),
                 temperature: Some(completion_temperature),
@@ -2518,6 +2594,7 @@ pub(crate) async fn run_message_via_llm(
                                             approval_request_id, task_id, effective_role_tool, err
                                         );
                                     }
+                                    if code_studio_disk_task {if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":actual_tool,"question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome)){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
                                         question: question.clone(),
@@ -2691,6 +2768,9 @@ pub(crate) async fn run_message_via_llm(
                             }
                             let _ = store.insert_event(task_id, "skill_activated", Some(&metadata), &chrono::Utc::now().to_rfc3339());
                         }
+                        let workflow_operation=if code_studio_disk_task && matches!(actual_tool.as_str(),"delegate_to_agent"|"install_skill"|"uninstall_skill"|"write_todos"|"merge_todos"|"update_todo") {
+                            match crate::studio_tool_contract::WorkflowOperation::begin(&store_path,task_id,&actual_tool,tool_args){Ok(operation)=>Some(operation),Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(error);continue;}}
+                        }else{None};
                         let (success, res, captured_image): (bool, String, Option<String>) =
                             if actual_tool == "ask_user" {
                                 // Human in the loop: register pending request, emit event, wait for user reply.
@@ -2726,6 +2806,7 @@ pub(crate) async fn run_message_via_llm(
                                         if question.is_empty() {
                                             (false, format!("[ask_user] invalid JSON: question required. Got: {}", body.chars().take(100).collect::<String>()), None)
                                         } else {
+                                            if code_studio_disk_task {if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":"ask_user","question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome)){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                             let (tx, rx) = tokio::sync::oneshot::channel();
                                             let pending = PendingHumanInput {
                                                 question: question.clone(),
@@ -3157,6 +3238,7 @@ pub(crate) async fn run_message_via_llm(
                                 )
                                 .await
                             };
+                        if let Some(operation)=workflow_operation {if let Err(error)=operation.finish(success,&res){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Workflow result unknown: {error}");break 'tool_rounds;}}
                         if success { run_outcome.successful_tool_calls += 1; } else { run_outcome.failed_tool_calls += 1; }
                         if matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container") {
                             run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
@@ -3432,6 +3514,9 @@ pub(crate) async fn run_message_via_llm(
                 if let Some(nudge) = studio_readonly_nudge {
                     current_prompt = format!("{nudge}\n\n{current_prompt}");
                 }
+                if code_studio_disk_task {
+                    if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.round=round;checkpoint.prompt=current_prompt.clone();checkpoint.phase="after_tools".into();checkpoint.waiting=None;checkpoint.outcome=run_outcome.clone();if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
+                }
                 if round >= max_tool_rounds {
                     let response_for_user = response
                         .lines()
@@ -3490,70 +3575,13 @@ pub(crate) async fn run_message_via_llm(
                     };
 
                     // When human_input_store is available, ask user whether to continue (+10 rounds), reset and continue, or stop.
-                    let should_stop = match &human_input_store {
-                        Some(store) => {
-                            const TOOL_ROUND_LIMIT_TIMEOUT_SECS: u64 = 300;
-                            let question = "Limite de tours d'outils atteinte. Souhaitez-vous continuer la tâche ?".to_string();
-                            let context = format!(
-                            "La tâche a utilisé {} tours d'outils (max {}). Vous pouvez ajouter 10 tours, réinitialiser le compteur et ajouter 10 tours, ou arrêter.",
-                            round, max_tool_rounds
-                        );
-                            let choices = vec![
-                                "Continuer (+10 tours)".to_string(),
-                                "Réinitialiser et continuer (+10 tours)".to_string(),
-                                "Arrêter".to_string(),
-                            ];
-                            let (tx, rx) = tokio::sync::oneshot::channel();
-                            let pending = PendingHumanInput {
-                                question: question.clone(),
-                                context: context.clone(),
-                                choices: Some(choices.clone()),
-                                response_tx: tx,
-                            };
-                            {
-                                let mut g = store.write().await;
-                                g.insert(task_id, pending);
-                            }
-                            let payload = serde_json::json!({
-                                "task_id": task_id.to_string(),
-                                "question": question,
-                                "context": context,
-                                "choices": choices,
-                                "tool_round_limit": true,
-                                "current_round": round,
-                                "max_tool_rounds": max_tool_rounds
-                            });
-                            let _ = bus.send(
-                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload))
-                                    .with_correlation(task_id),
-                            );
-                            let reply = tokio::time::timeout(
-                                std::time::Duration::from_secs(TOOL_ROUND_LIMIT_TIMEOUT_SECS),
-                                rx,
-                            )
-                            .await;
-                            {
-                                let mut g = store.write().await;
-                                g.remove(&task_id);
-                            }
-                            match reply {
-                                Ok(Ok(user_choice)) => {
-                                    let choice = user_choice.trim();
-                                    if choice == "Continuer (+10 tours)" {
-                                        max_tool_rounds += 10;
-                                        false
-                                    } else if choice == "Réinitialiser et continuer (+10 tours)" {
-                                        round = 0;
-                                        max_tool_rounds += 10;
-                                        false
-                                    } else {
-                                        true
-                                    }
-                                }
-                                _ => true,
-                            }
-                        }
-                        None => true,
+                    if code_studio_disk_task {
+                        if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",serde_json::json!({"tool_round_limit":true,"question":"Continue tool rounds?","current_round":round,"max_tool_rounds":max_tool_rounds}),(&current_prompt,round,max_tool_rounds,&run_outcome)) { run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds; }
+                    }
+                    let should_stop = match studio_round_limit_choice(&human_input_store,&bus,task_id,round,max_tool_rounds).await.as_deref() {
+                        Some("Continuer (+10 tours)") => { max_tool_rounds=max_tool_rounds.saturating_add(10); false }
+                        Some("Réinitialiser et continuer (+10 tours)") => { round=0; max_tool_rounds=max_tool_rounds.saturating_add(10); false }
+                        _ => true,
                     };
                     if should_stop {
                         run_outcome.termination = TerminationReason::ToolRoundLimit;
@@ -4414,6 +4442,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     } else {
         EventType::TaskCompleted
     };
+    if code_studio_disk_task {if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.phase=final_status.as_str().into();checkpoint.outcome=run_outcome.clone();let _=crate::studio_recovery::save(&store_path,&checkpoint);}}
     let final_status_str = final_status.as_str();
 
     let mut final_payload = serde_json::json!({

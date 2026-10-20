@@ -5507,6 +5507,7 @@ pub async fn handle_api(
         path: path_only.to_string(),
     };
     crate::lifecycle_hooks::run_http_request_pre_hooks(data_dir, method, path_only).await;
+    if let Some(response)=crate::studio_recovery::route(method,path_only,body.as_deref(),store_path){return response;}
     if let Some(response) = crate::studio_observation::handle_route(method, path_only, query_str, body.as_deref(), data_dir, tools_executor).await {
         return response;
     }
