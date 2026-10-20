@@ -245,12 +245,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  release:
-    if: github.event_name != 'workflow_dispatch' || inputs.publish
-    needs: [build, build-windows, build-tauri]
+  package:
+    if: ${{ always() && needs.verify-release-version.result == 'success' && needs.build.result == 'success' && needs.build-windows.result == 'success' && needs.build-tauri.result == 'success' }}
+    needs: [verify-release-version, build, build-windows, build-tauri]
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -261,10 +261,7 @@ jobs:
           pattern: akasha-*
           path: artifacts
 
-      - name: Create archives and release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
+      - name: Create release archives
         run: |
           set -e
           RELEASE_DIR="$(pwd)/release"
@@ -347,6 +344,46 @@ jobs:
           RELEASE_FILES=("$RELEASE_DIR"/*.zip)
           if [ ${#RELEASE_FILES[@]} -eq 0 ]; then
             echo "::error::No zip files produced in release/. Check that build and build-tauri jobs uploaded artifacts and that artifact paths match (see ARTIFACTS_ROOT=$ARTIFACTS_ROOT)."
+            exit 1
+          fi
+
+      - name: Verify shared Windows clients in packaged archives
+        run: python scripts/ci/verify_release_windows_archives.py release
+
+      - name: Upload release archives for verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archives
+          path: release/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    if: github.event_name != 'workflow_dispatch' || inputs.publish
+    needs: [package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          name: release-archives
+          path: release
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
+        run: |
+          set -e
+          shopt -s nullglob
+          RELEASE_FILES=("release"/*.zip)
+          if [ ${#RELEASE_FILES[@]} -eq 0 ]; then
+            echo "::error::No packaged release archives were downloaded."
             exit 1
           fi
 
