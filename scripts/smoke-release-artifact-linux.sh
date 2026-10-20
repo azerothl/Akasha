@@ -30,7 +30,7 @@ PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); p
 cleanup() {
   if [[ -n "${SMOKE_EVIDENCE_DIR:-}" ]]; then
     mkdir -p "$SMOKE_EVIDENCE_DIR"
-    for evidence in "$LOG" "$WORK/task.json" "$WORK/embedded-status.json"; do
+    for evidence in "$LOG" "$WORK/task.json" "$WORK/doctor.log" "$WORK/embedded-status.json"; do
       [[ ! -f "$evidence" ]] || cp -- "$evidence" "$SMOKE_EVIDENCE_DIR/"
     done
   fi
@@ -110,7 +110,13 @@ if [[ "$ok" != 1 ]]; then
 fi
 log "daemon_ready_duration_s=$((DAEMON_END - DAEMON_START))"
 
-./akasha doctor 2>&1 | tee -a "$LOG" || true
+DOCTOR_OK=1
+if ./akasha doctor 2>&1 | tee "$WORK/doctor.log" | tee -a "$LOG"; then
+  log "doctor_ok=true"
+else
+  DOCTOR_OK=0
+  log "::error::doctor failed; diagnostics retained"
+fi
 
 curl -sf "${BASE}/" | grep -q '"status":"ok"' || { log "::error::GET /"; exit 1; }
 curl -sf "${BASE}/api/status" | grep -q '"status":"ok"' || { log "::error::GET /api/status"; exit 1; }
@@ -121,6 +127,9 @@ echo "$EMBED_STATUS" | python3 -c "import json,sys; d=json.load(sys.stdin); asse
   || { log "::error::embedded not available"; exit 1; }
 
 if [[ "$SKIP_INFERENCE" == 1 ]]; then
+  if [[ "$DOCTOR_OK" != 1 ]]; then
+    exit 1
+  fi
   log "SKIP_INFERENCE=1 — smoke OK (no LLM call)"
   exit 0
 fi
@@ -138,13 +147,55 @@ deadline=$((INF_START + INFERENCE_TIMEOUT_SECS))
 while [[ $(date +%s) -lt $deadline ]]; do
   sleep 2
   T=$(curl -sf "${BASE}/api/tasks/${TASK_ID}")
-  printf '%s\n' "$T" > "$WORK/task.json"
+  printf '%s\n' "$T" > "$WORK/task.raw.json"
+  python3 - "$WORK/task.raw.json" "$WORK/task.json" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    task = json.load(f)
+for entry in task.get("progress", []):
+    if isinstance(entry, dict) and isinstance(entry.get("message"), str):
+        entry["message"] = re.sub(r"<think>.*?</think>", "", entry["message"], flags=re.DOTALL).strip()
+with open(sys.argv[2], "w", encoding="utf-8") as f:
+    json.dump(task, f, ensure_ascii=False, indent=2)
+PY
   ST=$(echo "$T" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
   if [[ "$ST" == "done" || "$ST" == "completed" ]]; then
-    echo "$T" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('assigned_agent') == 'technical_writer', d; assert d.get('last_turn_model_used') == 'embedded', d; assert d.get('last_turn_tokens_out',0) > 0, d"
+    if ! python3 - "$WORK/task.json" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    task = json.load(f)
+
+assert task.get("assigned_agent") == "technical_writer", "wrong assigned agent"
+assert task.get("last_turn_model_used") == "embedded", "embedded model was not used"
+assert task.get("last_turn_tokens_out", 0) > 0, "model returned no completion tokens"
+messages = [
+    entry.get("message", "")
+    for entry in task.get("progress", [])
+    if isinstance(entry, dict) and isinstance(entry.get("message"), str)
+]
+reply = next((message for message in reversed(messages) if message.strip()), "")
+reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.DOTALL).strip()
+normalized = " ".join(reply.split())
+if normalized != "OK":
+    raise SystemExit(f"final model reply must be exactly 'OK'; got {normalized[:160]!r}")
+PY
+    then
+      log "::error::model produced no valid answer for the deterministic prompt"
+      exit 1
+    fi
     INF_END=$(date +%s)
     log "first_inference_duration_s=$((INF_END - INF_START))"
-    echo "$T" | python3 -m json.tool >>"$LOG" 2>/dev/null || echo "$T" >>"$LOG"
+    python3 -m json.tool "$WORK/task.json" >>"$LOG" 2>/dev/null || cat "$WORK/task.json" >>"$LOG"
+    if [[ "$DOCTOR_OK" != 1 ]]; then
+      log "::error::doctor failed; artifact is not validated"
+      exit 1
+    fi
     log "smoke OK: $RELEASE_TAG $ARTIFACT_NAME on $(uname -s)/$(uname -m)"
     exit 0
   fi
