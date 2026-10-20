@@ -1,5 +1,14 @@
 # Nouveautés
 
+## Nouveautés 0.11.0
+
+- **Modèle embarqué** : le daemon expose un statut plus précis sur ce que votre modèle local prend en charge (texte, vision, preuves de compatibilité) ; le modèle CUDA proposé par défaut à l’installation reste **Qwen2.5-1.5B**, comme en 0.10.
+- **Serveurs MCP** : connectez des outils externes via `mcp.json`, validez-les avec `akasha mcp validate` / `probe` / `status`, et contrôlez quels serveurs l’agent peut utiliser dans `tools_policy.yaml` (voir **Configuration**, §8bis).
+- **Cockpit** : surveillez la fin d’une tâche planifiée (cron) et déclenchez un wakeup agent (Paramètres → Life layer) ; dans **Travail actif**, inspectez et annulez un arbre de sous-tâches en cours.
+- **Skills** : format `SKILL.md` compatible avec akasha-os (produit distinct) — page **Extensions vs akasha-os** et exemple partagé type brief matinal.
+- **Companion** : aucun boîtier ESP32 ni avatar livré avec cette version ; le daemon conserve les API réseau local (appairage, découverte) pour un futur client.
+
+---
 
 ## Nouveautés 0.10.0
 
@@ -12,7 +21,6 @@
 
 ---
 
-
 ## Nouveautés 0.9.0
 
 - **Workspace** : Cookbook (Modèles + Recettes), Comparer, Recherche approfondie, Notes
@@ -21,11 +29,9 @@
 - **Plugins canaux** : Matrix et CalDAV (sidecar) dans le catalogue public
 - **Code Studio** : `npx akasha-code-studio@0.9.0`
 
-
 ---
 
-## ## 14. Nouveautés depuis la version 0.7.0 (version 0.8.0)
-
+## Nouveautés depuis la version 0.7.0 (version 0.8.0)
 
 ### Mission autonome
 
