@@ -52,7 +52,7 @@ impl Output {
 fn resolve_program(root:&Path,program:&str,paths:&std::ffi::OsStr)->Result<PathBuf,String> {
     let root=root.canonicalize().map_err(|e|e.to_string())?;
     let suffixes=if cfg!(windows) {vec![".exe",".cmd",".bat",".com",""]}else{vec![""]};
-    let candidate=std::env::split_paths(paths).filter(|dir|dir.is_absolute()).flat_map(|dir|suffixes.iter().map(move |suffix|dir.join(format!("{program}{suffix}")))).find(|path|path.is_file()).ok_or_else(||format!("{program} unavailable on absolute PATH"))?;
+    let candidate=std::env::split_paths(paths).filter(|dir|dir.is_absolute()).flat_map(|dir|suffixes.iter().map(move |suffix|dir.join(format!("{program}{suffix}")))).find(|path|crate::studio_capabilities::executable_file(path)).ok_or_else(||format!("{program} unavailable on absolute PATH"))?;
     if candidate.canonicalize().map_err(|e|e.to_string())?.starts_with(&root) || candidate.parent().and_then(|p|p.canonicalize().ok()).is_some_and(|p|p.starts_with(&root)) {return Err("workspace-controlled delivery executable refused".into());}
     Ok(candidate)
 }
@@ -1568,11 +1568,33 @@ mod helper_config_regressions {
 #[cfg(test)]
 mod executable_regressions {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn nonexecutable_shadow_does_not_hide_later_git_or_gh() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        let shadow = dir.path().join("shadow");
+        let tools = dir.path().join("tools");
+        for path in [&root, &shadow, &tools] { std::fs::create_dir(path).unwrap(); }
+        for program in ["git", "gh"] {
+            std::fs::write(shadow.join(program), "not executable").unwrap();
+            std::fs::write(tools.join(program), "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(shadow.join(program),std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::set_permissions(tools.join(program),std::fs::Permissions::from_mode(0o755)).unwrap();
+            let paths = std::env::join_paths([&shadow, &tools]).unwrap();
+            let resolved=resolve_program(&root,program,&paths).unwrap();
+            assert_eq!(resolved,tools.join(program));
+            assert!(std::process::Command::new(resolved).status().unwrap().success());
+        }
+    }
     #[test] fn workspace_cannot_supply_the_delivery_executable() {
         let dir=tempfile::tempdir().unwrap();let root=dir.path().join("workspace");std::fs::create_dir(&root).unwrap();
         let name=if cfg!(windows) {"git.exe"}else{"git"};std::fs::write(root.join(name),"must not run").unwrap();
+        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(root.join(name),std::fs::Permissions::from_mode(0o755)).unwrap(); }
         let paths=std::env::join_paths([root.as_path()]).unwrap();assert!(resolve_program(&root,"git",&paths).is_err());
         let tools=dir.path().join("trusted");std::fs::create_dir(&tools).unwrap();std::fs::write(tools.join(name),"fixture only").unwrap();
+        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(tools.join(name),std::fs::Permissions::from_mode(0o755)).unwrap(); }
         let paths=std::env::join_paths([tools.as_path()]).unwrap();assert_eq!(resolve_program(&root,"git",&paths).unwrap(),tools.join(name));
     }
 }

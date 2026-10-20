@@ -18,6 +18,18 @@ pub(crate) struct StudioTool {
     pub parameter_checks_required: bool,
 }
 
+pub(crate) fn executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else { return false; };
+    if !metadata.is_file() { return false; }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    { true }
+}
+
 pub(crate) fn executable_available(program: &str) -> bool {
     let paths = std::env::var_os("PATH").unwrap_or_default();
     let suffixes = if cfg!(windows) {
@@ -28,8 +40,28 @@ pub(crate) fn executable_available(program: &str) -> bool {
     std::env::split_paths(&paths).any(|dir| {
         suffixes
             .iter()
-            .any(|s| dir.join(format!("{program}{s}")).is_file())
+            .any(|s| executable_file(&dir.join(format!("{program}{s}"))))
     })
+}
+
+#[cfg(test)]
+mod executable_file_tests {
+    #[test]
+    fn executable_candidates_require_a_file_and_platform_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!super::executable_file(dir.path()));
+        let file = dir.path().join("candidate");
+        assert!(!super::executable_file(&file));
+        std::fs::write(&file, "fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(!super::executable_file(&file));
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(super::executable_file(&file));
+    }
 }
 
 pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<StudioTool> {

@@ -357,6 +357,34 @@ impl Session {
         }
     }
 }
+fn resolve_executable(program: &str, paths: &std::ffi::OsStr) -> Result<PathBuf, String> {
+    let suffixes = if cfg!(windows) { vec![".exe", ".cmd", ".bat", ".com", ""] } else { vec![""] };
+    std::env::split_paths(paths).filter(|dir| dir.is_absolute())
+        .flat_map(|dir| suffixes.iter().map(move |suffix| dir.join(format!("{program}{suffix}"))))
+        .find(|path| crate::studio_capabilities::executable_file(path))
+        .ok_or_else(|| "LSP executable missing from absolute PATH directories".to_string())
+}
+
+#[cfg(all(test, unix))]
+mod executable_resolution_tests {
+    #[test]
+    fn nonexecutable_shadow_does_not_hide_later_language_server() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shadow = dir.path().join("shadow");
+        let tools = dir.path().join("tools");
+        for path in [&shadow, &tools] { std::fs::create_dir(path).unwrap(); }
+        std::fs::write(shadow.join("language-server"), "not executable").unwrap();
+        std::fs::write(tools.join("language-server"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(shadow.join("language-server"),std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(tools.join("language-server"),std::fs::Permissions::from_mode(0o755)).unwrap();
+        let paths=std::env::join_paths([&shadow,&tools]).unwrap();
+        let resolved=super::resolve_executable("language-server",&paths).unwrap();
+        assert_eq!(resolved,tools.join("language-server"));
+        assert!(std::process::Command::new(resolved).status().unwrap().success());
+    }
+}
+
 async fn start(
     root: &Path,
     program: &str,
@@ -368,8 +396,7 @@ async fn start(
     {
         return Err(format!("LSP server unavailable or denied: {program}. Install/configure it explicitly; no automatic install."));
     }
-    let suffixes=if cfg!(windows) {vec![".exe",".cmd",".bat",".com",""]}else{vec![""]};
-    let executable=std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).filter(|dir|dir.is_absolute()).flat_map(|dir|suffixes.iter().map(move |suffix|dir.join(format!("{program}{suffix}")))).find(|path|path.is_file()).ok_or("LSP executable missing from absolute PATH directories")?;
+    let executable=resolve_executable(program,&std::env::var_os("PATH").unwrap_or_default())?;
     // Preserve the filename for multicall shims such as rustup's rust-analyzer.
     // Resolve only for containment checks; spawning rustup.exe loses its mode.
     if executable.canonicalize().map_err(|e|e.to_string())?.starts_with(root) || executable.parent().and_then(|p|p.canonicalize().ok()).is_some_and(|p|p.starts_with(root)) {return Err("workspace-controlled LSP executable refused".into());}
