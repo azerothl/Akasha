@@ -4836,7 +4836,7 @@ KNOWN_TS_ERRORS:\n{}\n",
             }
         }
     }
-    let exec = tools_executor.read().await.clone();
+    let exec = crate::studio_policy::executor(tools_executor.read().await.clone(), Some(tool_disk_root));
     let mut any_write_success = false;
     let mut follow_up = String::new();
     let mut autofix_rules=std::collections::HashSet::<String>::new();
@@ -5011,6 +5011,7 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
         let lanes = akasha_tools::schedule_tool_calls(&calls);
         for (_lane, lane_calls) in lanes {
             for (name, args) in &lane_calls {
+                let exec = crate::studio_policy::executor(tools_executor.read().await.clone(), Some(tool_disk_root));
                 let actual_tool = match skill_registry {
                     Some(reg) => reg
                         .get(name)
@@ -5280,6 +5281,7 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                         let lanes = akasha_tools::schedule_tool_calls(&calls);
                         for (_lane, lane_calls) in lanes {
                             for (name, args) in &lane_calls {
+                let exec = crate::studio_policy::executor(tools_executor.read().await.clone(), Some(tool_disk_root));
                                 let actual_tool = canonicalize_tool_name(name);
                                 if !matches!(
                                     actual_tool.as_str(),

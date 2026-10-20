@@ -18,6 +18,9 @@ fn path_normalize(p: &Path) -> PathBuf {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
 pub struct ToolsPolicy {
+    /// Daemon-only omission metadata; never grants rights in the global executor.
+    #[serde(skip)]
+    pub studio_default_fields: Vec<String>,
     /// Path prefixes allowed for read and search.
     pub allowed_read_paths: Vec<String>,
     /// Path prefixes allowed for write.
@@ -200,13 +203,22 @@ impl ToolsPolicy {
 
     /// Save policy to a YAML file. Used e.g. after adding allowed_commands for a newly installed skill.
     pub fn save_to_path(&self, path: &Path) -> anyhow::Result<()> {
-        let yaml = serde_yaml::to_string(self)?;
+        let yaml = serde_yaml::to_string(&self.config_value()?)?;
         std::fs::write(path, yaml)?;
         Ok(())
     }
 
+    pub fn config_value(&self) -> anyhow::Result<serde_json::Value> {
+        let mut value = serde_json::to_value(self)?;
+        if let Some(fields) = value.as_object_mut() {
+            for key in &self.studio_default_fields { fields.remove(key); }
+        }
+        Ok(value)
+    }
+
     /// Add commands to allowed_commands if not already present. Returns the list of newly added commands.
     pub fn add_allowed_commands(&mut self, commands: &[String]) -> Vec<String> {
+        if !commands.is_empty() { self.studio_default_fields.retain(|key| key != "allowed_commands"); }
         let mut added = Vec::new();
         for cmd in commands {
             let c = cmd.trim().to_lowercase();
