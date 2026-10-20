@@ -300,9 +300,9 @@ if method == "GET" && path == "/api/tools/device-interfaces" {
 }
 if method == "GET" && path == "/api/tools/policy" {
     let policy_path = data_dir.join("tools_policy.yaml");
-    let policy = akasha_tools::ToolsPolicy::load_from_path(&policy_path).unwrap_or_default();
+    let policy = crate::studio_policy::load(&policy_path, data_dir).unwrap_or_default();
     let body = serde_json::json!({
-        "policy": policy,
+        "policy": policy.config_value().unwrap_or_default(),
         "path": policy_path.display().to_string(),
         "exists": policy_path.is_file(),
     });
@@ -319,7 +319,7 @@ if method == "POST" && path == "/api/tools/policy" {
     let Some(policy_value) = policy_value else {
         return Some(json_response("400 Bad Request", r#"{"error":"missing policy"}"#));
     };
-    let policy: akasha_tools::ToolsPolicy = match serde_json::from_value(policy_value) {
+    let policy = match crate::studio_policy::decode(policy_value, data_dir) {
         Ok(p) => p,
         Err(e) => {
             let body = serde_json::json!({
@@ -661,7 +661,7 @@ if method == "GET" && path_only == "/api/tools/effective" {
                             Ok(scoped) => manifest["skills"] = serde_json::to_value(scoped.for_agent(&agent).await).unwrap_or_default(),
                             Err(reason) => return Some(json_response("409 Conflict", &serde_json::json!({"error":"project_skills_unavailable","detail":reason.to_string()}).to_string())),
                         }
-                        match crate::studio_project_context::rules_for_path(&root, "workspace:/", &executor.policy) {
+                        match crate::studio_project_context::rules_for_path(&root, "workspace:/", &crate::studio_policy::for_workspace(&executor.policy, &root)) {
                             Ok(rules) => manifest["rules"] = serde_json::json!(rules.iter().map(|r| r.metadata()).collect::<Vec<_>>()),
                             Err(reason) => return Some(json_response("409 Conflict", &serde_json::json!({"error":"project_rules_unavailable","detail":reason}).to_string())),
                         }

@@ -2883,7 +2883,7 @@ pub(crate) async fn do_install_skill(
             let (mut commands_added_msg, need_hot_reload) = {
                 let bins = skill_required_bins(&body, &parsed.skill_name);
                 let policy_path = data_dir.join("tools_policy.yaml");
-                if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+                if let Ok(mut policy) = crate::studio_policy::load(&policy_path, data_dir) {
                     let added = policy.add_allowed_commands(&bins);
                     if !added.is_empty() {
                         if let Err(e) = policy.save_to_path(&policy_path) {
@@ -2992,7 +2992,7 @@ pub(crate) async fn do_uninstall_skill(
     let policy_path = data_dir.join("tools_policy.yaml");
     let mut policy_updated = false;
     if policy_path.exists() {
-        if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+        if let Ok(mut policy) = crate::studio_policy::load(&policy_path, data_dir) {
             if policy.remove_allowed_command(name) {
                 if policy.save_to_path(&policy_path).is_ok() {
                     policy_updated = true;
@@ -4124,7 +4124,7 @@ pub(crate) async fn reload_tools_executor_policy(
     policy_path: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let mut reloaded = akasha_tools::ToolsPolicy::load_from_path(policy_path)?;
+    let mut reloaded = crate::studio_policy::load(policy_path, data_dir)?;
     if let Ok(v) = akasha_vault::open_vault(data_dir) {
         reloaded.apply_vault_api_keys(|k| v.get(k).ok());
     }
@@ -4836,7 +4836,7 @@ KNOWN_TS_ERRORS:\n{}\n",
             }
         }
     }
-    let exec = tools_executor.read().await.clone();
+    let exec = crate::studio_policy::executor(tools_executor.read().await.clone(), Some(tool_disk_root));
     let mut any_write_success = false;
     let mut follow_up = String::new();
     let mut autofix_rules=std::collections::HashSet::<String>::new();
@@ -5011,6 +5011,7 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
         let lanes = akasha_tools::schedule_tool_calls(&calls);
         for (_lane, lane_calls) in lanes {
             for (name, args) in &lane_calls {
+                let exec = crate::studio_policy::executor(tools_executor.read().await.clone(), Some(tool_disk_root));
                 let actual_tool = match skill_registry {
                     Some(reg) => reg
                         .get(name)
@@ -5280,6 +5281,7 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                         let lanes = akasha_tools::schedule_tool_calls(&calls);
                         for (_lane, lane_calls) in lanes {
                             for (name, args) in &lane_calls {
+                let exec = crate::studio_policy::executor(tools_executor.read().await.clone(), Some(tool_disk_root));
                                 let actual_tool = canonicalize_tool_name(name);
                                 if !matches!(
                                     actual_tool.as_str(),

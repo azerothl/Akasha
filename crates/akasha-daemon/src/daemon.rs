@@ -659,7 +659,7 @@ impl Daemon {
                 }
             }
             let tools_executor: Option<Arc<tokio::sync::RwLock<Arc<akasha_tools::ToolExecutor>>>> = {
-                match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
+                match crate::studio_policy::load(&tools_policy_path, &self.data_dir) {
                     Ok(mut policy) => {
                         if let Ok(v) = &vault {
                             policy.apply_vault_api_keys(|k| v.get(k).ok());

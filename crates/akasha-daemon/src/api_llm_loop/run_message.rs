@@ -502,8 +502,9 @@ pub(crate) async fn run_message_via_llm(
         memory_profile.compact_before_prompt = true;
     }
 
+    let studio_policy_root = code_studio_disk_task.then_some(tool_disk_workspace_root.as_path());
     let tools_executor_snapshot = match &tools_executor {
-        Some(r) => Some((*r.read().await).clone()),
+        Some(r) => Some(crate::studio_policy::executor((*r.read().await).clone(), studio_policy_root)),
         None => None,
     };
 
@@ -1594,7 +1595,7 @@ pub(crate) async fn run_message_via_llm(
                 if goal.exhausted() { run_outcome.termination=TerminationReason::BudgetExhausted;reply_text="Limite de cycles ou de durée de l’objectif atteinte; réussite non confirmée.".into();let _=goal.save(&store_path,task_id,"budget_exhausted",&reply_text);break 'tool_rounds; }
                 if let Err(error)=goal.save(&store_path,task_id,"active","Exécution ou vérification en cours") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
             }
-            if code_studio_disk_task {if let Some(exec)=tools_executor.as_ref(){let policy=exec.read().await.policy.clone();if let Err(error)=crate::studio_file_effects::refresh(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}}
+            if code_studio_disk_task {if let Some(exec)=tools_executor.as_ref(){let policy=crate::studio_policy::for_workspace(&exec.read().await.policy, &tool_disk_workspace_root);if let Err(error)=crate::studio_file_effects::refresh(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}}
 
             if let Some(waiting) = resumed_limit_wait.take() {
                 max_tool_rounds = waiting["max_tool_rounds"].as_u64().map(|v|v as u32).unwrap_or(max_tool_rounds);
@@ -2141,7 +2142,7 @@ pub(crate) async fn run_message_via_llm(
             let no_parseable_tools_this_round = parsed_tool_calls.is_none();
             // Targeted missing-file recovery follows verified progress; a zero-effect claim still fails as a tool error.
             if code_studio_disk_task && no_parseable_tools_this_round && !explicit_file_goals.is_empty() && run_outcome.has_file_effect_progress() {
-                let current=if let Some(executor)=tools_executor.as_ref(){Some(executor.read().await.clone())}else{tools_executor_snapshot.clone()};
+                let current=if let Some(executor)=tools_executor.as_ref(){Some(crate::studio_policy::executor(executor.read().await.clone(), studio_policy_root))}else{tools_executor_snapshot.clone()};
                 if let Some(executor)=current {
                     let checks={
                         let _guard=match crate::studio_tool_contract::workspace_guard(&tool_disk_workspace_root).await {Ok(guard)=>guard,Err(error)=>{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}};
@@ -2440,7 +2441,7 @@ pub(crate) async fn run_message_via_llm(
 
                         // Hot-reloaded permissions must constrain the next invocation of an active task.
                         let current_executor = if let Some(registry) = tools_executor.as_ref() {
-                            registry.read().await.clone()
+                            crate::studio_policy::executor(registry.read().await.clone(), studio_policy_root)
                         } else { exec.clone() };
                         let exec = &current_executor;
                         if matches!(store.get(task_id).ok().flatten().map(|t| t.status),
@@ -3028,7 +3029,7 @@ pub(crate) async fn run_message_via_llm(
                                             .await
                                             {
                                                 Ok(Ok(reply)) => {
-                                                    if let Some(exec)=tools_executor.as_ref(){let policy=exec.read().await.policy.clone();if let Err(error)=crate::studio_file_effects::human_reply(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&question,&reply,&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
+                                                    if let Some(exec)=tools_executor.as_ref(){let policy=crate::studio_policy::for_workspace(&exec.read().await.policy, &tool_disk_workspace_root);if let Err(error)=crate::studio_file_effects::human_reply(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&question,&reply,&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                                     (true,format!("[ask_user] User replied: {}",reply),None)
                                                 },
                                                 Ok(Err(_)) => {
@@ -4649,7 +4650,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         );
     }
 
-    if code_studio_disk_task && !run_outcome.failed(){if let Some(exec)=tools_executor.as_ref(){let policy=exec.read().await.policy.clone();if let Err(error)=crate::studio_file_effects::refresh(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;}}}
+    if code_studio_disk_task && !run_outcome.failed(){if let Some(exec)=tools_executor.as_ref(){let policy=crate::studio_policy::for_workspace(&exec.read().await.policy, &tool_disk_workspace_root);if let Err(error)=crate::studio_file_effects::refresh(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;}}}
     if code_studio_disk_task && !run_outcome.failed() && run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation() {
         run_outcome.termination=TerminationReason::ToolError;reply_text="No confirmed file mutation; reads and prose cannot attest the requested edit.".into();
     }
@@ -4659,7 +4660,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     }
     if code_studio_disk_task && !explicit_file_goals.is_empty() {
         if let Some(registry)=tools_executor.as_ref() {
-            let executor=registry.read().await.clone();
+            let executor=crate::studio_policy::executor(registry.read().await.clone(), studio_policy_root);
             match crate::studio_tool_contract::workspace_guard(&tool_disk_workspace_root).await {
                 Ok(_guard)=>{
                     let checks=super::studio_completion::check_deliverables(&tool_disk_workspace_root,&executor.policy,&explicit_file_goals,if scope_unchanged {&explicit_file_literals}else{&[]});
