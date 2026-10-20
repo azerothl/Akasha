@@ -9,7 +9,7 @@ Cette page décrit ce que le **daemon Akasha** expose déjà sur le réseau loca
 - **Appairer** un identifiant d’appareil et obtenir un jeton stocké dans `companion_devices.json`.
 - Consulter un **snapshot** d’état (LLM, voix, tâches, mode présence) et, si besoin, configurer la **politique VAD** (fichier `companion_presence.json`).
 
-Les routes voix (`/api/voice/*`) existent séparément pour STT/TTS ; le snapshot Companion indique seulement si la voix est configurée. Spécification produit plus large : document développeur **à venir ([#174](https://github.com/azerothl/Akasha/issues/174))**.
+Les routes voix (`/api/voice/*`) existent séparément pour STT/TTS ; le snapshot Companion indique seulement si la voix est configurée. **Spécification technique (protocole, schémas JSON, erreurs)** : [COMPANION_SPEC.md](../COMPANION_SPEC.md).
 
 ## Prérequis
 
@@ -163,4 +163,4 @@ Commandes utiles : `akasha doctor`, page **Dépannage** de cette documentation.
 - **`notify.unread`** et **`notify.headline`** dans le snapshot sont des placeholders (non alimentés).
 - La découverte UDP ne transmet pas d’adresse IP : le client utilise l’IP source du datagramme de réponse ou une IP configurée manuellement.
 - Les routes **`/api/voice/*`** ne font pas partie du préfixe `/api/companion` ; un client voix doit les appeler séparément si besoin.
-- Spécification produit Companion complète : **à venir ([#174](https://github.com/azerothl/Akasha/issues/174))** ; le registre `spec/feature_evolution_tracking.md` distingue **Companion LAN** (API) et **matériel ESP32** (Planned).
+- Spécification technique Companion : [COMPANION_SPEC.md](../COMPANION_SPEC.md) ; le registre `spec/feature_evolution_tracking.md` distingue **Companion LAN** (API) et **matériel ESP32** (Planned).
