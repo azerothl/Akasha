@@ -1,6 +1,6 @@
 # Roadmap — release 0.11.0 (depuis v0.10.0)
 
-**Statut** : clôture release — dernière sync roadmap : 2026-09-28
+**Statut** : release **v0.11.0 publiée** ([tag](https://github.com/azerothl/Akasha/releases/tag/v0.11.0), 2026-09-28) — sync registre / clôture doc : 2026-10-18 ([#144](https://github.com/azerothl/Akasha/issues/144))
 
 Document à l’usage des **contributeurs** et de l’équipe release. Complète [roadmap_v0.10.0.md](roadmap_v0.10.0.md), [internal_release_0.10.0.md](internal_release_0.10.0.md), [embedded_models_research_v0.10.md](../roadmap/embedded_models_research_v0.10.md), [REFACTOR_MONOREPO_TRACKING.md](../quality/REFACTOR_MONOREPO_TRACKING.md) et [feature_evolution_tracking.md](../../feature_evolution_tracking.md).
 
@@ -35,12 +35,12 @@ Ne pas re-lister comme objectifs v0.11. Preuves : tag `v0.10.0`, [internal_relea
 
 Travail opérateur / doc déjà listé hors tag ; à traiter en tête de cycle pour une baseline mesurable.
 
-- [ ] **Smoke GPU self-hosted** : provisionner runner `self-hosted,gpu,nvidia` ; job `gpu-smoke` vert — [GPU_SELF_HOSTED_CI.md](../quality/GPU_SELF_HOSTED_CI.md)
-- [ ] **Gate bench post-tag** : exécuter `bench_embedded.ps1` / `.sh` sur machine de référence ; coller résultats dans [bench_embedded_results.md](../quality/bench_embedded_results.md)
-- [ ] **Matrice manuelle first-use** : zip CPU + CUDA → setup → wizard → premier message → `doctor`
+- [ ] **Smoke GPU self-hosted** — **bloqueur opérateur 2026-09-28** ; **owner : infra / release** — provisionner runner `self-hosted,gpu,nvidia` ; job `gpu-smoke` vert — [GPU_SELF_HOSTED_CI.md](../quality/GPU_SELF_HOSTED_CI.md)
+- [ ] **Gate bench post-tag** — **bloqueur opérateur 2026-09-28** ; **owner : release** — exécuter `bench_embedded.ps1` / `.sh` sur machine de référence GPU ; coller résultats dans [bench_embedded_results.md](../quality/bench_embedded_results.md)
+- [ ] **Matrice manuelle first-use** — **bloqueur opérateur 2026-10-18** ; **owner : QA** — zip CPU + CUDA → setup → wizard → premier message → `doctor` (checklist non archivée dans le dépôt)
 - [x] **Sync `docs/user_guide_final.md`** : `python scripts/build-user-docs.py` (pages first-use/CUDA déjà dans `docs/user/*`) — source rattrapée + regen 2026-09-26
 - [x] Erreurs routeur embarqué indisponible → message FR dédié (reste partiel P2 v0.10) — `EMBEDDED_UNAVAILABLE_FR` / `format_provider_error`
-- [ ] Veille **CUDA 13.2+** / `windows-latest` (VS 2026) — évaluation sans engagement artefact (report P4 v0.10)
+- [ ] Veille **CUDA 13.2+** / `windows-latest` (VS 2026) — **report 2026-10-18** ; **owner : release** — évaluation sans engagement artefact (report P4 v0.10)
 
 ---
 
@@ -55,7 +55,7 @@ Suite directe du [plan v0.11](../roadmap/embedded_models_research_v0.10.md#plan-
 - [x] **Décision documentée** swap défaut CUDA — **garder Qwen2.5-1.5B** (swap différé faute benches GPU) (garder Qwen2.5-1.5B **ou** promouvoir un candidat) — après benches, pas avant
 - [x] Variantes manifeste wizard si un candidat bat le défaut — **N/A** (pas de preuve live ; pas de swap)
 - [x] **`GET /api/capabilities`** (style Camelid) : flags GGUF / vision / mmproj / evidence — extension des statuts evidence-gated v0.10
-- [ ] Bench A/B **`ngl=0` vs `ngl=99`** — **bloqué opérateur** (pas de GPU cloud) sur GPU 4 Go (stratégie device laptop — note Insider / XPS)
+- [ ] Bench A/B **`ngl=0` vs `ngl=99`** — **bloqueur opérateur 2026-09-28** ; **owner : release** — pas de GPU cloud CI ; machine laptop 4 Go (stratégie device — note Insider / XPS)
 - [x] Veille tier 3 (doc only) : Qwen3.6 / MTP / ROCmFP4 vs stack NVIDIA release
 
 ### Stretch
@@ -148,7 +148,7 @@ APIs Companion LAN livrées via #122 (bind LAN, discovery UDP, `/api/companion/*
 ### Stretch
 
 - [ ] Spec + chemin MVP **Freenove FNK0104** (voix-first + avatar) — repo `Akasha_companion`, `/api/voice/*`, présence VAD (`companion_presence.json`)
-- [ ] Doc user Companion LAN (pairing secret, discovery :3877)
+- [x] Doc user Companion LAN (pairing secret, discovery :3877) — `docs/user/companion-lan.md` ([#163](https://github.com/azerothl/Akasha/issues/163))
 - [ ] Smoke LAN : daemon bind + device factice / maquette
 
 ### Hors scope P6
@@ -181,7 +181,7 @@ Liste prioritaire [feature_evolution_tracking.md](../../feature_evolution_tracki
 
 Matrices Hermes / pi-mono / memory largement **clôturées** (archives → [ROADMAP_FINAL_REGISTRY.md](../roadmap/ROADMAP_FINAL_REGISTRY.md)). Ne pas rouvrir Phase 5. Items **Reporter** utiles en stretch si capacité :
 
-- [ ] **S-MEM-05** chiffrement `memory.db` (SQLCipher / doctor) — [memory_encryption_rfc.md](../roadmap/memory_encryption_rfc.md) ; sinon rester sur chiffrement disque OS
+- [ ] **S-MEM-05** chiffrement `memory.db` (SQLCipher) — [memory_encryption_rfc.md](../roadmap/memory_encryption_rfc.md) ; stockage actuel en clair (`akasha doctor`) ; sinon chiffrement disque OS
 - [ ] UI édition **agent identity** / constitution (gaps C4 / E1 partiels)
 - [ ] Fork tree UI v2 (`/tree`) — Reporter pi-mono ; v1 suffit sauf demande produit
 - [ ] GraphRAG communautés au-delà de `project:*` (S-RAG-04 Reporter)
@@ -236,16 +236,16 @@ Objectif : **aligner** (docs + chemins d’import/export) les extensions du daem
 
 - [x] Versions alignées **0.11.0** (workspace + Tauri) via `sync-release-version.py` **en fin de cycle**
 - [x] Carte d’architecture régénérée (`spec/dev/architecture/` — diagramme HTML + `architecture-graph.json`) avant le tag — [architecture/README.md](../architecture/README.md)
-- [ ] Tag **`v0.11.0`** + artefacts Release (CPU / CUDA / full) sans régression smoke GitHub-hosted
+- [x] Tag **`v0.11.0`** + artefacts Release (CPU / CUDA / full) — preuve : [Release v0.11.0](https://github.com/azerothl/Akasha/releases/tag/v0.11.0) (13 archives ; smoke GitHub-hosted vert au merge [#137](https://github.com/azerothl/Akasha/pull/137))
 - [x] Benches AR tier 1–2 (mock + baselines) + **décision défaut CUDA** documentée (garder 1.5B)
 - [x] `api.rs` **&lt; ~8k** lignes ; check daemon + tests outils verts
 - [x] MCP : statut registre **Implemented** + doc user minimale
 - [x] P6-B3 et P6-B4 livrés (ou report explicite avec justification capacité)
-- [ ] Dette doc « Partially documented » prioritaire résorbée (ou tickets GitHub associés)
-- [x] GPU CI self-hosted : au moins un run `gpu-smoke` documenté (vert ou bloqueur opérateur noté) — **QUEUED / bloqueur opérateur**
+- [x] Dette doc « Partially documented » prioritaire résorbée : pages user `docs/user/donnees.md`, `docs/user/observabilite.md`, `docs/user/companion-lan.md` et protocole `docs/COMPANION_SPEC.md` (PR #171 / #175)
+- [ ] GPU CI self-hosted : run `gpu-smoke` vert — **bloqueur opérateur 2026-09-28** ; **owner : infra** — voir P0 et [GPU_SELF_HOSTED_CI.md](../quality/GPU_SELF_HOSTED_CI.md) (non bloquant tag v0.11.0 publié)
 - [x] Note Rbitnet/DLM : spike **ou** no-go renouvelé (pas de silence)
 - [x] **P9** : note d’interop + matrice `SKILL.md` + pilote skill partagé + inventaire catalogues publiés (must ; stretch bridge/ABI encore ouverts)
-- [ ] Site / `api/latest.json` synchronisés pour la bannière update
+- [ ] Site / `api/latest.json` synchronisés pour la bannière update — **bloqueur 2026-10-18** ; **owner : Akasha_app** — dépôt site (`api/latest.json`, `data/releases.json`)
 
 ---
 
@@ -336,4 +336,4 @@ flowchart LR
 
 - **v0.9.0** : premier artefact CUDA Windows ; fixes CI / DLL — [internal_release_0.9.md](internal_release_0.9.md).
 - **v0.10.0** : first-use embarqué, full CUDA, R0, cockpit P6 A1–A4, life layer P7, refactor L0–L6 — tag publié.
-- **v0.11.0** *(proposition)* : maturité embarqué (benches AR), plateforme (`api.rs`, MCP), reste cockpit P6 B3/B4, dette doc, **rapprochement skills/plugins ↔ akasha-os (P9)** ; Rbitnet/DLM + ABI modules en arbitrage.
+- **v0.11.0** *(publiée 2026-09-28)* : maturité embarqué (benches AR, `/api/capabilities`), plateforme (refactor `api.rs` sous ~8k lignes — boucle outils `api_tool_dispatch` / `api_llm_loop`, MCP), cockpit P6 B3/B4, dette doc P7 must, **P9 interop akasha-os** ; Rbitnet/DLM no-go renouvelé ; GPU smoke / benches live / sync Akasha_app = suivis opérateur post-tag.

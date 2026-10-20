@@ -52,6 +52,16 @@
       "file": "extensions-vs-akasha-os.md"
     },
     {
+      "id": "observabilite",
+      "title": "Observabilité",
+      "file": "observabilite.md"
+    },
+    {
+      "id": "companion-lan",
+      "title": "Companion LAN",
+      "file": "companion-lan.md"
+    },
+    {
       "id": "depannage",
       "title": "Dépannage",
       "file": "depannage.md"

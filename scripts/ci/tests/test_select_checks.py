@@ -41,6 +41,11 @@ class SelectChecksTests(unittest.TestCase):
     def test_runtime_documentation_is_not_exempt(self):
         self.assertTrue(ci.select_checks(["docs/user/accueil.md"])["ui"])
 
+    def test_runtime_skill_markdown_is_not_exempt(self):
+        plan = ci.select_checks(["spec/skills/studio-verify/SKILL.md"])
+        self.assertTrue(plan["full"])
+        self.assertTrue(plan["rust"])
+
     def test_core_and_reverse_daemon_dependencies_select_full(self):
         for package in ["akasha-core", "akasha-llm", "akasha-store", "akasha-vault"]:
             with self.subTest(package=package):

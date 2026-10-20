@@ -1,16 +1,26 @@
 //! Phase 8 — Evaluation suite: security (prompt injection, redaction), runbooks consistency, basic hallucinations.
+//! CI mock profile: deterministic agentic checks (policy, LLM fallback, memory) — see `agentic_mock`.
 
+mod agentic_mock;
+
+use agentic_mock::run_agentic_mock_evals;
 use akasha_core::{check_prompt_injection, redact};
 use akasha_rag::{retrieve, RagPack};
 use std::path::Path;
 
 /// Result of a single eval.
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct EvalResult {
     pub name: String,
     pub passed: bool,
     pub message: String,
 }
+
+/// CI profile: Phase 8 core evals + deterministic mock agentic scenarios (no GPU / no external LLM).
+pub const PROFILE_MOCK_CI: &str = "mock-ci";
+
+/// Profile for runs that invoke real models (local CPU, CUDA, or external providers). Not used in default CI.
+pub const PROFILE_MODEL: &str = "model";
 
 /// Security: prompt injection must be rejected for known patterns.
 pub fn eval_security_prompt_injection() -> EvalResult {
@@ -157,8 +167,8 @@ pub fn eval_hallucination_non_empty() -> EvalResult {
     }
 }
 
-/// Run all evals; spec_dir used for runbook retrieval (default: ./spec).
-pub fn run_all(spec_dir: Option<&Path>) -> Vec<EvalResult> {
+/// Phase 8 evals only (legacy `run_all` subset).
+pub fn run_phase8_evals(spec_dir: Option<&Path>) -> Vec<EvalResult> {
     let spec = spec_dir.unwrap_or_else(|| Path::new("spec"));
     vec![
         eval_security_prompt_injection(),
@@ -167,4 +177,30 @@ pub fn run_all(spec_dir: Option<&Path>) -> Vec<EvalResult> {
         eval_runbooks_consistency(),
         eval_hallucination_non_empty(),
     ]
+}
+
+/// Run evals for a named profile. Unknown profiles fall back to mock CI.
+pub fn run_profile(spec_dir: Option<&Path>, profile: &str) -> Vec<EvalResult> {
+    match profile.trim().to_ascii_lowercase().as_str() {
+        PROFILE_MODEL => run_phase8_evals(spec_dir),
+        PROFILE_MOCK_CI | "" => {
+            let mut results = run_phase8_evals(spec_dir);
+            results.extend(run_agentic_mock_evals());
+            results
+        }
+        other => {
+            let mut results = run_phase8_evals(spec_dir);
+            results.push(EvalResult {
+                name: "profile".into(),
+                passed: false,
+                message: format!("Unknown profile '{}'; use '{}' or '{}'.", other, PROFILE_MOCK_CI, PROFILE_MODEL),
+            });
+            results
+        }
+    }
+}
+
+/// Run all evals; spec_dir used for runbook retrieval (default: ./spec).
+pub fn run_all(spec_dir: Option<&Path>) -> Vec<EvalResult> {
+    run_profile(spec_dir, PROFILE_MOCK_CI)
 }

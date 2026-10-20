@@ -546,14 +546,15 @@ impl Daemon {
 
         // Initialize store and restore tasks (Phase 1). Phase 2 AI OS: mark Running tasks as Interrupted (recoverable) instead of Failed.
         let interrupted_ids: Vec<uuid::Uuid> = if let Ok(store) = TaskStore::open(&db_path) {
-            let tasks = store.get_pending_or_running().unwrap_or_default();
+            let tasks=store.get_all().unwrap_or_default().into_iter().filter(|task|matches!(task.status,akasha_store::TaskStatus::Pending|akasha_store::TaskStatus::Queued|akasha_store::TaskStatus::Running|akasha_store::TaskStatus::WaitingUserInput)).collect::<Vec<_>>();
             info!(count = tasks.len(), "Restored tasks from persistence");
             let mut ids = Vec::new();
             for t in &tasks {
-                if t.status == akasha_store::TaskStatus::Running {
+                if matches!(t.status,akasha_store::TaskStatus::Running|akasha_store::TaskStatus::WaitingUserInput) || t.status==akasha_store::TaskStatus::Queued && crate::studio_recovery::load(&db_path,t.id,false).ok().flatten().is_some() {
                     match store.update_status(t.id, akasha_store::TaskStatus::Interrupted) {
                         Ok(_) => {
                             ids.push(t.id);
+                            if let Err(error)=crate::studio_recovery::mark_interrupted(&db_path,t.id){warn!(task_id=%t.id,%error,"Cannot mark Studio checkpoint interrupted");}
                             info!(task_id = %t.id, "Task marked interrupted (daemon restart); can be resumed");
                         }
                         Err(e) => {
@@ -1516,6 +1517,8 @@ impl Daemon {
                                     let (method, path, body, headers) = parse_request(&full_buf);
                                     let (path_only, _) = crate::api_security::split_path_query(&path);
                                     if method == "GET" && path_only == "/api/events" {
+                                        if let Some(response)=crate::api_security::csrf_reject_response(&method,&path,&headers) {let _=stream.write_all(response.as_bytes()).await;return;}
+
                                         let (_, query) = crate::api_security::split_path_query(&path);
                                         let filter = crate::api::parse_sse_event_filter(query);
                                         let _ =

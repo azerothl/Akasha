@@ -137,6 +137,9 @@ Rules:\n\
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(512);
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
+        tools: None,
         prompt,
         max_tokens: Some(max_tokens),
         temperature: Some(0.1),

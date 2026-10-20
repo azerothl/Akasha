@@ -123,6 +123,9 @@ if method == "POST" && path == "/api/chat/suggest-thread-title" {
         message
     );
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
+        tools: None,
         prompt,
         max_tokens: Some(80),
         temperature: Some(0.3),
@@ -282,11 +285,24 @@ if method == "GET" && path == "/api/doctor" {
     } else {
         false
     };
-    checks.push(serde_json::json!({
-        "id": "ollama",
-        "ok": ollama_ok,
-        "description": if ollama_ok { "Ollama reachable" } else { "Ollama unreachable" }
-    }));
+
+    #[cfg(feature = "embedded")]
+    let embedded_ready = {
+        let snap = llm_router.embedded_status();
+        snap.ready_for_chat && snap.action.is_none()
+    };
+    #[cfg(not(feature = "embedded"))]
+    let embedded_ready = false;
+
+    let doctor_locale = crate::doctor_checks::doctor_locale_from_env();
+    checks.push(crate::doctor_checks::build_local_llm_runtime_check(
+        "ollama",
+        ollama_ok,
+        embedded_ready,
+        "Ollama reachable",
+        "Ollama unreachable",
+        crate::doctor_checks::optional_ollama_not_installed_desc(doctor_locale),
+    ));
 
     if crate::connectors_config::homeassistant_enabled_in_file(data_dir) {
         let ha_url = crate::connectors_config::ha_base_url(data_dir);
@@ -610,20 +626,20 @@ if method == "GET" && path == "/api/doctor" {
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false);
-    checks.push(serde_json::json!({
-        "id": "rbitnet",
-        "ok": rbitnet_ok,
-        "description": if rbitnet_ok {
-            "Rbitnet reachable (local inference). Compare perf vs llama.cpp: see Rbitnet/docs/BENCHMARKS.md"
-        } else {
-            "Rbitnet unreachable (optional: rbitnet-server on RBITNET_BIND, default 127.0.0.1:8080)"
-        },
-        "models_url": rbitnet_models_url
-    }));
+    let mut rbitnet_check = crate::doctor_checks::build_local_llm_runtime_check(
+        "rbitnet",
+        rbitnet_ok,
+        embedded_ready,
+        "Rbitnet reachable (local inference). Compare perf vs llama.cpp: see Rbitnet/docs/BENCHMARKS.md",
+        "Rbitnet unreachable (optional: rbitnet-server on RBITNET_BIND, default 127.0.0.1:8080)",
+        crate::doctor_checks::optional_rbitnet_not_installed_desc(doctor_locale),
+    );
+    if let Some(obj) = rbitnet_check.as_object_mut() {
+        obj.insert("models_url".to_string(), serde_json::json!(rbitnet_models_url));
+    }
+    checks.push(rbitnet_check);
 
-    let all_ok = checks
-        .iter()
-        .all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+    let all_ok = crate::doctor_checks::doctor_checks_all_ok(&checks);
     let body_json =
         serde_json::json!({ "ok": all_ok, "checks": checks, "playwright": playwright_json })
             .to_string();
@@ -855,6 +871,9 @@ if method == "POST" && path == "/api/complete" {
         .unwrap_or("")
         .to_string();
     let req = akasha_llm::CompletionRequest {
+        require_tool: false,
+        conversation: None,
+        tools: None,
         prompt,
         max_tokens: body
             .get("max_tokens")
@@ -959,6 +978,9 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
         summary
     );
     let req = akasha_llm::CompletionRequest {
+        require_tool: false,
+        conversation: None,
+        tools: None,
         prompt,
         max_tokens: Some(512),
         temperature: Some(0.3),

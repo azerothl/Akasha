@@ -69,7 +69,7 @@
 
 .btn-primary {
   background: var(--akasha-btn-primary-bg);
-  color: #fff;
+  color: var(--akasha-on-accent);
   border: none;
   border-radius: var(--akasha-radius-button);
   box-shadow: var(--akasha-btn-primary-shadow);
@@ -164,7 +164,7 @@
 }
 
 .input-group-btn.btn-primary {
-  color: #fff;
+  color: var(--akasha-on-accent);
   background: var(--akasha-btn-primary-bg, var(--akasha-accent));
 }
 

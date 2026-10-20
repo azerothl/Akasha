@@ -1,6 +1,6 @@
 # Commandes
 
-## ## 3. Commandes principales
+## 3. Commandes principales
 
 
 ### Daemon
@@ -88,7 +88,7 @@ L'URL de l'API est configurable via la variable d'environnement `AKASHA_APP_BASE
 
 ---
 
-## ## 7. Commandes slash (dans le chat)
+## 7. Commandes slash (dans le chat)
 
 
 Dans le chat (TUI ou interface web), les messages commençant par **/** sont des commandes (non envoyées au LLM). Tapez **/help** ou **/?** dans le chat pour afficher la liste complète.
@@ -127,7 +127,7 @@ Pour **ajouter** une clé dans le vault : utilisez le CLI `akasha vault set KEY 
 
 ---
 
-## ## 7bis. Terminal intégré et sessions PTY
+## 7bis. Terminal intégré et sessions PTY
 
 
 Akasha propose deux niveaux d'accès terminal :
@@ -147,7 +147,7 @@ Prérequis : daemon démarré ; capacités via `GET /api/terminal/capabilities` 
 
 ---
 
-## ## 13. Référence rapide
+## 13. Référence rapide
 
 
 | Action | Commande ou moyen |

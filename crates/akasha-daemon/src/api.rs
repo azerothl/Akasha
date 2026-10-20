@@ -110,6 +110,10 @@ pub(crate) fn save_budget_settings(data_dir: &Path, settings: &BudgetSettings) -
 
 pub(crate) fn tool_scope_key(tool: &str, tool_args: &[String]) -> String {
     match tool {
+        "git_commit"|"git_push"|"github_create_pr"|"lsp_apply_rename"|"terminal_session"=>{
+            use sha2::Digest;
+            format!("exact-operation:{:x}",sha2::Sha256::digest(serde_json::to_vec(tool_args).unwrap_or_default()))
+        }
         "run_command" | "run_terminal" | "run_command_background" => tool_args
             .iter()
             .take(2)
@@ -177,6 +181,17 @@ pub(crate) fn save_permission_mode(data_dir: &Path, state: &PermissionModeState)
 /// `args[0]` = chemin ; le reste = « ancien » puis ` | ` (recommandé) ou `|`, puis « nouveau ».
 /// Retire les `|` initiaux issus du découpage (`path | old | new` → `old | new`).
 pub(crate) fn parse_search_replace_payload(args: &[String]) -> Result<(String, String), &'static str> {
+    // Typed calls use a marked JSON pair to preserve pipes, whitespace and
+    // newlines. Unmarked legacy TOOL arguments keep their original grammar.
+    if args.get(1).is_some_and(|arg| arg == "--studio-search-replace-v1") {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Pair { search: String, replacement: String }
+        if args.len() != 3 { return Err("usage"); }
+        let pair: Pair = serde_json::from_str(&args[2]).map_err(|_| "usage")?;
+        if pair.search.is_empty() { return Err("empty_search"); }
+        return Ok((pair.search, pair.replacement));
+    }
     let mut rest: String = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
     rest = rest.trim().to_string();
     while rest.starts_with('|') {
@@ -541,7 +556,7 @@ pub(crate) async fn pdf_extract_message_from_disk(
     via_tool: &str,
 ) -> (bool, String, Option<String>) {
     match tokio::fs::read(disk_path).await {
-        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+        Ok(bytes) => match crate::pdf_extract_safe::extract_text_from_mem(&bytes) {
             Ok(text) => {
                 let preview = if text.len() > 2000 {
                     format!("{}…", text.chars().take(2000).collect::<String>())
@@ -1250,6 +1265,7 @@ pub async fn run_delegation_handler(
 
 /// Pending "human in the loop" request: agent is waiting for the user to answer.
 pub struct PendingHumanInput {
+    pub request_id: Option<String>,
     pub question: String,
     pub context: String,
     pub choices: Option<Vec<String>>,
@@ -1285,7 +1301,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche. Pour GitHub depuis le shell, préférer gh-axi (npm install -g gh-axi ; principes AXI https://axi.md/) s'il est installé — sorties compactes pour l'agent. Pour l'automation navigateur en CLI, chrome-devtools-axi (même dépôt https://github.com/kunchenguid/axi) en complément d'Akasha browser."),
     ("run_terminal", "run_terminal [--cwd <path>] <cmd> [args...] — exécuter une commande (même que run_command)"),
     ("run_command_background", "run_command_background [--cwd <path>] <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
-    ("terminal_session", "terminal_session — PTY interactif: GET /api/terminal/capabilities ; API HTTP /api/terminal/pty/sessions (spec/43_session_terminal.md). Sinon: run_command / run_terminal, run_command_background + process list|poll|kill, GET /api/process/watch/recent."),
+    ("terminal_session", "terminal_session start [JSON argv,cols,rows] | list | read <id> | write <id> <text> | resize <id> <cols> <rows> | stop <id> — PTY réservé à cette tâche, dossier du projet imposé. Le shell autorisé peut exécuter des commandes arbitraires; pas de sandbox OS. Extrait archivé à la fermeture."),
     ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers (ligne à ligne)"),
     ("diff_unified", "diff_unified <path_a> <path_b> [context_lines] — diff unifié style patch (défaut context_lines=3) ; chemins réels ou workspace:/"),
@@ -1328,7 +1344,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("calendar_delete", "calendar_delete <event_id> — supprimer (soft-delete) un événement externe."),
     ("budget_status", "budget_status [session_id] — état budget (usage tokens/coût, seuil, auto-concise)."),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
-    ("browser", "browser navigate <url> — navigate (http/https; domain allowed). browser snapshot — texte + liens. browser screenshot | browser click <css> | browser fill <css> <texte> | browser wait <css_selector|ms> — automation Playwright (spec 39)."),
+    ("browser", "browser navigate <url> | snapshot | screenshot | click <css> | fill <css> <texte> | wait <css|ms> | viewport <largeur> <hauteur> | console | network — Playwright, domaines filtrés y compris ressources et WebSocket. Captures et journaux archivés par tâche. Studio exige Node/Playwright/Chromium déjà installés."),
     ("install_playwright", "install_playwright — run npm install and npx playwright install chromium in the Playwright runner directory (scripts/playwright-runner or AKASHA_PLAYWRIGHT_RUNNER). Requires browser_enabled. Use after ask_user consent if you need explicit approval before download; optional require_approval in tools_policy."),
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
@@ -1348,6 +1364,14 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("merge_todos", "merge_todos <payload> — ajoute des étapes (même format que write_todos) sans supprimer les existantes ; titres déjà présents ignorés (casse insensible)."),
     ("read_todos", "read_todos — retourne la liste des étapes (todos) de la tâche courante."),
     ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
+    ("git_delivery_status", "git_delivery_status [JSON {remote:origin}] — préflight Git local, fichiers/versions, HEAD, branche, accès GitHub et état distant. Aucune publication."),
+    ("git_commit", "git_commit <JSON {paths:[...],expected_versions:{path:sha256},expected_head,message}> — commit des seuls fichiers sélectionnés avec index temporaire et mise à jour de ref conditionnelle ; aucun push."),
+    ("git_push", "git_push <JSON {remote,branch,expected_head,expected_remote_head}> — publication explicite de ce commit uniquement, sans force/tags/sous-modules ; approbation requise."),
+    ("github_create_pr", "github_create_pr <JSON {remote,head,base,expected_head,title,body,draft:true}> — crée une PR GitHub après push vérifié, sans fork/push implicite ni merge ; approbation requise."),
+    ("github_pr_status", "github_pr_status <JSON {remote,number?}> — lecture PR/CI, sans exécuter la CI. Distingue contrôles absents, en attente, échoués, neutres et SHA périmé."),
+    ("lsp_query", "lsp_query <JSON {action:diagnostics|definition|references|rename,path,position:{line,character},new_name?,text?}> — serveur LSP préinstallé et autorisé ; positions UTF-16 à base zéro. Rename prépare un plan sans modifier le dépôt."),
+    ("lsp_apply_rename", "lsp_apply_rename <plan_uuid> — appliquer un plan LSP de cette tâche, versions et politique contrôlées ; inspecter le plan avant appel."),
+    ("list_tools", "list_tools [name] — current task capabilities: permissions, availability, argument schemas. Refresh after MCP or policy changes."),
     ("list_skills", "list_skills — retourne la liste des skills installés (nom et description). Utiliser avant read_skill pour charger le détail d'un skill."),
     ("search_skills_catalog", "search_skills_catalog <query> [max] — rechercher dans la galerie Akasha_skills (skills.json distant)"),
     ("read_skill", "read_skill <name> — charge le contenu (instructions, usage) du skill. À utiliser quand tu as besoin du détail d'un skill avant de l'invoquer par son nom."),
@@ -1375,6 +1399,16 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
 /// `delegate_to_agent` n’est ajouté que pour `studio_project_manager` et seulement si la politique l’autorise.
 pub(crate) fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent: &str) -> Vec<String> {
     const STUDIO: &[&str] = &[
+        "git_delivery_status",
+        "git_commit",
+        "git_push",
+        "github_create_pr",
+        "github_pr_status",
+        "lsp_query",
+        "lsp_apply_rename",
+        "list_tools",
+        "browser",
+        "terminal_session",
         "read_file",
         "write_file",
         "write_code",
@@ -1423,13 +1457,6 @@ pub(crate) fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, ass
                 .collect()
         }
     };
-    if out.is_empty() {
-        out.extend(
-            ["read_file", "write_file", "write_code", "grep_content", "run_command", "ask_user"]
-                .iter()
-                .map(|s| (*s).to_string()),
-        );
-    }
     let delegate_allowed_by_policy = allowed_tools.map_or(true, |l| {
         l.iter()
             .any(|t| t.eq_ignore_ascii_case("delegate_to_agent"))
@@ -1474,23 +1501,8 @@ pub(crate) fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, ass
             }
         }
     }
+    out.retain(|tool| crate::studio_role_policy::allows_tool(assigned_agent, tool));
     out
-}
-
-/// Like [`available_tools_instruction`] but **only** listed tool names — no `always_misc` merge
-/// (Code Studio must not advertise install_skill, browser, delegate_to_agent, etc.).
-pub(crate) fn available_tools_instruction_exact(allowed: &[String]) -> String {
-    if allowed.is_empty() {
-        return String::new();
-    }
-    let allowed_lc: std::collections::HashSet<String> =
-        allowed.iter().map(|s| s.to_ascii_lowercase()).collect();
-    AVAILABLE_TOOLS
-        .iter()
-        .filter(|(name, _)| allowed_lc.contains(&name.to_ascii_lowercase()))
-        .map(|(_, desc)| *desc)
-        .collect::<Vec<_>>()
-        .join(" ; ")
 }
 
 pub(crate) fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -3099,8 +3111,8 @@ pub(crate) const CODE_STUDIO_APP_CONTEXT: &str = concat!(
     "Concentre-toi sur le code et la documentation de ce dépôt — pas sur l’interface générale d’Akasha (TUI, onglets, skills hors projet, caméra, météo). ",
     "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
     "Réponds dans la même langue que le dernier message utilisateur. ",
-    "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n",
-    "Sur le premier lot d’un projet : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant de commencer le développement applicatif si ce fichier est absent.\n",
+    "Avant de modifier un fichier existant : le lire ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.). Pour créer un fichier absent, utiliser expected_version=missing ; une lecture échouée avant création ne remplace pas une lecture de vérification demandée après l’écriture.\n",
+    "Pour créer ou faire évoluer une application : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant le développement applicatif si ce fichier est absent. Pour une demande ciblée sur des fichiers précis, respecter uniquement son périmètre et son contenu ; les gabarits du projet ne sont pas des modèles de contenu pour ces fichiers.\n",
     "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_code` pour le code source, `write_file` pour markdown/json/config, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
     "Si un outil d’écriture échoue ou est interdit, expliquer clairement la raison avant toute solution de secours.\n\n",
 );
@@ -3298,8 +3310,8 @@ Langue : aligne-toi sur le dernier message utilisateur."),
         "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Verify dependencies exist in package.json before importing. Use read_file before editing. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
         "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
         "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
-        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, write_code, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
-        "studio_reviewer" => Some("You are the Code Studio QA/Review agent. STRICTLY NON-MUTATING: never modify application files and never run write tools (write_file, write_code, edit_file, search_replace, apply_patch, delete_file, rename_path, move_tree). Your job in ticket `review` is to verify that the work linked to the ticket is present and behaves as expected, then post structured feedback on the ticket. Use read-only inspection (read_file, grep_content, git_* and optional diagnostics) and finish by updating the ticket via `studio_update_ticket`: if accepted set review_outcome=approved and status=done; if issues remain set review_outcome=changes_requested, add concrete corrective_steps, and set status=in_progress. Do not rewrite the implementation during review."),
+        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, write_code, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Shell, background processes, containers, MCP/plugins and delegation are technically disabled for this role. Use git_status, git_log and git_diff for diagnostics. You MAY use write_file ONLY on workspace:/CODE_STUDIO_PLAN.md: read its existing content first and preserve unrelated sections. Other edit/delete/move tools are disabled. Explore with read_file, search_files, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
+        "studio_reviewer" => Some("You are the Code Studio QA/Review agent. STRICTLY NON-MUTATING: never modify application files and never run write tools (write_file, write_code, edit_file, search_replace, apply_patch, delete_file, rename_path, move_tree). Your job in ticket `review` is to verify that the work linked to the ticket is present and behaves as expected, then post structured feedback on the ticket. Shell, background processes, containers, MCP/plugins and delegation are technically disabled for this role. Project verification scripts and autofix are not executed by this role; request a separate implementation/QA task when execution is needed. Use read-only inspection (read_file, grep_content, git_*) and finish by updating the ticket via `studio_update_ticket`: if accepted set review_outcome=approved and status=done; if issues remain set review_outcome=changes_requested, add concrete corrective_steps, and set status=in_progress. Do not rewrite the implementation during review."),
         _ => None,
     }
 }
@@ -3535,6 +3547,9 @@ pub(crate) async fn compact_short_term_if_needed(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(2048);
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
+        tools: None,
         prompt: summary_prompt,
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
@@ -3640,6 +3655,9 @@ Factual response in English.\n\n{}",
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(1024);
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
+        tools: None,
         prompt: summary_prompt,
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
@@ -4468,6 +4486,9 @@ Output JSON only.",
         assistant_excerpt.chars().take(1_800).collect::<String>()
     );
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
+        tools: None,
         prompt: user,
         max_tokens: Some(500),
         temperature: Some(0.05),
@@ -4578,6 +4599,9 @@ Use a short structure: context (1–2 sentences), root cause, files/lines from t
         ),
     };
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
+        tools: None,
         prompt: user,
         max_tokens: Some(800),
         temperature: Some(0.15),
@@ -4813,6 +4837,7 @@ KNOWN_TS_ERRORS:\n{}\n",
     let exec = tools_executor.read().await.clone();
     let mut any_write_success = false;
     let mut follow_up = String::new();
+    let mut autofix_rules=std::collections::HashSet::<String>::new();
     let mut short_or_no_tool_retries = 0u32;
     let mut writes_ok_count = 0u32;
     /// Nudge only when the same file is read repeatedly without an intervening write (exploration stays allowed across many files).
@@ -4836,6 +4861,9 @@ KNOWN_TS_ERRORS:\n{}\n",
         let not_module_paths = extract_ts2306_not_module_paths(verify_log, 12);
         for p in &not_module_paths {
             let as_path = std::path::Path::new(p);
+            // Deterministic repairs cannot interpret repository instructions.
+            if crate::studio_project_context::rules_for_path(tool_disk_root,p,&exec.policy).map_or(true,|rules|!rules.is_empty()) {continue;}
+
             if !as_path.starts_with(tool_disk_root) {
                 continue;
             }
@@ -4903,6 +4931,9 @@ LAST_FAILED_FILES: {}\n",
             )
         };
         let req = CompletionRequest {
+            require_tool: false,
+            conversation: None,
+            tools: None,
             prompt: user_block,
             max_tokens: Some(8192),
             temperature: Some(0.15),
@@ -4987,6 +5018,9 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                     None => name.clone(),
                 };
                 let actual_tool = canonicalize_tool_name(&actual_tool);
+                let actual_tool=if actual_tool=="studio_call" {
+                    match crate::studio_tool_contract::decode(&args.join(" ")) {Ok(decoded)=>decoded.envelope.tool,Err(error)=>{round_results.push(error);continue;}}
+                }else{actual_tool};
                 last_tool = actual_tool.clone();
                 if !STUDIO_VERIFY_AUTOFIX_TOOLS
                     .iter()
@@ -5016,9 +5050,21 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                     )
                     .with_correlation(timeline_correlation),
                 );
+                let decoded=if name=="studio_call" {crate::studio_tool_contract::decode(&args.join(" ")).ok()}else{None};
+                let target_args=decoded.as_ref().map(|d|d.argv.as_slice()).unwrap_or(args);
+                let mut defer=false;
+                for path in crate::studio_tool_contract::paths_for_tool(&actual_tool,target_args) {
+                    match crate::studio_project_context::rules_for_path(tool_disk_root,&path,&exec.policy) {
+                        Ok(rules)=>for rule in rules {
+                            if autofix_rules.insert(format!("{}:{}",rule.path.display(),rule.sha256)) {first_user.push_str(&rule.prompt());defer=true;}
+                        },
+                        Err(error)=>{round_results.push(error);defer=true;}
+                    }
+                }
+                if defer {round_results.push("Repository instructions loaded; propose the repair again under these rules.".into());continue;}
                 let (success, res, _cap) = execute_tool_call(
                     &exec,
-                    &actual_tool,
+                    if name=="studio_call" {"studio_call"}else{&actual_tool},
                     args,
                     process_registry,
                     long_term_client,
@@ -5191,6 +5237,9 @@ The compiler output already signals what is wrong: apply a minimal fix with `TOO
             }
             if !focused_reads.is_empty() {
                 let fallback_req = CompletionRequest {
+                    require_tool: false,
+                    conversation: None,
+                    tools: None,
                     prompt: format!(
                         "Build output:\n{}\n\nFocused file reads:\n{}\n\nReturn ONLY TOOL lines to fix the TS syntax/build errors now. \
 Use only: search_replace, edit_file, write_file, apply_patch, file_diff, delete_file, rename_path, move_tree. \
@@ -5237,6 +5286,8 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 ) {
                                     continue;
                                 }
+                                if exec.policy.requires_approval(&actual_tool) {continue;}
+                                if crate::studio_tool_contract::paths_for_tool(&actual_tool,args).iter().any(|path|crate::studio_project_context::rules_for_path(tool_disk_root,path,&exec.policy).map_or(true,|rules|rules.iter().any(|rule|!autofix_rules.contains(&format!("{}:{}",rule.path.display(),rule.sha256))))) {continue;}
                                 let (success, _res, _cap) = execute_tool_call(
                                     &exec,
                                     &actual_tool,
@@ -5519,6 +5570,13 @@ pub async fn handle_api(
         path: path_only.to_string(),
     };
     crate::lifecycle_hooks::run_http_request_pre_hooks(data_dir, method, path_only).await;
+    if let Some(response)=crate::studio_delivery::route(method,path_only,query_str,body.as_deref(),data_dir,tools_executor).await{return response;}
+    if let Some(response)=crate::studio_lsp::route(method,path_only,body.as_deref(),data_dir,tools_executor).await{return response;}
+    if let Some(response)=crate::studio_recovery::route(method,path_only,body.as_deref(),store_path){return response;}
+    if let Some(response) = crate::studio_observation::handle_route(method, path_only, query_str, body.as_deref(), data_dir, tools_executor).await {
+        return response;
+    }
+
 
     if let Some(resp) = crate::api_studio::handle_studio_route(
         method,

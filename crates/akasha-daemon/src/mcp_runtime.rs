@@ -11,10 +11,12 @@ use tokio::sync::Mutex;
 
 struct StdioState {
     server: String,
+    data_dir: std::path::PathBuf,
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
     reader: BufReader<tokio::process::ChildStdout>,
     next_id: AtomicU64,
+    healthy: bool,
 }
 
 pub fn mcp_namespaced_tool(server: &str, tool: &str) -> String {
@@ -30,6 +32,143 @@ pub fn parse_mcp_tool_name(tool_name: &str) -> Option<(String, String)> {
         return None;
     }
     Some((server.to_string(), tool.to_string()))
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DiscoveredTool {
+    pub name: String,
+    pub server: String,
+    pub tool: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+static DISCOVERED: OnceLock<std::sync::RwLock<Vec<DiscoveredTool>>> = OnceLock::new();
+fn tool_cache() -> &'static std::sync::RwLock<Vec<DiscoveredTool>> {
+    DISCOVERED.get_or_init(|| std::sync::RwLock::new(Vec::new()))
+}
+pub fn discovered_tools() -> Vec<DiscoveredTool> {
+    tool_cache()
+        .read()
+        .map(|tools| tools.clone())
+        .unwrap_or_default()
+}
+pub fn discovered_tool(name: &str) -> Option<DiscoveredTool> {
+    tool_cache().read().ok()?.iter().find(|tool|tool.name==name).cloned()
+}
+pub fn discovered_names() -> Vec<String> {
+    tool_cache().read().map(|tools|tools.iter().map(|tool|tool.name.clone()).collect()).unwrap_or_default()
+}
+pub fn prompt_tool_names(policy: &akasha_tools::ToolsPolicy) -> std::collections::HashSet<String> {
+    tool_cache().read().map(|tools|tools.iter().filter(|tool|policy.can_use_mcp_tool(&tool.server,&tool.tool)&&(policy.default_profile.is_none() || policy.allowed_tool_list().is_some_and(|names|names.contains(&tool.name)))&&tool.input_schema.to_string().len()<=4096).take(32).map(|tool|tool.name.clone()).collect()).unwrap_or_default()
+}
+
+fn has_external_ref(value: &Value, depth: usize) -> bool {
+    if depth > 64 {
+        return true;
+    }
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            (matches!(key.as_str(), "$dynamicRef" | "$recursiveRef")
+                || (key == "$ref" && value.as_str().is_some_and(|r| !r.starts_with('#'))))
+                || has_external_ref(value, depth + 1)
+        }),
+        Value::Array(values) => values.iter().any(|v| has_external_ref(v, depth + 1)),
+        _ => false,
+    }
+}
+
+struct NoExternalSchema;
+impl jsonschema::SchemaResolver for NoExternalSchema {
+    fn resolve(
+        &self,
+        _root: &Value,
+        _url: &url::Url,
+        _reference: &str,
+    ) -> Result<std::sync::Arc<Value>, jsonschema::SchemaResolverError> {
+        Err(anyhow::anyhow!("External MCP schemas are disabled"))
+    }
+}
+fn compile_schema(schema: &Value) -> Result<jsonschema::JSONSchema, String> {
+    jsonschema::JSONSchema::options()
+        .with_resolver(NoExternalSchema)
+        .compile(schema)
+        .map_err(|_| "unsupported MCP input schema".into())
+}
+
+pub fn validate_arguments(tool: &DiscoveredTool, arguments: &Value) -> Result<(), String> {
+    if !arguments.is_object() {
+        return Err("MCP arguments must be a JSON object".into());
+    }
+    let compiled = compile_schema(&tool.input_schema)
+        .map_err(|_| "unsupported MCP argument schema".to_string())?;
+    let result = compiled.validate(arguments);
+    match result {
+        Ok(()) => Ok(()),
+        Err(errors) => Err(format!(
+            "MCP argument validation failed at: {}",
+            errors
+                .take(4)
+                .map(|error| error.instance_path.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn cache_tools(server: &str, response: &Value) -> Result<usize, String> {
+    let list = response
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .ok_or("invalid tools/list result")?;
+    if list.len() > 256 {
+        return Err("MCP catalogue exceeds 256 tools".into());
+    }
+    let mut tools = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    for item in list {
+        let bare = item["name"]
+            .as_str()
+            .filter(|name| !name.is_empty() && name.len() <= 128)
+            .ok_or("invalid MCP tool name")?;
+        let name = mcp_namespaced_tool(server, bare);
+        if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            || !names.insert(name.clone())
+        {
+            return Err(
+                "MCP namespace contains unsupported characters or colliding tool names".into(),
+            );
+        }
+        let schema = item
+            .get("inputSchema")
+            .cloned()
+            .unwrap_or_else(|| json!({"type":"object"}));
+        if !schema.is_object()
+            || schema.to_string().len() > 64 * 1024
+            || has_external_ref(&schema, 0)
+        {
+            return Err("MCP schema too large, too deep or uses external references".into());
+        }
+        compile_schema(&schema).map_err(|_| "unsupported MCP input schema")?;
+        tools.push(DiscoveredTool {
+            name,
+            server: server.into(),
+            tool: bare.into(),
+            description: item["description"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(2000)
+                .collect(),
+            input_schema: schema,
+        });
+    }
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    let count = tools.len();
+    *tool_cache()
+        .write()
+        .map_err(|_| "MCP catalogue lock unavailable")? = tools;
+    Ok(count)
 }
 
 static STDIO: OnceLock<Mutex<Option<StdioState>>> = OnceLock::new();
@@ -71,11 +210,20 @@ async fn oauth_load_from_disk(data_dir: &Path) -> Value {
     }
 }
 
-async fn write_framed(stdin: &mut (impl AsyncWriteExt + Unpin), msg: &Value) -> std::io::Result<()> {
+// MCP stdio uses newline-delimited JSON-RPC, not LSP Content-Length frames.
+async fn write_framed(
+    stdin: &mut (impl AsyncWriteExt + Unpin),
+    msg: &Value,
+) -> std::io::Result<()> {
     let body = msg.to_string();
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    stdin.write_all(header.as_bytes()).await?;
+    if body.len() > 8 * 1024 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "MCP message too large",
+        ));
+    }
     stdin.write_all(body.as_bytes()).await?;
+    stdin.write_all(b"\n").await?;
     stdin.flush().await
 }
 
@@ -83,6 +231,8 @@ pub async fn summary() -> Value {
     let g = cell().lock().await;
     json!({
         "stdio_server": g.as_ref().map(|s| s.server.as_str()),
+        "stdio_healthy": g.as_ref().is_some_and(|state| state.healthy),
+        "discovered_tools": discovered_tools(),
         "oauth": {
             "mode": "documented_vault_reserved",
             "see": "spec/dev/integrations/mcp-oauth.md"
@@ -146,7 +296,11 @@ async fn oauth_refresh_if_needed(data_dir: &Path, state: &mut Value) {
     if !client_id.is_empty() {
         form.push(("client_id".into(), client_id));
     }
-    if let Some(secret) = state.get("client_secret").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(secret) = state
+        .get("client_secret")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
         form.push(("client_secret".into(), secret.to_string()));
     }
     let client = match reqwest::Client::builder()
@@ -220,7 +374,10 @@ pub async fn oauth_get(data_dir: &Path) -> Value {
     let mut g = oauth_cell().lock().await;
     if g.get("updated_at").and_then(|x| x.as_str()).is_none()
         || g.get("updated_at").and_then(|x| x.as_str()).unwrap_or("")
-            < disk.get("updated_at").and_then(|x| x.as_str()).unwrap_or("")
+            < disk
+                .get("updated_at")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
     {
         *g = disk;
     }
@@ -309,12 +466,21 @@ pub async fn start_stdio_server(data_dir: &Path, server: &str) -> Result<Value, 
         })
         .unwrap_or_default();
 
-    let mut child = Command::new(cmd)
-        .args(&args)
+    let mut command = Command::new(cmd);
+    command.args(&args);
+    if let Some(env) = entry.get("env").and_then(Value::as_object) {
+        for (key, value) in env {
+            let value = value.as_str().ok_or("MCP env values must be strings")?;
+            command.env(key, value);
+        }
+    }
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(false)
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("spawn: {}", e))?;
 
@@ -346,7 +512,7 @@ pub async fn start_stdio_server(data_dir: &Path, server: &str) -> Result<Value, 
         "id": 1,
         "method": "initialize",
         "params": {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2025-06-18",
             "capabilities": {},
             "clientInfo": { "name": "akasha-mcp-runtime", "version": env!("CARGO_PKG_VERSION") }
         }
@@ -356,7 +522,32 @@ pub async fn start_stdio_server(data_dir: &Path, server: &str) -> Result<Value, 
         .map_err(|e| format!("initialize write: {}", e))?;
 
     let mut reader = BufReader::new(stdout);
-    let _ = read_framed(&mut reader).await;
+    let initialized =
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            for _ in 0..64 {
+                let message=read_framed(&mut reader).await?;
+                if message["id"]==1 {return Ok::<Value,String>(message);}
+                if message.get("id").is_some(){return Err("unexpected MCP initialize response ID".into());}
+            }
+            Err("MCP initialize notification limit exceeded".into())
+        })
+            .await
+            .map_err(|_| "MCP initialize timeout")??;
+    if initialized.get("error").is_some()
+        || initialized.get("result").is_none()
+        || initialized["id"] != 1
+    {
+        return Err("MCP initialize rejected or malformed".into());
+    }
+
+    if !matches!(
+        initialized
+            .pointer("/result/protocolVersion")
+            .and_then(Value::as_str),
+        Some("2024-11-05" | "2025-03-26" | "2025-06-18")
+    ) {
+        return Err("MCP protocol version not supported".into());
+    }
 
     // MCP spec requires the client to send notifications/initialized after the
     // initialize response and before any tool requests (tools/list, tools/call, …).
@@ -376,64 +567,119 @@ pub async fn start_stdio_server(data_dir: &Path, server: &str) -> Result<Value, 
     }
     *slot = Some(StdioState {
         server: server.to_string(),
+        data_dir: data_dir.to_path_buf(),
         child,
         stdin,
         reader,
         next_id: AtomicU64::new(2),
+        healthy: true,
     });
-    Ok(json!({ "ok": true, "server": server }))
+    if let Ok(mut cache) = tool_cache().write() {
+        cache.clear();
+    }
+    let discovery = if let Some(state) = slot.as_mut() {
+        match discover_all(state).await {
+            Ok(response) => cache_tools(server, &response),
+            Err(error) => Err(error),
+        }
+    } else {
+        Err("MCP state unavailable".into())
+    };
+    Ok(
+        json!({ "ok": true, "server": server, "tool_count":discovery.as_ref().ok(), "discovery_error":discovery.err() }),
+    )
 }
 
 async fn read_framed<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
 ) -> Result<Value, String> {
-    let mut content_length: Option<usize> = None;
-    loop {
-        let mut line = String::new();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("read header: {}", e))?;
-        if n == 0 {
-            return Err("connection closed".to_string());
-        }
-        let trimmed = line.trim_end_matches(['\n', '\r']);
-        if trimmed.is_empty() {
-            break;
-        }
-        if let Some((_, v)) = trimmed.split_once(':') {
-            if trimmed.to_ascii_lowercase().starts_with("content-length") {
-                content_length = v.trim().parse().ok();
-            }
-        }
+    for _ in 0..64 {
+        let mut body=Vec::new();
+        let n=(&mut *reader).take(8*1024*1024+1).read_until(b'\n',&mut body).await.map_err(|e|e.to_string())?;
+        if n==0 {return Err("MCP connection closed".into());}
+        if n>8*1024*1024 || !body.ends_with(b"\n") {return Err("MCP response exceeds limit or is not newline delimited".into());}
+        if body.iter().all(u8::is_ascii_whitespace) {continue;}
+        return serde_json::from_slice(&body).map_err(|_|"invalid MCP JSON response".into());
     }
-    let len = content_length.ok_or_else(|| "no Content-Length".to_string())?;
-    let mut body = vec![0u8; len];
-    reader
-        .read_exact(&mut body)
-        .await
-        .map_err(|e| format!("read body: {}", e))?;
-    serde_json::from_slice(&body).map_err(|e| format!("json: {}", e))
+    Err("MCP excessive blank lines".into())
 }
 
 async fn rpc_request(state: &mut StdioState, method: &str, params: Value) -> Result<Value, String> {
+    if !state.healthy {
+        return Err("MCP stream interrupted; reconnect the server".into());
+    }
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    let req = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": params
-    });
-    write_framed(&mut state.stdin, &req).await.map_err(|e| e.to_string())?;
-    read_framed(&mut state.reader).await
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        write_framed(&mut state.stdin, &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})).await.map_err(|e| e.to_string())?;
+        for _ in 0..256 {
+            let message = read_framed(&mut state.reader).await?;
+            if message["id"] == id && message.get("method").is_none() {
+                return Ok(message);
+            }
+            if let Some(request_id) = message.get("id") {
+                let answer = if message["method"] == "ping" {json!({"jsonrpc":"2.0","id":request_id,"result":{}})}
+                    else {json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"Client method not supported"}})};
+                write_framed(&mut state.stdin, &answer).await.map_err(|e| e.to_string())?;
+            }
+            // Notifications do not satisfy the pending response id.
+        }
+        Err("MCP notification limit exceeded".into())
+    }).await.map_err(|_| "MCP request timeout; reconnect required".to_string()).and_then(|r| r);
+    if result.is_err() {
+        state.healthy = false;
+        if let Ok(mut cache) = tool_cache().write() {
+            cache.clear();
+        }
+    }
+    result
+}
+
+async fn discover_all(state: &mut StdioState) -> Result<Value, String> {
+    let mut cursor: Option<String> = None;
+    let mut seen = std::collections::HashSet::new();
+    let mut tools = Vec::new();
+    for _ in 0..16 {
+        let params = cursor
+            .as_ref()
+            .map(|value| json!({"cursor":value}))
+            .unwrap_or_else(|| json!({}));
+        let response = rpc_request(state, "tools/list", params).await?;
+        let page = response
+            .pointer("/result/tools")
+            .and_then(Value::as_array)
+            .ok_or("invalid MCP tools/list response")?;
+        tools.extend(page.iter().cloned());
+        if tools.len() > 256 {
+            return Err("MCP catalogue exceeds 256 tools".into());
+        }
+        cursor = response
+            .pointer("/result/nextCursor")
+            .and_then(Value::as_str)
+            .map(String::from);
+        if let Some(ref value) = cursor {
+            if !seen.insert(value.clone()) {
+                return Err("MCP repeated pagination cursor".into());
+            }
+        } else {
+            return Ok(json!({"jsonrpc":"2.0","result":{"tools":tools}}));
+        }
+    }
+    Err("MCP tools/list exceeds 16 pages".into())
 }
 
 pub async fn tools_list() -> Result<Value, String> {
     let mut slot = cell().lock().await;
-    let Some(state) = slot.as_mut() else {
-        return Err("no stdio MCP server attached (POST /api/mcp/runtime/stdio/start)".to_string());
-    };
-    rpc_request(state, "tools/list", json!({})).await
+    let state = slot.as_mut().ok_or("no stdio MCP server attached")?;
+    let discovered = discover_all(state).await.and_then(|response| {
+        cache_tools(&state.server, &response)?;
+        Ok(response)
+    });
+    if discovered.is_err() {
+        if let Ok(mut cache) = tool_cache().write() {
+            cache.clear();
+        }
+    }
+    discovered
 }
 
 pub async fn tools_call(tool_name: &str, arguments: Value) -> Result<Value, String> {
@@ -441,6 +687,12 @@ pub async fn tools_call(tool_name: &str, arguments: Value) -> Result<Value, Stri
     let Some(state) = slot.as_mut() else {
         return Err("no stdio MCP server attached".to_string());
     };
+    let descriptor = discovered_tools()
+        .into_iter()
+        .find(|tool| tool.server == state.server && tool.tool == tool_name)
+        .ok_or("tool not discovered on attached MCP server")?;
+    validate_arguments(&descriptor, &arguments)?;
+    check_current_policy(state, tool_name)?;
     rpc_request(
         state,
         "tools/call",
@@ -449,7 +701,40 @@ pub async fn tools_call(tool_name: &str, arguments: Value) -> Result<Value, Stri
     .await
 }
 
+pub async fn call_discovered(name: &str, arguments: Value) -> Result<Value, String> {
+    let descriptor =
+        discovered_tool(name).ok_or("MCP tool not discovered on the attached server")?;
+    validate_arguments(&descriptor, &arguments)?;
+    let mut slot = cell().lock().await;
+    let state = slot.as_mut().ok_or("no stdio MCP server attached")?;
+    if state.server != descriptor.server {
+        return Err("MCP server changed; refresh capabilities".into());
+    }
+    check_current_policy(state, &descriptor.tool)?;
+    rpc_request(
+        state,
+        "tools/call",
+        json!({"name":descriptor.tool,"arguments":arguments}),
+    )
+    .await
+}
+
+fn check_current_policy(state: &StdioState, tool: &str) -> Result<(), String> {
+    let path = state.data_dir.join("tools_policy.yaml");
+    if path.is_file() {
+        let policy = akasha_tools::ToolsPolicy::load_from_path(&path)
+            .map_err(|_| "cannot read current MCP policy")?;
+        if !policy.can_use_mcp_tool(&state.server, tool) {
+            return Err("MCP tool denied by current server/tool policy".into());
+        }
+    }
+    Ok(())
+}
+
 pub async fn stop_stdio_server() -> Value {
+    if let Ok(mut cache) = tool_cache().write() {
+        cache.clear();
+    }
     let mut slot = cell().lock().await;
     if let Some(prev) = slot.take() {
         let mut c = prev.child;
@@ -457,4 +742,21 @@ pub async fn stop_stdio_server() -> Value {
         let _ = c.wait().await;
     }
     json!({ "ok": true })
+}
+
+#[cfg(test)]
+mod native_catalogue_regressions {
+    use super::*;
+    #[test]
+    fn native_mcp_variant_uses_discovered_fields_and_local_definitions() {
+        let name="mcp_schemafixture_lookup";
+        let schema=json!({"type":"object","required":["query"],"additionalProperties":false,"properties":{"query":{"$ref":"#/$defs/query"}},"$defs":{"query":{"type":"string","minLength":1}}});
+        tool_cache().write().unwrap().push(DiscoveredTool{name:name.into(),server:"schemafixture".into(),tool:"lookup".into(),description:"fixture".into(),input_schema:schema.clone()});
+        assert_eq!(crate::studio_tool_contract::argument_schema(name),schema);
+        let definition=crate::studio_tool_contract::native_definition(vec![name.into()]);
+        let compiled=jsonschema::JSONSchema::compile(&definition["function"]["parameters"]).unwrap();
+        assert!(compiled.is_valid(&json!({"schema_version":1,"tool":name,"arguments":{"query":"needle"}})));
+        assert!(!compiled.is_valid(&json!({"schema_version":1,"tool":name,"arguments":{"argv":["needle"]}})));
+        tool_cache().write().unwrap().retain(|tool|tool.name!=name);
+    }
 }

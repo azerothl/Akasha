@@ -26,9 +26,17 @@ fn apply_openai_delta(
 }
 
 pub async fn read_openai_compatible_sse_stream(
+    resp: reqwest::Response,
+    model_fallback: &str,
+    chunk_tx: &std::sync::mpsc::Sender<String>,
+) -> Result<CompletionResponse, ProviderError> {
+    read_openai_sse_with_functions(resp,model_fallback,chunk_tx,&[]).await
+}
+async fn read_openai_sse_with_functions(
     mut resp: reqwest::Response,
     model_fallback: &str,
     chunk_tx: &std::sync::mpsc::Sender<String>,
+    functions: &[String],
 ) -> Result<CompletionResponse, ProviderError> {
     if resp.status().as_u16() == 429 {
         return Err(ProviderError::RateLimit);
@@ -42,7 +50,9 @@ pub async fn read_openai_compatible_sse_stream(
         return Err(ProviderError::Api(format!("{} {}", status, err_body)));
     }
 
+    let mut native_calls=crate::provider::NativeCalls::default();
     let mut pending = String::new();
+    let mut utf8_pending=Vec::new();
     let mut full_text = String::new();
     let mut reasoning_text = String::new();
     let mut last_usage: Option<TokenUsage> = None;
@@ -58,7 +68,11 @@ pub async fn read_openai_compatible_sse_stream(
             }
         })?;
         let Some(chunk) = chunk else { break };
-        pending.push_str(&String::from_utf8_lossy(&chunk));
+        utf8_pending.extend_from_slice(&chunk);
+        let valid=match std::str::from_utf8(&utf8_pending){Ok(text)=>text.len(),Err(error) if error.error_len().is_none()=>error.valid_up_to(),Err(_)=>return Err(ProviderError::Api("invalid stream UTF-8".into()))};
+        pending.push_str(std::str::from_utf8(&utf8_pending[..valid]).map_err(|_|ProviderError::Api("invalid UTF-8".into()))?);
+        utf8_pending.drain(..valid);
+        if pending.len()>2*1024*1024{return Err(ProviderError::Api("SSE event exceeds 2 MiB".into()));}
         while let Some(pos) = pending.find('\n') {
             let end = pos + 1;
             let line = pending[..pos].trim_end_matches('\r').trim().to_string();
@@ -107,12 +121,15 @@ pub async fn read_openai_compatible_sse_stream(
                     }
                 }
                 if let Some(delta) = c.get("delta") {
+                    native_calls.apply(delta)?;
+                    if delta.get("tool_calls").is_some(){let _=chunk_tx.send(String::new());}
                     apply_openai_delta(delta, &mut full_text, &mut reasoning_text, chunk_tx);
                 }
             }
         }
     }
 
+    if !utf8_pending.is_empty(){return Err(ProviderError::Api("incomplete stream UTF-8".into()));}
     if !pending.trim().is_empty() {
         let line = pending.trim();
         if line.starts_with("data:") {
@@ -124,8 +141,11 @@ pub async fn read_openai_compatible_sse_stream(
                         .and_then(|c| c.as_array())
                         .and_then(|a| a.first())
                     {
+                        if let Some(reason)=choice0.get("finish_reason").and_then(|v|v.as_str()).filter(|v|!v.is_empty()){finish_reason=Some(reason.to_owned());}
                         if let Some(delta) = choice0.get("delta") {
-                            apply_openai_delta(delta, &mut full_text, &mut reasoning_text, chunk_tx);
+                            native_calls.apply(delta)?;
+                    if delta.get("tool_calls").is_some(){let _=chunk_tx.send(String::new());}
+                    apply_openai_delta(delta, &mut full_text, &mut reasoning_text, chunk_tx);
                         }
                     }
                 }
@@ -134,7 +154,7 @@ pub async fn read_openai_compatible_sse_stream(
     }
 
     Ok(CompletionResponse {
-        text: full_text,
+        text: native_calls.finish_with_functions(full_text,finish_reason.as_deref(),functions)?,
         usage: last_usage,
         model_used: model_used.unwrap_or_else(|| model_fallback.to_string()),
         cost_usd: None,
@@ -367,11 +387,53 @@ pub async fn post_openai_chat_completions_stream(
             ProviderError::Api(e.to_string())
         }
     })?;
-    read_openai_compatible_sse_stream(resp, model_fallback, chunk_tx).await
+    read_openai_sse_with_functions(resp, model_fallback, chunk_tx,&crate::provider::advertised_function_names(&body)).await
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn posted_native_function_catalogue_controls_sse_normalization() {
+        use std::io::{Read,Write};
+        use serde_json::json;
+        for name in ["write_file","unadvertised","studio_call"] {
+            let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+            let worker=std::thread::spawn(move || {
+                let (mut socket,_)=listener.accept().unwrap();let mut bytes=vec![];let mut buffer=[0u8;1024];
+                let end=loop {let count=socket.read(&mut buffer).unwrap();assert!(count>0);bytes.extend_from_slice(&buffer[..count]);if let Some(pos)=bytes.windows(4).position(|w|w==b"\r\n\r\n"){break pos+4;}};
+                let header=std::str::from_utf8(&bytes[..end]).unwrap();
+                let length=header.lines().find_map(|line|line.to_lowercase().strip_prefix("content-length:").map(|n|n.trim().parse::<usize>().unwrap())).unwrap();
+                while bytes.len()<end+length {let count=socket.read(&mut buffer).unwrap();assert!(count>0);bytes.extend_from_slice(&buffer[..count]);}
+                let request:serde_json::Value=serde_json::from_slice(&bytes[end..end+length]).unwrap();
+                assert_eq!(request["tools"][0]["function"]["name"],"write_file");assert_eq!(request["stream"],true);
+                let arguments=json!({"path":"workspace:/é.txt","content":"Exact\n🙂","expected_version":"missing"}).to_string();
+                let chunk=json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":name,"arguments":arguments}}]},"finish_reason":"tool_calls"}]});
+                let body=format!("data: {chunk}\n\ndata: [DONE]\n\n");
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            });
+            let (tx,rx)=std::sync::mpsc::channel();
+            let body=json!({"messages":[],"tools":[{"type":"function","function":{"name":"write_file","parameters":{"type":"object"}}}]});
+            let response=super::post_openai_chat_completions_stream(&reqwest::Client::new(),&format!("http://{address}"),|r|r,body,std::time::Duration::from_secs(5),"fixture",&tx).await;
+            if name=="write_file" {let text=response.unwrap().text;let value:serde_json::Value=serde_json::from_str(text.strip_prefix("TOOL_JSON: ").unwrap()).unwrap();assert_eq!(value["arguments"]["content"],"Exact\n🙂");}
+            else {assert!(response.is_err());assert!(rx.try_iter().all(|chunk|chunk.is_empty()),"Only empty progress heartbeats may precede validation");}
+            worker.join().unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn final_native_sse_frame_without_newline_keeps_finish_reason() {
+        use std::io::{BufRead,Write};
+        let server=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let address=server.local_addr().unwrap();
+        let worker=std::thread::spawn(move||{
+            let (stream,_)=server.accept().unwrap();let mut reader=std::io::BufReader::new(stream);
+            loop {let mut line=String::new();reader.read_line(&mut line).unwrap();if line=="\r\n"||line.is_empty(){break;}}
+            let body=r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"studio_call","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+            let mut stream=reader.into_inner();write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+        });
+        let response=reqwest::Client::new().get(format!("http://{address}")).send().await.unwrap();
+        let (tx,_rx)=std::sync::mpsc::channel();
+        let completed=super::read_openai_sse_with_functions(response,"fixture",&tx,&["studio_call".into()]).await.unwrap();
+        assert_eq!(completed.done_reason.as_deref(),Some("tool_calls"));assert!(completed.text.starts_with("TOOL_JSON:"));worker.join().unwrap();
+    }
     use super::apply_openai_delta;
 
     #[test]

@@ -2,7 +2,7 @@
 
 > **akasha-os** : les skills/plugins du daemon ne sont pas les modules Preview — voir [extensions vs akasha-os](extensions-vs-akasha-os.md).
 
-## ## 9. Skills (capacités supplémentaires)
+## 9. Skills (capacités supplémentaires)
 
 
 Vous pouvez **demander à l'agent d'installer un skill** depuis une URL. Par exemple, dans le chat : « Installe le skill bankr depuis https://github.com/BankrBot/skills/tree/main/bankr ». L'agent utilisera l'outil d'installation, téléchargera le skill, puis le rechargera.
@@ -16,7 +16,7 @@ Vous pouvez **demander à l'agent d'installer un skill** depuis une URL. Par exe
 
 ---
 
-## ## 10. Canaux (Telegram, Slack, Discord)
+## 10. Canaux (Telegram, Slack, Discord)
 
 
 - **Telegram** : enregistrez le token du bot avec `akasha vault set telegram_bot_token VOTRE_TOKEN`, puis définissez la variable d'environnement `AKASHA_TELEGRAM_ENABLED=1`. Le bot répond aux commandes `/akasha <message>` ou `/start`. Pour les briefs / notifies (Life layer), renseignez aussi `AKASHA_TELEGRAM_NOTIFY_CHAT_ID` (UI Connecteurs) — le daemon peut alors appeler `POST /api/channels/notify`.

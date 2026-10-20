@@ -31,10 +31,107 @@ pub async fn execute_tool_call(
     tool_name: &str,
     args: &[String],
 ) -> (bool, String, Option<String>) {
-    crate::api_tool_dispatch::execute::execute_tool_call_impl(
+    let decoded = if tool_name == "studio_call" {
+        match if args.is_empty() {Err("missing Studio envelope".to_string())} else {crate::studio_tool_contract::decode(&args.join(" "))} {
+            Ok(value) => Some(value),
+            Err(error) => {
+                return (
+                    false,
+                    serde_json::json!({"schema_version":1,"success":false,"error":error})
+                        .to_string(),
+                    None,
+                )
+            }
+        }
+    } else {
+        None
+    };
+    let name = decoded
+        .as_ref()
+        .map(|call| call.envelope.tool.as_str())
+        .unwrap_or(tool_name);
+    let argv = decoded
+        .as_ref()
+        .map(|call| call.argv.as_slice())
+        .unwrap_or(args);
+    let studio = ctx
+        .store_path
+        .and_then(|path| akasha_store::TaskStore::open(path).ok())
+        .and_then(|store| {
+            store
+                .lineage_root_studio_project_id(ctx.task_id)
+                .ok()
+                .flatten()
+        })
+        .is_some();
+    let operation = if studio {
+        let Some(db) = ctx.store_path else {
+            return (false, "Studio task store missing".into(), None);
+        };
+        let Some(root) = ctx.workspace_root else {
+            return (false, "Studio workspace missing".into(), None);
+        };
+        let role = akasha_store::TaskStore::open(db)
+            .ok()
+            .and_then(|store| store.get(ctx.task_id).ok().flatten())
+            .map(|task| (task.assigned_agent, task.status));
+        let Some((role, status)) = role else {
+            return (false, "Studio task context unavailable".into(), None);
+        };
+        if matches!(
+            status,
+            akasha_store::TaskStatus::Paused
+                | akasha_store::TaskStatus::Cancelled
+                | akasha_store::TaskStatus::Interrupted
+                | akasha_store::TaskStatus::WaitingUserInput
+                | akasha_store::TaskStatus::Failed
+        ) {
+            return (false, "task stopped or waiting for input".into(), None);
+        }
+        if let Err(error) = crate::studio_role_policy::check(&role, name, argv, Some(root))
+            .and_then(|_| crate::studio_capabilities::check(&executor.policy, &role, name))
+        {
+            return (false, error, None);
+        }
+        match crate::studio_tool_contract::Operation::begin(
+            db,
+            ctx.task_id,
+            name,
+            argv,
+            root,
+            &executor.policy,
+            decoded.as_ref(),
+        )
+        .await
+        {
+            Ok(operation) => {
+                if let Some((ok, ref result)) = operation.cached {
+                    return (ok, result.clone(), None);
+                }
+                Some(operation)
+            }
+            Err(error) => {
+                return (
+                    false,
+                    serde_json::json!({"schema_version":1,"success":false,"error":error})
+                        .to_string(),
+                    None,
+                )
+            }
+        }
+    } else if decoded.is_some() {
+        return (
+            false,
+            "versioned Studio calls require a Studio task".into(),
+            None,
+        );
+    } else {
+        None
+    };
+    let result = crate::api_tool_dispatch::execute::execute_tool_call_impl(
         executor,
-        tool_name,
-        args,
+        name,
+        argv,
         ctx.process_registry,
         ctx.long_term_client,
         ctx.task_id,
@@ -47,6 +144,15 @@ pub async fn execute_tool_call(
         ctx.browser_registry,
         ctx.workspace_root,
         ctx.session_id,
+        decoded.as_ref().and_then(|call|call.envelope.approval_identity.as_deref()),
     )
-    .await
+    .await;
+    if let Some(operation) = operation {
+        match operation.finish(result.0,&result.1) {
+            Ok(output)=>(serde_json::from_str::<serde_json::Value>(&output).ok().and_then(|v|v["success"].as_bool()).unwrap_or(false),output,result.2),
+            Err(error)=>(false,serde_json::json!({"schema_version":1,"success":false,"error":"operation_result_unknown","detail":error,"output":result.1}).to_string(),result.2)
+        }
+    } else {
+        result
+    }
 }

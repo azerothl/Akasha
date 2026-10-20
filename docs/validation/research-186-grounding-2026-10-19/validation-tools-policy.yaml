@@ -1,0 +1,2 @@
+web_search_enabled: false
+allowed_web_domains: ["doc.rust-lang.org"]

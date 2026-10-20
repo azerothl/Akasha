@@ -91,6 +91,9 @@ jobs:
         run: |
           pip install jsonschema
           python scripts/validate-cookbook-recipes.py
+      - name: Validate feature registry
+        run: python scripts/validate-feature-registry.py
+
       - name: E2E tests (daemon)
         if: needs.changes.outputs.daemon_e2e == 'true'
         env:
@@ -185,6 +188,62 @@ jobs:
       - name: Playwright E2E
         working-directory: apps/akasha-ui
         run: npm run test:e2e
+
+  evals-mock-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-evals-mock-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-evals-mock-
+
+      - name: Run Akasha evals (mock CI profile)
+        env:
+          AKASHA_SPEC_DIR: ${{ github.workspace }}/spec
+          AKASHA_EVALS_PROFILE: mock-ci
+          AKASHA_EVALS_JSON: "1"
+          GITHUB_SHA: ${{ github.sha }}
+        run: cargo run -p akasha-evals --release
+  release-artifact-first-boot-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gh (release download)
+        run: type gh >/dev/null 2>&1 || sudo apt-get update && sudo apt-get install -y gh
+
+      - name: First-boot smoke (published Linux CPU zip)
+        env:
+          RELEASE_TAG: v0.11.0
+          GH_TOKEN: ${{ github.token }}
+          SMOKE_EVIDENCE_DIR: ${{ runner.temp }}/release-first-boot
+        run: bash scripts/smoke-release-artifact-linux.sh
+
+      - name: Preserve first-boot diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-first-boot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-first-boot
+          if-no-files-found: warn
+          retention-days: 7
 
   embedded-llama-cpp-linux:
     needs: changes

@@ -63,6 +63,8 @@ def select_checks(paths, root=ROOT, force_full=False):
             continue
         if path.startswith("docs/user/") or path == "docs/user_guide_final.md":
             return full_plan(f"runtime documentation: {path}")
+        if path.startswith("spec/skills/"):
+            return full_plan(f"runtime skill: {path}")
         if (path in {"README.md", "AGENTS.md", "LICENSE", "LICENSE.md", ".gitignore"}
                 or (path.endswith(".md") and path.startswith(("docs/", "spec/")))):
             continue
