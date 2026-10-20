@@ -134,7 +134,7 @@ mod tests {
         assert!(for_workspace(&roundtrip,&root).can_run_command("npm"));
         std::fs::write(&path, "# empty config\n").unwrap();
         assert!(for_workspace(&load(&path, dir.path()).unwrap(),&root).can_run_command("npm"));
-        let mut saved = default.config_value().unwrap();
+        let mut saved = serde_json::to_value(default.config_value().unwrap()).unwrap();
         saved["allowed_write_paths"] = json!([]);
         assert!(!for_workspace(&decode(saved, dir.path()).unwrap(),&root).can_write(&root.join("game.ts")));
         std::fs::write(&path, "allowed_read_paths: [").unwrap();

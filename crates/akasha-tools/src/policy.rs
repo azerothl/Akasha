@@ -208,10 +208,10 @@ impl ToolsPolicy {
         Ok(())
     }
 
-    pub fn config_value(&self) -> anyhow::Result<serde_json::Value> {
-        let mut value = serde_json::to_value(self)?;
-        if let Some(fields) = value.as_object_mut() {
-            for key in &self.studio_default_fields { fields.remove(key); }
+    pub fn config_value(&self) -> anyhow::Result<serde_yaml::Value> {
+        let mut value = serde_yaml::to_value(self)?;
+        if let Some(fields) = value.as_mapping_mut() {
+            for key in &self.studio_default_fields { fields.remove(serde_yaml::Value::String(key.clone())); }
         }
         Ok(value)
     }
