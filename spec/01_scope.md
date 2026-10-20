@@ -18,7 +18,7 @@
 
 ### Mémoire
 - [x] Mémoire court terme (session volatile)
-- [x] Mémoire long terme (persistante chiffrée AES-256)
+- [x] Mémoire long terme (SQLite `memory.db` en clair ; chiffrement au repos **non livré** — cible S-MEM-05 / FR-005)
 - [x] Indexation vectorielle (embeddings)
 - [x] SQLite local standalone
 

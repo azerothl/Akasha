@@ -1,0 +1,14 @@
+
+> akasha-ui@0.11.0 test
+> vitest run researchQuality.test.ts researchReportExport.test.ts
+
+
+ RUN  v2.1.9 C:/Users/azero/.codex/worktrees/ui-audit-delivery/Akasha/apps/akasha-ui
+
+ ✓ src/researchQuality.test.ts (3 tests) 2ms
+ ✓ src/researchReportExport.test.ts (3 tests) 21ms
+
+ Test Files  2 passed (2)
+      Tests  6 passed (6)
+   Start at  15:18:45
+   Duration  411ms (transform 121ms, setup 0ms, collect 167ms, tests 23ms, environment 0ms, prepare 160ms)

@@ -1,0 +1,34 @@
+{
+  "id": "dr_56cc6447416e4ff695386ef754cf0cf3",
+  "topic": "Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) : organisation mémoire, accès par indice, ajout/retrait au début et à la fin, complexités amorties et usages. Citer les documents lus et signaler les limites, sans développement hors sujet. Sources officielles à lire :\nhttps://doc.rust-lang.org/std/vec/index.html\nhttps://doc.rust-lang.org/std/collections/vec_deque/index.html\nhttps://doc.rust-lang.org/std/collections/index.html\nhttps://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+  "phase": "cancelled",
+  "round": 0,
+  "max_rounds": 1,
+  "branches": [
+    {
+      "id": "branch_plan",
+      "label": "Planning",
+      "status": "running",
+      "sub_agents": [
+        {
+          "id": "branch_plan_planner_3633fba3edfd4fef816ce4711085a959",
+          "parent_branch_id": "branch_plan",
+          "role": "planner",
+          "label": "Research plan",
+          "status": "running"
+        }
+      ]
+    }
+  ],
+  "evolving_report": "",
+  "findings": [],
+  "category": "general",
+  "providers_used": [],
+  "research_plan": "",
+  "plan_sub_questions": [],
+  "report_markdown": null,
+  "report_meta": null,
+  "search_degraded": true,
+  "started_at": "2026-10-19T21:28:05.346808400+00:00",
+  "finished_at": "2026-10-19T21:29:07.136733500+00:00"
+}

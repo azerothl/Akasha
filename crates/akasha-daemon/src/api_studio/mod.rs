@@ -762,7 +762,7 @@ pub fn studio_project_summary_prefix(project_root: &Path) -> Option<String> {
 pub fn studio_code_mode_message_prefix(mode: &str) -> Option<String> {
     match mode.trim().to_lowercase().as_str() {
         "plan" => Some(
-            "[Mode Code Studio — PLANIFICATION : priorité analyse et mise à jour de CODE_STUDIO_PLAN.md ; pas d’implémentation ni commandes mutatrices sauf demande explicite.]\n\n"
+            "[Mode Code Studio — PLANIFICATION : rôle studio_planner, lecture du dépôt et seule écriture de CODE_STUDIO_PLAN.md. Shell, implémentation, extensions et délégation désactivés. Passer en mode implémentation pour modifier les sources.]\n\n"
                 .to_string(),
         ),
         "implement" => Some(
@@ -2137,11 +2137,12 @@ pub(crate) fn studio_project_verify_timeout_sec(project_root: &Path) -> u64 {
         .max(1)
 }
 
-/// After an agent task on a studio disk, run build/check when possible. Err = verify failed (task should fail).
-pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), String> {
+/// Run the configured build/check. Ok(true) = command passed; Ok(false) = skipped;
+/// Err = configured verification failed, including when a weaker fallback bundles successfully.
+pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<bool, String> {
     let meta = load_studio_meta(project_root);
     if meta.as_ref().map(|m| m.verify_skip).unwrap_or(false) {
-        return Ok(());
+        return Ok(false);
     }
     let timeout_sec = meta
         .as_ref()
@@ -2150,7 +2151,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
         .min(3600);
     let argv: Vec<String> = if let Some(v) = meta.as_ref().and_then(|m| m.verify_argv.as_ref()) {
         if v.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         v.clone()
     } else if project_root.join("package.json").is_file() {
@@ -2158,7 +2159,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
     } else if project_root.join("Cargo.toml").is_file() {
         vec!["cargo".into(), "check".into()]
     } else {
-        return Ok(());
+        return Ok(false);
     };
     if !argv_looks_safe(&argv) {
         return Err("verify_argv in .akasha-studio.json is invalid or unsafe".into());
@@ -2166,7 +2167,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
     let is_npm_run_build =
         argv.len() == 3 && argv[0] == "npm" && argv[1] == "run" && argv[2] == "build";
     match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-        Ok((Some(0), _, _)) => Ok(()),
+        Ok((Some(0), _, _)) => Ok(true),
         Ok((mut code, mut out, mut err)) => {
             let first_err = format_verify_failure(code, &out, &err);
             if !is_npm_run_build {
@@ -2179,7 +2180,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
                 fix_notes.push("npm install (dépendances manquantes détectées)".to_string());
                 try_npm_install_autofix(project_root, timeout_sec).await;
                 match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                    Ok((Some(0), _, _)) => return Ok(()),
+                    Ok((Some(0), _, _)) => return Ok(true),
                     Ok((c, o, e)) => {
                         code = c;
                         out = o;
@@ -2199,7 +2200,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
                     Ok(Some(note)) => {
                         fix_notes.push(note.clone());
                         match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                            Ok((Some(0), _, _)) => return Ok(()),
+                            Ok((Some(0), _, _)) => return Ok(true),
                             Ok((c, o, e)) => {
                                 code = c;
                                 out = o;
@@ -2225,7 +2226,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
                                 "fichier {AKASHA_TEST_SHIM_REL} (globals describe/it/expect)"
                             ));
                             match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                                Ok((Some(0), _, _)) => return Ok(()),
+                                Ok((Some(0), _, _)) => return Ok(true),
                                 Ok((c2, o2, e2)) => {
                                     return Err(format!(
                                         "{first_err}\n\n[Tentatives automatiques : {}]\n{}",
@@ -2265,7 +2266,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
                         "secours: npm exec -- vite build (sans étape tsc du script build)".into(),
                     );
                     match studio_run_command_capture(project_root, &vite_argv, timeout_sec).await {
-                        Ok((Some(0), _, _)) => return Ok(()),
+                        Ok((Some(0), _, _)) => return Err(format!("{}\n\n[Tentatives automatiques : {}]\nVite fallback passed, but the configured build still failed (TypeScript step not verified).",format_verify_failure(code,&out,&err),fix_notes.join(" ; "))),
                         Ok((cv, ov, ev)) => {
                             fix_notes.push(format!(
                                 "vite build secours — {}",

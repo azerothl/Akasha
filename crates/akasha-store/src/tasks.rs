@@ -156,6 +156,20 @@ impl TaskStore {
         if has_studio_pid == 0 {
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN studio_project_id TEXT", []);
         }
+        let has_outcome: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='outcome_json'",
+            [], |r| r.get(0),
+        )?;
+        if has_outcome == 0 {
+            // Another connection may have migrated between the probe and ALTER TABLE.
+            if let Err(error) = conn.execute("ALTER TABLE tasks ADD COLUMN outcome_json TEXT", []) {
+                let migrated: i32 = conn.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='outcome_json'",
+                    [], |r| r.get(0),
+                )?;
+                if migrated == 0 { return Err(error.into()); }
+            }
+        }
         crate::todos::create_task_todos_table(&conn)?;
         Ok(Self { conn })
     }
@@ -360,10 +374,57 @@ impl TaskStore {
     pub fn update_status(&self, id: Uuid, status: TaskStatus) -> anyhow::Result<()> {
         let now = Utc::now();
         self.conn.execute(
-            "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            "UPDATE tasks SET status = ?1, updated_at = ?2, outcome_json = CASE WHEN ?1 IN ('running','queued') THEN NULL ELSE outcome_json END WHERE id = ?3",
             rusqlite::params![status.as_str(), now.to_rfc3339(), id.to_string()],
         )?;
         Ok(())
+    }
+
+    /// Conditional transitions preserve a concurrent cancellation or pause.
+    pub fn transition_if(&self,id:Uuid,expected:&[TaskStatus],status:TaskStatus)->anyhow::Result<bool>{
+        if expected.is_empty(){return Ok(false);}
+        let mut values=vec![status.as_str().to_string(),Utc::now().to_rfc3339(),id.to_string()];
+        values.extend(expected.iter().map(|value|value.as_str().to_string()));
+        let slots=(4..4+expected.len()).map(|n|format!("?{n}")).collect::<Vec<_>>().join(",");
+        let changed=self.conn.execute(&format!("UPDATE tasks SET status=?1,updated_at=?2,outcome_json=CASE WHEN ?1 IN ('running','queued') THEN NULL ELSE outcome_json END WHERE id=?3 AND status IN ({slots})"),rusqlite::params_from_iter(values))?;
+        Ok(changed==1)
+    }
+
+    /// Commit status and outcome together. A concurrent stop/watchdog failure wins over completion.
+    pub fn finalize_outcome(
+        &self, id: Uuid, proposed: TaskStatus, mut outcome: serde_json::Value,
+    ) -> anyhow::Result<(TaskStatus, serde_json::Value)> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
+        let (previous,previous_outcome): (String,Option<String>) = tx.query_row("SELECT status,outcome_json FROM tasks WHERE id = ?1", [id.to_string()], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        let previous = TaskStatus::from_str(&previous);
+        let status = if matches!(previous, TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Paused | TaskStatus::Interrupted | TaskStatus::WaitingUserInput) {
+            if let Some(saved)=previous_outcome.and_then(|raw|serde_json::from_str(&raw).ok()) {
+                outcome=saved;
+                outcome["acceptance_verified"]=serde_json::json!(false);
+            } else {
+                outcome["termination_reason"] = serde_json::json!(previous.as_str());
+                outcome["reason"] = serde_json::json!("Task stopped before finalization; existing status preserved.");
+                outcome["result"] = serde_json::json!(if previous == TaskStatus::Failed { "failed" } else { "stopped" });
+                outcome["acceptance_verified"] = serde_json::json!(false);
+            }
+            previous
+        } else { proposed };
+        outcome["status"] = serde_json::json!(status.as_str());
+        tx.execute("UPDATE tasks SET status = ?1, outcome_json = ?2, updated_at = ?3 WHERE id = ?4",
+            rusqlite::params![status.as_str(), outcome.to_string(), Utc::now().to_rfc3339(), id.to_string()])?;
+        tx.commit()?;
+        Ok((status, outcome))
+    }
+
+    pub fn get_outcome(&self, id: Uuid) -> anyhow::Result<Option<serde_json::Value>> {
+        let raw: Option<String> = self.conn.query_row("SELECT outcome_json FROM tasks WHERE id = ?1", [id.to_string()], |r| r.get(0))?;
+        raw.map(|s| serde_json::from_str(&s).map_err(Into::into)).transpose()
+    }
+
+    /// Restore a failed enqueue without overwriting a concurrent stop or worker.
+    pub fn rollback_queued_resume(&self, id: Uuid, status: TaskStatus, outcome: Option<&serde_json::Value>) -> anyhow::Result<bool> {
+        Ok(self.conn.execute("UPDATE tasks SET status=?1,outcome_json=?2,updated_at=?3 WHERE id=?4 AND status='queued'",
+            rusqlite::params![status.as_str(),outcome.map(|v|v.to_string()),Utc::now().to_rfc3339(),id.to_string()])? == 1)
     }
 
     pub fn get_all(&self) -> anyhow::Result<Vec<Task>> {

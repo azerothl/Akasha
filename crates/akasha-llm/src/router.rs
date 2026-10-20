@@ -770,39 +770,43 @@ mod tests {
 
     #[tokio::test]
     async fn router_complete_uses_registered_local_provider() {
-        let config = RoutingConfig::default_config();
-        let mut router = LLMRouter::new(config);
-        let mock_text = "mock local model reply";
-        router.register_provider(Arc::new(MockLocalProvider {
-            response_text: mock_text.to_string(),
-        }));
-        router.set_primary_route(
-            "conversation",
-            RouteEntry {
-                provider: "mock_local".into(),
-                model: "default".into(),
-                config: None,
-            },
-        );
-        let request = CompletionRequest {
-            prompt: "Hello".into(),
-            max_tokens: Some(10),
-            temperature: Some(0.0),
-            preferred_task_type: Some("conversation".into()),
-            system_prompt: None,
-            image_data_urls: None,
-            top_p: None,
-            top_k: None,
-            frequency_penalty: None,
-            presence_penalty: None,
-            repeat_penalty: None,
-            num_ctx: None,
-            num_gpu: None,
-            thinking_level: None,
-        };
-        let response = router.complete(&request).await.expect("complete should succeed");
-        assert_eq!(response.text, mock_text);
-        assert_eq!(response.model_used, "mock");
+        for retries in [0, 2] {
+            let mut config = RoutingConfig::default_config();
+            config.global.default_max_retries = Some(retries);
+            let mut router = LLMRouter::new(config);
+            let mock_text = "mock local model reply";
+            router.register_provider(Arc::new(MockLocalProvider {
+                response_text: mock_text.to_string(),
+            }));
+            router.set_primary_route(
+                "conversation",
+                RouteEntry {
+                    provider: "mock_local".into(),
+                    model: "default".into(),
+                    config: None,
+                },
+            );
+            let request = CompletionRequest {
+                prompt: "Hello".into(),
+                max_tokens: Some(10),
+                temperature: Some(0.0),
+                preferred_task_type: Some("conversation".into()),
+                system_prompt: None,
+                tools: None,
+                image_data_urls: None,
+                top_p: None,
+                top_k: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                repeat_penalty: None,
+                num_ctx: None,
+                num_gpu: None,
+                thinking_level: None,
+            };
+            let response = router.complete(&request).await.expect("complete should succeed");
+            assert_eq!(response.text, mock_text);
+            assert_eq!(response.model_used, "mock");
+        }
     }
 
     #[test]

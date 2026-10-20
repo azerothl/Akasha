@@ -101,6 +101,7 @@ If uncertain, prefer false for both booleans.";
     );
 
     let req = CompletionRequest {
+        tools: None,
         prompt: user,
         max_tokens: Some(120),
         temperature: Some(0.0),

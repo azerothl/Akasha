@@ -1,0 +1,10 @@
+{
+  "error": "research_no_evidence",
+  "live_request": true,
+  "phase": "error",
+  "model": "qwen3.5:9b",
+  "max_rounds": 1,
+  "report_is_null": true,
+  "max_time_secs": 60,
+  "round": 0
+}

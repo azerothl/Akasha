@@ -805,8 +805,34 @@ pub(crate) fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i].trim();
+        if let Some(json) = line.strip_prefix("TOOL_JSON:") {
+            out.push(("studio_call".into(), vec![json.trim().into()]));
+            i += 1;
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("TOOL:") {
             let rest = rest.trim();
+            // Preserve the MCP JSON object verbatim; shell-style quote splitting changes its keys/values.
+            if let Some((name, json)) = rest.split_once(char::is_whitespace) {
+                if (name.starts_with("mcp_") || name=="lsp_query") && tool_name_is_safe_identifier(name) {
+                    out.push((name.to_string(), vec![json.trim().to_string()]));
+                    i += 1;
+                    continue;
+                }
+            }
+            if let Some(payload)=rest.strip_prefix("terminal_session ") {
+                if let Some(json)=payload.strip_prefix("start ").filter(|value|value.trim_start().starts_with('{')) {
+                    out.push(("terminal_session".into(),vec!["start".into(),json.trim().into()])); i+=1; continue;
+                }
+                if let Some(write)=payload.strip_prefix("write ") {
+                    if let Some((id,input))=write.split_once(char::is_whitespace) {
+                        out.push(("terminal_session".into(),vec!["write".into(),id.into(),input.trim().into()])); i+=1; continue;
+                    }
+                }
+            }
+            let mut quoted=false;let mut escaped=false;
+            for character in rest.chars(){if escaped{escaped=false;continue;}if character=='\\'{escaped=true;}else if character=='"'{quoted=!quoted;}}
+            if quoted {out.push(("studio_call".into(),vec!["invalid incomplete legacy quotes".into()]));i+=1;continue;}
             // Split by whitespace, respecting double-quoted args (so run_command -H "Bearer $VAR" works)
             let parts: Vec<String> = split_whitespace_respecting_quotes(rest);
             if let Some((name, fixed_args)) = parts.split_first() {
@@ -824,7 +850,7 @@ pub(crate) fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String
                     // tools like apply_patch / edit_file that need preserved whitespace).
                     i += 1;
                     let body_start = i;
-                    while i < lines.len() && !lines[i].trim_start().starts_with("TOOL:") {
+                    while i < lines.len() && !lines[i].trim_start().starts_with("TOOL:") && !lines[i].trim_start().starts_with("TOOL_JSON:") {
                         i += 1;
                     }
                     // Trim trailing blank lines from the body

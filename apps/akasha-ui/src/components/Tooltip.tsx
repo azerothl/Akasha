@@ -12,6 +12,7 @@ import {
   safePolygon,
 } from "@floating-ui/react";
 import { useState, type ReactNode } from "react";
+import { useI18n } from "../useI18n";
 
 type Placement = "top" | "bottom" | "left" | "right";
 
@@ -22,9 +23,10 @@ type Props = {
   /** When true, wraps children with an info "?" button instead of using children as trigger. */
   info?: boolean;
   className?: string;
+  label?: string;
 };
 
-export function Tooltip({ content, children, placement = "top", info = false, className }: Props) {
+export function Tooltip({ content, children, placement = "top", info = false, className, label }: Props) {
   const [open, setOpen] = useState(false);
 
   const { refs, floatingStyles, context } = useFloating({
@@ -50,7 +52,7 @@ export function Tooltip({ content, children, placement = "top", info = false, cl
           type="button"
           ref={refs.setReference}
           className="akasha-tooltip-trigger"
-          aria-label="?"
+          aria-label={label ?? (typeof content === "string" ? content : "Information")}
           {...getReferenceProps()}
         >
           ?
@@ -79,8 +81,9 @@ export function Tooltip({ content, children, placement = "top", info = false, cl
 
 /** Compact info icon with tooltip — replaces static hint paragraphs. */
 export function InfoTip({ label, content }: { label?: string; content: ReactNode }) {
+  const { locale } = useI18n();
   return (
-    <Tooltip content={content} info placement="top">
+    <Tooltip content={content} label={label ? `${locale === "en" ? "Help" : "Aide"} : ${label}` : undefined} info placement="top">
       {label ? <span className="sr-only">{label}</span> : null}
     </Tooltip>
   );
