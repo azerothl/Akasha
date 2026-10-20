@@ -181,8 +181,11 @@ Liste complète des commandes et options : [spec/user_guide.md](spec/user_guide.
 | [spec/33_agents_tools_orchestrator_skills.md](spec/33_agents_tools_orchestrator_skills.md) | Feuille de route agents, outils machine, skills, conteneur, UI |
 | [spec/runbooks/](spec/runbooks/) | Runbooks (diagnostic, redémarrage daemon) |
 | [docs/user_guide.md](docs/user_guide.md) | Renvoi vers le guide complet (spec + API) |
+| [spec/feature_evolution_tracking.md](spec/feature_evolution_tracking.md) | **Registre des fonctionnalités** (statuts impl + doc user/dev, preuves de release) |
 
 Quand le daemon tourne, le guide utilisateur est servi en markdown via **GET /api/docs** (onglet Doc de la TUI et de l’UI web).
+
+**Release courante** : [v0.11.0](https://github.com/azerothl/Akasha/releases/tag/v0.11.0) — clôture documentée dans [spec/dev/releases/roadmap_v0.11.0.md](spec/dev/releases/roadmap_v0.11.0.md).
 
 ---
 
