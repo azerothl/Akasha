@@ -1,6 +1,6 @@
 //! Scoped filesystem evidence. A tool name alone never attests a requested edit.
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -119,7 +119,8 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
             }
         }
     }
-    re.captures_iter(request)
+    let mut goals: Vec<_> = re
+        .captures_iter(request)
         .filter_map(|cap| {
             let verb = cap.name("verb")?;
             if !outside[verb.start()] {
@@ -258,7 +259,30 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
             Some(goals)
         })
         .flatten()
-        .collect()
+        .collect();
+    // Bind only an explicit fronted file and an adjacent edit clause. Never
+    // infer a destination from unrelated prose or from quoted file contents.
+    let fronted = regex::Regex::new(&format!(
+        r#"(?im)(?:^[ \t]*|[;\n]\s*)(?:in|for|dans|pour|sur)\s+(?P<det>{det})(?P<path>{path})\s*,\s*(?P<verb>modify|update|edit|fix|repair|implement|implémente(?:r|z)?|refactor|refactori[sz]e(?:r|z)?|rewrite|overwrite|patch|insert|corrige(?:r|z)?|répare(?:r|z)?|modifie(?:r|z)?|ajoute(?:r|z)?|add|append|prepend|replace|remplace(?:r|z)?|change(?:r|z)?)\s+"#
+    )).unwrap();
+    for cap in fronted.captures_iter(request) {
+        let verb = cap.name("verb").unwrap();
+        let path = cap.name("path").unwrap().as_str();
+        let det = cap.name("det").unwrap().as_str();
+        if !outside[verb.start()]
+            || (!path.starts_with(['`', '"', '\''])
+                && !path.contains(['.', '/', '\\'])
+                && explicit_path_kind(det).is_none())
+        {
+            continue;
+        }
+        for goal in parsed(&format!("{} {}{}", verb.as_str(), det, path)) {
+            if !goals.contains(&goal) {
+                goals.push(goal);
+            }
+        }
+    }
+    goals
 }
 pub(crate) fn has_request(request: &str) -> bool {
     !parsed(request).is_empty()
@@ -412,12 +436,10 @@ pub(crate) fn scoped_paths(
 }
 pub(crate) fn receipt_effects(before: &BTreeMap<String, String>) -> Result<Value, String> {
     let after = capture_paths(&before.keys().map(PathBuf::from).collect::<Vec<_>>())?;
-    Ok(json!(
-        before
-            .iter()
-            .map(|(path, version)| json!({"path":path,"before":version,"after":after[path]}))
-            .collect::<Vec<_>>()
-    ))
+    Ok(json!(before
+        .iter()
+        .map(|(path, version)| json!({"path":path,"before":version,"after":after[path]}))
+        .collect::<Vec<_>>()))
 }
 fn missing(value: &str) -> bool {
     value == "missing"
@@ -1230,14 +1252,12 @@ mod tests {
         let after = capture_paths(&effect.paths()).unwrap();
         effect.observe(&changed, &after);
         assert!(!effect.verified(&after));
-        assert!(
-            paths_for_request(
-                root.path(),
-                "Delete a.txt; Copy a.txt to b.txt",
-                &policy(root.path())
-            )
-            .is_err()
-        );
+        assert!(paths_for_request(
+            root.path(),
+            "Delete a.txt; Copy a.txt to b.txt",
+            &policy(root.path())
+        )
+        .is_err());
     }
     #[test]
     fn removing_content_tracks_the_destination_not_an_unrelated_path() {
@@ -1300,6 +1320,13 @@ mod tests {
     fn implementation_and_common_edit_verbs_bind_explicit_file_targets() {
         for (request, expected) in [
             ("Implement the parser in src/parser.rs", "src/parser.rs"),
+            ("In config.toml, update the port", "config.toml"),
+            ("For src/main.rs, implement the parser", "src/main.rs"),
+            ("Dans config.toml, modifie le port", "config.toml"),
+            (
+                "Pour le fichier `src/my parser.rs`, implémente le parseur",
+                "src/my parser.rs",
+            ),
             ("Implémente le parseur dans src/parser.rs", "src/parser.rs"),
             ("Refactor src/parser.rs", "src/parser.rs"),
             ("Refactorise le parseur dans src/parser.rs", "src/parser.rs"),
