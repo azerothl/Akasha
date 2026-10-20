@@ -132,7 +132,17 @@ jobs:
         env:
           RELEASE_TAG: v0.11.0
           GH_TOKEN: ${{ github.token }}
+          SMOKE_EVIDENCE_DIR: ${{ runner.temp }}/release-first-boot
         run: bash scripts/smoke-release-artifact-linux.sh
+
+      - name: Preserve first-boot diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-first-boot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-first-boot
+          if-no-files-found: warn
+          retention-days: 7
 
   embedded-llama-cpp-linux:
     runs-on: ubuntu-latest

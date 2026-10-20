@@ -28,6 +28,12 @@ LOG="$WORK/smoke.log"
 PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")"
 
 cleanup() {
+  if [[ -n "${SMOKE_EVIDENCE_DIR:-}" ]]; then
+    mkdir -p "$SMOKE_EVIDENCE_DIR"
+    for evidence in "$LOG" "$WORK/task.json" "$WORK/embedded-status.json"; do
+      [[ ! -f "$evidence" ]] || cp -- "$evidence" "$SMOKE_EVIDENCE_DIR/"
+    done
+  fi
   if [[ -n "${DPID:-}" ]]; then
     kill "$DPID" 2>/dev/null || true
     wait "$DPID" 2>/dev/null || true
@@ -84,7 +90,7 @@ log "init_duration_s=$((INIT_END - INIT_START))"
 }
 
 DAEMON_START=$(date +%s)
-./akasha-daemon >>"$LOG" 2>&1 &
+env -u GH_TOKEN -u GITHUB_TOKEN ./akasha-daemon >>"$LOG" 2>&1 &
 DPID=$!
 BASE="http://127.0.0.1:${PORT}"
 
@@ -110,7 +116,7 @@ curl -sf "${BASE}/" | grep -q '"status":"ok"' || { log "::error::GET /"; exit 1;
 curl -sf "${BASE}/api/status" | grep -q '"status":"ok"' || { log "::error::GET /api/status"; exit 1; }
 
 EMBED_STATUS=$(curl -sf "${BASE}/api/router/embedded-status")
-echo "$EMBED_STATUS" | tee -a "$LOG"
+echo "$EMBED_STATUS" | tee "$WORK/embedded-status.json" | tee -a "$LOG"
 echo "$EMBED_STATUS" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('embedded_available') is True, d" \
   || { log "::error::embedded not available"; exit 1; }
 
@@ -130,6 +136,7 @@ deadline=$((INF_START + INFERENCE_TIMEOUT_SECS))
 while [[ $(date +%s) -lt $deadline ]]; do
   sleep 2
   T=$(curl -sf "${BASE}/api/tasks/${TASK_ID}")
+  printf '%s\n' "$T" > "$WORK/task.json"
   ST=$(echo "$T" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
   if [[ "$ST" == "done" || "$ST" == "completed" ]]; then
     INF_END=$(date +%s)
@@ -145,4 +152,9 @@ while [[ $(date +%s) -lt $deadline ]]; do
 done
 
 log "::error::inference timed out after ${INFERENCE_TIMEOUT_SECS}s"
+if [[ -f "$WORK/task.json" ]]; then
+  python3 -m json.tool "$WORK/task.json" | tee -a "$LOG"
+fi
+curl -sf "${BASE}/api/router/embedded-status" | tee "$WORK/embedded-status.json" | tee -a "$LOG" || true
+tail -100 "$LOG" || true
 exit 1
