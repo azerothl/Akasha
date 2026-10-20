@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+mod startup_probe;
 
 const DAEMON_PORT: u16 = 3876;
 const TASK_POLL_INTERVAL_MS: u64 = 1500;
@@ -2685,9 +2686,33 @@ async fn post_agent_profile(body: serde_json::Value, port: Option<u16>) -> Resul
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    startup_probe::start();
+    let mut context = tauri::generate_context!();
+    let benchmark_windows = if startup_probe::output().is_some() {
+        std::env::var_os("AKASHA_UI_STARTUP_PROFILE").map(std::path::PathBuf::from).filter(|p| p.is_absolute()).map(|profile| {
+            let windows = context.config().app.windows.clone();
+            for window in &mut context.config_mut().app.windows { window.create = false; }
+            (windows, profile)
+        })
+    } else { None };
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .setup(move |app| {
+            if let Some((windows, profile)) = &benchmark_windows {
+                // Absolute paths are ignored by WindowConfig; use the builder explicitly.
+                for config in windows {
+                    tauri::WebviewWindowBuilder::from_config(app, config)?.data_directory(profile.clone()).build()?;
+                }
+            }
+            Ok(())
+        })
+        .on_page_load(|webview, payload| {
+            if startup_probe::output().is_some() && payload.event() == tauri::webview::PageLoadEvent::Finished {
+                let _ = webview.eval(startup_probe::SCRIPT);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            startup_probe::record_startup_probe,
             check_health,
             get_router_metrics,
             send_message,
@@ -2811,6 +2836,6 @@ pub fn run() {
             get_agent_profile,
             post_agent_profile
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

@@ -69,7 +69,7 @@ Walkthrough opérateur (~15 min) pour montrer pourquoi Akasha convient en **loca
 
 ## Clôture démo
 
-- **Souveraineté :** `memory.db` + vault sur disque ; voir gap chiffrement [memory_encryption_rfc.md](../../spec/dev/roadmap/memory_encryption_rfc.md).
+- **Souveraineté :** `memory.db` (SQLite **en clair**) + vault chiffré sur disque ; gap chiffrement mémoire : [memory_encryption_rfc.md](../../spec/dev/roadmap/memory_encryption_rfc.md).
 - **Intégration externe :** [memory_api_external.md](../../spec/dev/integrations/memory_api_external.md) — subset stable pour LangGraph sans SDK Mem0.
 
 ## Références

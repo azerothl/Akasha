@@ -8,6 +8,9 @@ use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
+    /// Native function definitions; ignored by providers without this transport. Studio keeps a textual adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
     pub prompt: String,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -55,6 +58,51 @@ fn normalized_thinking_level(level: Option<&str>) -> Option<&'static str> {
         Some(s) if s == "high" => Some("high"),
         _ => None,
     }
+}
+
+/// Collect native arguments completely before exposing a call to the daemon.
+#[derive(Default)]
+pub(crate) struct NativeCalls(std::collections::BTreeMap<usize,(String,String)>);
+impl NativeCalls {
+    pub(crate) fn apply(&mut self,delta:&serde_json::Value)->Result<(),ProviderError>{
+        if let Some(calls)=delta.get("tool_calls").and_then(|v|v.as_array()) {
+            for call in calls {
+                let index=call["index"].as_u64().ok_or_else(||ProviderError::Api("native call index missing".into()))? as usize;
+                if index>=32{return Err(ProviderError::Api("too many native calls".into()));}
+                let entry=self.0.entry(index).or_default();
+                if let Some(name)=call.pointer("/function/name").and_then(|v|v.as_str()){
+                    if entry.0!=name {
+                        if name.starts_with(&entry.0) {entry.0=name.into();} else {entry.0.push_str(name);}
+                    }
+                }
+                if let Some(arguments)=call.pointer("/function/arguments").and_then(|v|v.as_str()){entry.1.push_str(arguments);}
+                if entry.0.len()>128||self.0.values().map(|(_,arguments)|arguments.len()).sum::<usize>()>1024*1024{return Err(ProviderError::Api("native arguments exceed limit".into()));}
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn finish(self,text:String,finish:Option<&str>)->Result<String,ProviderError>{
+        if self.0.is_empty(){return Ok(text);}
+        if !matches!(finish,Some("tool_calls"|"stop")){return Err(ProviderError::Api("native tool generation incomplete; nothing executed".into()));}
+        let mut output=Vec::new();
+        for (_, (name,arguments)) in self.0 {
+            if name!="studio_call"{return Err(ProviderError::Api("unsupported native function".into()));}
+            let value:serde_json::Value=serde_json::from_str(&arguments).map_err(|_|ProviderError::Api("malformed native arguments; nothing executed".into()))?;
+            if !value.is_object(){return Err(ProviderError::Api("native arguments must be an object".into()));}
+            output.push(format!("TOOL_JSON: {value}"));
+        }
+        Ok(output.join("\n"))
+    }
+}
+
+fn normalize_native_completion(json:&serde_json::Value,text:String)->Result<String,ProviderError>{
+    let choice=&json["choices"][0];
+    let mut calls=NativeCalls::default();
+    if let Some(list)=choice.pointer("/message/tool_calls").and_then(|v|v.as_array()) {
+        let list=list.iter().enumerate().map(|(index,call)|{let mut call=call.clone();call["index"]=serde_json::json!(index);call}).collect::<Vec<_>>();
+        calls.apply(&serde_json::json!({"tool_calls":list}))?;
+    }
+    calls.finish(text,choice["finish_reason"].as_str())
 }
 
 fn ollama_think_enabled(level: Option<&str>) -> Option<bool> {
@@ -766,6 +814,7 @@ impl OpenAIProvider {
                 body["reasoning_effort"] = serde_json::json!(level);
             }
         }
+        if let Some(tools)=request.tools.as_ref().filter(|tools|!tools.is_empty()) {body["tools"]=serde_json::json!(tools);body["parallel_tool_calls"]=serde_json::json!(false);}
         body
     }
 
@@ -818,6 +867,7 @@ impl OpenAIProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let text=normalize_native_completion(&json,text)?;
         let usage = json.get("usage").map(|u| TokenUsage {
             prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -972,6 +1022,7 @@ impl OpenRouterProvider {
                 body["reasoning_effort"] = serde_json::json!(level);
             }
         }
+        if let Some(tools)=request.tools.as_ref().filter(|tools|!tools.is_empty()) {body["tools"]=serde_json::json!(tools);body["parallel_tool_calls"]=serde_json::json!(false);}
         body
     }
 }
@@ -1056,6 +1107,7 @@ impl LLMProvider for OpenRouterProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let text=normalize_native_completion(&json,text)?;
         let usage = json.get("usage").map(|u| TokenUsage {
             prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -1304,6 +1356,7 @@ impl AzureOpenAIProvider {
                 body["reasoning_effort"] = serde_json::json!(level);
             }
         }
+        if let Some(tools)=request.tools.as_ref().filter(|tools|!tools.is_empty()) {body["tools"]=serde_json::json!(tools);body["parallel_tool_calls"]=serde_json::json!(false);}
         body
     }
 }
@@ -1367,6 +1420,7 @@ impl LLMProvider for AzureOpenAIProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let text=normalize_native_completion(&json,text)?;
         let usage = json.get("usage").map(|u| TokenUsage {
             prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -2162,6 +2216,7 @@ mod tests {
             return;
         }
         let req = CompletionRequest {
+            tools: None,
             prompt: "Hi".into(),
             max_tokens: Some(10),
             temperature: Some(0.0),
@@ -2210,6 +2265,7 @@ mod tests {
         // consistent with all other OpenAI-compatible providers (prevents unexpected truncation).
         // This mirrors the actual body construction in AzureOpenAIProvider::complete().
         let request = CompletionRequest {
+            tools: None,
             prompt: "test".into(),
             max_tokens: None, // No override → must use the default
             temperature: None,

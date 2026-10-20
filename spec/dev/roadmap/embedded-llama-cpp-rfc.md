@@ -26,7 +26,7 @@ Scope: `akasha-embedded-llm`, `akasha-daemon`, `akasha-cli`, releases Windows CU
 | `AKASHA_EMBEDDED_GGUF_PATH` | Chemin `.gguf` (sinon `{data_dir}/models/embedded/default.gguf`) |
 | `AKASHA_EMBEDDED_N_GPU_LAYERS` | Couches GPU llama.cpp (défaut 99 si CUDA compilé) |
 | `AKASHA_EMBEDDED_MODEL` | Inchangé pour Candle (`qwen3_0_6b`, `baguettotron`) |
-| `AKASHA_DATA_DIR` | Répertoire données (défaut `~/akasha`) |
+| `AKASHA_DATA_DIR` | Répertoire données (défaut `~/akasha`) ; shell / `akasha start` — pas `akasha.env` |
 
 ## Build
 

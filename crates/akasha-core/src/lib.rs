@@ -9,7 +9,11 @@ pub mod spec_dir;
 pub mod spec_loader;
 
 pub use config_merge::{merge_json_fill_missing, merge_yaml_fill_missing};
-pub use env_file::{parse_env_file_content, resolve_tracing_from_akasha_env, AkashaEnvTracing};
+pub use env_file::{
+    apply_data_dir_env_files, env_file_line_entry, env_file_line_key, parse_env_file_content,
+    resolve_tracing_from_akasha_env, warn_env_file_parse_errors, AkashaEnvTracing,
+    EnvFileParseError,
+};
 pub use events::{EventEnvelope, EventType};
 pub use security::{check_prompt_injection, redact, Role, TrustStore, TrustStoreError};
 pub use service_discovery::{

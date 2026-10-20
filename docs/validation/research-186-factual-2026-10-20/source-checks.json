@@ -1,0 +1,42 @@
+[
+  {
+    "url": "https://doc.rust-lang.org/std/vec/index.html",
+    "status": 200,
+    "bytes": 11319,
+    "sha256": "f88a9a74630c27f7f2bab353879e8705fd480221b8de494134db1fbe3692fa2e",
+    "retrieved_utc": "2026-10-19T21:30:34.211863+00:00",
+    "role": "research source and independent verification"
+  },
+  {
+    "url": "https://doc.rust-lang.org/std/collections/vec_deque/index.html",
+    "status": 200,
+    "bytes": 5524,
+    "sha256": "c5b38928f046035f1d98f39800670db4d51772fced30d7fcd2b7654d97252b5b",
+    "retrieved_utc": "2026-10-19T21:30:34.264616+00:00",
+    "role": "research source and independent verification"
+  },
+  {
+    "url": "https://doc.rust-lang.org/std/collections/index.html",
+    "status": 200,
+    "bytes": 42417,
+    "sha256": "1824bc21ff7bb7bec7f6c208531bbcd040d14fbfc9c43ac4392e97c973d88b59",
+    "retrieved_utc": "2026-10-19T21:30:34.401038+00:00",
+    "role": "research source and independent verification"
+  },
+  {
+    "url": "https://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+    "status": 200,
+    "bytes": 330010,
+    "sha256": "273c8e92cb5024b4519190652defeaf4916bc0d88e89494ac129d5ef784410bc",
+    "retrieved_utc": "2026-10-19T21:30:34.556483+00:00",
+    "role": "research source and independent verification"
+  },
+  {
+    "url": "https://doc.rust-lang.org/std/collections/vec_deque/struct.Iter.html",
+    "status": 200,
+    "bytes": 200083,
+    "sha256": "61cce08e558551fd1a7a48b37e527478ac9454e4f0866d51927f8fb576f54881",
+    "retrieved_utc": "2026-10-19T22:10:03.756735+00:00",
+    "role": "independent verification only; not counted among run sources"
+  }
+]

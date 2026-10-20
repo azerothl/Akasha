@@ -19,7 +19,7 @@ export function SteeringQueueBell({ taskId, fetchEndpoint, locale }: Props) {
         className="steering-queue-bell-trigger"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        title={locale === "en" ? "Steering / follow-up queue" : "File steering / follow-up"}
+        title={locale === "en" ? "Messages during or after the task" : "Messages pendant ou après la tâche"}
       >
         <MonoIcon name="queue" />
         {pending > 0 ? <span className="steering-queue-bell-badge">{pending}</span> : null}

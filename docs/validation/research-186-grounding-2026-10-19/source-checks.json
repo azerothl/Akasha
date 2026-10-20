@@ -1,0 +1,37 @@
+[
+  {
+    "url": "https://doc.rust-lang.org/std/vec/index.html",
+    "status": 200,
+    "sha256": "f88a9a74630c27f7f2bab353879e8705fd480221b8de494134db1fbe3692fa2e",
+    "bytes": 11319,
+    "documentation_version": "1.99.1"
+  },
+  {
+    "url": "https://doc.rust-lang.org/std/collections/vec_deque/index.html",
+    "status": 200,
+    "sha256": "c5b38928f046035f1d98f39800670db4d51772fced30d7fcd2b7654d97252b5b",
+    "bytes": 5524,
+    "documentation_version": "1.99.1"
+  },
+  {
+    "url": "https://doc.rust-lang.org/std/collections/index.html",
+    "status": 200,
+    "sha256": "1824bc21ff7bb7bec7f6c208531bbcd040d14fbfc9c43ac4392e97c973d88b59",
+    "bytes": 42417,
+    "documentation_version": "1.99.1"
+  },
+  {
+    "url": "https://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+    "status": 200,
+    "sha256": "273c8e92cb5024b4519190652defeaf4916bc0d88e89494ac129d5ef784410bc",
+    "bytes": 330010,
+    "documentation_version": "1.99.1"
+  },
+  {
+    "url": "https://doc.rust-lang.org/std/vec/struct.Vec.html",
+    "status": 200,
+    "sha256": "3043fc4fa845810446c3c98c4009a890169a8d1f32d35cff23e602a40eb24cbe",
+    "bytes": 955558,
+    "documentation_version": "1.99.1"
+  }
+]
