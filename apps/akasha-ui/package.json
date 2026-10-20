@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@floating-ui/react": "^0.27.19",
-    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/api": "~2.11.1",
     "@tiptap/extension-image": "^3.26.0",
     "@tiptap/extension-link": "^3.26.0",
     "@tiptap/extension-placeholder": "^3.26.0",
