@@ -67,6 +67,12 @@ fi
   log "::error::akasha binaries not found under $EXTRACT"
   exit 1
 }
+for required_spec in 09_event_model.yaml 10_data_model.yaml; do
+  if [[ ! -f "$ROOT/spec/$required_spec" ]]; then
+    log "::error::release artifact is missing spec/$required_spec"
+    exit 1
+  fi
+done
 
 chmod +x "$ROOT/akasha" "$ROOT/akasha-daemon" "$ROOT/akasha-tui"
 [[ -d "$ROOT/scripts" ]] && chmod +x "$ROOT/scripts/"*.sh 2>/dev/null || true
