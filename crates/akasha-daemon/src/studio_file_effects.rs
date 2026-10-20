@@ -15,6 +15,7 @@ enum EndState {
     DirectoryPresent,
     Absent,
     RenameDestination,
+    CopySource,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Goal {
@@ -30,6 +31,8 @@ struct Rename {
     verified: bool,
     #[serde(default)]
     verified_state: Option<String>,
+    #[serde(default)]
+    keep_source: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Scope {
@@ -84,7 +87,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
     // At most one typed noun: adjectives must not consume a later list item.
     let det = r"(?:(?:the|an?|new|le|la|un|une|les|des|uniquement|only|seulement)\s+)*(?:(?:[\p{L}-]+\s+){0,4}?(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{e9}pertoires?)(?:\s+(?:empty|blank|vide|vides))?(?:\s+(?:named|called|nomm\x{e9}e?s?|appel\x{e9}e?s?))?\s+)?";
     let pattern = format!(
-        r#"(?im)(?:^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|append|prepend|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>{det})(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
+        r#"(?im)(?:^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?|[.!?;\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|append|prepend|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|copy|copie(?:r|z)?|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>{det})(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
     );
     let re = regex::Regex::new(&pattern).unwrap();
     // Object-before-path requests: "Add logging to config.txt". Keep this
@@ -147,6 +150,8 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
                     | "unlink"
                     | "rename"
                     | "move"
+                    | "copy"
+                    | "copie"
                     | "supprime"
                     | "efface"
                     | "renomme"
@@ -413,7 +418,14 @@ impl Scope {
                 after.get(&rename.source),
                 after.get(&rename.target),
             ) {
-                if !missing(a) && missing(b) && a == c {
+                let source_matches = if rename.keep_source {
+                    a == b
+                } else {
+                    missing(b)
+                };
+                let destination_changed =
+                    !rename.keep_source || before.get(&rename.target) != Some(c);
+                if !missing(a) && source_matches && a == c && destination_changed {
                     rename.verified = true;
                     rename.verified_state = Some(a.clone());
                 }
@@ -479,6 +491,12 @@ impl Scope {
                                     && r.verified_state.as_ref() == Some(v)
                             })
                     }
+                    EndState::CopySource => self.renames.iter().any(|r| {
+                        r.keep_source
+                            && r.source == g.path
+                            && r.verified
+                            && r.verified_state.as_ref() == Some(v)
+                    }),
                 })
             })
             && self.renames.iter().all(|r| r.verified)
@@ -534,26 +552,38 @@ fn paths_for_request(
     for (verb, source, target, kind) in parsed(request) {
         if matches!(
             verb.as_str(),
-            "rename" | "move" | "renomme" | "d\u{e9}place" | "deplace"
+            "rename" | "move" | "copy" | "copie" | "renomme" | "d\u{e9}place" | "deplace"
         ) && target.is_none()
         {
-            return Err("rename/move target could not be resolved; provide explicit source and destination paths".into());
+            return Err("rename/move/copy target could not be resolved; provide explicit source and destination paths".into());
         }
         let source = resolve(&source)?;
         if let Some(target) = target.filter(|_| {
             matches!(
                 verb.as_str(),
-                "rename" | "move" | "renomme" | "d\u{e9}place" | "deplace"
+                "rename" | "move" | "copy" | "copie" | "renomme" | "d\u{e9}place" | "deplace"
             )
         }) {
             let target = resolve(&target)?;
-            set(source.clone(), EndState::Absent);
+            if source == target {
+                return Err("source and destination paths must differ".into());
+            }
+            let keep_source = matches!(verb.as_str(), "copy" | "copie");
+            set(
+                source.clone(),
+                if keep_source {
+                    EndState::CopySource
+                } else {
+                    EndState::Absent
+                },
+            );
             set(target.clone(), EndState::RenameDestination);
             renames.push(Rename {
                 source,
                 target,
                 verified: false,
                 verified_state: None,
+                keep_source,
             });
         } else {
             set(
@@ -1053,6 +1083,46 @@ mod tests {
             }
         }
         assert!(parsed("Example: `- Create example.txt`").is_empty());
+    }
+    #[test]
+    fn copy_requires_destination_effect_matching_source_and_preserves_source() {
+        for request in [
+            "Copy source.txt to destination.txt",
+            "Please copy source.txt to destination.txt",
+            "Copie source.txt vers destination.txt",
+        ] {
+            let goals = parsed(request);
+            assert_eq!(goals.len(), 1, "{request}");
+            assert_eq!(goals[0].1, "source.txt");
+            assert_eq!(goals[0].2.as_deref(), Some("destination.txt"));
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source.txt");
+            let destination = root.path().join("destination.txt");
+            std::fs::write(&source, "original").unwrap();
+            let mut effect = scope(root.path(), request);
+            let before = capture_paths(&effect.paths()).unwrap();
+            effect.observe(&before, &before);
+            assert!(!effect.verified(&before));
+            std::fs::copy(&source, &destination).unwrap();
+            let after = capture_paths(&effect.paths()).unwrap();
+            effect.observe(&before, &after);
+            assert!(effect.verified(&after), "{request}");
+            let restored: Scope =
+                serde_json::from_str(&serde_json::to_string(&effect).unwrap()).unwrap();
+            assert!(restored.verified(&after));
+            std::fs::write(&destination, "wrong").unwrap();
+            assert!(!effect.verified(&capture_paths(&effect.paths()).unwrap()));
+            std::fs::copy(&source, &destination).unwrap();
+            std::fs::remove_file(&source).unwrap();
+            assert!(!effect.verified(&capture_paths(&effect.paths()).unwrap()));
+        }
+        let root = tempfile::tempdir().unwrap();
+        assert!(has_request("Copy source.txt"));
+        assert!(paths_for_request(root.path(), "Copy source.txt", &policy(root.path())).is_err());
+        assert_eq!(
+            parsed("Copy source.txt to destination.txt; Modify config.txt").len(),
+            2
+        );
     }
     #[test]
     fn explicit_directory_and_file_determiners_require_the_requested_kind() {
