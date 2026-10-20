@@ -10,8 +10,8 @@ Les scénarios de **reprise Studio** (REC-01…REC-09, issue #168) ne font **pas
 
 | Profil | Variable | Usage |
 |--------|----------|--------|
-| **mock CI** (défaut) | `AKASHA_EVALS_PROFILE=mock-ci` | CI GitHub, développement local rapide : 5 evals Phase 8 + 3 scénarios mock agentiques |
-| **modèle** | `AKASHA_EVALS_PROFILE=model` | Phase 8 uniquement ; les runs avec vrai modèle (CPU embarqué, CUDA, Ollama, cloud) se font via les runbooks qualité (`bench_ar_protocol.py --live`, benches embarqués, recettes Studio) |
+| **mock CI** (défaut) | `AKASHA_EVALS_PROFILE=mock-ci` | CI GitHub, développement local rapide : 5 evals Phase 8 + 4 scénarios agentiques déterministes |
+| **Phase 8 statique** | `AKASHA_EVALS_PROFILE=phase8-static` | Les 5 checks statiques Phase 8, sans appel à un modèle |
 
 ## Prérequis
 
@@ -23,17 +23,17 @@ Les scénarios de **reprise Studio** (REC-01…REC-09, issue #168) ne font **pas
 Depuis la racine du dépôt Akasha :
 
 ```bash
-# Profil mock CI (défaut) — 8 scénarios déterministes
+# Profil mock CI (défaut) — 9 scénarios déterministes
 cargo run -p akasha-evals --release
 
-# Rapport JSON (commit CI, latence, liste des scénarios)
+# Rapport JSON (commit, environnement, latence et probes/actions par scénario)
 AKASHA_EVALS_JSON=1 GITHUB_SHA=$(git rev-parse HEAD) cargo run -p akasha-evals --release
 
 # Répertoire spec personnalisé
 AKASHA_SPEC_DIR=/chemin/vers/spec cargo run -p akasha-evals --release
 
-# Phase 8 seulement (pas les mocks agentiques)
-AKASHA_EVALS_PROFILE=model cargo run -p akasha-evals --release
+# Phase 8 seulement (pas les mocks agentiques, aucun modèle appelé)
+AKASHA_EVALS_PROFILE=phase8-static cargo run -p akasha-evals --release
 ```
 
 Sur les environnements Cloud Agent / Linux où le linker C++ l'exige pour les dépendances transitives :
@@ -46,7 +46,8 @@ CXX=g++ cargo run -p akasha-evals --release
 
 - Liste des tests avec `PASS` ou `FAIL`
 - Code de sortie 0 si tous les tests passent, 1 sinon (utilisable en CI)
-- Avec `AKASHA_EVALS_JSON=1`, un objet JSON après le résumé texte
+- Avec `AKASHA_EVALS_JSON=1`, le JSON inclut le commit, l'OS, l'architecture, le GPU détecté, le provider/modèle déclarés, la latence par scénario et les probes `actions`/`tools`.
+- Le profil `mock-ci` ne mesure aucun modèle réel. Le baseline déterministe versionné est `spec/dev/quality/evals_mock_ci_baseline.json`; les performances et résultats de vrais modèles restent à établir séparément.
 
 ## Scénarios (profil mock-ci)
 
@@ -63,11 +64,12 @@ CXX=g++ cargo run -p akasha-evals --release
 - **agentic_tools_policy_refusal** : refus d'outil hors profil, écriture hors chemins autorisés, commande bloquée (`akasha-tools`)
 - **agentic_llm_provider_fallback** : chaîne primary indisponible → fallback mock réussi (`akasha-llm`)
 - **agentic_memory_persisted_restart** : entrée mémoire long terme lisible après fermeture/réouverture SQLite (`akasha-store`)
+- **agentic_scheduled_task_lifecycle** : runs planifiés queued/completed/cancelled et déduplication conservés après réouverture du store (`akasha-store`)
 
 ## Ajouter un scénario
 
 1. Implémenter une fonction `pub fn eval_<nom>() -> EvalResult` dans `crates/akasha-evals/src/lib.rs` ou `src/agentic_mock.rs` (mocks déterministes, pas d'appel réseau).
-2. L'enregistrer dans `run_phase8_evals` ou `run_agentic_mock_evals` selon le périmètre.
+2. L'enregistrer dans `run_phase8_evals_timed` ou `run_agentic_mock_evals_timed` selon le périmètre.
 3. Documenter le nom et la règle de réussite dans ce runbook.
 4. Vérifier localement : `cargo run -p akasha-evals --release`.
 5. Le job CI `evals-mock-ci` exécute automatiquement le profil `mock-ci`.
@@ -85,7 +87,7 @@ Le workflow `.github/workflows/ci.yml` définit le job **`evals-mock-ci`** (Ubun
   run: cargo run -p akasha-evals --release
 ```
 
-**Note :** une refonte du workflow CI est en cours sur la PR codex #165 ; un rebase de la branche evals sera nécessaire après merge de #165 pour résoudre d'éventuels conflits sur `ci.yml`.
+**État au 20 octobre 2026 :** la PR #165 est fusionnée. Le profil `mock-ci` et le job `evals-mock-ci` passent en CI ; le dernier run complet a réussi. Ce résultat ne valide pas des parcours avec modèle réel.
 
 ## Hors périmètre mock CI
 

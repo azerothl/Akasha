@@ -8,7 +8,7 @@ Les mesures NVIDIA réelles restent un **gate opérateur** (P0 / runner `self-ho
 | Artefact | Rôle |
 |----------|------|
 | [`bench_ar_protocol.json`](bench_ar_protocol.json) | 5 prompts FR + candidats tier 1–2 + gate A1 + veille tier 3 |
-| [`bench_ar_protocol.py`](bench_ar_protocol.py) | Runner `--mock` (CI / sans GPU) et `--live` (daemon) |
+| [`bench_ar_protocol.py`](bench_ar_protocol.py) | Runner `--mock` (CI / sans GPU) et `--live` (daemon, modèle vérifié) |
 | `GET /api/capabilities` | Flags GGUF / vision / mmproj / evidence (taxonomie Camelid) |
 | `AKASHA_EMBEDDED_N_BATCH` | Override `n_batch` llama.cpp (défaut 2048 ; boost arch `qwen35`) |
 
@@ -25,7 +25,9 @@ Complète `GET /api/router/embedded-status` (runtime) sans le remplacer.
 
 ## Protocole (5 prompts FR)
 
-Voir `prompts[]` dans le JSON. Métriques : **TTFT**, **tok/s**, **load** (live) ; mock émet des valeurs synthétiques pour valider le wiring.
+Voir `prompts[]` dans le JSON. Le mode live appelle directement `POST /api/complete`, vérifie le provider réellement choisi, le modèle GGUF actif, une réponse non vide et un compte de tokens du moteur. Le champ de route `default` est rapproché de `active_model_id` dans l'état du daemon. Le débit est calculé avec les tokens de sortie réels et le temps de génération, hors chargement et évaluation du prompt. Un seul candidat est configuré par daemon.
+
+Le backend llama.cpp mesure le vrai nombre de tokens prompt/sortie, le TTFT au premier token visible, le chargement du modèle quand il est effectué à la demande, la génération et la durée totale. `load_s` est disponible sur le premier appel d'un daemon frais ; si le modèle est déjà préchargé, la mesure est explicitement absente et le run échoue au contrôle global de chargement. Les autres backends qui ne publient pas ces mesures ne sont pas présentés comme validés. Le rapport inclut le provider, le commit, l'OS, l'architecture, le backend, le périphérique, le GPU détecté et le SHA-256 du modèle si son chemin est lisible.
 
 ## Commandes
 
@@ -34,7 +36,9 @@ Voir `prompts[]` dans le JSON. Métriques : **TTFT**, **tok/s**, **load** (live)
 python3 spec/dev/quality/bench_ar_protocol.py --mock --json
 
 # Live (daemon sur :3876, GGUF présent)
-python3 spec/dev/quality/bench_ar_protocol.py --live --candidate qwen2.5-1.5b-instruct-q4
+python3 spec/dev/quality/bench_ar_protocol.py --live \
+  --candidate qwen2.5-1.5b-instruct-q4 \
+  --expected-model qwen2.5-1.5b-instruct-q4
 
 # Matrice ngl 0 vs 99 — PowerShell existant (GPU)
 # .\spec\dev\quality\bench_embedded_models.ps1 -Matrix
@@ -45,6 +49,10 @@ python3 spec/dev/quality/bench_ar_protocol.py --live --candidate qwen2.5-1.5b-in
 Crash historique : `GGML_ASSERT(n_tokens_all <= cparams.n_batch)` sur arch hybrid.  
 Mitigation code : `n_batch` effectif ≥ 2048 (env `AKASHA_EMBEDDED_N_BATCH`, hint arch via `AKASHA_EMBEDDED_ARCH=qwen35`).  
 Validation produit GPU : coller résultats dans [bench_embedded_results.md](bench_embedded_results.md) avant swap défaut A1.
+
+Le runner utilise le routeur du daemon : `provider` et `max_tokens` transmis à `/api/message` ne sélectionnaient pas le backend. Le mode live exige donc `--candidate` et `--expected-model`; il échoue si le routeur choisit un autre provider/modèle, si la réponse est vide ou si une métrique réelle manque. Il ne prétend pas mesurer les outils ou actions agentiques (`actions` et `tools` sont vides sur ce parcours de complétion).
+
+Le résultat local du 20 octobre 2026 sur RTX 4080 SUPER est un relevé exploratoire, pas une comparaison contrôlée à la baseline RTX 3050 Ti de `bench_embedded_results.md` : modèles, matériel et protocole ne sont pas identiques. Ne pas en déduire un facteur d'accélération. Le run matériel GitHub reste en attente d'un runner NVIDIA disponible.
 
 ## Hors scope de ce socle
 

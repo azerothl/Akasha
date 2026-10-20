@@ -4,6 +4,17 @@ on:
   push:
     branches: [main, "0.*"]
   workflow_dispatch:
+    inputs:
+      run_release_smoke:
+        description: Download a published release and run its first-boot smoke
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: Published release tag to validate when run_release_smoke is true
+        required: false
+        type: string
+        default: v0.11.0
 permissions:
   contents: read
 concurrency:
@@ -221,6 +232,7 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
         run: cargo run -p akasha-evals --release
   release-artifact-first-boot-linux:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_release_smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -231,7 +243,7 @@ jobs:
 
       - name: First-boot smoke (published Linux CPU zip)
         env:
-          RELEASE_TAG: v0.11.0
+          RELEASE_TAG: ${{ inputs.release_tag || 'v0.11.0' }}
           GH_TOKEN: ${{ github.token }}
           SMOKE_EVIDENCE_DIR: ${{ runner.temp }}/release-first-boot
         run: bash scripts/smoke-release-artifact-linux.sh

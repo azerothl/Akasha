@@ -3,7 +3,7 @@
 Suivi : #147 (cache), #148 (sélection CI), #149 (clients Windows),
 #150 (compatibilité CPU/CUDA). État documenté le 18 octobre 2026.
 
-## Changements préparés
+## Changements fusionnés dans la PR #165
 
 La CI calcule les fichiers modifiés avec Git et le graphe inverse des
 dépendances locales Cargo. Le graphe inclut les dépendances optionnelles,
@@ -70,11 +70,28 @@ publish=false permet des répétitions sans publication et peut amorcer des
 caches depuis cette branche. Son coût doit être inclus dans la comparaison :
 lancer un build uniquement pour amorcer le cache n'est pas en soi une économie.
 
-À la date du relevé, le dépôt occupait 5 056 324 727 octets dans 6 caches.
+Au relevé initial, le dépôt occupait 5 056 324 727 octets dans 6 caches.
 Les nouvelles entrées restent soumises au quota et à l'éviction GitHub.
 Vérifier le volume après les premiers runs avant d'ajouter un deuxième niveau
 de cache de compilateur. sccache a été considéré mais n'est pas activé :
 il ajouterait un autre stockage avant de disposer des mesures du premier.
+
+### Mesure après fusion de la PR #165 — 20 octobre 2026
+
+Avant nettoyage, `gh cache list` recensait 18 entrées pour 11 383 834 209 octets.
+L'API d'usage indiquait simultanément 10 253 547 114 octets et 18 entrées ;
+elle n'avait pas encore reflété la dernière entrée de 1 130 287 095 octets.
+Le dépôt a un plafond configuré de 10 Go. Les entrées des PR déjà fusionnées
+#138, #165 et #200 ont été supprimées (10 caches), sans toucher à `main` ni aux
+PR ouvertes. L'inventaire après suppression compte 9 entrées, 4 769 518 092
+octets : 7 caches de `main`, un de #221 et un de #223. L'API d'usage renvoyait
+encore l'ancien relevé juste après le nettoyage, puis a convergé à 4 769 518 092
+octets et 9 entrées au relevé suivant.
+
+Cette réduction remet l'inventaire visible sous le plafond, mais le ticket #147
+reste ouvert : il manque encore deux builds de release comparables, des mesures
+de hits/misses et de durée après changement source, puis la validation des
+archives produites.
 
 Sources :
 - https://github.com/Swatinem/rust-cache
@@ -147,7 +164,7 @@ ce n'est pas la taille de l'entrée sauvegardée.
 
 | Ticket | Preuve locale | Validation GitHub ou matérielle encore requise |
 | --- | --- | --- |
-| #147 | Lockfiles résolus avec --locked ; nettoyage CUDA corrigé ; clés et mesures préparées | Deux runs comparables, hits/misses, tailles sauvegardées, variation source et volume global |
+| #147 | Lockfiles résolus avec --locked ; nettoyage ciblé des 10 caches attachés aux PR fusionnées ; inventaire visible redescendu à 4 769 518 092 octets | Deux runs de release comparables, hits/misses, durées après changement source, convergence du relevé d'usage et validation des archives |
 | #148 | Sélection sur les vrais manifestes et tests de dépendances, déplacements, chemins mixtes et fallback | Runs docs seuls, crate isolée, UI seule et changement transverse ; statut requis |
 | #149 | Imports des anciens clients inspectés ; construction commune et vérification SHA câblées | Deux archives nouvelles, smoke et mesure des transferts/runner |
 | #150 | Import direct nvcuda.dll confirmé dans le daemon publié ; décision NO-GO documentée | Diagnostic natif sur runner sans pilote ; aucune inférence supplémentaire revendiquée |
