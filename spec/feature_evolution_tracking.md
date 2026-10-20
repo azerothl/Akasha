@@ -39,10 +39,10 @@ Contrôle local léger : `python3 scripts/validate-feature-registry.py` (CI job 
 | Runtime | Sessions terminal / PTY et backends | Implemented | OK | OK | `docs/user/commandes.md` (§7bis), `43_session_terminal.md`, `dev/runtime/terminal-backends-roadmap.md` |
 | Integrations | MCP runtime / OAuth / MVP | Implemented | OK | OK | `docs/user/configuration.md` (§8bis), `docs/user/commandes.md`, `dev/integrations/mcp-runtime.md`, `dev/integrations/mcp-oauth.md`, `dev/integrations/mcp-mvp.md` |
 | Plugins | Architecture plugins + reputation + reseau host | Implemented | OK | OK | `docs/user/extensions.md`, `16_plugin_architecture.md`, `27_plugin_reputation_system.md`, `dev/plugins/plugin-host-network.md`, `dev/plugins/plugin-map-view-schema.md` |
-| Memory | Memoire LT + compaction + knowledge graph + user RAG async | Implemented | Partially documented | OK | `06_memory_model.md`, `47_memory_4_layers.md`, `dev/roadmap/kinbot_inspired_roadmap.md` — suivi [#144](https://github.com/azerothl/Akasha/issues/144) |
+| Memory | Memoire LT + compaction + knowledge graph + user RAG async | Implemented | OK | OK | `docs/user/donnees.md`, `06_memory_model.md`, `47_memory_4_layers.md` |
 | Graph | Workspace project graph | Implemented | OK | OK | `docs/user/donnees.md`, `54_workspace_project_knowledge_graph.md` |
 | Security | Menaces, permissions, policy engine | Implemented | OK | OK | `docs/user/configuration.md` (§8 tools_policy), `12_threat_model.md`, `07_security_model.md`, `49_policy_engine.md` |
-| Observability | Metrics, diagnostics, runbooks | Implemented | Partially documented | OK | `observability.md`, `runbooks/01_diagnostic.md`, `runbooks/02_daemon_restart.md` — suivi [#144](https://github.com/azerothl/Akasha/issues/144) |
+| Observability | Metrics, diagnostics, runbooks | Implemented | OK | OK | `docs/user/observabilite.md`, `docs/user/commandes.md`, `observability.md`, `runbooks/` |
 | Channels | Telegram / Slack / Discord / WhatsApp | Implemented (partiel selon canal) | OK | OK | `docs/user/extensions.md`, `22_multichannel_architecture.md`, `44_whatsapp.md` |
 | Mission autonome | Heartbeats, roles, events API | Implemented | OK | OK | `docs/user/mission.md`, `dev/runtime/autonomous-mission.md`, `agent_contracts/` |
 | Cockpit UI | Active work drawer (chat ↔ tasks) | Implemented | OK | OK | `roadmap_v0.10.0.md` P6 A1, `ActiveWorkDrawer.tsx` |
@@ -62,12 +62,11 @@ Items P7 must v0.11 traités dans la sync doc (réseau host / map view, PTY, too
 
 Restants (stretch ou suivi explicite) :
 
-1. Mémoire LT / compaction / knowledge graph — synthèse user plus détaillée — suivi [#144](https://github.com/azerothl/Akasha/issues/144).
-2. Observability (metrics / runbooks) — synthèse user hors onglet Routeur / doctor — suivi [#144](https://github.com/azerothl/Akasha/issues/144).
-3. Sync site **Akasha_app** (What's new / compare) — hors monorepo, owner dépôt site.
+1. Sync site **Akasha_app** (What's new / compare) — hors monorepo, owner dépôt site.
 
 ## Process de mise à jour
 
 1. Toute nouvelle feature ou option modifiée met à jour ce fichier.
 2. La PR référence les sections user (`docs/`) et dev (`spec/`) impactées.
-3. Un statut `Partially documented` ne peut rester au-delà d'une release mineure sans ticket associé.
+3. Un statut `Partially documented` ne peut rester au-delà d'une release mineure **sans numéro d'issue GitHub** dans la colonne References ou la liste prioritaire.
+4. Avant tag : exécuter `python3 scripts/validate-feature-registry.py` et compléter les preuves dans la table § Preuves de release.

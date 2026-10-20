@@ -20,4 +20,4 @@ Ce dossier contient uniquement la documentation destinee aux utilisateurs finaux
 
 ## Registre des fonctionnalites (contributeurs)
 
-L'etat d'implementation et de documentation par bloc fonctionnel est suivi dans [`spec/feature_evolution_tracking.md`](../spec/feature_evolution_tracking.md). Avant chaque release mineure : y ajouter les preuves listees et executer `python3 scripts/validate-feature-registry.py`.
+L'etat d'implementation et de documentation par bloc fonctionnel est suivi dans [`spec/feature_evolution_tracking.md`](../spec/feature_evolution_tracking.md) (source de verite). Avant chaque release mineure : y ajouter les preuves listees dans ce fichier et executer `python3 scripts/validate-feature-registry.py`.

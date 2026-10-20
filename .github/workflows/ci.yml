@@ -45,6 +45,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-ci-
 
+      # Studio worktree path-boundary tests (`akasha-daemon::studio_worktree`) run on Linux
+      # (ubuntu-latest) only. They cover normalized Windows-style path separators in registry
+      # rows but do not execute on native Windows CI (no windows job in this workflow).
       - name: Cargo test (workspace)
         run: cargo test --workspace
 
