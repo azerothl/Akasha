@@ -122,6 +122,37 @@ jobs:
         working-directory: apps/akasha-ui
         run: npm run test:e2e
 
+  evals-mock-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-evals-mock-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-evals-mock-
+
+      - name: Run Akasha evals (mock CI profile)
+        env:
+          AKASHA_SPEC_DIR: ${{ github.workspace }}/spec
+          AKASHA_EVALS_PROFILE: mock-ci
+          AKASHA_EVALS_JSON: "1"
+          GITHUB_SHA: ${{ github.sha }}
+        run: cargo run -p akasha-evals --release
   release-artifact-first-boot-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 20
