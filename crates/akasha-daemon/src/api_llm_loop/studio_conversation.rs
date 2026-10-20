@@ -137,7 +137,7 @@ fn json_function_calls(response: &str, allowed: Option<&[String]>) -> Option<Vec
     if response.len() > 1024 * 1024 { return None; }
     let value: Value = serde_json::from_str(response.trim()).ok()?;
     let items = value.as_array().cloned().unwrap_or_else(||vec![value]);
-    if items.is_empty() || !items.iter().all(|item| (item["name"]=="studio_call" || item["name"].as_str().is_some_and(|name|crate::studio_tool_contract::supports_typed(name) && crate::api::AVAILABLE_TOOLS.iter().any(|(known,_)|*known==name))) && item.get("arguments").is_some()
+    if items.is_empty() || !items.iter().all(|item| (item["name"]=="studio_call" || item["name"].as_str().is_some_and(|name|crate::studio_tool_contract::supports_typed(name) && (crate::api::AVAILABLE_TOOLS.iter().any(|(known,_)|*known==name) || name.starts_with("mcp_") || allowed.is_some_and(|names| names.iter().any(|known| known==name))))) && item.get("arguments").is_some()
         && item.as_object().is_some_and(|object|object.keys().all(|key|matches!(key.as_str(),"name"|"arguments")))) {
         return None;
     }
@@ -335,6 +335,21 @@ mod tests {
 #[cfg(test)]
 mod content_catalogue_tests {
     use super::*;
+    #[test]
+    fn dynamic_mcp_json_content_preserves_catalogue_checks_and_history() {
+        let response = r#"{"name":"mcp_server_lookup","arguments":{"query":"hello"}}"#;
+        let allowed = vec!["mcp_server_lookup".to_string()];
+        let calls = parse_calls_for_turn(response, Some(&allowed));
+        assert_eq!(calls.len(), 1);
+        let decoded = crate::studio_tool_contract::decode(&calls[0].1.join(" ")).unwrap();
+        assert_eq!(decoded.envelope.tool, "mcp_server_lookup");
+        assert_eq!(decoded.envelope.arguments["query"], "hello");
+        let denied = parse_calls_for_turn(response, Some(&[]));
+        assert!(denied[0].1[0].contains("outside the advertised turn catalogue"));
+        let history = tool_turn(response, "observed result", 1, "lookup");
+        assert_eq!(history[0].tool_calls.len(), 1);
+        assert!(history[0].content.is_empty());
+    }
     #[test] fn json_content_functions_validate_the_whole_batch_against_the_turn() {
         let allowed=vec!["read_file".to_string(),"write_file".to_string()];
         for response in [

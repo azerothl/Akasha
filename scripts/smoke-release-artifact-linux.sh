@@ -125,7 +125,9 @@ if [[ "$SKIP_INFERENCE" == 1 ]]; then
   exit 0
 fi
 
-BODY='{"message":"Réponds uniquement par le mot OK.","provider":"akasha_embedded","max_tokens":32}'
+# Exercise one explicitly routed specialist request, not the multi-agent orchestrator.
+# provider/max_tokens are not accepted by /api/message in this published release.
+BODY='{"message":"Réponds uniquement par le mot OK.","composer_mode":"technical_writer"}'
 INF_START=$(date +%s)
 TASK_JSON=$(curl -sf -X POST -H "Content-Type: application/json" -d "$BODY" "${BASE}/api/message")
 TASK_ID=$(echo "$TASK_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('task_id',''))")
@@ -139,6 +141,7 @@ while [[ $(date +%s) -lt $deadline ]]; do
   printf '%s\n' "$T" > "$WORK/task.json"
   ST=$(echo "$T" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
   if [[ "$ST" == "done" || "$ST" == "completed" ]]; then
+    echo "$T" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('assigned_agent') == 'technical_writer', d; assert d.get('last_turn_model_used') == 'embedded', d; assert d.get('last_turn_tokens_out',0) > 0, d"
     INF_END=$(date +%s)
     log "first_inference_duration_s=$((INF_END - INF_START))"
     echo "$T" | python3 -m json.tool >>"$LOG" 2>/dev/null || echo "$T" >>"$LOG"

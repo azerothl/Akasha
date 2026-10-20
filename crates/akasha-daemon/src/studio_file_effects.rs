@@ -84,7 +84,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
     // At most one typed noun: adjectives must not consume a later list item.
     let det = r"(?:(?:the|an?|new|le|la|un|une|les|des|uniquement|only|seulement)\s+)*(?:(?:[\p{L}-]+\s+){0,4}?(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{e9}pertoires?)(?:\s+(?:empty|blank|vide|vides))?(?:\s+(?:named|called|nomm\x{e9}e?s?|appel\x{e9}e?s?))?\s+)?";
     let pattern = format!(
-        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>{det})(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
+        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|append|prepend|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>{det})(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
     );
     let re = regex::Regex::new(&pattern).unwrap();
     // Object-before-path requests: "Add logging to config.txt". Keep this
@@ -156,17 +156,19 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
             let object = object_path.captures(&request[verb_end..]);
             let object_destination = !filesystem
                 && object.as_ref().is_some_and(|object| {
-                    matches!(verb.as_str(), "add" | "ajoute" | "replace" | "remplace")
-                        || (matches!(
-                            object
-                                .name("prep")
-                                .map(|p| p.as_str().to_lowercase())
-                                .as_deref(),
-                            Some("in" | "into" | "from" | "dans" | "sur")
-                        ) && !matches!(
-                            verb.as_str(),
-                            "create" | "write" | "save" | "cr\u{e9}e" | "cree" | "enregistre"
-                        ))
+                    matches!(
+                        verb.as_str(),
+                        "add" | "append" | "prepend" | "ajoute" | "replace" | "remplace"
+                    ) || (matches!(
+                        object
+                            .name("prep")
+                            .map(|p| p.as_str().to_lowercase())
+                            .as_deref(),
+                        Some("in" | "into" | "from" | "dans" | "sur")
+                    ) && !matches!(
+                        verb.as_str(),
+                        "create" | "write" | "save" | "cr\u{e9}e" | "cree" | "enregistre"
+                    ))
                 });
             if object_destination
                 || (!filesystem
@@ -1000,6 +1002,28 @@ mod tests {
             let before = capture_paths(&effect.paths()).unwrap();
             assert!(!effect.verified(&before));
             std::fs::write(root.path().join("report.txt"), "").unwrap();
+            let after = capture_paths(&effect.paths()).unwrap();
+            effect.observe(&before, &after);
+            assert!(effect.verified(&after), "{request}");
+        }
+    }
+    #[test]
+    fn append_and_prepend_bind_the_object_to_its_destination() {
+        for request in [
+            "Append this line to config.txt",
+            "Prepend a header to config.txt",
+            "Ajoute une ligne à config.txt",
+            "Append config.txt with another line",
+        ] {
+            let goals = parsed(request);
+            assert_eq!(goals.len(), 1, "{request}");
+            assert_eq!(goals[0].1, "config.txt", "{request}");
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("config.txt"), "old").unwrap();
+            let mut effect = scope(root.path(), request);
+            let before = capture_paths(&effect.paths()).unwrap();
+            assert!(!effect.verified(&before));
+            std::fs::write(root.path().join("config.txt"), "old\nnew").unwrap();
             let after = capture_paths(&effect.paths()).unwrap();
             effect.observe(&before, &after);
             assert!(effect.verified(&after), "{request}");
