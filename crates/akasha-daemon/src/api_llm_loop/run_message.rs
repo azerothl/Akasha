@@ -2681,7 +2681,7 @@ pub(crate) async fn run_message_via_llm(
                                     // Redact write-like tool args entirely; truncate others to avoid leaking secrets/blobs.
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(effective_role_tool,"git_commit"|"git_push"|"github_create_pr") {
-                                        delivery_approval_identity.clone().unwrap_or_default()
+                                        crate::studio_delivery::approval_preview(delivery_approval_identity.as_deref().unwrap_or_default())
                                     } else if effective_role_tool=="terminal_session" {
                                         serde_json::to_string(&approval_args).unwrap_or_default()
                                     } else if matches!(
@@ -2892,7 +2892,7 @@ pub(crate) async fn run_message_via_llm(
                         }
                         let tool_t0 = std::time::Instant::now();
                         let call_id = Uuid::new_v4();
-                        let args_preview_tc: String = {
+                        let args_preview_tc: String = if let Some(identity)=delivery_approval_identity.as_deref() { crate::studio_delivery::approval_preview(identity) } else {
                             const L: usize = 100;
                             args.iter()
                                 .take(3)

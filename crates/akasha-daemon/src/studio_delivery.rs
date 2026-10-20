@@ -251,6 +251,58 @@ pub(crate) async fn approval_identity(root:&Path,tool:&str,argv:&[String]) -> Re
     Ok(json!({"workspace":root,"git_dir":git_dir,"git_common_dir":common_dir,"repository":repo,"publication_url":publication_url,"tool":tool,"arguments":payload}).to_string())
 }
 
+/// Human/event preview only. The exact identity still binds approval and execution.
+pub(crate) fn approval_preview(identity: &str) -> String {
+    let Ok(value)=serde_json::from_str::<Value>(identity) else {
+        return "[delivery arguments redacted]".into();
+    };
+    let short=|value:&Value| -> Value {
+        let text=value.as_str().unwrap_or_default().chars().filter(|c|!c.is_control()).collect::<String>();
+        json!(crate::tool_output::truncate_utf8_by_bytes(&text,160).0)
+    };
+    let args=&value["arguments"];
+    let mut metadata=serde_json::Map::new();
+    for key in ["remote","head","base","branch","expected_head","expected_remote_head","title"] {
+        if args.get(key).is_some() { metadata.insert(key.into(),short(&args[key])); }
+    }
+    if let Some(draft)=args["draft"].as_bool() { metadata.insert("draft".into(),json!(draft)); }
+    if let Some(paths)=args["paths"].as_array() {
+        metadata.insert("paths_count".into(),json!(paths.len()));
+        metadata.insert("paths".into(),json!(paths.iter().take(8).map(short).collect::<Vec<_>>()));
+    }
+    for key in ["body","message"] {
+        if let Some(text)=args[key].as_str() {
+            metadata.insert(format!("{key}_bytes"),json!(text.len()));
+            metadata.insert(format!("{key}_sha256"),json!(format!("{:x}",Sha256::digest(text.as_bytes()))));
+        }
+    }
+    let preview=json!({"tool":short(&value["tool"]),"workspace":short(&value["workspace"]),
+        "repository":short(&value["repository"]),"publication_url":short(&value["publication_url"]),
+        "metadata":metadata,"identity_sha256":format!("{:x}",Sha256::digest(identity.as_bytes()))});
+    crate::tool_output::truncate_utf8_by_bytes(&preview.to_string(),2048).0.into_owned()
+}
+
+#[cfg(test)]
+mod approval_preview_tests {
+    #[test]
+    fn publication_previews_redact_body_but_bind_the_exact_identity() {
+        let body="PRIVATE_BODY_SENTINEL_é".repeat(2000);
+        let identity=serde_json::json!({"tool":"github_create_pr","workspace":"workspace",
+            "repository":"owner/repo","arguments":{"head":"feature","base":"main",
+            "title":"Safe title","body":body,"draft":true,"future_secret":"PRIVATE_FUTURE_SENTINEL"}}).to_string();
+        let preview=super::approval_preview(&identity);
+        assert!(preview.len()<=2048);
+        assert!(!preview.contains("PRIVATE_BODY_SENTINEL"));
+        assert!(!preview.contains("PRIVATE_FUTURE_SENTINEL"));
+        let parsed:serde_json::Value=serde_json::from_str(&preview).unwrap();
+        assert_eq!(parsed["metadata"]["body_bytes"],body.len());
+        assert_eq!(parsed["metadata"]["title"],"Safe title");
+        let changed=identity.replace("PRIVATE_BODY_SENTINEL","CHANGED_BODY_SENTINEL");
+        assert_ne!(parsed["identity_sha256"],serde_json::from_str::<serde_json::Value>(&super::approval_preview(&changed)).unwrap()["identity_sha256"]);
+        assert_eq!(super::approval_preview("not JSON"),"[delivery arguments redacted]");
+    }
+}
+
 fn lock_git_configuration(root: &Path) -> Result<OwnedGitLock,String> {
     let (_,common)=bound_metadata(&delivery_data_dir(root)?,root)?;
     let path=common.join("config.lock");

@@ -89,7 +89,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
     // At most one typed noun: adjectives must not consume a later list item.
     let det = r"(?:(?:the|an?|new|le|la|un|une|les|des|uniquement|only|seulement)\s+)*(?:(?:[\p{L}-]+\s+){0,4}?(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{e9}pertoires?)(?:\s+(?:empty|blank|vide|vides))?(?:\s+(?:named|called|nomm\x{e9}e?s?|appel\x{e9}e?s?))?\s+)?";
     let pattern = format!(
-        r#"(?im)(?:^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?|[.!?;\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|append|prepend|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|copy|copie(?:r|z)?|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>{det})(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
+        r#"(?im)(?:^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?|[.!?;\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|fix|repair|corrige(?:r|z)?|r(?:e|\x{{e9}})pare(?:r|z)?|add|append|prepend|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|copy|copie(?:r|z)?|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>{det})(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
     );
     let re = regex::Regex::new(&pattern).unwrap();
     // Object-before-path requests: "Add logging to config.txt". Keep this
@@ -139,7 +139,11 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
             };
             let mut source = clean(raw);
             let verb = verb.as_str().to_lowercase();
-            let mut verb = verb.strip_suffix(['r', 'z']).unwrap_or(&verb).to_string();
+            let mut verb = if verb == "repair" {
+                verb
+            } else {
+                verb.strip_suffix(['r', 'z']).unwrap_or(&verb).to_string()
+            };
             let det = cap
                 .name("det")
                 .map(|value| value.as_str().to_lowercase())
@@ -1264,6 +1268,33 @@ mod tests {
             assert!(effect.verified(&after));
         }
         assert_eq!(parsed("Delete obsolete.txt")[0].0, "delete");
+    }
+    #[test]
+    fn explicit_fix_and_repair_requests_require_the_named_file_effect() {
+        for request in [
+            "Fix config.toml",
+            "Please fix config.toml",
+            "Repair config.toml",
+            "Corrige le fichier config.toml",
+            "Répare config.toml",
+            "Fix the port in config.toml",
+        ] {
+            let goals = parsed(request);
+            assert_eq!(goals.len(), 1, "{request}");
+            assert_eq!(goals[0].1, "config.toml", "{request}");
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("config.toml"), "old").unwrap();
+            let mut effect = scope(root.path(), request);
+            let before = capture_paths(&effect.paths()).unwrap();
+            assert!(!effect.verified(&before));
+            std::fs::write(root.path().join("other.toml"), "wrong").unwrap();
+            effect.observe(&before, &capture_paths(&effect.paths()).unwrap());
+            assert!(!effect.verified(&capture_paths(&effect.paths()).unwrap()));
+            std::fs::write(root.path().join("config.toml"), "fixed").unwrap();
+            let after = capture_paths(&effect.paths()).unwrap();
+            effect.observe(&before, &after);
+            assert!(effect.verified(&after));
+        }
     }
     #[test]
     fn explicit_directory_and_file_determiners_require_the_requested_kind() {
