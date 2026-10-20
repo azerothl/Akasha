@@ -2883,7 +2883,7 @@ pub(crate) async fn do_install_skill(
             let (mut commands_added_msg, need_hot_reload) = {
                 let bins = skill_required_bins(&body, &parsed.skill_name);
                 let policy_path = data_dir.join("tools_policy.yaml");
-                if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+                if let Ok(mut policy) = crate::studio_policy::load(&policy_path, data_dir) {
                     let added = policy.add_allowed_commands(&bins);
                     if !added.is_empty() {
                         if let Err(e) = policy.save_to_path(&policy_path) {
@@ -2992,7 +2992,7 @@ pub(crate) async fn do_uninstall_skill(
     let policy_path = data_dir.join("tools_policy.yaml");
     let mut policy_updated = false;
     if policy_path.exists() {
-        if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+        if let Ok(mut policy) = crate::studio_policy::load(&policy_path, data_dir) {
             if policy.remove_allowed_command(name) {
                 if policy.save_to_path(&policy_path).is_ok() {
                     policy_updated = true;
@@ -4124,7 +4124,7 @@ pub(crate) async fn reload_tools_executor_policy(
     policy_path: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let mut reloaded = akasha_tools::ToolsPolicy::load_from_path(policy_path)?;
+    let mut reloaded = crate::studio_policy::load(policy_path, data_dir)?;
     if let Ok(v) = akasha_vault::open_vault(data_dir) {
         reloaded.apply_vault_api_keys(|k| v.get(k).ok());
     }

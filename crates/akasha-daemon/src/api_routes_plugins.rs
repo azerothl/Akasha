@@ -300,7 +300,7 @@ if method == "GET" && path == "/api/tools/device-interfaces" {
 }
 if method == "GET" && path == "/api/tools/policy" {
     let policy_path = data_dir.join("tools_policy.yaml");
-    let policy = akasha_tools::ToolsPolicy::load_from_path(&policy_path).unwrap_or_default();
+    let policy = crate::studio_policy::load(&policy_path, data_dir).unwrap_or_default();
     let body = serde_json::json!({
         "policy": policy,
         "path": policy_path.display().to_string(),
@@ -319,7 +319,7 @@ if method == "POST" && path == "/api/tools/policy" {
     let Some(policy_value) = policy_value else {
         return Some(json_response("400 Bad Request", r#"{"error":"missing policy"}"#));
     };
-    let policy: akasha_tools::ToolsPolicy = match serde_json::from_value(policy_value) {
+    let policy = match crate::studio_policy::decode(policy_value, data_dir) {
         Ok(p) => p,
         Err(e) => {
             let body = serde_json::json!({
