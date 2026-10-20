@@ -151,6 +151,7 @@ const SPECIALIST_AGENTS: &[&str] = &[
     "studio_fullstack",
     "studio_planner",
     "studio_reviewer",
+    "studio_auditor",
     "studio_project_manager",
 ];
 
@@ -479,6 +480,29 @@ User message:\n{}",
         studio_evolution_branch: Option<String>,
         incognito: bool,
     ) -> anyhow::Result<Uuid> {
+        self.handle_message_with_execution(store_path, message, display_request, _correlation_id, forward_to_orchestrator, session_id, image_data_urls, priority, studio_disk_root, studio_forced_agent, studio_evolution_branch, incognito, None).await
+    }
+
+    pub(crate) fn validate_studio_execution(&self, body: &serde_json::Value) -> Result<Option<crate::studio_execution::Execution>, String> {
+        crate::studio_execution::validate(body, &self.llm_router)
+    }
+
+    pub(crate) async fn handle_message_with_execution(
+        &self,
+        store_path: &Path,
+        message: &str,
+        display_request: Option<&str>,
+        _correlation_id: Uuid,
+        forward_to_orchestrator: bool,
+        session_id: &str,
+        image_data_urls: Option<Vec<String>>,
+        priority: TaskPriority,
+        studio_disk_root: Option<std::path::PathBuf>,
+        studio_forced_agent: Option<String>,
+        studio_evolution_branch: Option<String>,
+        incognito: bool,
+        studio_execution: Option<crate::studio_execution::Execution>,
+    ) -> anyhow::Result<Uuid> {
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
 
@@ -527,6 +551,10 @@ User message:\n{}",
                 studio_project_id,
             };
             store.insert(&task)?;
+            if let Some(options) = &studio_execution {
+                crate::studio_execution::persist(store_path,task_id,options).map_err(anyhow::Error::msg)?;
+                store.insert_event(task_id, "studio_execution", Some(&serde_json::to_value(options)?), &Utc::now().to_rfc3339())?;
+            }
             let _ = store.insert_event(
                 task_id,
                 "session_bound",
