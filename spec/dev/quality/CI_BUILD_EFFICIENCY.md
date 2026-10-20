@@ -270,10 +270,10 @@ checksums du workflow ; l'usage API a momentanément atteint 10 887 600 625
 octets. Une fois les jobs terminés, les quatre anciennes entrées main ont été
 supprimées par identifiant (`9218859147`, `9218679955`, `9216930364`,
 `9218548631`). L'inventaire courant compte 15 entrées main pour un total de
-8 841 693 347 octets. L'API d'usage rapporte encore 9 951 111 942 octets ; sa
-valeur n'a pas encore rejoint la somme de l'inventaire, mais les deux mesures
-sont sous le quota de 10 Go. Aucune entrée de cache n'est actuellement listée
-pour les refs de PR #221, #223 ou #242.
+8 841 693 347 octets. L'API d'usage a d'abord rapporté 9 951 111 942 octets,
+puis a convergé vers la somme de l'inventaire, 8 841 693 347 octets. Aucune
+entrée de cache n'est actuellement listée pour les refs de PR #221, #223 ou
+#242.
 
 ### Validation de l'assemblage des archives
 
