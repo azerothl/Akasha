@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -76,12 +77,22 @@ pub struct PtyOutputResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct PtyOutputSnapshot {
+    pub data_b64: String,
+    pub bytes: usize,
+    pub next_cursor: u64,
+    pub truncated: bool,
+    pub exit_code: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct PtySessionStatus {
     pub session_id: String,
     pub transcript_path: Option<String>,
     pub created_at_rfc3339: String,
     pub idle_for_secs: u64,
     pub idle_timeout_secs: u64,
+    pub exit_code: Option<u32>,
 }
 
 pub struct PtyManager {
@@ -92,6 +103,7 @@ pub struct PtySessionInner {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     out: Arc<Mutex<VecDeque<u8>>>,
+    total_output: Arc<AtomicU64>,
     child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
     reader: Mutex<Option<std::thread::JoinHandle<()>>>,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -101,6 +113,11 @@ pub struct PtySessionInner {
 }
 
 impl PtyManager {
+    /// Studio sessions are never exposed by the legacy global terminal routes.
+    pub(crate) fn studio() -> &'static Self {
+        static STUDIO: OnceLock<PtyManager> = OnceLock::new();
+        STUDIO.get_or_init(|| PtyManager { sessions: Mutex::new(HashMap::new()) })
+    }
     pub fn global() -> &'static Self {
         static G: OnceLock<PtyManager> = OnceLock::new();
         G.get_or_init(|| PtyManager {
@@ -124,6 +141,7 @@ impl PtyManager {
 
         let master = Arc::new(Mutex::new(pair.master));
         let out = Arc::new(Mutex::new(VecDeque::new()));
+        let total_output = Arc::new(AtomicU64::new(0));
         let last_activity = Arc::new(Mutex::new(Instant::now()));
         let created_at = chrono::Utc::now();
         let idle_timeout = Duration::from_secs(body.idle_timeout_secs.unwrap_or(900).max(30));
@@ -163,6 +181,7 @@ impl PtyManager {
             g.try_clone_reader()?
         };
         let out_thread = Arc::clone(&out);
+        let total_thread = Arc::clone(&total_output);
         let activity_thread = Arc::clone(&last_activity);
         let transcript_thread = transcript_path.clone();
         let reader_handle = std::thread::spawn(move || {
@@ -184,12 +203,19 @@ impl PtyManager {
                                 q.pop_front();
                             }
                         }
+                        total_thread.fetch_add(n as u64, Ordering::Relaxed);
                         if let Some(tp) = &transcript_thread {
                             let _ = OpenOptions::new()
                                 .create(true)
                                 .append(true)
                                 .open(tp)
-                                .and_then(|mut f| f.write_all(&buf[..n]));
+                                .and_then(|mut f| {
+                                    if f.metadata()?.len() < 16 * 1024 * 1024 {
+                                        f.write_all(&buf[..n])
+                                    } else {
+                                        Ok(())
+                                    }
+                                });
                         }
                     }
                     Err(_) => break,
@@ -212,6 +238,7 @@ impl PtyManager {
             master,
             writer,
             out,
+            total_output,
             child: Arc::clone(&child_holder),
             reader: Mutex::new(Some(reader_handle)),
             created_at,
@@ -281,6 +308,47 @@ impl PtyManager {
         Ok(PtyOutputResponse { data_b64, bytes })
     }
 
+    /// Non-consuming cursor stream for multiple user views. Agent sessions use their own scoped queue.
+    pub fn snapshot_output(
+        &self,
+        id: &str,
+        cursor: u64,
+        max: usize,
+    ) -> anyhow::Result<PtyOutputSnapshot> {
+        use base64::Engine;
+        let inner = self.get_arc(id)?;
+        let (chunk, next_cursor, truncated) = {
+            let q = inner
+                .out
+                .lock()
+                .map_err(|e| anyhow::anyhow!("PTY output lock: {e}"))?;
+            let total = inner.total_output.load(Ordering::Relaxed);
+            let begin = total.saturating_sub(q.len() as u64);
+            let start = cursor.max(begin).min(total);
+            let chunk = q
+                .iter()
+                .skip((start - begin) as usize)
+                .take(max.clamp(1, OUTPUT_CAP_BYTES))
+                .copied()
+                .collect::<Vec<_>>();
+            let next = start + chunk.len() as u64;
+            (chunk, next, cursor < begin)
+        };
+        let exit_code = inner.child.lock().ok().and_then(|mut child| {
+            child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok().flatten())
+                .map(|status| status.exit_code())
+        });
+        Ok(PtyOutputSnapshot {
+            data_b64: base64::engine::general_purpose::STANDARD.encode(&chunk),
+            bytes: chunk.len(),
+            next_cursor,
+            truncated,
+            exit_code,
+        })
+    }
+
     pub fn resize(&self, id: &str, body: PtyResizeBody) -> anyhow::Result<()> {
         let inner = self.get_arc(id)?;
         let g = inner
@@ -313,7 +381,10 @@ impl PtyManager {
         }
         if let Ok(mut h) = inner.reader.lock() {
             if let Some(j) = h.take() {
-                let _ = j.join();
+                // A descendant may retain the slave; release the master without waiting on a blocked reader.
+                if j.is_finished() {
+                    let _ = j.join();
+                }
             }
         }
         Ok(())
@@ -338,6 +409,12 @@ impl PtyManager {
                 created_at_rfc3339: s.created_at.to_rfc3339(),
                 idle_for_secs: idle_for.as_secs(),
                 idle_timeout_secs: s.idle_timeout.as_secs(),
+                exit_code: s.child.lock().ok().and_then(|mut child| {
+                    child
+                        .as_mut()
+                        .and_then(|child| child.try_wait().ok().flatten())
+                        .map(|status| status.exit_code())
+                }),
             });
         }
         Ok(out)
@@ -348,8 +425,9 @@ impl PtyManager {
         REAPER.get_or_init(|| {
             std::thread::spawn(|| loop {
                 std::thread::sleep(Duration::from_secs(15));
+                for manager in [PtyManager::global(), PtyManager::studio()] {
                 let mut to_close = Vec::new();
-                if let Ok(map) = PtyManager::global().sessions.lock() {
+                if let Ok(map) = manager.sessions.lock() {
                     for (id, s) in map.iter() {
                         let idle = s
                             .last_activity
@@ -363,7 +441,8 @@ impl PtyManager {
                     }
                 }
                 for id in to_close {
-                    let _ = PtyManager::global().close(&id);
+                    let _ = manager.close(&id);
+                }
                 }
             });
         });
@@ -449,11 +528,7 @@ mod tests {
         };
         #[cfg(windows)]
         let body = PtyCreateBody {
-            argv: Some(vec![
-                "cmd.exe".into(),
-                "/c".into(),
-                "echo PTY_OK".into(),
-            ]),
+            argv: Some(vec!["cmd.exe".into(), "/c".into(), "echo PTY_OK".into()]),
             cwd: None,
             transcript_name: None,
             idle_timeout_secs: None,
@@ -462,9 +537,7 @@ mod tests {
         };
         let res = mgr.create(body).expect("create");
         std::thread::sleep(std::time::Duration::from_millis(400));
-        let out = mgr
-            .read_output(&res.session_id, 4096)
-            .expect("read_output");
+        let out = mgr.read_output(&res.session_id, 4096).expect("read_output");
         mgr.close(&res.session_id).expect("close");
         assert!(!out.data_b64.is_empty());
         use base64::Engine;

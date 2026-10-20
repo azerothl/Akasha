@@ -354,6 +354,7 @@ mod tests {
 
     fn empty_request() -> CompletionRequest {
         CompletionRequest {
+            tools: None,
             prompt: "test".into(),
             max_tokens: None,
             temperature: None,

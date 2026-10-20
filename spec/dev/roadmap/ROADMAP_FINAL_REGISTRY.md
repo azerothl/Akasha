@@ -46,7 +46,7 @@ Tous les stubs sont en statut terminal **Production**, **Reporter** ou **Degrade
 | S-MEM-02 | `memory_hierarchical.rs` fallback | Production | 2A | Métrique `rollup_deferred` | — |
 | S-MEM-03 | `memory_export.rs` import | Production | 2A | Re-embedding à l'import | — |
 | S-MEM-04 | `memory_relation_semantic.rs` | Production | 2C | LLM edge labeling | — |
-| S-MEM-05 | SQLCipher / doctor | Reporter | 2B | Spike `--encrypt-memory` reporté | — |
+| S-MEM-05 | SQLCipher / doctor | Reporter | 2B | `memory.db` en clair ; doctor honnête | — |
 | S-MEM-06 | `akasha init` memory | Production | 4 | Pointer wizard + doctor | — |
 | S-LLM-01 | `provider.rs` placeholder | Production | 1 | Erreur explicite sans embedded | — |
 | M-LLM-02 | `akasha-embedded-llm` llama-cpp-4 | Production | 1 | Artifact Windows CUDA ; fallback Candle | [embedded-llama-cpp-rfc.md](embedded-llama-cpp-rfc.md) |

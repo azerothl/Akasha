@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { NAV_GROUP_LABEL_KEYS, NAV_ITEMS, type NavGroupId, type Tab } from "../navigation/types";
 import { NavIcon } from "./NavIcon";
 import { Tooltip } from "./Tooltip";
@@ -9,11 +9,15 @@ type Props = {
   t: (key: string) => string;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  simple?: boolean;
 };
 
 const GROUP_ORDER: NavGroupId[] = ["primary", "workspace", "operations", "data", "help"];
+const primary = new Set(["chat", "research", "tasks", "notes", "docs", "settings"]);
 
-export function AppNavigation({ tab, setTab, t, collapsed, onToggleCollapse }: Props) {
+export function AppNavigation({ tab, setTab, t, collapsed, onToggleCollapse, simple }: Props) {
+  const [moreOpen, setMoreOpen] = useState(!primary.has(tab));
+  useEffect(() => { if (!primary.has(tab)) setMoreOpen(true); }, [tab]);
   const collapseBtn = (
     <button type="button" className="sidebar-nav-collapse-btn" onClick={onToggleCollapse} aria-label={t("nav.toggle_sidebar")}>
       {collapsed ? "▶" : "◀"}
@@ -32,7 +36,7 @@ export function AppNavigation({ tab, setTab, t, collapsed, onToggleCollapse }: P
         )
       ) : null}
       {GROUP_ORDER.map((group) => {
-        const items = NAV_ITEMS.filter((n) => n.group === group);
+        const items = NAV_ITEMS.filter((n) => n.group === group && (!simple || primary.has(n.id)));
         if (items.length === 0) return null;
         return (
           <div key={group} className="sidebar-nav-group">
@@ -73,6 +77,17 @@ export function AppNavigation({ tab, setTab, t, collapsed, onToggleCollapse }: P
           </div>
         );
       })}
+      {simple && <details className="sidebar-nav-more" open={moreOpen} onToggle={event => setMoreOpen(event.currentTarget.open)}>
+        <summary aria-label={t("nav.more_tools")}>{t("nav.more_tools")}</summary>
+        <div className="sidebar-nav-group">
+          {NAV_ITEMS.filter(item => !primary.has(item.id)).map(item => <button
+            key={item.id} type="button" role="tab" id={`tab-${item.id}`}
+            aria-selected={tab === item.id} aria-controls={`panel-${item.id}`}
+            className={tab === item.id ? "active" : ""} onClick={() => setTab(item.id)}
+            aria-label={t(item.labelKey)}
+          >{collapsed ? <span className="sidebar-nav-icon" aria-hidden><NavIcon id={item.id}/></span> : t(item.labelKey)}</button>)}
+        </div>
+      </details>}
     </nav>
   );
 }

@@ -1,0 +1,165 @@
+warning: esaxx-rs@0.1.10: cl : Ligne de commande warning D9002 : option '-std=c++11' inconnue ignorée
+warning: unused variable: `router_model`
+   --> crates\akasha-embedded-llm\src\lib.rs:110:9
+    |
+110 |         router_model: Option<&str>,
+    |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_router_model`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `akasha-embedded-llm` (lib) generated 1 warning (run `cargo fix --lib -p akasha-embedded-llm` to apply 1 suggestion)
+   Compiling akasha-daemon v0.11.0 (<worktree>\crates\akasha-daemon)
+warning: unused imports: `MessageIntentFlags`, `SessionRecallIntent`, and `SmallTalkIntent`
+  --> crates\akasha-daemon\src\api_llm_loop\run_message.rs:27:20
+   |
+27 |     MemoryProfile, MessageIntentFlags, PendingHumanInput, ProcessRegistry, SessionRecallIntent,
+   |                    ^^^^^^^^^^^^^^^^^^                                      ^^^^^^^^^^^^^^^^^^^
+28 |     SessionRecallRange, SmallTalkIntent, SmallTalkLanguage, SteeringQueueStore,
+   |                         ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `TaskPriority` and `interpret_message`
+ --> crates\akasha-daemon\src\api.rs:7:21
+  |
+7 | use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
+  |                     ^^^^^^^^^^^^^^^^^                              ^^^^^^^^^^^^
+
+warning: unused imports: `clear_task_milestones`, `emit_timeline_once_for_task`, and `log_latency_metric`
+ --> crates\akasha-daemon\src\api.rs:9:5
+  |
+9 |     clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric,
+  |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^                   ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::protocol_adapter::unknown_external_message_count`
+  --> crates\akasha-daemon\src\api.rs:14:5
+   |
+14 | use crate::protocol_adapter::unknown_external_message_count;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MissionStatusYaml`
+  --> crates\akasha-daemon\src\api.rs:15:65
+   |
+15 | use crate::autonomous_mission_config::{AutonomousMissionConfig, MissionStatusYaml};
+   |                                                                 ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::user_profile::UserProfile`
+  --> crates\akasha-daemon\src\api.rs:16:5
+   |
+16 | use crate::user_profile::UserProfile;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `PluginKind` and `PluginManifest`
+  --> crates\akasha-daemon\src\api.rs:19:25
+   |
+19 | use akasha_plugin_api::{PluginKind, PluginManifest};
+   |                         ^^^^^^^^^^  ^^^^^^^^^^^^^^
+
+warning: unused imports: `ScheduleExceptionType`, `ScheduleException`, `ScheduleStore`, `Schedule`, `TaskRunStatus`, `TodoStatus`, `WorkspaceGraphStore`, `format_todos_plan_block`, and `parse_todos_from_payload`
+  --> crates\akasha-daemon\src\api.rs:22:5
+   |
+22 |     format_todos_plan_block, parse_todos_from_payload, Schedule,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^
+23 |     ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^        ^^^^^^^^^^^^^
+24 |     TaskStore, TodoStatus, WorkspaceGraphStore,
+   |                ^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::cmp::Ordering`
+  --> crates\akasha-daemon\src\api.rs:28:5
+   |
+28 | use std::cmp::Ordering;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `BinaryHeap`
+   --> crates\akasha-daemon\src\api.rs:617:24
+    |
+617 | use std::collections::{BinaryHeap, VecDeque};
+    |                        ^^^^^^^^^^
+
+warning: unused import: `sync_workspace_store_from_disk`
+    --> crates\akasha-daemon\src\api.rs:3333:128
+     |
+3333 | ..._lineage_root, rewrite_workspace_plan_path_str, sync_workspace_store_from_disk, workspace_lineage_root_task_id};
+     |                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `info`
+ --> crates\akasha-daemon\src\user_rag_indexer.rs:5:15
+  |
+5 | use tracing::{info, warn};
+  |               ^^^^
+
+warning: unused import: `super::*`
+  --> crates\akasha-daemon\src\api_routes_docs.rs:86:9
+   |
+86 |     use super::*;
+   |         ^^^^^^^^
+
+warning: unused import: `std::path::Path`
+  --> crates\akasha-daemon\src\api_routes_docs.rs:87:9
+   |
+87 |     use std::path::Path;
+   |         ^^^^^^^^^^^^^^^
+
+warning: unused import: `SecondBrainSettings`
+ --> crates\akasha-daemon\src\api_routes_memory.rs:3:74
+  |
+3 | use crate::api::{load_second_brain_settings, save_second_brain_settings, SecondBrainSettings};
+  |                                                                          ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `HashMap`
+  --> crates\akasha-daemon\src\api_routes_tasks.rs:19:36
+   |
+19 | use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+   |                                    ^^^^^^^
+
+warning: unused variable: `data_dir_rag`
+    --> crates\akasha-daemon\src\api_llm_loop\run_message.rs:1020:13
+     |
+1020 |         let data_dir_rag = data_dir.to_path_buf();
+     |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_dir_rag`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `akasha-daemon` (lib test) generated 17 warnings (run `cargo fix --lib -p akasha-daemon --tests` to apply 17 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 17s
+     Running unittests src\lib.rs (target\debug\deps\akasha_daemon-912c8323a59dfc3d.exe)
+
+running 35 tests
+test deep_research::engine::tests::failed_final_generation_is_an_error_not_a_draft ... ok
+test deep_research::engine::tests::evidence_ids_copy_source_rows_and_legends_without_model_rewriting ... ok
+test deep_research::engine::tests::evidence_is_verbatim_not_a_model_paraphrase_or_translation ... ok
+test deep_research::engine::tests::optional_quality_revision_keeps_original_but_unknown_citations_fail_closed ... ok
+test deep_research::engine::tests::degraded_findings_reject_failed_or_blank_model_steps ... ok
+test deep_research::engine::tests::fetched_page_sufficiency_does_not_depend_on_discovery ... ok
+test deep_research::engine::tests::final_manifest_keeps_evidence_bound_to_its_source ... ok
+test deep_research::parse::tests::assess_flags_thin_sources ... ok
+test deep_research::parse::tests::citation_validation_preserves_parentheses_and_section_anchors ... ok
+test deep_research::engine::tests::manifest_never_cuts_a_passage_before_its_qualifier ... ok
+test deep_research::engine::tests::extraction_preserves_string_and_array_evidence ... ok
+test deep_research::parse::tests::citations_require_consulted_pages_but_allow_section_anchors ... ok
+test deep_research::parse::tests::direct_pages_do_not_get_model_only_or_false_thin_source_warnings ... ok
+test deep_research::parse::tests::parse_json_array_embedded ... ok
+test deep_research::engine::tests::degraded_run_without_provider_returns_no_evidence ... ok
+test deep_research::parse::tests::gfm_and_html_links_cannot_bypass_consulted_source_validation ... ok
+test deep_research::parse::tests::explicit_sources_preserve_nested_and_markdown_parentheses ... ok
+test deep_research::engine::tests::manifest_shares_evidence_budget_and_quality_uses_represented_pages ... ok
+test deep_research::parse::tests::explicit_sources_are_bounded_deduplicated_and_http_only ... ok
+test deep_research::parse::tests::page_text_preserves_tables_qualifiers_and_excludes_navigation ... ok
+test deep_research::parse::tests::parse_stop_yes ... ok
+test deep_research::queries::tests::booster_empty_when_enough_pages ... ok
+test deep_research::queries::tests::howto_includes_github ... ok
+test deep_research::queries::tests::integration_includes_architecture_query ... ok
+test deep_research::parse::tests::truncate_content_respects_utf8_char_boundaries ... ok
+test deep_research::parse::tests::parse_search_line ... ok
+test deep_research::parse::tests::reference_citations_resolve_definitions_without_counting_examples_or_images ... ok
+test deep_research::queries::tests::round1_includes_wikipedia_and_arxiv ... ok
+test deep_research::queries::tests::round2_has_no_specialized_queries ... ok
+test deep_research::parse::tests::unique_domains_counts_hosts ... ok
+test deep_research::parse::tests::unreadable_pdf_and_binary_detected ... ok
+test deep_research::queries::tests::french_and_unicode_topics_never_split_utf8_characters ... ok
+test deep_research::engine::tests::explicit_fetch_is_independent_of_search_and_respects_blocked_domains ... ok
+test deep_research::engine::tests::cancellation_drops_in_flight_work_instead_of_resuming_analysis ... ok
+test deep_research::engine::tests::evidence_and_final_prompts_have_utf8_byte_budgets ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 365 filtered out; finished in 0.13s

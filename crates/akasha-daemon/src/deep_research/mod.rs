@@ -1,6 +1,7 @@
 //! IterResearch-style deep research engine (Odysseus / Alibaba DeepResearch inspired).
 
 mod engine;
+mod grounding;
 mod parse;
 mod prompts;
 mod queries;

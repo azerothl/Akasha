@@ -148,7 +148,7 @@ APIs Companion LAN livrées via #122 (bind LAN, discovery UDP, `/api/companion/*
 ### Stretch
 
 - [ ] Spec + chemin MVP **Freenove FNK0104** (voix-first + avatar) — repo `Akasha_companion`, `/api/voice/*`, présence VAD (`companion_presence.json`)
-- [ ] Doc user Companion LAN (pairing secret, discovery :3877)
+- [x] Doc user Companion LAN (pairing secret, discovery :3877) — `docs/user/companion-lan.md` ([#163](https://github.com/azerothl/Akasha/issues/163))
 - [ ] Smoke LAN : daemon bind + device factice / maquette
 
 ### Hors scope P6
@@ -181,7 +181,7 @@ Liste prioritaire [feature_evolution_tracking.md](../../feature_evolution_tracki
 
 Matrices Hermes / pi-mono / memory largement **clôturées** (archives → [ROADMAP_FINAL_REGISTRY.md](../roadmap/ROADMAP_FINAL_REGISTRY.md)). Ne pas rouvrir Phase 5. Items **Reporter** utiles en stretch si capacité :
 
-- [ ] **S-MEM-05** chiffrement `memory.db` (SQLCipher / doctor) — [memory_encryption_rfc.md](../roadmap/memory_encryption_rfc.md) ; sinon rester sur chiffrement disque OS
+- [ ] **S-MEM-05** chiffrement `memory.db` (SQLCipher) — [memory_encryption_rfc.md](../roadmap/memory_encryption_rfc.md) ; stockage actuel en clair (`akasha doctor`) ; sinon chiffrement disque OS
 - [ ] UI édition **agent identity** / constitution (gaps C4 / E1 partiels)
 - [ ] Fork tree UI v2 (`/tree`) — Reporter pi-mono ; v1 suffit sauf demande produit
 - [ ] GraphRAG communautés au-delà de `project:*` (S-RAG-04 Reporter)

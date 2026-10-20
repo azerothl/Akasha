@@ -76,7 +76,8 @@ impl FallbackEngine {
             let mut disable_thinking_after_empty = false;
             // Do not call provider.is_available() here: OllamaProvider uses blocking reqwest
             // which would block the async runtime and cause "response ended prematurely".
-            for attempt in 0..self.max_retries {
+            // Zero disables retries; it must not suppress the initial provider call.
+            for attempt in 0..self.max_retries.max(1) {
                 let start = Instant::now();
                 // Clone request and apply model-specific config from routing entry.
                 let mut request_with_config = request.clone();

@@ -24,6 +24,7 @@ pub mod api_routes_workspace;
 pub mod cookbook_models;
 pub mod cookbook_recipes;
 pub mod deep_research;
+pub mod doctor_checks;
 pub mod api_routes_mission;
 pub mod api_routes_kinbot;
 pub mod api_routes_profiles;
@@ -40,6 +41,12 @@ pub mod api;
 pub mod api_studio;
 pub mod api_workspace_graph;
 pub mod studio;
+pub(crate) mod studio_role_policy;
+pub(crate) mod studio_capabilities;
+pub(crate) mod studio_project_context;
+pub(crate) mod studio_artifacts;
+pub(crate) mod studio_observation;
+pub(crate) mod task_outcome;
 pub mod studio_worktree;
 pub mod tool_output;
 pub mod autonomous_heartbeat;
@@ -98,6 +105,7 @@ pub mod inter_agent;
 pub mod memory_consolidation;
 pub mod memory_retrieval_enhance;
 pub mod user_rag;
+pub mod pdf_extract_safe;
 pub mod user_rag_indexer;
 pub mod notes;
 pub mod api_routes_notes;
@@ -113,3 +121,9 @@ pub mod user_docs;
 
 pub use daemon::{Daemon, RunOutcome};
 pub use health::{HealthState, HealthStatus};
+
+pub(crate) mod studio_tool_contract;
+
+pub(crate) mod studio_recovery;
+
+pub(crate) mod studio_lsp;
