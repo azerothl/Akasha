@@ -630,7 +630,8 @@ impl Operation {
         if crate::studio_delivery::is_delivery_tool(tool) && (!policy.can_run_command("git") || matches!(tool,"github_pr_status"|"git_push"|"github_create_pr") && !policy.can_run_command("gh")) {return Err("cached/current delivery executable denied by policy".into());}
         for raw in paths_for_tool(tool,args) {
             let path=bounded_path(&canonical,&raw)?;let plain=crate::api::strip_verbatim_prefix(path);
-            if !policy.can_read(&plain) || is_file_mutation(tool) && !policy.can_write(&plain) {return Err("cached/current path denied by current policy".into());}
+            let denied = if !policy.can_read(&plain) { Some("allowed_read_paths") } else if is_file_mutation(tool) && !policy.can_write(&plain) { Some("allowed_write_paths") } else { None };
+            if let Some(setting) = denied {return Err(format!("[studio_policy_denied] {setting} denies {}. The task workspace is already known: {}. This is a permissions restriction, not a missing project path; do not ask for a replacement workspace path.", plain.display(), canonical.display()));}
         }
         if let Some((old_digest, state, result)) = old {
             if tool=="git_delivery_status" && !policy.can_run_command("gh") {return Err("cached GitHub status unavailable under current policy; request a fresh local inspection operation".into());}

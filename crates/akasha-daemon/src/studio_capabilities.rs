@@ -335,6 +335,9 @@ pub(crate) fn preflight(
     {
         return Err((404, "project_not_found".into()));
     }
+    let workspace = crate::studio_project_context::manifest_workspace(data_dir, &pid, scope_task)
+        .map_err(|error| (409, error))?;
+    let policy = &crate::studio_policy::for_workspace(policy, &workspace);
     Ok(serde_json::json!({
         "schema_version":1, "scope":"studio", "project_id":pid, "task_id":scope_task,
         "agent":agent, "preview":scope_task.is_none(),
