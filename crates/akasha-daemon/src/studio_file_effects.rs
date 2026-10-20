@@ -33,6 +33,8 @@ struct Rename {
     verified_state: Option<String>,
     #[serde(default)]
     keep_source: bool,
+    #[serde(default)]
+    source_may_change: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Scope {
@@ -485,18 +487,34 @@ impl Scope {
                     EndState::Absent => g.changed && missing(v),
                     EndState::RenameDestination => {
                         !missing(v)
-                            && self.renames.iter().any(|r| {
-                                r.target == g.path
-                                    && r.verified
-                                    && r.verified_state.as_ref() == Some(v)
-                            })
+                            && self
+                                .renames
+                                .iter()
+                                .rev()
+                                .find(|r| r.target == g.path)
+                                .is_some_and(|r| r.verified && r.verified_state.as_ref() == Some(v))
                     }
-                    EndState::CopySource => self.renames.iter().any(|r| {
-                        r.keep_source
-                            && r.source == g.path
-                            && r.verified
-                            && r.verified_state.as_ref() == Some(v)
-                    }),
+                    EndState::CopySource => self
+                        .renames
+                        .iter()
+                        .rev()
+                        .find(|r| r.keep_source && r.source == g.path)
+                        .is_some_and(|r| {
+                            r.verified
+                                && r.verified_state.as_ref() == Some(v)
+                                && if r.source_may_change {
+                                    g.changed && *v != g.baseline
+                                } else if let Some(writer) = self
+                                    .renames
+                                    .iter()
+                                    .rev()
+                                    .find(|writer| writer.target == g.path)
+                                {
+                                    writer.verified && writer.verified_state.as_ref() == Some(v)
+                                } else {
+                                    !missing(v) && *v == g.baseline
+                                }
+                        }),
                 })
             })
             && self.renames.iter().all(|r| r.verified)
@@ -530,6 +548,8 @@ fn paths_for_request(
 ) -> Result<(Vec<Goal>, Vec<Rename>), String> {
     let mut goals: Vec<Goal> = vec![];
     let mut renames = vec![];
+    // Last requested writer: 0 = ordinary edit/create, 1 = transfer, 2 = removal.
+    let mut writers = BTreeMap::<String, u8>::new();
     let resolve = |raw: &str| -> Result<String, String> {
         let p = crate::studio_tool_contract::bounded_path(root, raw)?;
         if !policy.can_read(&p) {
@@ -569,6 +589,14 @@ fn paths_for_request(
                 return Err("source and destination paths must differ".into());
             }
             let keep_source = matches!(verb.as_str(), "copy" | "copie");
+            if keep_source && writers.get(&source) == Some(&2) {
+                return Err("copy source is removed by an earlier requested operation".into());
+            }
+            let source_may_change = keep_source && writers.get(&source) == Some(&0);
+            if !keep_source {
+                writers.insert(source.clone(), 2);
+            }
+            writers.insert(target.clone(), 1);
             set(
                 source.clone(),
                 if keep_source {
@@ -584,8 +612,20 @@ fn paths_for_request(
                 verified: false,
                 verified_state: None,
                 keep_source,
+                source_may_change,
             });
         } else {
+            writers.insert(
+                source.clone(),
+                if matches!(
+                    verb.as_str(),
+                    "delete" | "remove" | "unlink" | "supprime" | "efface"
+                ) {
+                    2
+                } else {
+                    0
+                },
+            );
             set(
                 source,
                 if matches!(
@@ -1122,6 +1162,61 @@ mod tests {
         assert_eq!(
             parsed("Copy source.txt to destination.txt; Modify config.txt").len(),
             2
+        );
+    }
+    #[test]
+    fn copy_source_versions_follow_requested_writes_and_reject_invention() {
+        for (request, existed, allowed_change) in [
+            ("Copy source.txt to destination.txt", true, false),
+            ("Copy source.txt to destination.txt", false, false),
+            (
+                "Modify source.txt; Copy source.txt to destination.txt",
+                true,
+                true,
+            ),
+            (
+                "Create source.txt; Copy source.txt to destination.txt",
+                false,
+                true,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source.txt");
+            let target = root.path().join("destination.txt");
+            if existed {
+                std::fs::write(&source, "original").unwrap();
+            }
+            let mut effect = scope(root.path(), request);
+            let before = capture_paths(&effect.paths()).unwrap();
+            std::fs::write(&source, "changed").unwrap();
+            let changed = capture_paths(&effect.paths()).unwrap();
+            effect.observe(&before, &changed);
+            std::fs::copy(&source, &target).unwrap();
+            let after = capture_paths(&effect.paths()).unwrap();
+            effect.observe(&changed, &after);
+            assert_eq!(effect.verified(&after), allowed_change, "{request}");
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "original").unwrap();
+        let mut effect = scope(root.path(), "Copy a.txt to b.txt; Copy b.txt to c.txt");
+        let before = capture_paths(&effect.paths()).unwrap();
+        std::fs::copy(root.path().join("a.txt"), root.path().join("b.txt")).unwrap();
+        let copied = capture_paths(&effect.paths()).unwrap();
+        effect.observe(&before, &copied);
+        std::fs::write(root.path().join("b.txt"), "wrong").unwrap();
+        let changed = capture_paths(&effect.paths()).unwrap();
+        effect.observe(&copied, &changed);
+        std::fs::copy(root.path().join("b.txt"), root.path().join("c.txt")).unwrap();
+        let after = capture_paths(&effect.paths()).unwrap();
+        effect.observe(&changed, &after);
+        assert!(!effect.verified(&after));
+        assert!(
+            paths_for_request(
+                root.path(),
+                "Delete a.txt; Copy a.txt to b.txt",
+                &policy(root.path())
+            )
+            .is_err()
         );
     }
     #[test]
