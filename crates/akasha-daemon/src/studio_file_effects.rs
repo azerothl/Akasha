@@ -98,7 +98,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
     let object_atom =
         r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[\p{L}\p{N}_/\\:.=@+-]*[\p{L}\p{N}_/\\:=@+-])"#;
     let object_path = regex::Regex::new(&format!(
-        r#"(?i)^\s+(?:{object_atom}\s+){{1,12}}?(?P<prep>to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?P<det>{det})(?P<path>{path})"#
+        r#"(?i)^\s+(?:{object_atom}\s+){{1,12}}?(?P<prep>to|in|into|from|dans|de|du|au|aux|sur|\x{{e0}})\s+(?P<det>{det})(?P<path>{path})"#
     )).unwrap();
     let path_list = regex::Regex::new(&format!(
         r#"(?i)^\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et|&)\s+)(?P<det>{det})(?P<path>{path})"#
@@ -139,12 +139,28 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
             };
             let mut source = clean(raw);
             let verb = verb.as_str().to_lowercase();
-            let verb = verb.strip_suffix(['r', 'z']).unwrap_or(&verb).to_string();
+            let mut verb = verb.strip_suffix(['r', 'z']).unwrap_or(&verb).to_string();
             let det = cap
                 .name("det")
                 .map(|value| value.as_str().to_lowercase())
                 .unwrap_or_default();
             let mut kind = explicit_path_kind(&det);
+            let object = object_path.captures(&request[verb_end..]);
+            let content_removal =
+                matches!(verb.as_str(), "delete" | "remove" | "supprime" | "efface")
+                    && object.as_ref().is_some_and(|object| {
+                        let prep = object.name("prep").map(|p| p.as_str().to_lowercase());
+                        let destination =
+                            object.name("path").map(|p| p.as_str()).unwrap_or_default();
+                        matches!(prep.as_deref(), Some("from" | "de" | "du" | "dans"))
+                            && (destination.contains('.')
+                                || explicit_path_kind(
+                                    object.name("det").map(|d| d.as_str()).unwrap_or_default(),
+                                ) == Some(false))
+                    });
+            if content_removal {
+                verb = "modify".into();
+            }
             let filesystem = matches!(
                 verb.as_str(),
                 "delete"
@@ -160,23 +176,23 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
                     | "d\u{e9}place"
                     | "deplace"
             );
-            let object = object_path.captures(&request[verb_end..]);
-            let object_destination = !filesystem
-                && object.as_ref().is_some_and(|object| {
-                    matches!(
-                        verb.as_str(),
-                        "add" | "append" | "prepend" | "ajoute" | "replace" | "remplace"
-                    ) || (matches!(
-                        object
-                            .name("prep")
-                            .map(|p| p.as_str().to_lowercase())
-                            .as_deref(),
-                        Some("in" | "into" | "from" | "dans" | "sur")
-                    ) && !matches!(
-                        verb.as_str(),
-                        "create" | "write" | "save" | "cr\u{e9}e" | "cree" | "enregistre"
-                    ))
-                });
+            let object_destination = content_removal
+                || !filesystem
+                    && object.as_ref().is_some_and(|object| {
+                        matches!(
+                            verb.as_str(),
+                            "add" | "append" | "prepend" | "ajoute" | "replace" | "remplace"
+                        ) || (matches!(
+                            object
+                                .name("prep")
+                                .map(|p| p.as_str().to_lowercase())
+                                .as_deref(),
+                            Some("in" | "into" | "from" | "dans" | "sur")
+                        ) && !matches!(
+                            verb.as_str(),
+                            "create" | "write" | "save" | "cr\u{e9}e" | "cree" | "enregistre"
+                        ))
+                    });
             if object_destination
                 || (!filesystem
                     && !raw.starts_with(['`', '"', '\''])
@@ -1218,6 +1234,36 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn removing_content_tracks_the_destination_not_an_unrelated_path() {
+        for (request, name) in [
+            ("Remove debug from config.toml", "config.toml"),
+            ("Delete the obsolete setting from app.conf", "app.conf"),
+            (
+                "Supprime le paramètre obsolète de config.toml",
+                "config.toml",
+            ),
+            ("Remove `debug.txt` from config.toml", "config.toml"),
+        ] {
+            let goals = parsed(request);
+            assert_eq!(goals.len(), 1, "{request}");
+            assert_eq!(goals[0].0, "modify", "{request}");
+            assert_eq!(goals[0].1, name, "{request}");
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join(name), "debug=true\nkeep=true\n").unwrap();
+            std::fs::write(root.path().join("debug"), "unrelated").unwrap();
+            let mut effect = scope(root.path(), request);
+            let before = capture_paths(&effect.paths()).unwrap();
+            std::fs::remove_file(root.path().join("debug")).unwrap();
+            effect.observe(&before, &capture_paths(&effect.paths()).unwrap());
+            assert!(!effect.verified(&capture_paths(&effect.paths()).unwrap()));
+            std::fs::write(root.path().join(name), "keep=true\n").unwrap();
+            let after = capture_paths(&effect.paths()).unwrap();
+            effect.observe(&before, &after);
+            assert!(effect.verified(&after));
+        }
+        assert_eq!(parsed("Delete obsolete.txt")[0].0, "delete");
     }
     #[test]
     fn explicit_directory_and_file_determiners_require_the_requested_kind() {
