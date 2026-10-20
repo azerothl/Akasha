@@ -14,7 +14,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::EvalResult;
+use crate::{measure_eval, EvalResult, TimedEvalResult};
+use akasha_store::{Schedule, ScheduleStore, TaskRun, TaskRunStatus};
+use chrono::{Duration as ChronoDuration, Utc};
 
 /// Policy: forbidden tool, path, and command must be refused (akasha-tools).
 pub fn eval_tools_policy_refusal() -> EvalResult {
@@ -147,6 +149,10 @@ impl LLMProvider for OkMockProvider {
             done_reason: None,
             eval_count: None,
             total_duration_ns: None,
+            provider_used: None,
+            ttft_ns: None,
+            load_duration_ns: None,
+            generation_duration_ns: None,
         })
     }
 }
@@ -168,18 +174,18 @@ pub fn eval_llm_provider_fallback() -> EvalResult {
     rt.block_on(async {
         let primary_id = "eval_primary_down";
         let fallback_id = "eval_fallback_ok";
-        let resolve: akasha_llm::fallback::ProviderResolver = Arc::new(move |provider: &str| {
-            match provider {
-                p if p == primary_id => Some(Arc::new(UnavailableMockProvider { id: primary_id }) as Arc<dyn LLMProvider>),
-                p if p == fallback_id => {
-                    Some(Arc::new(OkMockProvider {
-                        id: fallback_id,
-                        text: "fallback-ok",
-                    }) as Arc<dyn LLMProvider>)
+        let resolve: akasha_llm::fallback::ProviderResolver =
+            Arc::new(move |provider: &str| match provider {
+                p if p == primary_id => {
+                    Some(Arc::new(UnavailableMockProvider { id: primary_id })
+                        as Arc<dyn LLMProvider>)
                 }
+                p if p == fallback_id => Some(Arc::new(OkMockProvider {
+                    id: fallback_id,
+                    text: "fallback-ok",
+                }) as Arc<dyn LLMProvider>),
                 _ => None,
-            }
-        });
+            });
 
         let task_config = TaskTypeConfig {
             primary: Some(RouteEntry {
@@ -245,8 +251,7 @@ pub fn eval_llm_provider_fallback() -> EvalResult {
                 passed: false,
                 message: format!(
                     "Unexpected success: text={:?} model_used={}",
-                    resp.text,
-                    resp.model_used
+                    resp.text, resp.model_used
                 ),
             },
             Err(e) => EvalResult {
@@ -259,6 +264,155 @@ pub fn eval_llm_provider_fallback() -> EvalResult {
 }
 
 const MEMORY_FIXTURE: &str = "akasha-evals-ci-memory-persist-v1";
+
+/// A scheduled run can complete or be cancelled, and those outcomes survive a store restart.
+pub fn eval_scheduled_task_lifecycle_persisted() -> EvalResult {
+    let name = "agentic_scheduled_task_lifecycle".to_string();
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            return EvalResult {
+                name,
+                passed: false,
+                message: format!("tempdir: {}", error),
+            };
+        }
+    };
+    let db_path = dir.path().join("schedules.db");
+    let now = Utc::now();
+    let planned_for = now + ChronoDuration::minutes(5);
+    let schedule_id = uuid::Uuid::new_v4();
+    let queued_id = uuid::Uuid::new_v4();
+    let completed_id = uuid::Uuid::new_v4();
+    let cancelled_id = uuid::Uuid::new_v4();
+
+    let initial_store = match ScheduleStore::open(&db_path) {
+        Ok(store) => store,
+        Err(error) => {
+            return EvalResult {
+                name,
+                passed: false,
+                message: format!("open schedule store: {}", error),
+            };
+        }
+    };
+    let schedule = Schedule {
+        id: schedule_id,
+        name: "eval daily task".into(),
+        description: "deterministic CI schedule lifecycle".into(),
+        enabled: true,
+        timezone: "UTC".into(),
+        rrule: "FREQ=DAILY".into(),
+        interval_seconds: None,
+        start_at: now,
+        end_at: None,
+        channel_context: None,
+        created_at: now,
+        updated_at: now,
+    };
+    if let Err(error) = initial_store.insert_schedule(&schedule) {
+        return EvalResult {
+            name,
+            passed: false,
+            message: format!("insert schedule: {}", error),
+        };
+    }
+
+    for (id, status, suffix) in [
+        (queued_id, TaskRunStatus::Queued, "queued"),
+        (completed_id, TaskRunStatus::Queued, "completed"),
+        (cancelled_id, TaskRunStatus::Queued, "cancelled"),
+    ] {
+        let run = TaskRun {
+            id,
+            schedule_id: Some(schedule_id),
+            task_id: uuid::Uuid::new_v4(),
+            status,
+            planned_for,
+            started_at: None,
+            ended_at: None,
+            dedup_key: format!("schedule-eval-{suffix}"),
+        };
+        if let Err(error) = initial_store.insert_task_run(&run) {
+            return EvalResult {
+                name,
+                passed: false,
+                message: format!("insert {suffix} task run: {}", error),
+            };
+        }
+    }
+
+    let started_at = now + ChronoDuration::seconds(1);
+    let ended_at = now + ChronoDuration::seconds(2);
+    for (id, status) in [
+        (completed_id, TaskRunStatus::Completed),
+        (cancelled_id, TaskRunStatus::Cancelled),
+    ] {
+        if let Err(error) =
+            initial_store.update_task_run_status(id, status, Some(started_at), Some(ended_at))
+        {
+            return EvalResult {
+                name,
+                passed: false,
+                message: format!("update task run status: {}", error),
+            };
+        }
+    }
+    drop(initial_store);
+
+    let reopened = match ScheduleStore::open(&db_path) {
+        Ok(store) => store,
+        Err(error) => {
+            return EvalResult {
+                name,
+                passed: false,
+                message: format!("reopen schedule store: {}", error),
+            };
+        }
+    };
+    let runs = match reopened.list_task_runs(Some(schedule_id), 10) {
+        Ok(runs) => runs,
+        Err(error) => {
+            return EvalResult {
+                name,
+                passed: false,
+                message: format!("list persisted task runs: {}", error),
+            };
+        }
+    };
+    let completed_ok = runs.iter().any(|run| {
+        run.id == completed_id
+            && run.status == TaskRunStatus::Completed
+            && run.started_at.is_some()
+            && run.ended_at.is_some()
+    });
+    let cancelled_ok = runs.iter().any(|run| {
+        run.id == cancelled_id
+            && run.status == TaskRunStatus::Cancelled
+            && run.started_at.is_some()
+            && run.ended_at.is_some()
+    });
+    let queued_ok = reopened
+        .list_upcoming_task_runs(now, 10)
+        .map(|upcoming| upcoming.len() == 1 && upcoming[0].id == queued_id)
+        .unwrap_or(false);
+    let dedup_ok = reopened
+        .dedup_key_exists("schedule-eval-queued")
+        .unwrap_or(false);
+
+    EvalResult {
+        name,
+        passed: runs.len() == 3 && completed_ok && cancelled_ok && queued_ok && dedup_ok,
+        message: if runs.len() == 3 && completed_ok && cancelled_ok && queued_ok && dedup_ok {
+            "Queued, completed, and cancelled scheduled runs persist across reopen; only the queued run is returned as upcoming, and its dedup key is retained.".into()
+        } else {
+            format!(
+                "Schedule lifecycle mismatch after reopen: runs={}, completed={}, cancelled={}, queued_upcoming={}, dedup={}",
+                runs.len(), completed_ok, cancelled_ok, queued_ok, dedup_ok
+            )
+        },
+    }
+}
 
 /// Long-term memory entry survives closing and reopening the SQLite store.
 pub fn eval_memory_persisted_after_store_restart() -> EvalResult {
@@ -315,10 +469,27 @@ pub fn eval_memory_persisted_after_store_restart() -> EvalResult {
 }
 
 /// All deterministic mock evals for the CI profile (excludes Studio REC scenarios).
-pub fn run_agentic_mock_evals() -> Vec<EvalResult> {
+pub(crate) fn run_agentic_mock_evals_timed() -> Vec<TimedEvalResult> {
     vec![
-        eval_tools_policy_refusal(),
-        eval_llm_provider_fallback(),
-        eval_memory_persisted_after_store_restart(),
+        measure_eval(
+            eval_tools_policy_refusal,
+            &["probe_forbidden_write", "probe_blocked_command"],
+            &["write_file", "run_command:rm"],
+        ),
+        measure_eval(
+            eval_llm_provider_fallback,
+            &["primary_unavailable", "fallback_completed"],
+            &[],
+        ),
+        measure_eval(
+            eval_memory_persisted_after_store_restart,
+            &["write_memory", "reopen_store", "recall_memory"],
+            &["long_term_store"],
+        ),
+        measure_eval(
+            eval_scheduled_task_lifecycle_persisted,
+            &["queue_run", "complete_run", "cancel_run", "reopen_store"],
+            &["schedule_store"],
+        ),
     ]
 }
