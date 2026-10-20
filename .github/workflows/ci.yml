@@ -1,20 +1,59 @@
 name: CI
-
 on:
   pull_request:
   push:
     branches: [main, "0.*"]
-
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_INCREMENTAL: "0"
   RUSTFLAGS: "-C debuginfo=0"
-
 jobs:
-  test:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.plan.outputs.rust }}
+      full: ${{ steps.plan.outputs.full }}
+      ui: ${{ steps.plan.outputs.ui }}
+      recipes: ${{ steps.plan.outputs.recipes }}
+      llama: ${{ steps.plan.outputs.llama }}
+      daemon_e2e: ${{ steps.plan.outputs.daemon_e2e }}
+      cli_e2e: ${{ steps.plan.outputs.cli_e2e }}
+      packages: ${{ steps.plan.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify change selection
+        run: python -m unittest discover -s scripts/ci/tests -v
+      - name: Select checks
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            python scripts/ci/select_checks.py --full
+          else
+            python scripts/ci/select_checks.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          fi
+
+  rust-tests:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      - name: Start measurement
+        run: python scripts/ci/report_build.py start
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -25,53 +64,81 @@ jobs:
           large-packages: true
           docker-images: true
           swap-storage: false
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        id: cache
+        uses: ./.github/actions/cargo-cache
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-ci-
-
-      # Studio worktree path-boundary tests (`akasha-daemon::studio_worktree`) run on Linux
-      # (ubuntu-latest) only. They cover normalized Windows-style path separators in registry
-      # rows but do not execute on native Windows CI (no windows job in this workflow).
-      - name: Cargo test (workspace)
-        run: cargo test --workspace
-
+          variant: ci-ubuntu-debug-default
+      - name: Cargo test (workspace or affected packages)
+        env:
+          FULL: ${{ needs.changes.outputs.full }}
+          PACKAGES: ${{ needs.changes.outputs.packages }}
+        run: |
+          args=(--workspace)
+          if [[ "$FULL" != true ]]; then
+            args=()
+            while IFS= read -r package; do args+=(-p "$package"); done < <(jq -r '.[]' <<< "$PACKAGES")
+            if [[ ${#args[@]} == 0 ]]; then echo "::error::Empty Rust selection"; exit 1; fi
+          fi
+          cargo test --locked "${args[@]}"
       - name: Validate cookbook recipes
+        if: needs.changes.outputs.recipes == 'true'
         run: |
           pip install jsonschema
           python scripts/validate-cookbook-recipes.py
-
       - name: Validate feature registry
         run: python scripts/validate-feature-registry.py
 
-      - name: E2E tests (daemon + CLI binaries)
+      - name: E2E tests (daemon)
+        if: needs.changes.outputs.daemon_e2e == 'true'
         env:
           RUN_E2E: "1"
-        run: |
-          cargo test -p akasha-daemon --test e2e_health --test e2e_api_smoke -- --ignored --test-threads=1
-          cargo test -p akasha-cli --test cli_smoke -- --ignored
+        run: cargo test --locked -p akasha-daemon --test e2e_health --test e2e_api_smoke -- --ignored --test-threads=1
+      - name: E2E tests (CLI)
+        if: needs.changes.outputs.cli_e2e == 'true'
+        env:
+          RUN_E2E: "1"
+        run: cargo test --locked -p akasha-cli --test cli_smoke -- --ignored
+      - name: Prepare daemon for UI tests
+        if: needs.changes.outputs.ui == 'true'
+        run: cargo build --locked -p akasha-daemon
+      - name: Share daemon with UI tests
+        if: needs.changes.outputs.ui == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: ci-ui-daemon
+          path: target/debug/akasha-daemon
+          retention-days: 1
+          if-no-files-found: error
+      - name: Report build/cache
+        if: always()
+        env:
+          BUILD_JOB_STATUS: ${{ job.status }}
+        run: python scripts/ci/report_build.py finish --cache-hit '${{ steps.cache.outputs.cache-hit }}'
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: ci-rust-measurements
+          path: ci-build-report.json
+          retention-days: 14
 
   ui-e2e:
+    needs: [changes, rust-tests]
+    if: >-
+      always() && needs.changes.result == 'success' &&
+      needs.changes.outputs.ui == 'true' &&
+      (needs.rust-tests.result == 'success' || needs.rust-tests.result == 'skipped')
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
-
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -82,43 +149,43 @@ jobs:
           large-packages: true
           docker-images: true
           swap-storage: false
-
-      - name: Install Rust
+      - name: Install Rust (UI-only change)
+        if: needs.rust-tests.result == 'skipped'
         uses: dtolnay/rust-toolchain@stable
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies (UI-only change)
+        if: needs.rust-tests.result == 'skipped'
+        uses: ./.github/actions/cargo-cache
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-ui-e2e-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-ui-e2e-
-
-      - name: Build daemon for Playwright
-        run: cargo build -p akasha-daemon
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+          variant: ci-ubuntu-debug-default
+      - name: Reuse daemon built by Rust checks
+        if: needs.rust-tests.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-ui-daemon
+          path: target/debug
+      - name: Build daemon (UI-only change)
+        if: needs.rust-tests.result == 'skipped'
+        run: cargo build --locked -p akasha-daemon
+      - name: Restore executable permission after artifact download
+        run: chmod +x target/debug/akasha-daemon
+      - uses: actions/setup-node@v4
         with:
           node-version: "lts/*"
           cache: npm
           cache-dependency-path: apps/akasha-ui/package-lock.json
-
       - name: Install UI deps and Playwright browser
         working-directory: apps/akasha-ui
         run: |
           npm ci
           npm run test:e2e:install
-
-      - name: Playwright E2E (build --mode e2e + tests)
+      - name: UI unit tests
+        working-directory: apps/akasha-ui
+        run: npm run test
+      - name: Playwright E2E
         working-directory: apps/akasha-ui
         run: npm run test:e2e
 
@@ -179,19 +246,37 @@ jobs:
           retention-days: 7
 
   embedded-llama-cpp-linux:
+    needs: changes
+    if: needs.changes.outputs.llama == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install build deps (llama.cpp)
         run: sudo apt-get update && sudo apt-get install -y clang cmake pkg-config libssl-dev
+      - uses: ./.github/actions/cargo-cache
+        with:
+          variant: ci-ubuntu-debug-llama-cpp
+      - name: Build and test embedded-llm with llama-cpp
+        run: |
+          cargo build --locked -p akasha-embedded-llm --features llama-cpp
+          cargo test --locked -p akasha-embedded-llm --features llama-cpp
 
-      - name: Build embedded-llm with llama-cpp
-        run: cargo build -p akasha-embedded-llm --features llama-cpp
-
-      - name: Unit tests (no GGUF e2e)
-        run: cargo test -p akasha-embedded-llm --features llama-cpp
+  # Preserve the existing required "test" check, including docs-only changes.
+  test:
+    if: always()
+    needs: [changes, rust-tests, ui-e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all required outcomes
+        env:
+          PLAN_RESULT: ${{ needs.changes.result }}
+          RUST_RESULT: ${{ needs.rust-tests.result }}
+          UI_RESULT: ${{ needs.ui-e2e.result }}
+          RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
+          UI_REQUIRED: ${{ needs.changes.outputs.ui }}
+        run: |
+          [[ "$PLAN_RESULT" == success ]]
+          if [[ "$RUST_REQUIRED" == true ]]; then [[ "$RUST_RESULT" == success ]]; else [[ "$RUST_RESULT" == skipped ]]; fi
+          if [[ "$UI_REQUIRED" == true ]]; then [[ "$UI_RESULT" == success ]]; else [[ "$UI_RESULT" == skipped ]]; fi
