@@ -4,7 +4,7 @@
 # See: spec/dev/roadmap/memory_encryption_rfc.md
 #
 # Prerequisites:
-#   1. akasha doctor --fix --encrypt-memory   (sets AKASHA_MEMORY_ENCRYPT=1 in akasha.env)
+#   1. akasha doctor   (reports memory.db stored unencrypted today)
 #   2. Daemon running on AKASHA_PORT (default 3876)
 #   3. Synthetic memory dataset (10k entries) — seed via export/import or test harness
 #
@@ -20,7 +20,7 @@
 #
 # Operator checks:
 #   - strings ~/akasha/memory.db | head     # should show gibberish when encrypted
-#   - akasha doctor                           # encryption state advisory when AKASHA_MEMORY_ENCRYPT=1
+#   - akasha doctor                           # memory_at_rest check (plaintext today)
 
 param(
   [string]$DaemonUrl = "http://127.0.0.1:3876",
@@ -47,6 +47,6 @@ if (-not (Test-Path $benchScript)) {
 
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "  1. Enable AKASHA_MEMORY_ENCRYPT=1 via: akasha doctor --fix --encrypt-memory"
+Write-Host "  1. Confirm plaintext baseline via: akasha doctor (memory_at_rest check)"
 Write-Host "  2. Implement SQLCipher or per-field encryption in akasha-store/long_term_memory.rs"
 Write-Host "  3. Re-run this script and compare p95 to baseline (target: <=15% regression)"

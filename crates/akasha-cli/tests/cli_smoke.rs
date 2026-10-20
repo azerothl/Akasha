@@ -69,11 +69,19 @@ fn e2e_cli_doctor_json_shape() {
     );
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("doctor stdout should be JSON");
-    let checks = v.get("checks").and_then(|c| c.as_array()).expect("checks array");
+    let checks = v
+        .get("checks")
+        .and_then(|c| c.as_array())
+        .expect("checks array");
     assert!(!checks.is_empty(), "expected at least one check");
     for c in checks {
         assert!(c.get("id").is_some());
-        assert!(c.get("ok").is_some());
+        let is_info = c.get("level").and_then(|l| l.as_str()) == Some("info");
+        if is_info {
+            assert_eq!(c.get("id").and_then(|i| i.as_str()), Some("memory_at_rest"));
+        } else {
+            assert!(c.get("ok").is_some());
+        }
     }
     // daemon_checks may include embedded_llm.action when GGUF missing (shape only)
     if let Some(dc) = v.get("daemon_checks").and_then(|c| c.as_array()) {

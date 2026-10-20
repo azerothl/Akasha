@@ -181,7 +181,7 @@ Liste prioritaire [feature_evolution_tracking.md](../../feature_evolution_tracki
 
 Matrices Hermes / pi-mono / memory largement **clôturées** (archives → [ROADMAP_FINAL_REGISTRY.md](../roadmap/ROADMAP_FINAL_REGISTRY.md)). Ne pas rouvrir Phase 5. Items **Reporter** utiles en stretch si capacité :
 
-- [ ] **S-MEM-05** chiffrement `memory.db` (SQLCipher / doctor) — [memory_encryption_rfc.md](../roadmap/memory_encryption_rfc.md) ; sinon rester sur chiffrement disque OS
+- [ ] **S-MEM-05** chiffrement `memory.db` (SQLCipher) — [memory_encryption_rfc.md](../roadmap/memory_encryption_rfc.md) ; stockage actuel en clair (`akasha doctor`) ; sinon chiffrement disque OS
 - [ ] UI édition **agent identity** / constitution (gaps C4 / E1 partiels)
 - [ ] Fork tree UI v2 (`/tree`) — Reporter pi-mono ; v1 suffit sauf demande produit
 - [ ] GraphRAG communautés au-delà de `project:*` (S-RAG-04 Reporter)
