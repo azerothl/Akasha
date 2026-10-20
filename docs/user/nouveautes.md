@@ -16,7 +16,8 @@
 - **Artefacts** : zip CPU (Candle) + CUDA / full CUDA (llama-cpp-4 + GGUF)
 - **Cockpit** : Active work, modes composer, Usage 7/30 j, pin/fork/dual-pane
 - **Life layer** : overnight, brief matinal Telegram, OAuth Connectors, schedules en langage naturel
-- **Companion LAN** : APIs daemon pour un futur client ESP32 (pairing / discovery) — **pas** de firmware ni device livré avec la release
+- **Companion LAN** : APIs daemon (pairing / discovery) — voir la page **Companion LAN** ; le matériel ESP32 reste **non livré**
+
 
 ---
 

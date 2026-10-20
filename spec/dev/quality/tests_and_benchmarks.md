@@ -252,6 +252,7 @@ cargo bench -p akasha-daemon --no-default-features --features "embedded"
 | Tests E2E UI (Playwright) | `cd apps/akasha-ui && npm run test:e2e` (voir script ; nécessite build UI + daemon) |
 | Test complétion réelle embedded (téléchargement + inférence) | `cargo test -p akasha-embedded-llm --lib -- --ignored` |
 | Benchmarks prompts daemon | `cargo bench -p akasha-daemon` |
+| Smoke premier démarrage (zip release Linux CPU, GitHub) | `bash scripts/smoke-release-artifact-linux.sh` (CI : job `release-artifact-first-boot-linux`) ; matrice manuelle : [release_artifact_validation_v0.11.0.md](../releases/release_artifact_validation_v0.11.0.md) |
 
 ---
 

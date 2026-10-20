@@ -2,10 +2,10 @@
 
 use crate::agents::{interpret_message, EventBus, OrchestratorTask};
 use crate::api::{
-    agent_role_system_prompt, available_tools_instruction, available_tools_instruction_exact,
+    agent_role_system_prompt, available_tools_instruction,
     build_image_markdown, build_session_recap_reply, cancel_task_watchdogs,
     canonicalize_tool_name, captured_media_suitable_for_vision_injection,
-    classify_small_talk_message, code_studio_tools_for_prompt, compact_short_term_if_needed,
+    classify_small_talk_message, compact_short_term_if_needed,
     compute_message_intent_flags, detect_session_recall_intent, do_install_skill,
     do_uninstall_skill, embedded_tools_instruction_hint, ensure_no_open_code_block,
     execute_tool_call, extract_semaphore, extract_x_profile_handle, insert_task_tracking_event,
@@ -55,6 +55,25 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use uuid::Uuid;
 
+async fn studio_round_limit_choice(store: &Option<HumanInputStore>, bus: &EventBus, task: Uuid, round: u32, max: u32) -> Option<String> {
+    let store = store.as_ref()?;
+    let question = "Limite de tours d'outils atteinte. Souhaitez-vous continuer la tâche ?".to_string();
+    let context = format!("La tâche a utilisé {round} tours d'outils (max {max}). Une reprise exige une nouvelle décision ; aucune ancienne approbation n'est réutilisée.");
+    let choices = vec!["Continuer (+10 tours)".to_string(), "Réinitialiser et continuer (+10 tours)".to_string(), "Arrêter".to_string()];
+    let (tx, rx) = oneshot::channel();
+    store.write().await.insert(task, PendingHumanInput { question:question.clone(), context:context.clone(), choices:Some(choices.clone()), response_tx:tx });
+    let _ = bus.send(EventEnvelope::new(EventType::TaskWaitingUserInput, Some(serde_json::json!({"task_id":task,"question":question,"context":context,"choices":choices,"tool_round_limit":true,"current_round":round,"max_tool_rounds":max}))).with_correlation(task));
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(300), rx).await.ok().and_then(Result::ok);
+    store.write().await.remove(&task);
+    answer
+}
+
+fn studio_tool_followup(request: &str, results: &str) -> String {
+    // The previous model reply is an executable proposal, not another request.
+    // Repeating it here primes text-tool models to emit the same operation again.
+    format!("[CURRENT Studio task]\n{request}\n\n[Recorded execution results, do not repeat successful operations]\n{results}\n\nContinue only unmet requirements. If the requested effects have succeeded, finish with a brief plain-text summary. A successful file write does not prove other checks passed. Do not emit the same write again. Failed or deferred operations are not completed; address their actual errors before claiming success.")
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 /// preferred_task_type_override: when set (e.g. system selector task_type), overrides routing/reminders vs. assigned_agent alone.
@@ -93,9 +112,20 @@ pub(crate) async fn run_message_via_llm(
     studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
     incognito: bool,
 ) {
-    if let Ok(store) = TaskStore::open(&store_path) {
-        let _ = store.update_status(task_id, TaskStatus::Running);
-    }
+    let _active_execution=match crate::studio_recovery::ActiveRun::enter(task_id){Ok(guard)=>guard,Err(error)=>{tracing::warn!(%task_id,%error,"Duplicate task execution refused");return;}};
+    let started=match TaskStore::open(&store_path).and_then(|store|store.transition_if(task_id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running],TaskStatus::Running)) {
+        Ok(started)=>started,
+        Err(error)=>{
+            let reason=format!("Cannot start task execution: {error}");
+            let outcome=serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":"failed","reason":reason,"status":"failed","verification":[],"acceptance_verified":false});
+            let persisted=TaskStore::open(&store_path).and_then(|store|store.finalize_outcome(task_id,TaskStatus::Failed,outcome.clone())).is_ok();
+            tracing::error!(%task_id,%error,persisted,"Task start persistence failed");
+            let _=bus.send(EventEnvelope::new(EventType::TaskFailed,Some(serde_json::json!({"task_id":task_id,"reason":reason,"outcome":outcome,"persisted":persisted}))).with_correlation(task_id));
+            notify_task_completion(&task_completion_registry,task_id).await;return;
+        }
+    };
+    if !started {notify_task_completion(&task_completion_registry,task_id).await;return;}
+
     let _ = bus.send(
         EventEnvelope::new(
             EventType::ProgressUpdate,
@@ -137,6 +167,26 @@ pub(crate) async fn run_message_via_llm(
         crate::api_studio::strip_embedded_acceptance_json(&message);
     let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
     let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+    macro_rules! abort_recovery {($reason:expr)=>{{
+        let reason=$reason.to_string();
+        let proposed=if crate::studio_recovery::load(&store_path,task_id,false).ok().flatten().is_some(){TaskStatus::Interrupted}else{TaskStatus::Failed};
+        let actual=TaskStore::open(&store_path).and_then(|store|store.finalize_outcome(task_id,proposed.clone(),serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":if proposed==TaskStatus::Interrupted{"stopped"}else{"failed"},"reason":reason,"verification":[],"acceptance_verified":false}))).map(|(status,_)|status).unwrap_or(proposed);
+        let event=match actual {TaskStatus::Cancelled=>EventType::TaskCancelled,TaskStatus::Paused|TaskStatus::Interrupted|TaskStatus::WaitingUserInput=>EventType::TaskPaused,_=>EventType::TaskFailed};
+        let _=bus.send(EventEnvelope::new(event,Some(serde_json::json!({"task_id":task_id,"status":actual.as_str(),"reason":reason}))).with_correlation(task_id));
+        cancel_task_watchdogs(&mut watchdog_cancel,&mut stall_cancel);notify_task_completion(&task_completion_registry,task_id).await;return;
+    }}}
+    let recovery_checkpoint=match crate::studio_recovery::load(&store_path,task_id,true){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
+    if let Some(checkpoint)=recovery_checkpoint.as_ref(){
+        let root=match crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags,&checkpoint.project_id).and_then(|path|path.canonicalize().map_err(|e|e.to_string())){Ok(path)=>path,Err(error)=>{abort_recovery!(error);}};
+        if !crate::studio::is_strictly_under_studio_root(&root,&crate::studio::studio_projects_base(data_dir_for_studio_flags)){abort_recovery!("Recorded project escapes Studio project storage");}
+        let expected=match checkpoint.workspace.canonicalize(){Ok(path)=>path,Err(error)=>{abort_recovery!(error);}};
+        if expected!=root {
+            match crate::studio_worktree::restore_for_resume(data_dir_for_studio_flags,&studio_worktree_registry,task_id,&checkpoint.project_id).await {
+                Ok(Some(state)) if state.worktree_path.canonicalize().ok().as_ref()==Some(&expected)=>{},
+                _=>{abort_recovery!("Cannot restore the recorded task worktree; project-root fallback refused");}
+            }
+        }
+    }
     let tool_disk_workspace_root: std::path::PathBuf = {
         if let Some(wt) = crate::studio_worktree::get_worktree_for_task(&studio_worktree_registry, task_id).await
         {
@@ -170,8 +220,9 @@ pub(crate) async fn run_message_via_llm(
         }
         }
     };
-    let code_studio_disk_task = tool_disk_workspace_root
-        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags));
+    // A path shape is not a project identity. Match the dispatcher/ledger gate.
+    let code_studio_disk_task = TaskStore::open(&store_path).ok()
+            .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten()).is_some();
     let studio_disk_system_append = {
         let proj_base = crate::studio::studio_projects_base(data_dir_for_studio_flags);
         if tool_disk_workspace_root.starts_with(proj_base) {
@@ -188,6 +239,28 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
+    if let Some(checkpoint)=recovery_checkpoint.as_ref(){
+        let project=TaskStore::open(&store_path).ok().and_then(|store|store.lineage_root_studio_project_id(task_id).ok().flatten());
+        if checkpoint.agent!=assigned_agent || project.as_deref()!=Some(&checkpoint.project_id) || checkpoint.workspace.canonicalize().ok()!=tool_disk_workspace_root.canonicalize().ok(){abort_recovery!("Checkpoint context no longer matches the task workspace, project or role");}
+    }
+    let skill_registry = if code_studio_disk_task {
+        match &skill_registry {
+            Some(registry) => match registry.for_project(&tool_disk_workspace_root).await {
+                Ok(scoped) => Some(Arc::new(scoped)),
+                Err(error) => {
+                    let reason = format!("Cannot load project skills: {error}");
+                    if let Ok(store) = TaskStore::open(&store_path) {
+                        let _ = store.finalize_outcome(task_id, TaskStatus::Failed, serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":"failed","reason":reason,"verification":[],"acceptance_verified":false}));
+                    }
+                    let _ = bus.send(EventEnvelope::new(EventType::TaskFailed, Some(serde_json::json!({"task_id":task_id,"reason":reason}))).with_correlation(task_id));
+                    cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
+                    notify_task_completion(&task_completion_registry, task_id).await;
+                    return;
+                }
+            },
+            None => None,
+        }
+    } else { skill_registry };
     let role_agent_for_system_prompt =
         if preferred_task_type_override.as_deref() == Some("image_generation") {
             "image_generation"
@@ -502,16 +575,13 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         }
-        let studio_tool_list = if code_studio_disk_task {
-            Some(code_studio_tools_for_prompt(
-                allowed_tools.as_deref(),
-                assigned_agent.as_str(),
-            ))
+        let studio_tool_list = if code_studio_disk_task || crate::studio_role_policy::restricted_role(&assigned_agent) {
+            tools_executor_snapshot.as_ref().map(|executor| crate::studio_capabilities::announced_names(&executor.policy, &assigned_agent))
         } else {
             None
         };
-        let base = if let Some(ref v) = studio_tool_list {
-            available_tools_instruction_exact(v)
+        let base = if studio_tool_list.is_some() {
+            tools_executor_snapshot.as_ref().map(|executor| crate::studio_capabilities::prompt(&executor.policy, &assigned_agent)).unwrap_or_default()
         } else {
             available_tools_instruction(allowed_tools.as_deref())
         };
@@ -524,11 +594,11 @@ pub(crate) async fn run_message_via_llm(
         if code_studio_disk_task {
             let skills_part_studio = match &skill_registry {
                 Some(reg) => {
-                    let list = reg.list().await;
+                    let list = reg.for_agent(&assigned_agent).await;
                     if list.is_empty() {
                         String::new()
                     } else {
-                        let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+                        let names: Vec<String> = list.iter().map(|s| format!("{}: {}", s.name, s.description)).collect();
                         format!(
                             " ; Skills (n’utiliser que si pertinent pour ce dépôt ; sinon ignorer) : {}",
                             names.join(", ")
@@ -544,7 +614,7 @@ pub(crate) async fn run_message_via_llm(
                  Règles :\n\
                  - Outils strictement nécessaires à la demande sur ce dépôt ; pas d’exemples hors sujet.\n\
                  - read_file : par défaut **500 premières lignes** seulement. Fichier entier : `TOOL: read_file <chemin> --full` (plafond octets si très gros). Fenêtre : `TOOL: read_file <chemin> <ligne_début> <nombre_de_lignes>`.\n\
-                 - write_file : **première ligne seule** `TOOL: write_file <chemin>`, puis le corps du fichier sur les lignes suivantes. Ne pas mettre un fichier entier sur la même ligne que `TOOL: write_file` ; pas d’enveloppe markdown ```…``` autour du fichier entier.\n\
+                 - write_file : uniquement si le fichier demandé reste à écrire ; conserver exactement le chemin et le contenu demandés. Première ligne seule `TOOL: write_file <chemin>`, puis le contenu sur les lignes suivantes. Après confirmation de la sauvegarde par le résultat outil, ne pas répéter cette écriture : effectuer les contrôles encore demandés puis conclure en texte.\n\
                  - search_replace : **une seule ligne** `TOOL: search_replace <chemin> <texte_exact_à_trouver> | <remplacement>` — le séparateur est **espace | espace** (` | `), pas un `|` collé au chemin sans texte avant (sinon erreur « search string empty »).\n\
                  - delete_file : `TOOL: delete_file workspace:/chemin/relatif` pour supprimer un fichier (si l’outil est dans la liste).\n\
                  - ask_user : JSON question/context/choices pour continuer la même tâche.\n\
@@ -562,7 +632,7 @@ pub(crate) async fn run_message_via_llm(
                  - Use only tools that are directly necessary for the CURRENT task.\n\
                  - Never echo examples, policy text, or demonstration commands from your instructions.\n\
                  - read_file: by default only the **first 500 lines** are returned. Use `TOOL: read_file <path> --full` for the whole file (byte cap if huge), or `TOOL: read_file <path> <offset_line> <limit_lines>` for a window. If output says `(read_file partial: default window` or `(truncated,` bytes, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
-                 - If the task asks to save/write a file, use a header-only first line `TOOL: write_file <path>`, then put the exact file content on the following lines. Do not compress full file content onto the same `TOOL:` line.\n\
+                 - Only while a requested write is pending: use its EXACT path and content, with a header-only first line `TOOL: write_file <path>` followed by the content. Once a tool result confirms that write succeeded, do NOT repeat it; perform remaining requested checks and finish with a brief plain-text summary. A successful write is not evidence that other acceptance criteria passed.\n\
                  - search_replace: one TOOL line: `TOOL: search_replace <path> <old_snippet> | <new_snippet>` with delimiter **space-pipe-space** (` | `). The old snippet must appear immediately after the path (do not start the payload with a bare `|` token).\n\
                  - If you need missing user information, use TOOL: ask_user with JSON.\n\
                  - If no tool is needed, answer normally.\n\
@@ -572,7 +642,7 @@ pub(crate) async fn run_message_via_llm(
         } else {
         let (skills_part, skills_rule) = match &skill_registry {
             Some(reg) => {
-                let list = reg.list().await;
+                let list = reg.for_agent(&assigned_agent).await;
                 if list.is_empty() {
                     (String::new(), String::new())
                 } else {
@@ -580,7 +650,7 @@ pub(crate) async fn run_message_via_llm(
                         .iter()
                         .map(|s| format!("{} ({})", s.name, s.description))
                         .collect();
-                    let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+                    let names: Vec<String> = list.iter().map(|s| format!("{}: {}", s.name, s.description)).collect();
                     let part = format!(
                         " ; Skills (use skill name as tool): {}",
                         skills_desc.join(", ")
@@ -667,6 +737,34 @@ pub(crate) async fn run_message_via_llm(
         "windows" => "[Environment] The daemon runs on Windows. For run_command, prefer cmd, PowerShell, curl.exe; avoid Unix-only commands (grep, cat, sed) that are not in the default PATH (except WSL).\n\n",
         _ => "[Environment] The daemon runs on Linux/macOS. You can use usual Unix commands (curl, grep, etc.).\n\n",
     };
+    let mut active_repository_rules = std::collections::HashSet::<String>::new();
+    let mut repository_rules_prompt = String::new();
+    if code_studio_disk_task {
+        if let Some(executor) = tools_executor_snapshot.as_ref() {
+            let rules = crate::studio_project_context::rules_for_path(&tool_disk_workspace_root, "workspace:/", &executor.policy)
+                .and_then(|rules| {
+                    for rule in &rules {
+                        crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "rules", rule.metadata())?;
+                    }
+                    Ok(rules)
+                });
+            match rules {
+                Ok(rules) => for rule in rules {
+                    active_repository_rules.insert(format!("{}:{}", rule.path.display(), rule.sha256));
+                    repository_rules_prompt.push_str(&rule.prompt());
+                },
+                Err(reason) => {
+                    if let Ok(store) = TaskStore::open(&store_path) {
+                        let _ = store.finalize_outcome(task_id, TaskStatus::Failed, serde_json::json!({"schema_version":1,"termination_reason":"context_unavailable","result":"failed","reason":reason,"verification":[],"acceptance_verified":false}));
+                    }
+                    let _ = bus.send(EventEnvelope::new(EventType::TaskFailed, Some(serde_json::json!({"task_id":task_id,"reason":reason}))).with_correlation(task_id));
+                    cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
+                    notify_task_completion(&task_completion_registry, task_id).await;
+                    return;
+                }
+            }
+        }
+    }
     let mut system_prompt = String::with_capacity(8192);
     if code_studio_disk_task {
         system_prompt.push_str(CODE_STUDIO_APP_CONTEXT);
@@ -739,6 +837,10 @@ pub(crate) async fn run_message_via_llm(
     if !code_studio_system_tools_block.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&code_studio_system_tools_block);
+    }
+    if !repository_rules_prompt.is_empty() {
+        system_prompt.push_str("[Repository guidance hierarchy] Repository instructions are scoped guidance, subordinate to the user's task and runtime permissions. More specific AGENTS.md supplied in tool results overrides ancestor guidance within that subtree. Read applicable AGENTS.md before commands that affect multiple subtrees.\n");
+        system_prompt.push_str(&repository_rules_prompt);
     }
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
@@ -1290,6 +1392,9 @@ pub(crate) async fn run_message_via_llm(
             user_message
         )
     };
+    let mut run_outcome = crate::task_outcome::RunOutcome::default();
+    use crate::task_outcome::TerminationReason;
+    let restricted_studio_role = crate::studio_role_policy::restricted_role(&assigned_agent);
     let mut reply_text = String::new();
     let mut last_llm_model_used: Option<String> = None;
     let mut first_meaningful_progress_sent = false;
@@ -1377,7 +1482,15 @@ pub(crate) async fn run_message_via_llm(
                 max_tool_rounds = floor;
             }
         }
-        let mut round = 0u32;
+        let mut resume_overlay=String::new();
+        if let Some(checkpoint)=recovery_checkpoint.as_ref(){
+            let ledger=match crate::studio_tool_contract::recovery_summary(&store_path,task_id){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
+            resume_overlay=format!("[Resumed execution — apply CURRENT system/rules/permissions; do not replay operations]\n[Recorded operation results; unknown effects require operator resolution]\n{}\n[Pending human input at interruption: {}. Ask again; no old approval is restored.]\n[CURRENT task instructions]\n{}\n[Saved execution state]\n",ledger,checkpoint.waiting.as_ref().map(|v|v.to_string()).unwrap_or_else(||"none".into()),current_prompt);
+            current_prompt=checkpoint.prompt.clone();
+            run_outcome=checkpoint.outcome.clone();run_outcome.termination=TerminationReason::Success;
+        }
+        if let Some(saved)=recovery_checkpoint.as_ref().and_then(|checkpoint|checkpoint.max_tool_rounds) {max_tool_rounds=saved;}
+        let mut round = recovery_checkpoint.as_ref().map(|checkpoint|checkpoint.round).unwrap_or(0);
         // Tours d'affilée avec uniquement des outils d'exploration (Code Studio).
         let mut studio_read_only_streak_rounds: u32 = 0;
         let mut social_snapshot_seen = false;
@@ -1431,10 +1544,25 @@ pub(crate) async fn run_message_via_llm(
                 }
             });
 
+        let mut resumed_limit_wait = recovery_checkpoint.as_ref().and_then(|checkpoint| {
+            checkpoint.waiting.as_ref().filter(|v|v["tool_round_limit"]==true).cloned()
+                .or_else(||(checkpoint.round>=max_tool_rounds).then(||serde_json::json!({"tool_round_limit":true,"max_tool_rounds":max_tool_rounds})))
+        });
         'tool_rounds: loop {
+            if let Some(waiting) = resumed_limit_wait.take() {
+                max_tool_rounds = waiting["max_tool_rounds"].as_u64().map(|v|v as u32).unwrap_or(max_tool_rounds);
+                if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",waiting,(&current_prompt,round,max_tool_rounds,&run_outcome)) {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
+                match studio_round_limit_choice(&human_input_store, &bus, task_id, round, max_tool_rounds).await.as_deref() {
+                    Some("Continuer (+10 tours)") => max_tool_rounds = round.max(max_tool_rounds).saturating_add(10),
+                    Some("Réinitialiser et continuer (+10 tours)") => { round=0; max_tool_rounds=max_tool_rounds.saturating_add(10); }
+                    _ => { run_outcome.termination=TerminationReason::ToolRoundLimit; reply_text="Tool round continuation declined or timed out.".into(); break 'tool_rounds; }
+                }
+            }
             match store.get(task_id).ok().flatten().map(|t| t.status) {
                 Some(TaskStatus::Paused)
                 | Some(TaskStatus::Cancelled)
+                | Some(TaskStatus::Interrupted)
+                | Some(TaskStatus::WaitingUserInput)
                 | Some(TaskStatus::Failed) => {
                     break 'tool_rounds;
                 }
@@ -1482,6 +1610,7 @@ pub(crate) async fn run_message_via_llm(
                     .and_then(|s| s.parse::<f64>().ok())
                 {
                     if max_cost > 0.0 && session_cost >= max_cost {
+                        run_outcome.termination = TerminationReason::BudgetExhausted;
                         reply_text = "Budget dépassé pour cette session (AKASHA_MAX_COST_PER_SESSION_USD). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
                         break 'tool_rounds;
                     }
@@ -1491,6 +1620,7 @@ pub(crate) async fn run_message_via_llm(
                     .and_then(|s| s.parse::<u64>().ok())
                 {
                     if max_tokens > 0 && session_tokens >= max_tokens {
+                        run_outcome.termination = TerminationReason::BudgetExhausted;
                         reply_text = "Quota de tokens dépassé pour cette session (AKASHA_MAX_TOKENS_PER_SESSION). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
                         break 'tool_rounds;
                     }
@@ -1561,8 +1691,25 @@ pub(crate) async fn run_message_via_llm(
                     );
                 }
             }
+            if code_studio_disk_task {
+                let project=TaskStore::open(&store_path).ok().and_then(|store|store.lineage_root_studio_project_id(task_id).ok().flatten());
+                let Some(project_id)=project else {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text="Studio project identity unavailable at checkpoint".into();break 'tool_rounds;};
+                let checkpoint=crate::studio_recovery::Checkpoint{schema_version:1,task_id,project_id,workspace:tool_disk_workspace_root.clone(),agent:assigned_agent.clone(),session_id:session_id.clone(),preferred_task_type:preferred_task_type_override.clone(),incognito,round,max_tool_rounds:Some(max_tool_rounds),prompt:current_prompt.clone(),phase:"before_model".into(),waiting:None,outcome:run_outcome.clone()};
+                if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
+            }
+            if round>=max_tool_rounds {run_outcome.termination=TerminationReason::ToolRoundLimit;reply_text="Tool round budget already exhausted at checkpoint; start a new scoped task to continue.".into();break 'tool_rounds;}
+            let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
+                tools_executor_snapshot.as_ref().and_then(|exec| {
+                    let names:Vec<String>=crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect();
+                    (!names.is_empty()).then(||vec![crate::studio_tool_contract::native_definition(names)])
+                })
+            }else{None};
             let request = CompletionRequest {
-                prompt: format!("{}{}", current_prompt, tool_instruction),
+                prompt: if code_studio_disk_task && round > 0 {
+                    format!("{}\n\n{}{}", tool_instruction, resume_overlay, current_prompt)
+                } else {
+                    format!("{}{}{}", resume_overlay, current_prompt, tool_instruction)
+                },
                 max_tokens: Some(completion_max_tokens),
                 temperature: Some(completion_temperature),
                 preferred_task_type,
@@ -1576,6 +1723,7 @@ pub(crate) async fn run_message_via_llm(
                 num_ctx: None,
                 num_gpu: None,
                 thinking_level: completion_thinking_level.clone(),
+                tools: native_tools,
             };
             // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
             // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -1606,6 +1754,7 @@ pub(crate) async fn run_message_via_llm(
                         "Overall LLM timeout exceeded; aborting task"
                     );
                     stream_join.abort();
+                    run_outcome.termination = TerminationReason::Timeout;
                     reply_text = if accumulated.is_empty() {
                         format!("LLM response timed out after {} seconds.", llm_timeout_secs)
                     } else {
@@ -1722,6 +1871,7 @@ pub(crate) async fn run_message_via_llm(
             // Wrap stream_join.await with remaining overall budget; guard against zero remaining.
             let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
             let response = if remaining.is_zero() {
+                run_outcome.termination = TerminationReason::Timeout;
                 tracing::warn!(
                     timeout_secs = llm_timeout_secs,
                     "Overall LLM timeout on stream completion"
@@ -1795,11 +1945,13 @@ pub(crate) async fn run_message_via_llm(
                                 "error": e.to_string(),
                             }),
                         );
+                        run_outcome.termination = TerminationReason::ProviderError;
                         reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
                         break;
                     }
                     Ok(Err(join_err)) => {
                         tracing::warn!(error = %join_err, "Stream task join failed");
+                        run_outcome.termination = TerminationReason::ProviderError;
                         reply_text = if accumulated.is_empty() {
                             format!("LLM task error: {}", join_err)
                         } else {
@@ -1808,6 +1960,7 @@ pub(crate) async fn run_message_via_llm(
                         break;
                     }
                     Err(_timeout) => {
+                        run_outcome.termination = TerminationReason::Timeout;
                         tracing::warn!(
                             timeout_secs = llm_timeout_secs,
                             "Overall LLM timeout on stream completion"
@@ -1827,6 +1980,15 @@ pub(crate) async fn run_message_via_llm(
             // `contains("TOOL:")` check so that any provider-specific formatting is handled consistently.
             let response =
                 crate::api_llm_stream::choose_merged_response_for_tools(&response, &accumulated);
+
+            // An empty generation is a terminal provider outcome. In particular, the
+            // Studio PM delegation/promise guards must not turn it into another round
+            // whose later prose would hide the original failure.
+            if response.trim().is_empty() {
+                run_outcome.termination = TerminationReason::ModelEmpty;
+                reply_text = String::new();
+                break 'tool_rounds;
+            }
 
             if let Some(intent) = small_talk_intent {
                 if response_looks_off_topic_for_small_talk(&response) {
@@ -2092,6 +2254,7 @@ pub(crate) async fn run_message_via_llm(
             {
                 round += 1;
                 let mut tool_results = Vec::new();
+                let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
                 for (lane, lane_calls) in scheduled_lanes {
                     let lane_name = match lane {
@@ -2110,17 +2273,105 @@ pub(crate) async fn run_message_via_llm(
                     .with_correlation(task_id),
                 );
                     for (name, args) in &lane_calls {
+                        let typed_call=if name=="studio_call" {
+                            match crate::studio_tool_contract::decode(&args.join(" ")) {
+                                Ok(call)=>Some(call),Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(serde_json::json!({"schema_version":1,"success":false,"error":error}).to_string());continue;}
+                            }
+                        }else{None};
+                        let native_envelope_args=args;
+                        let name=typed_call.as_ref().map(|call|&call.envelope.tool).unwrap_or(name);
+                        let args=typed_call.as_ref().map(|call|&call.argv).unwrap_or(args);
+
+                        // Hot-reloaded permissions must constrain the next invocation of an active task.
+                        let current_executor = if let Some(registry) = tools_executor.as_ref() {
+                            registry.read().await.clone()
+                        } else { exec.clone() };
+                        let exec = &current_executor;
+                        if matches!(store.get(task_id).ok().flatten().map(|t| t.status),
+                            Some(TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Interrupted | TaskStatus::WaitingUserInput | TaskStatus::Failed)) {
+                            break 'tool_rounds;
+                        }
                         // Phase D: resolve skill name to tool_ref (spec 33)
-                        let actual_tool = match &skill_registry {
-                            Some(reg) => reg
-                                .get(name)
-                                .await
-                                .map(|s| s.tool_ref)
-                                .unwrap_or_else(|| name.clone()),
-                            None => name.clone(),
+                        let invocation_role = store.get(task_id).ok().flatten().map(|t| t.assigned_agent);
+                        // Builtin tool names are authoritative; a registry entry cannot shadow them.
+                        let skill_definition = if crate::api::AVAILABLE_TOOLS.iter().any(|(tool,_)| *tool == name) { None } else {
+                            match &skill_registry { Some(reg) => reg.get(name).await, None => None }
                         };
+                        if skill_definition.as_ref().is_some_and(|skill| !skill.agents.is_empty() && !skill.agents.iter().any(|agent| agent.eq_ignore_ascii_case(invocation_role.as_deref().unwrap_or(&assigned_agent)))) {
+                            run_outcome.failed_tool_calls += 1;
+                            tool_results.push(format!("[skill] {name} is not available for {assigned_agent}"));
+                            continue;
+                        }
+                        let actual_tool = skill_definition.as_ref().map(|s| s.tool_ref.clone()).unwrap_or_else(|| name.clone());
                         let actual_tool = canonicalize_tool_name(&actual_tool);
                         let tool_args: &[String] = args.as_slice();
+                        let effective_role_tool = if actual_tool.is_empty() {
+                            if tool_args.is_empty() { "read_skill" } else { "run_command" }
+                        } else { actual_tool.as_str() };
+                        let role_check = invocation_role.as_deref().ok_or_else(|| "[studio] cannot resolve task role".to_string())
+                            .and_then(|role| crate::studio_role_policy::check(role, effective_role_tool, tool_args, Some(&tool_disk_workspace_root)));
+                        if let Err(reason) = role_check {
+                            run_outcome.failed_tool_calls += 1;
+                            let _ = bus.send(EventEnvelope::new(EventType::ToolInvoked, Some(serde_json::json!({
+                                "tool":effective_role_tool, "success":false, "reason":"role_policy_denied", "result_preview":reason
+                            }))).with_correlation(timeline_correlation));
+                            tool_results.push(reason);
+                            continue;
+                        }
+                        if code_studio_disk_task {
+                            if let Err(reason) = crate::studio_capabilities::check(&exec.policy, invocation_role.as_deref().unwrap_or(&assigned_agent), effective_role_tool) {
+                                run_outcome.failed_tool_calls += 1;
+                                let _ = bus.send(EventEnvelope::new(EventType::ToolInvoked, Some(serde_json::json!({"tool":effective_role_tool,"success":false,"reason":"capability_unavailable","result_preview":reason}))).with_correlation(timeline_correlation));
+                                tool_results.push(reason);
+                                continue;
+                            }
+                        }
+                        if code_studio_disk_task {
+                            let targets: Vec<String> = if matches!(actual_tool.as_str(), "write_file" | "write_code") {
+                                crate::api::parse_write_file_request(tool_args).map(|(path,_)| path).into_iter().collect()
+                            } else if actual_tool == "read_file" {
+                                let (parts, _, _) = parse_read_file_args(tool_args);
+                                vec![parts.join(" ")]
+                            } else if matches!(actual_tool.as_str(), "rename_path" | "move_tree") {
+                                let mut paths: Vec<String> = tool_args.first().cloned().into_iter().collect();
+                                if tool_args.len() > 1 { paths.push(tool_args[1..].join(" ")); }
+                                paths
+                            } else if matches!(actual_tool.as_str(), "file_diff" | "diff_unified" | "dir_compare") {
+                                tool_args.iter().take(2).cloned().collect()
+                            } else if matches!(actual_tool.as_str(), "search_files" | "grep_content" | "edit_file" | "apply_patch" | "search_replace" | "delete_file") {
+                                tool_args.first().cloned().into_iter().collect()
+                            } else { Vec::new() };
+                            for path in targets {
+                                match crate::studio_project_context::rules_for_path(&tool_disk_workspace_root, &path, &exec.policy) {
+                                    Ok(rules) => for rule in rules {
+                                        let key = format!("{}:{}", rule.path.display(), rule.sha256);
+                                        if !active_repository_rules.contains(&key) {
+                                            match crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "rules", rule.metadata()) {
+                                                Ok(()) => {
+                                                    active_repository_rules.insert(key);
+                                                    tool_results.push(rule.prompt());
+                                                    repository_rules_deferred = true;
+                                                }
+                                                Err(reason) => {
+                                                    run_outcome.termination = TerminationReason::ContextUnavailable;
+                                                    reply_text = reason;
+                                                    break 'tool_rounds;
+                                                }
+                                            }
+                                        }
+                                    },
+                                    Err(reason) => {
+                                        run_outcome.termination = TerminationReason::ContextUnavailable;
+                                        reply_text = reason;
+                                        break 'tool_rounds;
+                                    }
+                                }
+                            }
+                            if repository_rules_deferred && !matches!(effective_role_tool, "read_file" | "grep_content" | "search_files" | "read_skill" | "list_skills" | "read_todos") {
+                                tool_results.push(format!("[{actual_tool}] deferred: read and apply the repository instructions supplied in this round before retrying the action"));
+                                continue;
+                            }
+                        }
                         // Hard guardrail: if read_file on this path was already truncated for this
                         // agent key, block repeated full-file reads and require chunked/windowed read.
                         if actual_tool.eq_ignore_ascii_case("read_file") {
@@ -2173,6 +2424,7 @@ pub(crate) async fn run_message_via_llm(
                                 .take(3)
                                 .all(|e| e.0 == last.0 && e.1 == last.1)
                             {
+                                run_outcome.termination = TerminationReason::ToolLoop;
                                 reply_text =
                                     "Loop detected: same tool and arguments repeated. Stopping."
                                         .to_string();
@@ -2216,22 +2468,26 @@ pub(crate) async fn run_message_via_llm(
                             .with_correlation(task_id),
                         );
                         // Phase 3.1: tools in require_approval need user confirmation before execution.
-                        if exec.policy.requires_approval(&actual_tool) {
+                        // Documentary CLI skills inherit command approval and scope, including their executable.
+                        let approval_args: Vec<String> = if actual_tool.is_empty() && !tool_args.is_empty() {
+                            std::iter::once(name.clone()).chain(tool_args.iter().cloned()).collect()
+                        } else {tool_args.to_vec()};
+                        if exec.policy.requires_approval(effective_role_tool) {
                             let permission_mode = load_permission_mode(data_dir);
                             if permission_mode.mode == "allow_all" {
                                 // Global session mode bypasses interactive approval prompts.
                             } else {
-                            let scope_key = tool_scope_key(&actual_tool, &tool_args);
+                            let scope_key = tool_scope_key(effective_role_tool, &approval_args);
                             let state = crate::permissions_center::load(data_dir);
                             let mut already_granted = false;
                             if let Some(decision) =
-                                crate::permissions_center::lookup(&actual_tool, &scope_key, &state)
+                                crate::permissions_center::lookup(effective_role_tool, &scope_key, &state)
                             {
                                 match decision.mode {
                                     crate::permissions_center::DecisionMode::AllowPersistent => {
                                         already_granted = true;
                                         let payload = serde_json::json!({
-                                            "tool": actual_tool,
+                                            "tool": effective_role_tool,
                                             "scope": scope_key,
                                             "approved": true,
                                             "mode": "allow_persistent",
@@ -2248,7 +2504,7 @@ pub(crate) async fn run_message_via_llm(
                                                 .to_string(),
                                         );
                                         let payload = serde_json::json!({
-                                            "tool": actual_tool,
+                                            "tool": effective_role_tool,
                                             "scope": scope_key,
                                             "approved": false,
                                             "mode": "deny_persistent",
@@ -2271,12 +2527,12 @@ pub(crate) async fn run_message_via_llm(
                                     // Redact write-like tool args entirely; truncate others to avoid leaking secrets/blobs.
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(
-                                        actual_tool.as_str(),
-                                        "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
+                                        effective_role_tool,
+                                        "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file" | "terminal_session"
                                     ) {
                                         "[redacted]".to_string()
                                     } else {
-                                        let truncated: Vec<String> = tool_args
+                                        let truncated: Vec<String> = approval_args
                                             .iter()
                                             .take(3)
                                             .map(|a| {
@@ -2292,8 +2548,8 @@ pub(crate) async fn run_message_via_llm(
                                                 }
                                             })
                                             .collect();
-                                        let suffix = if tool_args.len() > 3 {
-                                            format!(" … ({} args)", tool_args.len())
+                                        let suffix = if approval_args.len() > 3 {
+                                            format!(" … ({} args)", approval_args.len())
                                         } else {
                                             String::new()
                                         };
@@ -2301,7 +2557,7 @@ pub(crate) async fn run_message_via_llm(
                                     };
                                     let question = format!(
                                         "Approuver l'action : {} — {} ?",
-                                        actual_tool, args_preview
+                                        effective_role_tool, args_preview
                                     );
                                     let choices = vec![
                                         "Approuver".to_string(),
@@ -2313,10 +2569,10 @@ pub(crate) async fn run_message_via_llm(
                                     let queue_req = crate::permissions_queue::PermissionQueueRequest {
                                         id: approval_request_id.clone(),
                                         task_id: task_id.to_string(),
-                                        tool: actual_tool.clone(),
+                                        tool: effective_role_tool.to_string(),
                                         scope: scope_key.clone(),
-                                        action: actual_tool.clone(),
-                                        description: format!("{} {}", actual_tool, args_preview),
+                                        action: effective_role_tool.to_string(),
+                                        description: format!("{} {}", effective_role_tool, args_preview),
                                         rationale: format!(
                                             "Outil sensible (confirmation requise) pour la tâche {}",
                                             task_id
@@ -2335,9 +2591,10 @@ pub(crate) async fn run_message_via_llm(
                                     if let Err(err) = crate::permissions_queue::upsert_request(data_dir, queue_req) {
                                         eprintln!(
                                             "failed to persist permission queue request {} for task {} (tool {}): {}",
-                                            approval_request_id, task_id, actual_tool, err
+                                            approval_request_id, task_id, effective_role_tool, err
                                         );
                                     }
+                                    if code_studio_disk_task {if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":actual_tool,"question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome)){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
                                         question: question.clone(),
@@ -2368,7 +2625,7 @@ pub(crate) async fn run_message_via_llm(
                                         .with_correlation(task_id),
                                     );
                                     let approval_payload = serde_json::json!({
-                                        "tool": actual_tool,
+                                        "tool": effective_role_tool,
                                         "args_redacted": args_preview,
                                         "task_id": task_id.to_string(),
                                         "request_id": approval_request_id.clone()
@@ -2395,7 +2652,7 @@ pub(crate) async fn run_message_via_llm(
                                             }
                                             let expired_payload = serde_json::json!({
                                                 "task_id": task_id.to_string(),
-                                                "tool": actual_tool,
+                                                "tool": effective_role_tool,
                                                 "request_id": approval_request_id.clone(),
                                             });
                                             let _ = crate::permissions_queue::update_status(
@@ -2441,7 +2698,7 @@ pub(crate) async fn run_message_via_llm(
                                         });
                                         state.decisions.push(crate::permissions_center::PermissionDecision {
                                             id: Uuid::new_v4().to_string(),
-                                            tool: actual_tool.clone(),
+                                            tool: effective_role_tool.to_string(),
                                             scope: scope_key.clone(),
                                             mode: crate::permissions_center::DecisionMode::AllowPersistent,
                                             created_at: chrono::Utc::now().to_rfc3339(),
@@ -2452,7 +2709,7 @@ pub(crate) async fn run_message_via_llm(
                                     if !granted {
                                         tool_results.push("Action refusée par l'utilisateur (approbation requise).".to_string());
                                         let payload = serde_json::json!({
-                                            "tool": actual_tool,
+                                            "tool": effective_role_tool,
                                             "approved": false
                                         });
                                         let _ = bus.send(
@@ -2502,6 +2759,18 @@ pub(crate) async fn run_message_via_llm(
                             )
                             .with_correlation(timeline_correlation),
                         );
+                        if let Some(definition) = skill_definition.as_ref().filter(|_| name != &actual_tool) {
+                            let metadata = serde_json::json!({"name":definition.name,"source_root":definition.source_root,"sha256":definition.sha256,"version":definition.version,"activation":"tool_alias"});
+                            if let Err(reason) = crate::studio_project_context::record(data_dir_for_studio_flags, task_id, "skills", metadata.clone()) {
+                                run_outcome.termination = TerminationReason::ContextUnavailable;
+                                reply_text = reason;
+                                break 'tool_rounds;
+                            }
+                            let _ = store.insert_event(task_id, "skill_activated", Some(&metadata), &chrono::Utc::now().to_rfc3339());
+                        }
+                        let workflow_operation=if code_studio_disk_task && matches!(actual_tool.as_str(),"delegate_to_agent"|"install_skill"|"uninstall_skill"|"write_todos"|"merge_todos"|"update_todo") {
+                            match crate::studio_tool_contract::WorkflowOperation::begin(&store_path,task_id,&actual_tool,tool_args){Ok(operation)=>Some(operation),Err(error)=>{run_outcome.failed_tool_calls+=1;tool_results.push(error);continue;}}
+                        }else{None};
                         let (success, res, captured_image): (bool, String, Option<String>) =
                             if actual_tool == "ask_user" {
                                 // Human in the loop: register pending request, emit event, wait for user reply.
@@ -2537,6 +2806,7 @@ pub(crate) async fn run_message_via_llm(
                                         if question.is_empty() {
                                             (false, format!("[ask_user] invalid JSON: question required. Got: {}", body.chars().take(100).collect::<String>()), None)
                                         } else {
+                                            if code_studio_disk_task {if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_human",serde_json::json!({"tool":"ask_user","question":question,"choices":choices}),(&current_prompt,round,max_tool_rounds,&run_outcome)){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                             let (tx, rx) = tokio::sync::oneshot::channel();
                                             let pending = PendingHumanInput {
                                                 question: question.clone(),
@@ -2883,7 +3153,7 @@ pub(crate) async fn run_message_via_llm(
                             } else if actual_tool == "list_skills" {
                                 match &skill_registry {
                                     Some(reg) => {
-                                        let list = reg.list().await;
+                                        let list = reg.for_agent(invocation_role.as_deref().unwrap_or(&assigned_agent)).await;
                                         let summary: Vec<String> = list
                                             .iter()
                                             .map(|s| format!("{}: {}", s.name, s.description))
@@ -2905,37 +3175,14 @@ pub(crate) async fn run_message_via_llm(
                                     ),
                                 }
                             } else if actual_tool == "read_skill" {
-                                let skill_name =
-                                    tool_args.get(0).map(String::as_str).unwrap_or("").trim();
-                                if skill_name.is_empty() {
-                                    (
-                                        false,
-                                        "[read_skill] usage: read_skill <name>".to_string(),
-                                        None,
-                                    )
-                                } else {
-                                    match &skill_registry {
-                                        Some(reg) => {
-                                            if let Some(body) = reg.get_body(skill_name).await {
-                                                (
-                                                    true,
-                                                    format!(
-                                                        "[read_skill {}] Instructions:\n{}",
-                                                        skill_name, body
-                                                    ),
-                                                    None,
-                                                )
-                                            } else {
-                                                (false, format!("[read_skill] skill '{}' not found or has no body.", skill_name), None)
-                                            }
-                                        }
-                                        None => (
-                                            false,
-                                            "[read_skill] skill registry not available."
-                                                .to_string(),
-                                            None,
-                                        ),
-                                    }
+                                let skill_name = tool_args.first().map(String::as_str).unwrap_or("");
+                                let resource = tool_args.get(1).map(String::as_str);
+                                match &skill_registry {
+                                    Some(registry) => match crate::studio_project_context::activate_skill(registry, skill_name, invocation_role.as_deref().unwrap_or(&assigned_agent), resource, &store_path, task_id).await {
+                                        Ok(body) => (true, body, None),
+                                        Err(reason) => (false, reason, None),
+                                    },
+                                    None => (false, "[read_skill] registry unavailable".into(), None),
                                 }
                             } else if actual_tool.is_empty() {
                                 // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
@@ -2963,41 +3210,19 @@ pub(crate) async fn run_message_via_llm(
                                     .await;
                                     (s, r, None)
                                 } else {
-                                    // No args: inject SKILL.md body as context for next round (doc-only)
                                     match &skill_registry {
-                                        Some(reg) => {
-                                            if let Some(body) = reg.get_body(name).await {
-                                                (
-                                                    true,
-                                                    format!(
-                                                        "[Skill: {}] Instructions:\n{}",
-                                                        name, body
-                                                    ),
-                                                    None,
-                                                )
-                                            } else {
-                                                (
-                                                    false,
-                                                    format!(
-                                                        "[Skill: {}] No instructions body.",
-                                                        name
-                                                    ),
-                                                    None,
-                                                )
-                                            }
-                                        }
-                                        None => (
-                                            false,
-                                            "Skill registry not available.".to_string(),
-                                            None,
-                                        ),
+                                        Some(registry) => match crate::studio_project_context::activate_skill(registry, name, invocation_role.as_deref().unwrap_or(&assigned_agent), None, &store_path, task_id).await {
+                                            Ok(body) => (true, body, None),
+                                            Err(reason) => (false, reason, None),
+                                        },
+                                        None => (false, "[read_skill] registry unavailable".into(), None),
                                     }
                                 }
                             } else {
                                 execute_tool_call(
                                     exec,
-                                    &actual_tool,
-                                    tool_args,
+                                    if typed_call.is_some(){"studio_call"}else{&actual_tool},
+                                    if typed_call.is_some(){native_envelope_args.as_slice()}else{tool_args},
                                     process_registry.as_ref(),
                                     long_term_client.as_ref(),
                                     task_id,
@@ -3013,8 +3238,19 @@ pub(crate) async fn run_message_via_llm(
                                 )
                                 .await
                             };
+                        if let Some(operation)=workflow_operation {if let Err(error)=operation.finish(success,&res){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Workflow result unknown: {error}");break 'tool_rounds;}}
+                        if success { run_outcome.successful_tool_calls += 1; } else { run_outcome.failed_tool_calls += 1; }
+                        if matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container") {
+                            run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":actual_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
+                        }
                         if let Some(img) = captured_image {
-                            last_captured_image_base64 = Some(img.clone());
+                            // Studio browser PNGs are persisted and displayed by the
+                            // task evidence viewer. Keep vision input separate from
+                            // prose: embedding the data URI makes long binary strings
+                            // leak into Markdown clients that do not render it.
+                            if !code_studio_disk_task || actual_tool != "browser" {
+                                last_captured_image_base64 = Some(img.clone());
+                            }
                             if captured_media_suitable_for_vision_injection(&img) {
                                 let norm = normalize_captured_media_for_vision_turn(&img);
                                 if vision_payload_within_cap(&norm) {
@@ -3034,7 +3270,7 @@ pub(crate) async fn run_message_via_llm(
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                         let redacted_args: Vec<String> = if matches!(
                             actual_tool.as_str(),
-                            "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
+                            "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file" | "terminal_session"
                         ) {
                             vec!["[redacted for write-like tool]".to_string()]
                         } else {
@@ -3152,8 +3388,8 @@ pub(crate) async fn run_message_via_llm(
                 let results_blob = tool_results.join("\n");
                 let mut studio_readonly_nudge: Option<String> = None;
                 if code_studio_disk_task && !calls.is_empty() {
-                    let only_survey = calls.iter().all(|(name, _)| {
-                        let c = canonicalize_tool_name(&name.trim().to_string());
+                    let only_survey = calls.iter().all(|(name, args)| {
+                        let c = if name=="studio_call" {crate::studio_tool_contract::decode(&args.join(" ")).ok().map(|call|call.envelope.tool).unwrap_or_default()} else {canonicalize_tool_name(&name.trim().to_string())};
                         crate::api_studio::studio_survey_tool(&c)
                     });
                     if only_survey {
@@ -3222,7 +3458,9 @@ pub(crate) async fn run_message_via_llm(
                     .filter(|(t, _)| t == "web_search")
                     .count();
                 // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
-                current_prompt = if round_had_ask_user {
+                current_prompt = if code_studio_disk_task && !round_had_ask_user {
+                    studio_tool_followup(&user_message, &results_blob)
+                } else if round_had_ask_user {
                     format!(
                     "User request (PRIMARY — you must still fulfill this): {}\n\nYour previous assistant reply:\n{}\n\nask_user step result (user's choice; may be unrelated to the primary request):\n{}\n\nContinue the task. If the PRIMARY request is not satisfied yet, you MUST emit TOOL: lines next (web_search, web_fetch, browser navigate + browser snapshot, etc.). Do not reply \"blocked\" or \"no information\" without trying web_search first. When the primary request is fully answered, reply in plain text only (no TOOL: lines).",
                     user_message, response, results_blob
@@ -3275,6 +3513,9 @@ pub(crate) async fn run_message_via_llm(
                 };
                 if let Some(nudge) = studio_readonly_nudge {
                     current_prompt = format!("{nudge}\n\n{current_prompt}");
+                }
+                if code_studio_disk_task {
+                    if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.round=round;checkpoint.prompt=current_prompt.clone();checkpoint.phase="after_tools".into();checkpoint.waiting=None;checkpoint.outcome=run_outcome.clone();if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                 }
                 if round >= max_tool_rounds {
                     let response_for_user = response
@@ -3334,72 +3575,16 @@ pub(crate) async fn run_message_via_llm(
                     };
 
                     // When human_input_store is available, ask user whether to continue (+10 rounds), reset and continue, or stop.
-                    let should_stop = match &human_input_store {
-                        Some(store) => {
-                            const TOOL_ROUND_LIMIT_TIMEOUT_SECS: u64 = 300;
-                            let question = "Limite de tours d'outils atteinte. Souhaitez-vous continuer la tâche ?".to_string();
-                            let context = format!(
-                            "La tâche a utilisé {} tours d'outils (max {}). Vous pouvez ajouter 10 tours, réinitialiser le compteur et ajouter 10 tours, ou arrêter.",
-                            round, max_tool_rounds
-                        );
-                            let choices = vec![
-                                "Continuer (+10 tours)".to_string(),
-                                "Réinitialiser et continuer (+10 tours)".to_string(),
-                                "Arrêter".to_string(),
-                            ];
-                            let (tx, rx) = tokio::sync::oneshot::channel();
-                            let pending = PendingHumanInput {
-                                question: question.clone(),
-                                context: context.clone(),
-                                choices: Some(choices.clone()),
-                                response_tx: tx,
-                            };
-                            {
-                                let mut g = store.write().await;
-                                g.insert(task_id, pending);
-                            }
-                            let payload = serde_json::json!({
-                                "task_id": task_id.to_string(),
-                                "question": question,
-                                "context": context,
-                                "choices": choices,
-                                "tool_round_limit": true,
-                                "current_round": round,
-                                "max_tool_rounds": max_tool_rounds
-                            });
-                            let _ = bus.send(
-                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload))
-                                    .with_correlation(task_id),
-                            );
-                            let reply = tokio::time::timeout(
-                                std::time::Duration::from_secs(TOOL_ROUND_LIMIT_TIMEOUT_SECS),
-                                rx,
-                            )
-                            .await;
-                            {
-                                let mut g = store.write().await;
-                                g.remove(&task_id);
-                            }
-                            match reply {
-                                Ok(Ok(user_choice)) => {
-                                    let choice = user_choice.trim();
-                                    if choice == "Continuer (+10 tours)" {
-                                        max_tool_rounds += 10;
-                                        false
-                                    } else if choice == "Réinitialiser et continuer (+10 tours)" {
-                                        round = 0;
-                                        max_tool_rounds += 10;
-                                        false
-                                    } else {
-                                        true
-                                    }
-                                }
-                                _ => true,
-                            }
-                        }
-                        None => true,
+                    if code_studio_disk_task {
+                        if let Err(error)=crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",serde_json::json!({"tool_round_limit":true,"question":"Continue tool rounds?","current_round":round,"max_tool_rounds":max_tool_rounds}),(&current_prompt,round,max_tool_rounds,&run_outcome)) { run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds; }
+                    }
+                    let should_stop = match studio_round_limit_choice(&human_input_store,&bus,task_id,round,max_tool_rounds).await.as_deref() {
+                        Some("Continuer (+10 tours)") => { max_tool_rounds=max_tool_rounds.saturating_add(10); false }
+                        Some("Réinitialiser et continuer (+10 tours)") => { round=0; max_tool_rounds=max_tool_rounds.saturating_add(10); false }
+                        _ => true,
                     };
                     if should_stop {
+                        run_outcome.termination = TerminationReason::ToolRoundLimit;
                         reply_text = default_reply;
                         break;
                     }
@@ -3618,7 +3803,8 @@ pub(crate) async fn run_message_via_llm(
         }
     }
 
-    let mut reply_text = if reply_text.is_empty() {
+    let mut reply_text = if reply_text.trim().is_empty() {
+        if !run_outcome.failed() { run_outcome.termination = TerminationReason::ModelEmpty; }
         tracing::warn!("LLM returned empty text");
         "No response from the model. Check Ollama or your LLM provider.".to_string()
     } else {
@@ -3630,7 +3816,6 @@ pub(crate) async fn run_message_via_llm(
         reply_text
     };
     let task_status_snapshot = store.get(task_id).ok().flatten().map(|t| t.status);
-    let is_paused = matches!(task_status_snapshot, Some(TaskStatus::Paused));
     let halted_user = matches!(
         task_status_snapshot,
         Some(
@@ -3638,11 +3823,13 @@ pub(crate) async fn run_message_via_llm(
                 | TaskStatus::Cancelled
                 | TaskStatus::Interrupted
                 | TaskStatus::Failed
+                | TaskStatus::WaitingUserInput
         )
     );
     let mut studio_verify_error: Option<String> = None;
     let mut studio_autofix_applied = false;
-    if !halted_user && code_studio_disk_task {
+    // Planning/review must never execute project scripts or the mutating autofix path.
+    if !halted_user && code_studio_disk_task && !restricted_studio_role && !run_outcome.failed() {
         let max_passes: u32 = if is_session_recall {
             1
         } else {
@@ -3655,11 +3842,13 @@ pub(crate) async fn run_message_via_llm(
         };
         for pass in 0..max_passes {
             match crate::api_studio::studio_verify_after_agent_task(&tool_disk_workspace_root).await {
-                Ok(()) => {
+                Ok(executed) => {
+                    run_outcome.checks.push(serde_json::json!({"kind":"project_build", "status":if executed {"passed"} else {"not_run"}, "exit_code":if executed {Some(0)} else {None::<i32>}}));
                     studio_verify_error = None;
                     break;
                 }
                 Err(e) => {
+                    run_outcome.checks.push(serde_json::json!({"kind":"project_build", "status":"failed", "detail":e.chars().take(2000).collect::<String>()}));
                     studio_verify_error = Some(e.clone());
                     if pass + 1 >= max_passes {
                         break;
@@ -3738,12 +3927,22 @@ pub(crate) async fn run_message_via_llm(
                 let tmo = crate::api_studio::studio_project_verify_timeout_sec(
                     tool_disk_workspace_root.as_path(),
                 );
-                let mech = crate::api_studio::run_mechanical_acceptance_checks(
-                    tool_disk_workspace_root.as_path(),
-                    pay,
-                    tmo,
-                )
-                .await;
+                let mut mech = Vec::new();
+                for criterion in &pay.criteria {
+                    let errors = crate::api_studio::run_mechanical_acceptance_checks(
+                        tool_disk_workspace_root.as_path(),
+                        &crate::api_studio::StudioAcceptancePayload { criteria: vec![criterion.clone()] },
+                        tmo,
+                    ).await;
+                    let status = if matches!(criterion.kind, crate::api_studio::StudioCriterionKind::Manual) { "manual" }
+                        else if errors.is_empty() { "passed" } else { "failed" };
+                    run_outcome.checks.push(serde_json::json!({
+                        "kind":"acceptance", "id":criterion.id, "criterion_kind":criterion.kind,
+                        "status":status, "text":criterion.text,
+                        "exit_code":if status == "passed" && matches!(criterion.kind, crate::api_studio::StudioCriterionKind::CommandOk) {Some(0)} else {None::<i32>}
+                    }));
+                    mech.extend(errors);
+                }
                 if !mech.is_empty() {
                     studio_verify_error = Some(format!(
                         "Échec critères d'acceptation (vérification automatique) :\n{}",
@@ -3990,6 +4189,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(2048);
                 let req = CompletionRequest {
+                    tools: None,
                     prompt: extract_prompt,
                     max_tokens: Some(extract_max_tokens),
                     temperature: Some(0.1),
@@ -4120,7 +4320,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         || reply_lower.contains("refusée par l'utilisateur")
         || reply_lower.contains("action refusée")
         || reply_lower.contains("limite de tours d'outils atteinte");
-    if is_error_outcome {
+    if is_error_outcome || run_outcome.failed() {
         let _ = bus.send(
             EventEnvelope::new(
                 EventType::TaskEscalatedToHuman,
@@ -4135,6 +4335,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     if let Some(reg) = &browser_registry {
         crate::browser::close_task(reg, task_id).await;
     }
+    crate::studio_observation::close_task(task_id).await;
     // Release per-task workspace memory immediately — no longer needed once the task finishes.
     if let Some(ws) = &workspace_store {
         ws.write().await.remove(&task_id);
@@ -4212,6 +4413,22 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         );
     }
 
+    if studio_verify_error.is_some() { run_outcome.termination = TerminationReason::VerificationFailed; }
+    let proposed = if run_outcome.failed() { TaskStatus::Failed } else { TaskStatus::Completed };
+    let reason = if run_outcome.failed() {
+        Some(studio_verify_display_message.as_deref().unwrap_or(&reply_text).chars().take(2000).collect::<String>())
+    } else { None };
+    let (final_status, outcome) = match store.finalize_outcome(task_id, proposed, run_outcome.json(reason)) {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(%task_id, %error, "Cannot persist task outcome; completion not announced");
+            cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
+            notify_task_completion(&task_completion_registry, task_id).await;
+            return;
+        }
+    };
+    let task_status_snapshot = Some(final_status.clone());
+    let is_paused = matches!(final_status, TaskStatus::Paused | TaskStatus::WaitingUserInput);
     let final_event_type = if matches!(task_status_snapshot, Some(TaskStatus::Cancelled)) {
         EventType::TaskCancelled
     } else if is_paused {
@@ -4225,24 +4442,14 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     } else {
         EventType::TaskCompleted
     };
-    let final_status_str = if matches!(task_status_snapshot, Some(TaskStatus::Cancelled)) {
-        "cancelled"
-    } else if is_paused {
-        "paused"
-    } else if matches!(task_status_snapshot, Some(TaskStatus::Interrupted)) {
-        "interrupted"
-    } else if matches!(task_status_snapshot, Some(TaskStatus::Failed)) {
-        "failed"
-    } else if studio_verify_error.is_some() {
-        "failed"
-    } else {
-        "completed"
-    };
+    if code_studio_disk_task {if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.phase=final_status.as_str().into();checkpoint.outcome=run_outcome.clone();let _=crate::studio_recovery::save(&store_path,&checkpoint);}}
+    let final_status_str = final_status.as_str();
 
     let mut final_payload = serde_json::json!({
         "task_id": task_id.to_string(),
         "status": final_status_str,
-        "model_used": last_llm_model_used
+        "model_used": last_llm_model_used,
+        "outcome": outcome
     });
     if let Some(ref store) = task_usage_store {
         if let Some(u) = store.get_last_turn(task_id).await {
@@ -4273,6 +4480,9 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             obj.insert("reason".to_string(), serde_json::Value::String(reason_text));
         }
     }
+    if final_status_str == "failed" && final_payload.get("reason").is_none() {
+        final_payload["reason"] = outcome["reason"].clone();
+    }
     let failure_reason = final_payload.get("reason").cloned();
     let _ = bus.send(
         EventEnvelope::new(final_event_type, Some(final_payload)).with_correlation(task_id),
@@ -4282,7 +4492,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         Some(store_path.as_path()),
         task_id,
         "task_completed",
-        Some(serde_json::json!({ "status": final_status_str })),
+        Some(serde_json::json!({ "status": final_status_str, "outcome": outcome })),
     );
     if final_status_str == "completed" || final_status_str == "failed" {
         let hook_event = if final_status_str == "completed" {
@@ -4296,6 +4506,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             "status": final_status_str,
             "model_used": last_llm_model_used,
             "reply_preview": reply_text.chars().take(800).collect::<String>(),
+            "outcome": outcome,
         });
         if final_status_str == "failed" {
             if let (Some(obj), Some(reason)) = (hook_payload.as_object_mut(), failure_reason.as_ref()) {
@@ -4321,11 +4532,8 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     }
 
     // Phase 2 AI OS: do not overwrite Paused / Cancelled / Interrupted with Completed.
-    if !halted_user {
-        if studio_verify_error.is_some() {
-            let _ = store.update_status(task_id, TaskStatus::Failed);
-        } else {
-            let _ = store.update_status(task_id, TaskStatus::Completed);
+    if !matches!(final_status, TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Interrupted | TaskStatus::WaitingUserInput) {
+        if final_status == TaskStatus::Completed && !restricted_studio_role {
             if let Ok(events) = store.get_events(task_id) {
                 if let Some(ticket_id) = events
                     .iter()
@@ -4336,12 +4544,16 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                 {
-                    let _ = crate::api_studio::studio_mark_ticket_ready_for_review(
-                        &tool_disk_workspace_root,
+                    let ticket_root = match store.lineage_root_studio_project_id(task_id).ok().flatten() {
+                        Some(project)=>crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags,&project).ok(),
+                        None=>Some(tool_disk_workspace_root.clone()),
+                    };
+                    if let Some(ticket_root)=ticket_root {let _ = crate::api_studio::studio_mark_ticket_ready_for_review(
+                        &ticket_root,
                         &ticket_id,
                         &task_id.to_string(),
                         "system",
-                    );
+                    );}
                 }
             }
         }
@@ -4359,7 +4571,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         if is_root_task
             && !is_small_talk_fast_lane
             && !is_orchestrated_task_msg
-            && studio_verify_error.is_none()
+            && final_status == TaskStatus::Completed
         {
             if let Ok(st) = crate::session_state::merge(data_dir_sess, &session_id, |s| {
                 let fact = reply_text.chars().take(240).collect::<String>();
@@ -4418,11 +4630,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             }
         }
         if !is_small_talk_fast_lane {
-            let outcome_label = if studio_verify_error.is_some() {
-                "failed"
-            } else {
-                "completed"
-            };
+            let outcome_label = final_status.as_str();
             let summary_preview: String = if let Some(ref m) = studio_verify_display_message {
                 m.chars().take(300).collect()
             } else if let Some(ref e) = studio_verify_error {
@@ -4441,5 +4649,18 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             )
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod studio_followup_tests {
+    #[test]
+    fn execution_results_do_not_replay_the_model_proposal_or_force_completion() {
+        let prompt = super::studio_tool_followup("implement then verify", "write_file: saved; verification: failed");
+        assert!(prompt.contains("implement then verify"));
+        assert!(prompt.contains("verification: failed"));
+        assert!(prompt.contains("Failed or deferred operations are not completed"));
+        assert!(!prompt.contains("Your previous reply"));
+        assert!(!prompt.contains("No TOOL: lines"));
     }
 }

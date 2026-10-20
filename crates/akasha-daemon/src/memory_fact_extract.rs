@@ -81,6 +81,7 @@ async fn run_fact_extract(
         job.content.chars().take(2000).collect::<String>()
     );
     let req = CompletionRequest {
+        tools: None,
         prompt,
         max_tokens: Some(256),
         temperature: Some(0.0),

@@ -37,15 +37,23 @@ def main() -> int:
         if not line.startswith("|"):
             continue
         lower = line.lower()
-        if ("fnk0104" in lower or "esp32 matériel" in lower or "esp32 materiel" in lower):
+        if "fnk0104" in lower or "esp32 matériel" in lower or "esp32 materiel" in lower:
             if "Implemented" in line and "Planned" not in line.split("Implemented")[0]:
-                # implementation column should be Planned only
                 cols = [c.strip() for c in line.split("|")]
                 if len(cols) > 3 and cols[3] == "Implemented":
                     errors.append(f"Companion ESP32 hardware must not be Implemented:\n  {line}")
 
     if "Preuves de release" not in text:
         errors.append("Registry must document release proof locations (§ Preuves de release).")
+
+    companion_doc = ROOT / "docs" / "user" / "companion-lan.md"
+    if "Companion LAN" in text and companion_doc.is_file():
+        for line in text.splitlines():
+            if line.startswith("|") and "Companion LAN" in line and "Partially documented" in line:
+                errors.append(
+                    "Companion LAN doc user should be OK when docs/user/companion-lan.md exists:\n"
+                    f"  {line[:120]}..."
+                )
 
     if errors:
         for e in errors:

@@ -53,8 +53,8 @@ Contrôle local léger : `python3 scripts/validate-feature-registry.py` (CI job 
 | Life layer | Morning brief → Telegram notify | Implemented | OK | OK | `roadmap_v0.10.0.md` P7 L2, `/api/channels/notify` |
 | Life layer | OAuth CalDAV dans Connectors | Implemented | OK | OK | `roadmap_v0.10.0.md` P7 L3, `ConnectorsPanel` |
 | Life layer | Scheduling langage naturel (Hermes) | Implemented | OK | OK | `roadmap_v0.10.0.md` P7 L4, `/api/schedules/from-nl` |
-| Integrations | Companion LAN (pairing, discovery UDP, `/api/companion/*`) | Implemented | Partially documented | OK | Code : `api_routes_companion.rs` ; **suivi doc user** : issue proposée clôture [#144](https://github.com/azerothl/Akasha/issues/144) |
-| Interfaces | Companion ESP32 matériel (Freenove FNK0104, avatar) | Planned | N/A | Planned | Repo `Akasha_companion` — **non livré** v0.11 ; `docs/COMPANION_SPEC.md` |
+| Integrations | Companion LAN (pairing, discovery UDP, `/api/companion/*`) | Implemented | OK | OK | `docs/user/companion-lan.md`, `docs/COMPANION_SPEC.md`, `api_routes_companion.rs`, `companion_discovery.rs` |
+| Interfaces | Companion ESP32 matériel (Freenove FNK0104, avatar) | Planned | N/A | Planned | Repo `Akasha_companion` — **non livré** ; `/api/voice/*` (hors préfixe `/api/companion`) |
 
 ## Liste prioritaire « À documenter »
 
@@ -62,8 +62,7 @@ Items P7 must v0.11 traités dans la sync doc (réseau host / map view, PTY, too
 
 Restants (stretch ou suivi explicite) :
 
-1. **Companion LAN** — guide utilisateur pairing / secret / port discovery (`:3877`) — suivi proposé (voir rapport PR clôture #144).
-2. Sync site **Akasha_app** (What's new / compare) — hors monorepo, owner dépôt site.
+1. Sync site **Akasha_app** (What's new / compare) — hors monorepo, owner dépôt site.
 
 ## Process de mise à jour
 

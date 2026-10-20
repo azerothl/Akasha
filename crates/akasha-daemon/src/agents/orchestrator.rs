@@ -48,6 +48,10 @@ enum OrchestrationState {
     Evaluating,
     Completed,
     Failed,
+    Paused,
+    Cancelled,
+    Interrupted,
+    WaitingUserInput,
 }
 
 fn stable_mode_enabled(message: &str) -> bool {
@@ -531,13 +535,9 @@ fn compute_root_status(
     has_missing_deliverables: bool,
     display_message_trimmed: &str,
 ) -> TaskStatus {
-    if has_missing_deliverables {
-        return TaskStatus::Failed;
-    }
-    if any_failed
-        && (display_message_trimmed.is_empty()
-            || display_message_trimmed == "No response from sub-agents.")
-    {
+    // Readable synthesis is not proof that failed sub-tasks recovered.
+    if any_failed || has_missing_deliverables || display_message_trimmed.is_empty()
+        || display_message_trimmed == "No response from sub-agents." {
         TaskStatus::Failed
     } else {
         TaskStatus::Completed
@@ -1003,6 +1003,7 @@ async fn decompose_to_plan(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4096);
     let request = CompletionRequest {
+        tools: None,
         prompt,
         max_tokens: Some(system_max_tokens),
         temperature: Some(0.2),
@@ -1064,6 +1065,7 @@ async fn decompose_to_plan(
         project_min_steps()
     );
     let retry_request = CompletionRequest {
+        tools: None,
         prompt: retry_prompt,
         max_tokens: Some(system_max_tokens),
         temperature: Some(0.1),
@@ -1188,6 +1190,7 @@ Output only: SATISFACTORY, CANNOT_DO, or NEEDS_REFINEMENT"#,
         aggregated_response.trim().chars().take(2000).collect::<String>()
     );
     let req = CompletionRequest {
+        tools: None,
         prompt,
         max_tokens: Some(32),
         temperature: Some(0.0),
@@ -1333,6 +1336,7 @@ async fn process_root_task(
     if !akasha_core::Role::OrchestratorAgent.can_spawn_agents() {
         anyhow::bail!("RBAC: orchestrator not allowed to spawn agents");
     }
+    let _active_execution=crate::studio_recovery::ActiveRun::enter(root_task_id).map_err(anyhow::Error::msg)?;
     emit_orchestration_state(&bus, root_task_id, OrchestrationState::Received, None);
 
     // Readiness gates (policy/budget/retries/circuit) before any expensive orchestration.
@@ -1761,6 +1765,7 @@ async fn process_root_task(
         if let Some(tx) = startup_watchdog_tx.take() {
             let _ = tx.send(());
         }
+        drop(_active_execution);
         conversation_tx
             .send(OrchestratorTask {
                 task_id: root_task_id,
@@ -1830,6 +1835,7 @@ async fn process_root_task(
     let retry_timeout = deliverable_retry_timeout();
     let mut startup_watchdog_tx = startup_watchdog_tx;
     tokio::spawn(async move {
+        let _active_execution = _active_execution;
         let workspace_root = store_path_buf
             .parent()
             .map(Path::to_path_buf)
@@ -2600,22 +2606,27 @@ Do not only describe the files — execute the tools."#,
             }
             let all_done = children.iter().all(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Failed));
             if !all_done {
-                // Some children timed out without completing; treat the root task as failed.
-                let _ = store.update_status(root_task_id, TaskStatus::Failed);
+                // Persist timeout truth while preserving a concurrent operator stop.
+                let (status,outcome) = match store.finalize_outcome(root_task_id,TaskStatus::Failed,serde_json::json!({"schema_version":1,"termination_reason":"timeout","result":if children.iter().any(|child|child.status==TaskStatus::Completed){"partial"}else{"failed"},"reason":"Subtasks did not reach a terminal result before timeout","acceptance_verified":false,"verification":[],"subtasks":children.iter().map(|child|serde_json::json!({"task_id":child.id,"status":child.status})).collect::<Vec<_>>()})) {
+                    Ok(value)=>value,Err(error)=>{tracing::error!(%root_task_id,%error,"Cannot persist orchestration timeout");let _=store.clear_lease(root_task_id);let _=lease_stop_tx.send(());return;}
+                };
+                let _=store.clear_lease(root_task_id);
+                let _=lease_stop_tx.send(());
                 emit_timeline_once_for_task(
                     &bus,
                     Some(store_path_buf.as_path()),
                     root_task_id,
                     "task_completed",
-                    Some(serde_json::json!({ "status": "failed" })),
+                    Some(serde_json::json!({ "status": status.as_str(), "outcome":outcome })),
                 );
                 clear_task_milestones(root_task_id, None);
                 let _ = bus.send(
                     EventEnvelope::new(
-                        EventType::TaskFailed,
+                        match status {TaskStatus::Cancelled=>EventType::TaskCancelled,TaskStatus::Paused|TaskStatus::Interrupted|TaskStatus::WaitingUserInput=>EventType::TaskPaused,_=>EventType::TaskFailed},
                         Some(serde_json::json!({
                             "task_id": root_task_id.to_string(),
-                            "status": "failed",
+                            "status": status.as_str(),
+                            "outcome": outcome,
                             "subtasks": steps_count,
                             "model_used": Option::<String>::None
                         })),
@@ -2721,6 +2732,7 @@ Reply in the SAME LANGUAGE as the user's question above. Do not add any informat
                 raw_responses
             );
             let req = CompletionRequest {
+                tools: None,
                 prompt: synthesis_prompt,
                 max_tokens: Some(4096),
                 temperature: Some(0.3),
@@ -2890,6 +2902,7 @@ Formatting rules (Markdown):
                 )
             );
             let review_req = CompletionRequest {
+                tools: None,
                 prompt: review_prompt,
                 max_tokens: Some(256),
                 temperature: Some(0.0),
@@ -2920,7 +2933,7 @@ Formatting rules (Markdown):
         }
         // Ensure the UI receives a readable message (never raw JSON): extract summary or strip trailing contract.
         let display_message_original = user_facing_message(&final_aggregated);
-        let any_failed = children.iter().any(|t| t.status == TaskStatus::Failed);
+        let any_failed = children.iter().any(|t| t.status != TaskStatus::Completed);
 
         // If the root fails because we have "No response..." (often after long-running work), provide a richer
         // progress message for the UI so the user is not stuck with a generic "Tâche en échec".
@@ -2976,7 +2989,7 @@ Formatting rules (Markdown):
             )
             .with_correlation(root_task_id),
         );
-        // If some subtasks failed but we have a usable aggregated message (e.g. timeout/partial), still complete the root so the user sees the synthesis instead of a global "failed".
+        // Keep the synthesis available, while preserving an explicit partial/failed outcome.
         let deliverables_still_missing = !missing_deliverables.is_empty();
         if deliverables_still_missing {
             let missing_list = missing_deliverables
@@ -2987,19 +3000,40 @@ Formatting rules (Markdown):
             display_message.push_str("\n\nMissing required deliverables:\n");
             display_message.push_str(&missing_list);
         }
-        let root_status = compute_root_status(any_failed, deliverables_still_missing, msg_trim_original);
+        let proposed = compute_root_status(any_failed, deliverables_still_missing, msg_trim_original);
+        let reason = if deliverables_still_missing { "missing_deliverables" }
+            else if any_failed { "subtask_failed" }
+            else if proposed == TaskStatus::Failed { "model_empty" } else { "success" };
+        let proposed_outcome = serde_json::json!({
+            "schema_version":1, "termination_reason":reason,
+            "result":if proposed == TaskStatus::Completed {"succeeded"} else if children.iter().any(|t| t.status == TaskStatus::Completed) {"partial"} else {"failed"},
+            "acceptance_verified":false,
+            "reason":if proposed == TaskStatus::Failed {Some(display_message.chars().take(2000).collect::<String>())} else {None},
+            "verification":[],
+            "subtasks":children.iter().map(|t| serde_json::json!({"task_id":t.id,"status":t.status})).collect::<Vec<_>>()
+        });
+        let (root_status, outcome) = match TaskStore::open(&store_path_buf)
+            .and_then(|s| s.finalize_outcome(root_task_id, proposed, proposed_outcome)) {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!(%root_task_id, %error, "Cannot persist orchestration outcome");
+                let _ = lease_stop_tx.send(());
+                return;
+            }
+        };
         let status_str = root_status.as_str();
-        let event_type = if root_status == TaskStatus::Failed {
-            EventType::TaskFailed
-        } else {
-            EventType::TaskCompleted
+        let event_type = match root_status {
+            TaskStatus::Completed => EventType::TaskCompleted,
+            TaskStatus::Cancelled => EventType::TaskCancelled,
+            TaskStatus::Paused | TaskStatus::Interrupted | TaskStatus::WaitingUserInput => EventType::TaskPaused,
+            _ => EventType::TaskFailed,
         };
         emit_timeline_once_for_task(
             &bus,
             Some(store_path_buf.as_path()),
             root_task_id,
             "task_completed",
-            Some(serde_json::json!({ "status": status_str })),
+            Some(serde_json::json!({ "status": status_str, "outcome": outcome })),
         );
         clear_task_milestones(root_task_id, None);
         if root_status == TaskStatus::Completed && execution_mode_aggregator == Some(ExecutionMode::Orchestrated) {
@@ -3008,17 +3042,19 @@ Formatting rules (Markdown):
             }
         }
         if let Ok(s) = TaskStore::open(&store_path_buf) {
-            let _ = s.update_status(root_task_id, root_status.clone());
             let _ = s.clear_lease(root_task_id);
         }
         let _ = lease_stop_tx.send(());
         emit_orchestration_state(
             &bus,
             root_task_id,
-            if root_status == TaskStatus::Completed {
-                OrchestrationState::Completed
-            } else {
-                OrchestrationState::Failed
+            match root_status {
+                TaskStatus::Completed => OrchestrationState::Completed,
+                TaskStatus::Paused => OrchestrationState::Paused,
+                TaskStatus::Cancelled => OrchestrationState::Cancelled,
+                TaskStatus::Interrupted => OrchestrationState::Interrupted,
+                TaskStatus::WaitingUserInput => OrchestrationState::WaitingUserInput,
+                _ => OrchestrationState::Failed,
             },
             Some(serde_json::json!({
                 "status": root_status.as_str(),
@@ -3073,7 +3109,8 @@ Formatting rules (Markdown):
                     "task_id": root_task_id.to_string(),
                     "status": status_str,
                     "subtasks": steps_count,
-                    "model_used": synthesis_model_used
+                    "model_used": synthesis_model_used,
+                    "outcome": outcome
                 })),
             )
             .with_correlation(root_task_id),

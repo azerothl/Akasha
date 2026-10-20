@@ -148,7 +148,7 @@ APIs Companion LAN livrées via #122 (bind LAN, discovery UDP, `/api/companion/*
 ### Stretch
 
 - [ ] Spec + chemin MVP **Freenove FNK0104** (voix-first + avatar) — repo `Akasha_companion`, `/api/voice/*`, présence VAD (`companion_presence.json`)
-- [ ] Doc user Companion LAN (pairing secret, discovery :3877)
+- [x] Doc user Companion LAN (pairing secret, discovery :3877) — `docs/user/companion-lan.md` ([#163](https://github.com/azerothl/Akasha/issues/163))
 - [ ] Smoke LAN : daemon bind + device factice / maquette
 
 ### Hors scope P6
@@ -181,7 +181,7 @@ Liste prioritaire [feature_evolution_tracking.md](../../feature_evolution_tracki
 
 Matrices Hermes / pi-mono / memory largement **clôturées** (archives → [ROADMAP_FINAL_REGISTRY.md](../roadmap/ROADMAP_FINAL_REGISTRY.md)). Ne pas rouvrir Phase 5. Items **Reporter** utiles en stretch si capacité :
 
-- [ ] **S-MEM-05** chiffrement `memory.db` (SQLCipher / doctor) — [memory_encryption_rfc.md](../roadmap/memory_encryption_rfc.md) ; sinon rester sur chiffrement disque OS
+- [ ] **S-MEM-05** chiffrement `memory.db` (SQLCipher) — [memory_encryption_rfc.md](../roadmap/memory_encryption_rfc.md) ; stockage actuel en clair (`akasha doctor`) ; sinon chiffrement disque OS
 - [ ] UI édition **agent identity** / constitution (gaps C4 / E1 partiels)
 - [ ] Fork tree UI v2 (`/tree`) — Reporter pi-mono ; v1 suffit sauf demande produit
 - [ ] GraphRAG communautés au-delà de `project:*` (S-RAG-04 Reporter)
@@ -241,7 +241,7 @@ Objectif : **aligner** (docs + chemins d’import/export) les extensions du daem
 - [x] `api.rs` **&lt; ~8k** lignes ; check daemon + tests outils verts
 - [x] MCP : statut registre **Implemented** + doc user minimale
 - [x] P6-B3 et P6-B4 livrés (ou report explicite avec justification capacité)
-- [x] Dette doc « Partially documented » prioritaire (mémoire, observabilité) — pages user `docs/user/donnees.md`, `docs/user/observabilite.md` ; Companion LAN reste **Partially documented** (issue de suivi proposée #144)
+- [x] Dette doc « Partially documented » prioritaire résorbée : pages user `docs/user/donnees.md`, `docs/user/observabilite.md`, `docs/user/companion-lan.md` et protocole `docs/COMPANION_SPEC.md` (PR #171 / #175)
 - [ ] GPU CI self-hosted : run `gpu-smoke` vert — **bloqueur opérateur 2026-09-28** ; **owner : infra** — voir P0 et [GPU_SELF_HOSTED_CI.md](../quality/GPU_SELF_HOSTED_CI.md) (non bloquant tag v0.11.0 publié)
 - [x] Note Rbitnet/DLM : spike **ou** no-go renouvelé (pas de silence)
 - [x] **P9** : note d’interop + matrice `SKILL.md` + pilote skill partagé + inventaire catalogues publiés (must ; stretch bridge/ABI encore ouverts)

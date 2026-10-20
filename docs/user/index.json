@@ -57,6 +57,11 @@
       "file": "observabilite.md"
     },
     {
+      "id": "companion-lan",
+      "title": "Companion LAN",
+      "file": "companion-lan.md"
+    },
+    {
       "id": "depannage",
       "title": "Dépannage",
       "file": "depannage.md"

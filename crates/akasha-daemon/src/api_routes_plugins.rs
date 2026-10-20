@@ -646,11 +646,40 @@ if method == "GET" && path_only == "/api/tools/effective" {
         Some(ex_arc) => {
             let ex_inner = ex_arc.read().await;
             let executor = ex_inner.as_ref();
+            if query_str.is_some_and(|query| !query.is_empty()) {
+                return Some(match crate::studio_capabilities::preflight(data_dir, &executor.policy, query_str.unwrap_or_default()) {
+                    Ok(mut manifest) => {
+                        let pid = manifest["project_id"].as_str().unwrap_or_default();
+                        let agent = manifest["agent"].as_str().unwrap_or_default().to_owned();
+                        let task = manifest["task_id"].as_str().and_then(|id|Uuid::parse_str(id).ok());
+                        let root = match crate::studio_project_context::manifest_workspace(data_dir,pid,task) {
+                            Ok(root)=>root,
+                            Err(reason)=>return Some(json_response("409 Conflict", &serde_json::json!({"error":"task_workspace_unavailable","detail":reason}).to_string())),
+                        };
+                        manifest["workspace"] = serde_json::json!(root);
+                        match skill_registry.for_project(&root).await {
+                            Ok(scoped) => manifest["skills"] = serde_json::to_value(scoped.for_agent(&agent).await).unwrap_or_default(),
+                            Err(reason) => return Some(json_response("409 Conflict", &serde_json::json!({"error":"project_skills_unavailable","detail":reason.to_string()}).to_string())),
+                        }
+                        match crate::studio_project_context::rules_for_path(&root, "workspace:/", &executor.policy) {
+                            Ok(rules) => manifest["rules"] = serde_json::json!(rules.iter().map(|r| r.metadata()).collect::<Vec<_>>()),
+                            Err(reason) => return Some(json_response("409 Conflict", &serde_json::json!({"error":"project_rules_unavailable","detail":reason}).to_string())),
+                        }
+                        if let Some(id) = manifest["task_id"].as_str().and_then(|id| Uuid::parse_str(id).ok()) {
+                            manifest["active_context"] = crate::studio_project_context::read(data_dir, id);
+                        }
+                        json_response("200 OK", &manifest.to_string())
+                    },
+                    Err((code, reason)) => json_response(match code {400 => "400 Bad Request", 404 => "404 Not Found", _ => "500 Internal Server Error"}, &serde_json::json!({"error":reason}).to_string()),
+                });
+            }
             let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
             let rows = executor.policy.effective_tool_rows(&names);
             let body = serde_json::to_string(&serde_json::json!({
                 "tools": rows,
                 "default_profile": executor.policy.default_profile,
+                "schema_version":1,
+                "scope":"global",
             }))
             .unwrap_or_else(|_| "{}".to_string());
             return Some(json_response("200 OK", &body));

@@ -74,16 +74,27 @@ pub fn booster_queries(topic: &str, category: &str, pages_so_far: u32) -> Vec<St
 
 fn truncate_query_topic(topic: &str, max: usize) -> String {
     let t = topic.split_whitespace().collect::<Vec<_>>().join(" ");
-    if t.len() <= max {
+    if t.chars().count() <= max {
         t
     } else {
-        format!("{}…", &t[..max.saturating_sub(1)])
+        format!("{}…", t.chars().take(max.saturating_sub(1)).collect::<String>())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn french_and_unicode_topics_never_split_utf8_characters() {
+        let topic = "Comparer Vec et VecDeque en Rust : organisation mémoire, accès par indice, ajout et retrait au début et à la fin, complexités amorties et cas d’usage. 🦀";
+        for limit in 1..=topic.chars().count() {
+            let query = truncate_query_topic(topic, limit);
+            assert!(query.chars().count() <= limit);
+        }
+        assert!(!specialized_site_queries(topic, "comparison", 1).is_empty());
+        assert!(!booster_queries(topic, "comparison", 0).is_empty());
+    }
 
     #[test]
     fn round2_has_no_specialized_queries() {

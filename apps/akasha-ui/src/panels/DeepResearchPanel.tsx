@@ -21,6 +21,7 @@ import {
 import { InfoTip } from "../components/Tooltip";
 import { useNotifyOnMessage } from "../notifications/useNotifyOnMessage";
 import { useI18n } from "../useI18n";
+import { researchQuality } from "../researchQuality";
 
 const LazyMarkdownContent = lazy(() => import("../MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -45,6 +46,13 @@ export type ResearchRun = {
   searchDegraded?: boolean;
   error?: string;
 };
+
+class ResearchPollingError extends Error {
+  constructor(message: string, readonly run: ResearchRun) {
+    super(message);
+    this.name = "ResearchPollingError";
+  }
+}
 
 type ServerRun = {
   id: string;
@@ -147,6 +155,12 @@ function serverToRun(server: ServerRun, existing?: ResearchRun): ResearchRun {
 function formatDaemonError(message: string, locale: "fr" | "en"): string {
   const en = locale === "en";
   const lower = message.toLowerCase();
+  if (lower.includes("research_report_generation_failed")) return en
+    ? "The final report could not be written from its sources. Retry with a shorter topic or check the model settings."
+    : "Le rapport final n’a pas pu être rédigé à partir des sources. Réessayez avec un sujet plus court ou vérifiez les paramètres du modèle.";
+  if (lower.includes("research_no_evidence")) return en
+    ? "No usable sources were found. Try a more specific topic, or check web access in Settings before retrying."
+    : "Aucune source exploitable n’a été trouvée. Précisez le sujet ou vérifiez l’accès au Web dans Paramètres, puis réessayez.";
   if (lower.includes("timed out") || lower.includes("timeout") || lower.includes("time out")) {
     return en
       ? "Request timed out — use an external LLM in llm_router.yaml for faster research."
@@ -255,7 +269,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   const maybeAutoOpenReport = useCallback(
     (run: ResearchRun) => {
       const md = run.reportMarkdown?.trim();
-      if (!md || run.status !== "complete") return;
+      if (!md || run.status !== "complete" || researchQuality(md, run.reportMeta) !== "ready") return;
       const key = run.serverRunId ?? run.id;
       if (autoOpenedReportIdsRef.current.has(key)) return;
       autoOpenedReportIdsRef.current.add(key);
@@ -337,24 +351,32 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
     (serverRunId: string, initialRun: ResearchRun): Promise<void> => {
       serverRunIdRef.current = serverRunId;
       let current = initialRun;
+      let polling = false;
+      let terminal = false;
       stopPolling();
       return new Promise<void>((resolve, reject) => {
         const tick = async () => {
+          if (polling || terminal) return;
+          polling = true;
           try {
             const server = await pollRun(serverRunId, current);
             current = serverToRun(server, current);
             if (server.phase === "done" || server.phase === "error" || server.phase === "cancelled") {
+              terminal = true;
               stopPolling();
               if (server.phase === "error") {
-                reject(new Error(server.error ?? (en ? "Research failed" : "Recherche échouée")));
+                reject(new ResearchPollingError(server.error ?? (en ? "Research failed" : "Recherche échouée"), current));
               } else {
                 if (server.phase === "done") setPhase("done");
                 resolve();
               }
             }
           } catch (e) {
+            terminal = true;
             stopPolling();
-            reject(e);
+            reject(new ResearchPollingError(e instanceof Error ? e.message : String(e), current));
+          } finally {
+            polling = false;
           }
         };
         void tick();
@@ -386,7 +408,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
         const message = formatDaemonError(e instanceof Error ? e.message : String(e), locale);
         setErr(message);
         upsertRun({
-          ...running,
+          ...(e instanceof ResearchPollingError ? e.run : running),
           updatedAt: new Date().toISOString(),
           status: "error",
           error: message,
@@ -402,10 +424,17 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   const cancelRun = async () => {
     const sid = serverRunIdRef.current;
     if (!sid) return;
-    await fetchEndpoint(`/api/research/deep/runs/${encodeURIComponent(sid)}/cancel`, { method: "POST" });
-    stopPolling();
-    setLoading(false);
-    setPhase("idle");
+    setErr(null);
+    try {
+      const res = await fetchEndpoint(`/api/research/deep/runs/${encodeURIComponent(sid)}/cancel`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // The watcher must receive and persist the terminal snapshot before it
+      // resolves. Stopping it here left history running and its promise pending.
+    } catch {
+      setErr(en
+        ? "Cancellation could not be confirmed. Research is still being tracked; try cancelling again."
+        : "L’annulation n’a pas pu être confirmée. Le suivi de la recherche continue ; réessayez d’annuler.");
+    }
   };
 
   const run = async () => {
@@ -453,7 +482,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
       const message = formatDaemonError(e instanceof Error ? e.message : String(e), locale);
       setErr(message);
       current = {
-        ...current,
+        ...(e instanceof ResearchPollingError ? e.run : current),
         updatedAt: new Date().toISOString(),
         status: "error",
         error: message,
@@ -480,6 +509,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   };
 
   const report = selected?.reportMarkdown ?? "";
+  const quality = researchQuality(report, selected?.reportMeta);
   const evolving = selected?.evolvingReport ?? "";
 
   const reportDoc: ResearchReportDocument | null = useMemo(() => {
@@ -542,7 +572,10 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
 
   const inDraft = selectedId === null;
   const branches = inDraft ? [] : (selected?.branches ?? []);
-  const reportReady = !inDraft && Boolean(report.trim() && !loading);
+  const reportReady = !inDraft && selected?.status === "complete" && quality !== "empty" && !loading;
+  const reportError = !inDraft
+    ? err || (!loading ? selected?.error || (selected?.status === "complete" && quality === "empty" ? "research_no_evidence" : null) : null)
+    : null;
 
   useNotifyOnMessage(err, "error", t("tabs.research"));
   useNotifyOnMessage(
@@ -584,6 +617,9 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
                     : ` · max ${h.maxRounds} ${en ? "rounds" : "tours"}`}
                   {h.status === "running" ? (en ? " · running" : " · en cours") : null}
                   {h.status === "error" ? (en ? " · error" : " · erreur") : null}
+                  {h.status === "cancelled" ? (en ? " · cancelled" : " · annulée") : null}
+                  {h.status === "complete" && researchQuality(h.reportMarkdown, h.reportMeta) !== "ready"
+                    ? (en ? " · insufficient evidence" : " · sources insuffisantes") : null}
                 </span>
               </button>
               <button
@@ -705,12 +741,28 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
                 </select>
               </label>
               {reportReady ? (
-                <p className="research-report-ready-hint muted">{t("research.report.ready")}</p>
+                <p className="research-report-ready-hint muted">{quality === "limited"
+                  ? (en ? "Partial report — check the evidence limitations below." : "Rapport partiel — consultez les limites des sources ci-dessous.")
+                  : (en ? "Report available below. You can also open it in a separate window or export it." : "Rapport disponible ci-dessous. Vous pouvez aussi l’ouvrir dans une fenêtre ou l’exporter.")}</p>
               ) : null}
             </div>
           </header>
+          {reportError && <p role="alert" className="research-result-notice">{formatDaemonError(reportError, locale)}</p>}
+          {reportReady && quality === "limited" && <div role="status" className="research-result-notice">
+            <p>{en ? "The available sources are insufficient to support all conclusions. This report needs verification."
+              : "Les sources disponibles ne suffisent pas à étayer toutes les conclusions. Ce rapport doit être vérifié."}</p>
+            <p>{en ? "Sources retained" : "Sources retenues"} : {selected?.reportMeta?.sources?.length ?? 0}</p>
+            {selected?.reportMeta?.search_degraded && <p>{selected.reportMeta.sources.length > 0
+              ? (en ? "Search providers unavailable: report based on pages read directly." : "Moteurs indisponibles : rapport fondé sur les pages lues directement.")
+              : (en ? "Web search unavailable: model knowledge only." : "Recherche Web indisponible : connaissances du modèle uniquement.")}</p>}
+          </div>}
+          {reportReady && <section className="research-report-preview" aria-label={en ? "Research report" : "Rapport de recherche"}>
+            <Suspense fallback={<p role="status">{en ? "Loading report…" : "Chargement du rapport…"}</p>}>
+              <LazyMarkdownContent>{report}</LazyMarkdownContent>
+            </Suspense>
+          </section>}
           {!inDraft && selected?.searchDegraded ? (
-            <p className="research-degraded-hint muted" role="status">{t("research.search_degraded")}</p>
+            <p className="research-degraded-hint muted" role="status">{en ? "Discovery of new pages is unavailable." : "La recherche de nouvelles pages est indisponible."}</p>
           ) : null}
           {loading ? (
             <p className="research-slow-hint muted">
@@ -721,12 +773,74 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             </p>
           ) : null}
 
-          <ResearchStarViz
+          <label className="settings-field">
+            <span>
+              {t("research.topic_label")}
+              <InfoTip label={t("research.topic_label")} content={t("research.hero")} />
+            </span>
+            <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3} disabled={loading} />
+          </label>
+          <div className="research-actions">
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void run()}
+              disabled={loading || !topic.trim() || apiReady === false}
+            >
+              {loading
+                ? phaseLabel ?? (en ? "Researching…" : "Recherche…")
+                : en
+                  ? "Run research"
+                  : "Lancer la recherche"}
+            </button>
+            {loading ? (
+              <button type="button" className="btn-secondary" onClick={() => void cancelRun()}>
+                {en ? "Cancel" : "Annuler"}
+              </button>
+            ) : null}
+          </div>
+          <details className="research-advanced">
+            <summary>{en ? "Research options" : "Options de recherche"}</summary>
+            <p className="muted">{en ? "Limit how many rounds the research can run." : "Limiter le nombre d’étapes de la recherche."}</p>
+          <label className="settings-field research-max-rounds-field">
+            <span className="research-max-rounds-label">
+              {t("research.max_rounds_label")}
+              <button
+                type="button"
+                className="research-field-tip"
+                title={t("research.max_rounds_help")}
+                aria-label={t("research.max_rounds_help")}
+              >
+                ?
+              </button>
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              value={maxRounds}
+              onChange={(e) => setMaxRounds(Math.min(16, Math.max(1, Number(e.target.value) || 10)))}
+              disabled={loading}
+              aria-describedby="research-max-rounds-help"
+            />
+            <span id="research-max-rounds-help" className="sr-only">
+              {t("research.max_rounds_help")}
+            </span>
+            {selected?.reportMeta && !loading ? (
+              <span className="research-max-rounds-used muted">
+                {en
+                  ? `Last run: ${selected.reportMeta.rounds} of ${selected.maxRounds} rounds used`
+                  : `Dernière recherche : ${selected.reportMeta.rounds} / ${selected.maxRounds} tours utilisés`}
+              </span>
+            ) : null}
+          </label>
+          </details>
+          {loading && <ResearchStarViz
             branches={branches}
             phase={inDraft && !loading ? "idle" : displayPhase}
             phaseLabel={inDraft && !loading ? undefined : (phaseLabel ?? undefined)}
             topic={loading ? topic.trim() : inDraft ? undefined : selected?.topic}
-          />
+          />}
 
           {branches.length > 0 ? (
             <ol className="research-step-list">
@@ -762,64 +876,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             </details>
           ) : null}
 
-          <label className="settings-field">
-            <span>
-              {t("research.topic_label")}
-              <InfoTip label={t("research.topic_label")} content={t("research.hero")} />
-            </span>
-            <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3} disabled={loading} />
-          </label>
-          <label className="settings-field research-max-rounds-field">
-            <span className="research-max-rounds-label">
-              {t("research.max_rounds_label")}
-              <button
-                type="button"
-                className="research-field-tip"
-                title={t("research.max_rounds_help")}
-                aria-label={t("research.max_rounds_help")}
-              >
-                ?
-              </button>
-            </span>
-            <input
-              type="number"
-              min={1}
-              max={16}
-              value={maxRounds}
-              onChange={(e) => setMaxRounds(Math.min(16, Math.max(1, Number(e.target.value) || 10)))}
-              disabled={loading}
-              aria-describedby="research-max-rounds-help"
-            />
-            <span id="research-max-rounds-help" className="sr-only">
-              {t("research.max_rounds_help")}
-            </span>
-            {selected?.reportMeta && !loading ? (
-              <span className="research-max-rounds-used muted">
-                {en
-                  ? `Last run: ${selected.reportMeta.rounds} of ${selected.maxRounds} rounds used`
-                  : `Dernière recherche : ${selected.reportMeta.rounds} / ${selected.maxRounds} tours utilisés`}
-              </span>
-            ) : null}
-          </label>
-          <div className="research-actions">
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={() => void run()}
-              disabled={loading || !topic.trim() || apiReady === false}
-            >
-              {loading
-                ? phaseLabel ?? (en ? "Researching…" : "Recherche…")
-                : en
-                  ? "Run research"
-                  : "Lancer la recherche"}
-            </button>
-            {loading ? (
-              <button type="button" className="btn-secondary" onClick={() => void cancelRun()}>
-                {en ? "Cancel" : "Annuler"}
-              </button>
-            ) : null}
-          </div>
+
         </div>
       </div>
     </section>

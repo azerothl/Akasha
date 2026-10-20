@@ -1,0 +1,80 @@
+{
+  "global": {
+    "enable_metrics": true,
+    "enable_fallback": false,
+    "default_timeout_secs": 600,
+    "default_max_retries": 0
+  },
+  "providers": {
+    "ollama": {
+      "base_url": "http://127.0.0.1:11435"
+    }
+  },
+  "task_types": {
+    "research": {
+      "primary": {
+        "provider": "ollama",
+        "model": "qwen3.5:9b",
+        "config": {
+          "num_ctx": 8192,
+          "thinking_level": "off",
+          "num_gpu": 99,
+          "max_tokens": 1536
+        }
+      },
+      "fallback": []
+    },
+    "utility": {
+      "primary": {
+        "provider": "ollama",
+        "model": "qwen3.5:9b",
+        "config": {
+          "num_ctx": 8192,
+          "thinking_level": "off",
+          "num_gpu": 99,
+          "max_tokens": 1536
+        }
+      },
+      "fallback": []
+    },
+    "conversation": {
+      "primary": {
+        "provider": "ollama",
+        "model": "qwen3.5:9b",
+        "config": {
+          "num_ctx": 8192,
+          "thinking_level": "off",
+          "num_gpu": 99,
+          "max_tokens": 1536
+        }
+      },
+      "fallback": []
+    },
+    "orchestrator": {
+      "primary": {
+        "provider": "ollama",
+        "model": "qwen3.5:9b",
+        "config": {
+          "num_ctx": 8192,
+          "thinking_level": "off",
+          "num_gpu": 99,
+          "max_tokens": 1536
+        }
+      },
+      "fallback": []
+    },
+    "system": {
+      "primary": {
+        "provider": "ollama",
+        "model": "qwen3.5:9b",
+        "config": {
+          "num_ctx": 8192,
+          "thinking_level": "off",
+          "num_gpu": 99,
+          "max_tokens": 1536
+        }
+      },
+      "fallback": []
+    }
+  }
+}

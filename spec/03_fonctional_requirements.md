@@ -44,7 +44,7 @@ Description:
 > Conserver les informations importantes entre sessions.
 
 Contraintes:
-- Chiffrement obligatoire
+- Chiffrement au repos (cible produit ; implémentation actuelle : `memory.db` SQLite **en clair** — voir `akasha doctor` / S-MEM-05)
 - Indexation sémantique
 
 ---
