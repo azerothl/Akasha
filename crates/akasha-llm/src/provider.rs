@@ -2603,3 +2603,33 @@ mod tests {
         );
     }
 }
+#[cfg(test)]
+mod ollama_wrapper_history_regressions {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn ollama_chat_continuation_keeps_the_advertised_wrapper_and_call_identity() {
+        let arguments=json!({"schema_version":1,"tool":"write_file",
+            "arguments":{"path":"workspace:/a.txt","content":"exact","expected_version":"missing"}});
+        let request:CompletionRequest=serde_json::from_value(json!({"prompt":"",
+            "tools":[{"type":"function","function":{"name":"studio_call","parameters":{
+                "type":"object","properties":{"tool":{"enum":["write_file"]},"arguments":{"type":"object"}}}}}],
+            "conversation":[{"role":"user","content":"create a.txt"},
+                {"role":"assistant","content":"","tool_calls":[{"id":"stable-id","type":"function",
+                    "function":{"name":"studio_call","arguments":arguments.to_string()}}]},
+                {"role":"tool","content":"actual saved result","tool_call_id":"stable-id"}]})).unwrap();
+        let provider=OllamaProvider::new(None);
+        provider.chat_templates.lock().unwrap().insert("chat-model".into(),OllamaConversationTemplate::Chat);
+        let (url,body)=provider.build_generate_body(&request,"chat-model",false);
+        assert!(url.ends_with("/api/chat"));
+        assert_eq!(advertised_function_names(&body),vec!["studio_call".to_string()]);
+        assert_eq!(body["messages"].as_array().unwrap().len(),3);
+        let call=&body["messages"][1]["tool_calls"][0];
+        assert_eq!(call["function"]["name"],body["tools"][0]["function"]["name"]);
+        assert_eq!(call["function"]["name"],"studio_call");
+        assert_eq!(call["function"]["arguments"],arguments);
+        assert_eq!(call["id"],body["messages"][2]["tool_call_id"]);
+        assert_eq!(request.conversation.as_ref().unwrap()[1].tool_calls[0]["function"]["name"],"studio_call");
+    }
+}
