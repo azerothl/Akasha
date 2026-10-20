@@ -762,6 +762,16 @@ pub async fn park_for_review(
     Some(parked)
 }
 
+/// Resolve only a validated persisted worktree binding, never a gitfile supplied by an agent.
+pub(crate) fn delivery_project_root(data_dir: &Path, root: &Path) -> Result<PathBuf,String> {
+    with_registry_read(data_dir, |records| {
+        let record=records.iter().find(|record| Path::new(&record.worktree_path).canonicalize().ok().as_deref()==Some(root))
+            .ok_or("delivery workspace is not a registered Studio worktree")?;
+        validate_record_paths(data_dir,record)?;
+        Path::new(&record.project_root).canonicalize().map_err(|e|e.to_string())
+    })
+}
+
 pub fn list_project_worktrees(data_dir: &Path, project_id: &str) -> Vec<StudioWorktreeRecord> {
     with_registry_read(data_dir, |records| {
         records

@@ -10,6 +10,8 @@ fn default_calendar_read_enabled() -> bool {
 
 fn path_normalize(p: &Path) -> PathBuf {
     let s = p.to_string_lossy().replace('\\', "/").to_lowercase();
+    #[cfg(windows)]
+    let s=if let Some(unc)=s.strip_prefix("//?/unc/") {format!("//{unc}")}else{s.strip_prefix("//?/").unwrap_or(&s).to_owned()};
     PathBuf::from(s)
 }
 
@@ -155,6 +157,7 @@ impl ToolsPolicy {
     /// `write_code` inherits approval rules from `write_file` when the latter is listed.
     pub fn requires_approval(&self, tool_name: &str) -> bool {
         let name = tool_name.trim().to_lowercase();
+        if matches!(name.as_str(),"git_push"|"github_create_pr"){return true;}
         if self
             .require_approval
             .iter()
@@ -162,7 +165,7 @@ impl ToolsPolicy {
         {
             return true;
         }
-        ((name == "terminal_session") && self.require_approval.iter().any(|a|a.trim().eq_ignore_ascii_case("run_command"))) || matches!(name.as_str(),"write_code"|"lsp_apply_rename")
+        ((name == "terminal_session") && self.require_approval.iter().any(|a|a.trim().eq_ignore_ascii_case("run_command"))) || matches!(name.as_str(),"write_code"|"lsp_apply_rename"|"git_commit")
             && self
                 .require_approval
                 .iter()
@@ -319,9 +322,11 @@ impl ToolsPolicy {
             .and_then(|n| n.to_str())
             .unwrap_or(&name)
             .to_string();
+        let normalize=|value:String| {if cfg!(windows) {value.strip_suffix(".exe").unwrap_or(&value).to_owned()}else{value}};
+        let name=normalize(name);let name_base=normalize(name_base);
         if self.blocked_commands.iter().any(|b| {
-            let b = b.trim().to_lowercase();
-            name_base == b || name.ends_with(&b)
+            let b = normalize(b.trim().to_lowercase());
+            name_base == b || name == b
         }) {
             return false;
         }
@@ -329,8 +334,8 @@ impl ToolsPolicy {
             return true;
         }
         self.allowed_commands.iter().any(|allowed| {
-            let a = allowed.trim().to_lowercase();
-            name_base == a || name.ends_with(&a)
+            let a = normalize(allowed.trim().to_lowercase());
+            name_base == a || name == a
         })
     }
 
@@ -1132,5 +1137,37 @@ mod tests {
         };
         assert!(p.requires_approval("write_code"));
         assert!(!p.requires_approval("write_file"));
+    }
+}
+
+#[cfg(all(test,windows))]
+mod windows_executable_alias_regressions {
+    use super::*;
+    #[test] fn command_aliases_require_exact_names_or_exact_paths() {
+        let mut policy=ToolsPolicy {allowed_commands:vec!["git".into(),"node.exe".into()],..Default::default()};
+        for allowed in ["git", "git.exe", r"C:\tools\git.exe", "node", "NODE.EXE"] {assert!(policy.can_run_command(allowed),"{allowed}");}
+        for denied in ["evilgit.exe", "notnode.exe", r"C:\workspace\evilgit.exe", "git.exe.exe"] {assert!(!policy.can_run_command(denied),"{denied}");}
+        policy.allowed_commands=vec![r"C:\tools\git.exe".into()];
+        assert!(policy.can_run_command(r"C:\tools\git.exe"));
+        assert!(!policy.can_run_command(r"C:\evil\C:\tools\git.exe"));
+        assert!(!policy.can_run_command(r"C:\other\git.exe"));
+        policy.allowed_commands=vec!["*".into()];policy.blocked_commands=vec!["git.exe".into()];
+        assert!(!policy.can_run_command(r"C:\tools\git.exe"));
+        assert!(policy.can_run_command("legitgit.exe"));
+    }
+    #[test] fn exe_aliases_share_allow_and_deny_decisions() {
+        let mut policy=ToolsPolicy {allowed_commands:vec!["cmd".into()],..Default::default()};
+        assert!(policy.can_run_command("cmd.exe"));policy.blocked_commands=vec!["cmd.exe".into()];assert!(!policy.can_run_command("cmd"));
+        policy.blocked_commands.clear();policy.allowed_commands=vec!["powershell.exe".into()];assert!(policy.can_run_command("powershell"));
+    }
+}
+
+#[cfg(all(test,windows))]
+mod verbatim_path_regressions {
+    use super::*;
+    #[test] fn canonical_paths_match_the_same_allowed_directory() {
+        let policy=ToolsPolicy {allowed_read_paths:vec!["C:/workspace".into()],..Default::default()};
+        assert!(policy.can_read(Path::new(r"\\?\C:\workspace\file.txt")));
+        assert!(!policy.can_read(Path::new(r"\\?\C:\outside\file.txt")));
     }
 }

@@ -13,9 +13,13 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub(crate) struct Envelope {
     pub schema_version: u32,
+    #[serde(default = "Uuid::new_v4")]
     pub operation_id: Uuid,
     pub tool: String,
     pub arguments: Value,
+    /// Runtime constraint injected after approval; never widens tool permission.
+    #[serde(default)]
+    pub approval_identity: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -36,6 +40,20 @@ struct FileArgs {
     offset_line: Option<u32>,
     #[serde(default)]
     limit_lines: Option<u32>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchReplaceArgs {
+    path: String,
+    search: String,
+    replacement: String,
+    expected_version: String,
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SearchReplaceInput {
+    Structured(SearchReplaceArgs),
+    Legacy(FileArgs),
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,9 +100,37 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
     }
     let mut expected = None;
     let argv = match envelope.tool.as_str() {
-        "read_file" | "write_file" | "write_code" | "edit_file" | "delete_file" | "apply_patch" => {
+        "search_replace" => {
+            let input: SearchReplaceInput = serde_json::from_value(envelope.arguments.clone())
+                .map_err(|error| format!("invalid search_replace arguments: {error}"))?;
+            // Version 1 clients may still send the old delimiter payload. The
+            // native catalogue advertises only the structured, literal form.
+            let arg = match input {
+                SearchReplaceInput::Structured(arg) => arg,
+                SearchReplaceInput::Legacy(arg) => {
+                    if arg.start_line.is_some() || arg.end_line.is_some() || arg.full
+                        || arg.offset_line.is_some() || arg.limit_lines.is_some() {
+                        return Err("invalid legacy search_replace arguments".into());
+                    }
+                    let pair = crate::api::parse_search_replace_payload(&[
+                        arg.path.clone(), arg.content.ok_or("search and replacement required")?])
+                        .map_err(|_| "legacy content requires old | new; prefer search and replacement")?;
+                    SearchReplaceArgs { path: arg.path, search: pair.0, replacement: pair.1,
+                        expected_version: arg.expected_version.ok_or("expected_version required")? }
+                }
+            };
+            if arg.path.trim().is_empty() || arg.path.contains(['\0', '\n', '\r']) {
+                return Err("invalid file path".into());
+            }
+            if arg.search.is_empty() { return Err("search must not be empty".into()); }
+            expected = Some(arg.expected_version);
+            vec![arg.path, "--studio-search-replace-v1".into(),
+                json!({"search":arg.search,"replacement":arg.replacement}).to_string()]
+        }
+        "read_file" | "write_file" | "write_code" | "edit_file" | "delete_file" | "apply_patch"
+        => {
             let arg: FileArgs = serde_json::from_value(envelope.arguments.clone())
-                .map_err(|_| "invalid file arguments")?;
+                .map_err(|error| format!("invalid file arguments: {error}. Use only the declared argument names; workspace paths belong in path."))?;
             if arg.path.trim().is_empty() || arg.path.contains(['\0', '\n', '\r']) {
                 return Err("invalid file path".into());
             }
@@ -104,8 +150,10 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
                         if arg.offset_line.is_some()||arg.limit_lines.is_some(){return Err("full and line window are mutually exclusive".into());}
                         argv.push("--full".into());
                     } else if arg.offset_line.is_some()||arg.limit_lines.is_some() {
-                        let offset=arg.offset_line.filter(|n|*n>0).ok_or("positive offset_line required")?;
-                        let limit=arg.limit_lines.filter(|n|*n>0&&*n<=5000).ok_or("limit_lines must be 1..5000")?;
+                        let offset=arg.offset_line.unwrap_or(1);
+                        let limit=arg.limit_lines.unwrap_or(500);
+                        if offset==0 {return Err("offset_line must be positive".into());}
+                        if !(1..=5000).contains(&limit) {return Err("limit_lines must be 1..5000".into());}
                         argv.extend([offset.to_string(),limit.to_string()]);
                     }
                     argv
@@ -132,7 +180,9 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
                         arg.content.ok_or("content required")?,
                     ]
                 }
-                "apply_patch" => vec![arg.path, arg.content.ok_or("patch content required")?],
+                "apply_patch" => {
+                    vec![arg.path, arg.content.ok_or("patch content required")?]
+                }
                 _ => {
                     if arg.start_line.is_some() || arg.end_line.is_some() {
                         return Err("line range only applies to edit_file".into());
@@ -173,7 +223,10 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
             argv.extend(arg.args);
             argv
         }
-        name if name.starts_with("mcp_") || name == "lsp_query" => {
+        name if name.starts_with("mcp_")
+            || name == "lsp_query"
+            || crate::studio_delivery::is_delivery_tool(name) =>
+        {
             vec![envelope.arguments.to_string()]
         }
         _ => {
@@ -202,6 +255,28 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
     })
 }
 
+#[cfg(test)]
+mod read_window_tests {
+    use super::*;
+    #[test]
+    fn independently_optional_read_windows_use_documented_defaults() {
+        for (arguments,expected) in [
+            (json!({"path":"sample.txt","limit_lines":1}),vec!["sample.txt","1","1"]),
+            (json!({"path":"sample.txt","offset_line":501}),vec!["sample.txt","501","500"]),
+            (json!({"path":"sample.txt"}),vec!["sample.txt"]),
+        ] {
+            let call=decode(&json!({"schema_version":1,"tool":"read_file","arguments":arguments}).to_string()).unwrap();
+            assert_eq!(call.argv,expected);
+        }
+        for arguments in [json!({"path":"sample.txt","limit_lines":0}),json!({"path":"sample.txt","offset_line":0}),json!({"path":"sample.txt","limit_lines":5001}),json!({"path":"sample.txt","full":true,"limit_lines":1})] {
+            assert!(decode(&json!({"schema_version":1,"tool":"read_file","arguments":arguments}).to_string()).is_err());
+        }
+        assert_eq!(argument_schema("read_file")["properties"]["offset_line"]["default"],1);
+        assert_eq!(argument_schema("read_file")["properties"]["limit_lines"]["default"],500);
+        assert_eq!(native_definition(vec!["read_file".into()]).pointer("/function/parameters/oneOf/0/properties/arguments/properties/limit_lines/default"),Some(&json!(500)));
+    }
+}
+
 pub(crate) fn supports_typed(tool: &str) -> bool {
     !matches!(
         tool,
@@ -219,14 +294,79 @@ pub(crate) fn supports_typed(tool: &str) -> bool {
 }
 
 pub(crate) fn argument_schema(tool: &str) -> Value {
-    if tool=="read_file" {return json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1},"full":{"type":"boolean"},"offset_line":{"type":"integer","minimum":1},"limit_lines":{"type":"integer","minimum":1,"maximum":5000}}});}
+    if tool == "search_replace" {
+        return json!({"type":"object","additionalProperties":false,
+            "required":["path","search","replacement","expected_version"],
+            "properties":{
+                "path":{"type":"string","minLength":1},
+                "search":{"type":"string","minLength":1,"description":"Exact text to find; whitespace and delimiters are literal."},
+                "replacement":{"type":"string","description":"Exact replacement; empty string deletes the match."},
+                "expected_version":{"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"SHA-256 returned by reading the target file."}
+            }});
+    }
+    if tool.starts_with("mcp_") {
+        return crate::mcp_runtime::discovered_tool(tool).map(|tool|tool.input_schema)
+            .unwrap_or_else(||json!({"not":{}}));
+    }
+    if crate::studio_delivery::is_delivery_tool(tool) {
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+        let fields: &[(&str, &str, bool)] = match tool {
+            "git_commit" => &[
+                ("paths", "array", true),
+                ("expected_versions", "object", true),
+                ("expected_head", "string", true),
+                ("message", "string", true),
+            ],
+            "git_push" => &[
+                ("remote", "string", true),
+                ("branch", "string", true),
+                ("expected_head", "string", true),
+                ("expected_remote_head", "string", true),
+            ],
+            "github_create_pr" => &[
+                ("remote", "string", true),
+                ("head", "string", true),
+                ("base", "string", true),
+                ("expected_head", "string", true),
+                ("title", "string", true),
+                ("body", "string", true),
+                ("draft", "boolean", false),
+            ],
+            "github_pr_status" => &[("remote", "string", false), ("number", "integer", false)],
+            _ => &[("remote", "string", false)],
+        };
+        for (name, kind, needed) in fields {
+            let mut schema = json!({"type":kind});
+            if *kind == "array" {
+                schema["items"] = json!({"type":"string"});
+                schema["maxItems"] = json!(128);
+            }
+            if *name == "expected_versions" {
+                schema["additionalProperties"] = json!({"type":"string"});
+            }
+            properties.insert((*name).into(), schema);
+            if *needed {
+                required.push(*name);
+            }
+        }
+        return json!({"type":"object","additionalProperties":false,"required":required,"properties":properties});
+    }
+
+    if tool=="read_file" {return json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1},"full":{"type":"boolean","description":"Read the whole file. When true, omit offset_line and limit_lines."},"offset_line":{"type":"integer","minimum":1,"default":1,"description":"First line, default 1 when omitted"},"limit_lines":{"type":"integer","minimum":1,"maximum":5000,"default":500,"description":"Number of lines, default 500 when omitted"}},"not":{"required":["full"],"properties":{"full":{"const":true}},"anyOf":[{"required":["offset_line"]},{"required":["limit_lines"]}]}});}
     if tool == "lsp_query" {
         return json!({"type":"object","additionalProperties":false,"required":["action","path"],"properties":{"action":{"type":"string","enum":["diagnostics","definition","references","rename"]},"path":{"type":"string","minLength":1},"position":{"type":"object","required":["line","character"],"additionalProperties":false,"properties":{"line":{"type":"integer","minimum":0},"character":{"type":"integer","minimum":0}}},"new_name":{"type":"string","maxLength":256},"text":{"type":"string"}}});
     }
 
     if matches!(
         tool,
-        "read_file" | "write_file" | "write_code" | "edit_file" | "apply_patch" | "delete_file"
+        "read_file"
+            | "write_file"
+            | "write_code"
+            | "edit_file"
+            | "apply_patch"
+            | "search_replace"
+            | "delete_file"
     ) {
         let mut required = vec!["path"];
         if is_file_mutation(tool) {
@@ -234,14 +374,19 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
         }
         if matches!(
             tool,
-            "write_file" | "write_code" | "edit_file" | "apply_patch"
+            "write_file" | "write_code" | "edit_file" | "apply_patch" | "search_replace"
         ) {
             required.push("content");
         }
         if tool == "edit_file" {
             required.extend(["start_line", "end_line"]);
         }
-        json!({"type":"object","additionalProperties":false,"required":required,"properties":{"path":{"type":"string","minLength":1},"content":{"type":"string"},"expected_version":{"type":"string","description":"SHA-256 from read_file, or missing for creation"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}})
+        let mut properties=serde_json::Map::new();
+        properties.insert("path".into(),json!({"type":"string","minLength":1,"description":"Exact requested workspace:/ relative path. Use the field path, never workspace."}));
+        if is_file_mutation(tool) {properties.insert("expected_version".into(),json!({"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"REQUIRED: literal missing for a NEW file; SHA-256 from read_file for an EXISTING file. Never invent a hash or omit this field."}));}
+        if required.contains(&"content") {properties.insert("content".into(),json!({"type":"string","description":"Exact file content requested by the user; preserve case and bytes, no heading, template, code fences or call punctuation unless requested."}));}
+        if tool=="edit_file" {for field in ["start_line","end_line"] {properties.insert(field.into(),json!({"type":"integer","minimum":1}));}}
+        json!({"type":"object","additionalProperties":false,"required":required,"properties":properties})
     } else if matches!(
         tool,
         "run_command" | "run_terminal" | "run_command_background"
@@ -252,16 +397,81 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
     }
 }
 
+fn rebase_schema_refs(value:&mut Value,base:&str) {
+    match value {
+        Value::Object(map)=>for (key,value) in map {
+            if key=="$ref" {
+                if let Some(reference)=value.as_str().and_then(|r|r.strip_prefix('#')) {
+                    *value=Value::String(format!("{base}{reference}"));
+                }
+            } else {rebase_schema_refs(value,base);}
+        },
+        Value::Array(values)=>for value in values {rebase_schema_refs(value,base);},
+        _=>{}
+    }
+}
+
 pub(crate) fn native_definition(names: Vec<String>) -> Value {
-    json!({"type":"function","function":{"name":"studio_call","description":"Execute one versioned Studio tool. Reuse an operation_id only to retrieve the same operation result. Files use path/content/expected_version; commands use program/args/cwd; other tools use argv. Read a file before editing it. Creation requires expected_version=missing.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","operation_id","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"operation_id":{"type":"string","format":"uuid"},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}}}}})
+    let variants: Vec<Value> = names.iter().enumerate().map(|(index,name)| {
+        let mut schema=argument_schema(name);
+        rebase_schema_refs(&mut schema,&format!("#/oneOf/{index}/properties/arguments"));
+        json!({"properties":{"tool":{"enum":[name]},"arguments":schema}})
+    }).collect();
+    json!({"type":"function","function":{"name":"studio_call","description":"Execute one Studio tool. The runtime assigns operation IDs; do not invent one. The tool-specific argument schema is mandatory. For write_file/write_code creation, explicitly pass expected_version: missing. Existing files must be read before mutation.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}},"oneOf":variants}}})
+}
+
+/// Contextual constraints for literal-copy tasks. The model still emits the call;
+/// the executor never substitutes content or executes a schema example.
+pub(crate) fn literal_native_definition(names:Vec<String>,literals:&[(String,String)])->Value {
+    if literals.is_empty() {return native_definition(names);}
+    let mut definition=native_definition(names);
+    let mut paths=Vec::<String>::new();let mut contents=Vec::<String>::new();let mut cases=vec![];
+    for (path,literal) in literals {
+        let mut aliases=vec![path.clone()];
+        if let Some(relative)=path.strip_prefix("workspace:/") {aliases.push(relative.into());}
+        else if !Path::new(path).is_absolute() && !path.contains(':') {aliases.push(format!("workspace:/{path}"));}
+        let values=vec![literal.clone(),format!("{literal}\n"),format!("{literal}\r\n")];
+        for alias in &aliases {if !paths.contains(alias){paths.push(alias.clone());}}
+        for value in &values {if !contents.contains(value){contents.push(value.clone());}}
+        cases.push(json!({"properties":{"path":{"enum":aliases},"content":{"enum":values}}}));
+    }
+    if let Some(variants)=definition.pointer_mut("/function/parameters/oneOf").and_then(Value::as_array_mut) {
+        for variant in variants {
+            if !variant.pointer("/properties/tool/enum").and_then(Value::as_array).is_some_and(|names|names.iter().any(|name|matches!(name.as_str(),Some("write_file"|"write_code")))) {continue;}
+            let schema=&mut variant["properties"]["arguments"];
+            schema["properties"]["path"]["enum"]=json!(paths);
+            schema["properties"]["content"]["enum"]=json!(contents);
+            schema["properties"]["content"]["description"]=json!("Copy the exact literal string from the enum for this path. Case is significant. Do not add a heading, template or explanation.");
+            schema["oneOf"]=json!(cases);
+        }
+    }
+    definition
 }
 
 pub(crate) fn is_file_mutation(tool: &str) -> bool {
     matches!(
         tool,
-        "write_file" | "write_code" | "edit_file" | "delete_file" | "apply_patch"
+        "write_file"
+            | "write_code"
+            | "edit_file"
+            | "delete_file"
+            | "apply_patch"
+            | "search_replace"
     )
 }
+pub(crate) fn paths_for_tool(tool:&str,args:&[String])->Vec<String> {
+    if matches!(tool,"git_delivery_status"|"github_pr_status"|"git_push"|"github_create_pr") {return vec!["workspace:/".into()];}
+    if matches!(tool,"file_diff"|"diff_unified"|"dir_compare") {return args.iter().take(2).cloned().collect();}
+    if matches!(tool,"list_dir"|"search_files"|"grep_content"|"git_status"|"git_diff"|"git_log"|"git_branches") {return vec![args.first().cloned().unwrap_or_else(||"workspace:/".into())];}
+    if tool=="lsp_query" {return serde_json::from_str::<Value>(&args.join(" ")).ok().and_then(|v|v["path"].as_str().map(str::to_owned)).into_iter().collect();}
+    if tool=="git_commit" {return serde_json::from_str::<Value>(&args.join(" ")).ok().and_then(|v|v["paths"].as_array().cloned()).unwrap_or_default().iter().filter_map(|v|v.as_str().map(str::to_owned)).collect();}
+    if matches!(tool,"rename_path"|"move_tree") {return args.iter().take(2).cloned().collect();}
+    if tool=="read_file" {let (parts,_,_)=crate::api::parse_read_file_args(args);return vec![parts.join(" ")];}
+    if matches!(tool,"write_file"|"write_code") {return crate::api::parse_write_file_request(args).map(|(path,_)|vec![path]).unwrap_or_default();}
+    if matches!(tool,"edit_file"|"apply_patch"|"search_replace"|"delete_file"|"file_diff") {return args.first().cloned().into_iter().collect();}
+    vec![]
+}
+
 fn file_path(tool: &str, args: &[String]) -> Option<String> {
     if matches!(tool, "write_file" | "write_code") {
         crate::api::parse_write_file_request(args).map(|(path, _)| path)
@@ -276,6 +486,7 @@ fn file_path(tool: &str, args: &[String]) -> Option<String> {
         None
     }
 }
+pub(crate) fn ensure_ledger(path:&Path)->Result<(),String>{connection(path).map(|_|())}
 fn connection(path: &Path) -> Result<Connection, String> {
     let connection = Connection::open(path).map_err(|e| e.to_string())?;
     connection
@@ -287,7 +498,7 @@ fn connection(path: &Path) -> Result<Connection, String> {
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn bounded_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+pub(crate) fn bounded_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let path = crate::api::resolve_tool_disk_path(raw, Some(&root));
     if path
@@ -351,6 +562,8 @@ pub(crate) struct Operation {
     tool: String,
     path: Option<PathBuf>,
     before: Option<String>,
+    effect_before: std::collections::BTreeMap<String,String>,
+    terminal_context: Option<(String, Option<String>)>,
     _lock: tokio::sync::OwnedMutexGuard<()>,
     pub cached: Option<(bool, String)>,
 }
@@ -364,14 +577,29 @@ impl Operation {
         policy: &akasha_tools::ToolsPolicy,
         typed: Option<&Decoded>,
     ) -> Result<Self, String> {
+        Self::begin_inner(db,task,tool,args,root,policy,typed,false).await
+    }
+    pub(crate) async fn begin_operator(db:&Path,task:Uuid,tool:&str,args:&[String],root:&Path,policy:&akasha_tools::ToolsPolicy,typed:Option<&Decoded>)->Result<Self,String> {
+        if !matches!(tool,"git_commit"|"git_push"|"github_create_pr") {return Err("operator delivery tool required".into());}
+        Self::begin_inner(db,task,tool,args,root,policy,typed,true).await
+    }
+    async fn begin_inner(db:&Path,task:Uuid,tool:&str,args:&[String],root:&Path,policy:&akasha_tools::ToolsPolicy,typed:Option<&Decoded>,operator:bool)->Result<Self,String> {
         let canonical = root.canonicalize().map_err(|e| e.to_string())?;
         let lock = workspace_guard(&canonical).await?;
         let task_status = akasha_store::TaskStore::open(db).map_err(|e|e.to_string())?
             .get(task).map_err(|e|e.to_string())?.ok_or("Studio task missing after workspace lock")?.status;
-        if matches!(task_status,akasha_store::TaskStatus::Failed|akasha_store::TaskStatus::Cancelled|akasha_store::TaskStatus::Paused|akasha_store::TaskStatus::Interrupted|akasha_store::TaskStatus::WaitingUserInput) {
+        if operator && matches!(task_status,akasha_store::TaskStatus::Pending|akasha_store::TaskStatus::Queued|akasha_store::TaskStatus::Running|akasha_store::TaskStatus::WaitingUserInput) {return Err("operator delivery requires a stopped task".into());}
+        if !operator && matches!(task_status,akasha_store::TaskStatus::Failed|akasha_store::TaskStatus::Cancelled|akasha_store::TaskStatus::Paused|akasha_store::TaskStatus::Interrupted|akasha_store::TaskStatus::WaitingUserInput) {
             return Err("task stopped or waiting while acquiring workspace lock".into());
         }
 
+        if let Some(expected)=typed.and_then(|call|call.envelope.approval_identity.as_ref()) {
+            if !policy.can_use_tool(tool) || !policy.can_run_command("git") || !crate::studio_delivery::is_delivery_tool(tool) || crate::studio_delivery::approval_identity(&canonical,tool,args).await?!=*expected {
+                return Err("delivery destination changed while waiting for workspace lock; request fresh approval".into());
+            }
+            let current=akasha_store::TaskStore::open(db).map_err(|e|e.to_string())?.get(task).map_err(|e|e.to_string())?.ok_or("Studio task disappeared during approval validation")?.status;
+            if current!=task_status {return Err("task status changed during delivery approval validation".into());}
+        }
         let id = typed
             .map(|t| t.envelope.operation_id)
             .unwrap_or_else(Uuid::new_v4);
@@ -380,6 +608,7 @@ impl Operation {
                 .map_err(|e| e.to_string())?
                 .as_bytes(),
         );
+        let fingerprint=if let Some(identity)=typed.and_then(|call|call.envelope.approval_identity.as_ref()) {digest(serde_json::to_string(&(fingerprint,identity)).map_err(|e|e.to_string())?.as_bytes())}else{fingerprint};
         let mut connection = connection(db)?;
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -392,7 +621,20 @@ impl Operation {
             )
             .optional()
             .map_err(|e| e.to_string())?;
+        // Cached evidence is still subject to today's argument-level policy.
+        if matches!(tool,"run_command"|"run_terminal"|"run_command_background") {
+            let (_,cwd,program,_)=crate::api_tool_dispatch::process_ops::parse_run_command_args(args);
+            if !policy.can_run_command(&program) {return Err("cached/current command denied by current policy".into());}
+            crate::api_tool_dispatch::process_ops::resolve_run_command_working_dir(cwd.as_deref(),Some(&canonical),policy)?;
+        }
+        if crate::studio_delivery::is_delivery_tool(tool) && (!policy.can_run_command("git") || matches!(tool,"github_pr_status"|"git_push"|"github_create_pr") && !policy.can_run_command("gh")) {return Err("cached/current delivery executable denied by policy".into());}
+        for raw in paths_for_tool(tool,args) {
+            let path=bounded_path(&canonical,&raw)?;let plain=crate::api::strip_verbatim_prefix(path);
+            if !policy.can_read(&plain) || is_file_mutation(tool) && !policy.can_write(&plain) {return Err("cached/current path denied by current policy".into());}
+        }
         if let Some((old_digest, state, result)) = old {
+            if tool=="git_delivery_status" && !policy.can_run_command("gh") {return Err("cached GitHub status unavailable under current policy; request a fresh local inspection operation".into());}
+
             if old_digest != fingerprint {
                 return Err("operation_id reused with different arguments".into());
             }
@@ -408,6 +650,8 @@ impl Operation {
                 tool: tool.into(),
                 path: None,
                 before: None,
+                effect_before: Default::default(),
+                terminal_context: None,
                 _lock: lock,
                 cached: Some((
                     value["success"].as_bool().unwrap_or(false),
@@ -422,25 +666,27 @@ impl Operation {
                 |row| row.get(0),
             )
             .map_err(|e| e.to_string())?;
-        let inspection = matches!(
-            tool,
-            "read_file"
-                | "lsp_query"
-                | "list_dir"
-                | "search_files"
-                | "grep_content"
-                | "file_diff"
-                | "diff_unified"
-                | "dir_compare"
-                | "git_status"
-                | "git_diff"
-                | "git_log"
-                | "git_branches"
-                | "list_tools"
-        ) || tool == "terminal_session"
-            && args
-                .first()
-                .is_some_and(|sub| matches!(sub.as_str(), "read" | "list" | "stop"));
+        let inspection = matches!(tool, "git_delivery_status" | "github_pr_status")
+            || matches!(
+                tool,
+                "read_file"
+                    | "lsp_query"
+                    | "list_dir"
+                    | "search_files"
+                    | "grep_content"
+                    | "file_diff"
+                    | "diff_unified"
+                    | "dir_compare"
+                    | "git_status"
+                    | "git_diff"
+                    | "git_log"
+                    | "git_branches"
+                    | "list_tools"
+            )
+            || tool == "terminal_session"
+                && args
+                    .first()
+                    .is_some_and(|sub| matches!(sub.as_str(), "read" | "list" | "stop"));
         if unknown > 0 && !inspection {
             return Err("operation_result_unknown: only inspection is allowed until an operator resolves interrupted operations through /api/tasks/:id/recovery".into());
         }
@@ -465,6 +711,21 @@ impl Operation {
         } else {
             None
         };
+        // Legacy text calls have no operation identity. Reuse a confirmed receipt
+        // only for an identical write whose on-disk version still matches it.
+        // Policy, stopped-task and uncertain-effect checks above still apply.
+        if typed.is_none() && matches!(tool,"write_file"|"write_code") && before.as_deref()!=Some("missing") {
+            let receipt:Option<String>=transaction.query_row(
+                "SELECT result FROM studio_operations WHERE task=?1 AND tool=?2 AND digest=?3 AND state='completed' ORDER BY updated_at DESC LIMIT 1",
+                params![task.to_string(),tool,fingerprint],|row|row.get(0)).optional().map_err(|error|error.to_string())?;
+            if let Some(mut value)=receipt.and_then(|raw|serde_json::from_str::<Value>(&raw).ok()) {
+                if value["success"]==true && value["result_unknown"]!=true && value["file_version"].as_str()==before.as_deref() && before.is_some() {
+                    value["replayed"]=json!(true);
+                    value["retry_hint"]=json!("Identical write already confirmed and current file version verified; no new disk effect. Continue with the next requested operation or conclude after all checks.");
+                    return Ok(Self{db:db.into(),task,id,tool:tool.into(),path:None,before:None,effect_before:Default::default(),terminal_context:None,_lock:lock,cached:Some((true,value.to_string()))});
+                }
+            }
+        }
         if is_file_mutation(tool) {
             let path = path.as_ref().ok_or("file mutation path missing")?;
             let expected = if let Some(typed) = typed {
@@ -485,10 +746,15 @@ impl Operation {
                     "file_read_required: read the existing file before modifying it".into(),
                 );
             }
-            if expected != before {
+            if expected.as_ref().map(|s|s.to_ascii_lowercase()) != before {
                 return Err("stale_file_version: file changed since it was read; read it again before retrying".into());
             }
         }
+        let mut effect_paths=if is_file_mutation(tool){path.iter().cloned().collect::<Vec<_>>()}else{Vec::new()};
+        if matches!(tool,"rename_path"|"move_tree"){effect_paths=paths_for_tool(tool,args).iter().map(|raw|bounded_path(root,raw)).collect::<Result<Vec<_>,_>>()?;}
+        if tool=="lsp_apply_rename" {if let Some(id)=args.first().and_then(|s|Uuid::parse_str(s).ok()){effect_paths=crate::studio_lsp::plan_paths(db.parent().ok_or("task data directory missing")?,root,task,id)?.iter().map(|p|bounded_path(root,p)).collect::<Result<Vec<_>,_>>()?;}}
+        if is_confirmable_file_mutation(tool)||matches!(tool,"run_command"|"run_terminal"|"run_in_container"|"terminal_session") {effect_paths.extend(crate::studio_file_effects::scoped_paths(db,task,root,policy)?);}
+        let effect_before=crate::studio_file_effects::capture_paths(&effect_paths)?;
         transaction.execute("INSERT INTO studio_operations(task,operation,version,tool,digest,state,updated_at) VALUES(?1,?2,1,?3,?4,'started',?5)",params![task.to_string(),id.to_string(),tool,fingerprint,chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(Self {
@@ -498,6 +764,8 @@ impl Operation {
             tool: tool.into(),
             path,
             before,
+            effect_before,
+            terminal_context: (tool=="terminal_session").then(||(args.first().cloned().unwrap_or_default(),args.get(1).cloned())),
             _lock: lock,
             cached: None,
         })
@@ -519,14 +787,35 @@ impl Operation {
                 transaction.execute("INSERT INTO studio_file_versions(task,path,version) VALUES(?1,?2,?3) ON CONFLICT(task,path) DO UPDATE SET version=excluded.version",params![self.task.to_string(),path.display().to_string(),version]).map_err(|e|e.to_string())?;
             }
         }
-        let output = crate::tool_output::truncate_utf8_by_bytes(text, 64 * 1024).0;
-        let value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
-        transaction.execute("UPDATE studio_operations SET state='completed',result=?3,updated_at=?4 WHERE task=?1 AND operation=?2 AND state='started'",params![self.task.to_string(),self.id.to_string(),value.to_string(),chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+        let command_result=if matches!(self.tool.as_str(),"run_command"|"run_terminal") {serde_json::from_str::<Value>(text).ok()}else{None};
+        let plain=command_result.as_ref().and_then(|v|v["output"].as_str()).unwrap_or(text);
+        let (output,_,truncated) = crate::tool_output::truncate_utf8_by_bytes(plain, 64 * 1024);
+        let mut value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
+        value["file_effects"]=crate::studio_file_effects::receipt_effects(&self.effect_before)?;
+        if let Some((action,session))=&self.terminal_context {
+            let output:Value=serde_json::from_str(text).unwrap_or(Value::Null);
+            let session=if action=="start" {output["session_id"].as_str()} else {session.as_deref()};
+            if let Some(session)=session {value["terminal_effect"]=json!({"action":action,"session_id":session});}
+        }
+        value["truncated"]=json!(truncated);
+        if truncated {value["output"]=json!(format!("{}\n[Output truncated at 64 KiB; use bounded reads to inspect remaining data.]",value["output"].as_str().unwrap_or_default()));}
+        if self.tool == "read_file" && !success && value["file_version"] == "missing" {
+            value["error_code"]=json!("file_not_found");
+            value["retry_hint"]=json!("The file does not exist. Repeating read_file with another window/full cannot create it. If the ORIGINAL user request asks you to create this file, use write_file with expected_version: missing and the requested content. Otherwise report that it is absent; do not create unrelated files.");
+        }
+        let uncertain = serde_json::from_str::<Value>(text)
+            .ok()
+            .is_some_and(|value| value["result_unknown"] == true);
+        value["result_unknown"] = json!(uncertain);
+        transaction.execute("UPDATE studio_operations SET state=?5,result=?3,updated_at=?4 WHERE task=?1 AND operation=?2 AND state='started'",params![self.task.to_string(),self.id.to_string(),value.to_string(),chrono::Utc::now().to_rfc3339(),if uncertain{"started"}else{"completed"}]).map_err(|e|e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(value.to_string())
     }
 }
 
+pub(crate) fn is_confirmable_file_mutation(tool:&str)->bool {
+    is_file_mutation(tool) || matches!(tool,"rename_path"|"move_tree"|"lsp_apply_rename")
+}
 pub(crate) fn recovery_summary(db: &Path, task: Uuid) -> Result<Value, String> {
     let connection = connection(db)?;
     let unknown: i64 = connection
@@ -589,8 +878,64 @@ impl WorkflowOperation {
         })
     }
     pub(crate) fn finish(self, success: bool, text: &str) -> Result<(), String> {
+        // Failed delegation is not evidence that the child stopped. Keep the
+        // operation unresolved until explicit inspection/recovery.
+        if self.tool=="delegate_to_agent" && !success {return Err("delegation result uncertain; inspect child tasks before recovery".into());}
         let result = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"output":crate::tool_output::truncate_utf8_by_bytes(text,64*1024).0});
         connection(&self.db)?.execute("UPDATE studio_operations SET state='completed',result=?3,updated_at=?4 WHERE task=?1 AND operation=?2 AND state='started'",params![self.task.to_string(),self.id.to_string(),result.to_string(),chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod native_schema_regressions {
+    use super::*;
+    #[test]
+    fn structured_search_replace_round_trips_literal_text_and_empty_replacement() {
+        let schema = jsonschema::JSONSchema::compile(&argument_schema("search_replace")).unwrap();
+        for (search, replacement) in [(" old | value\n", " new | value\n"), ("remove", "")] {
+            let args = json!({"path":"workspace:/a.txt","search":search,
+                "replacement":replacement,"expected_version":"a".repeat(64)});
+            assert!(schema.is_valid(&args));
+            let decoded = decode(&json!({"schema_version":1,"tool":"search_replace","arguments":args}).to_string()).unwrap();
+            assert_eq!(crate::api::parse_search_replace_payload(&decoded.argv).unwrap(),
+                (search.to_string(), replacement.to_string()));
+        }
+        for args in [json!({"path":"a","content":"new","expected_version":"a".repeat(64)}),
+            json!({"path":"a","search":"","replacement":"new","expected_version":"a".repeat(64)})] {
+            assert!(!schema.is_valid(&args));
+            assert!(decode(&json!({"schema_version":1,"tool":"search_replace","arguments":args}).to_string()).is_err());
+        }
+        assert_eq!(crate::api::parse_search_replace_payload(&["a".into(),"old | new".into()]).unwrap(), ("old".into(),"new".into()));
+        let legacy = decode(&json!({"schema_version":1,"tool":"search_replace",
+            "arguments":{"path":"a","content":"old | new","expected_version":"a".repeat(64)}}).to_string()).unwrap();
+        assert_eq!(crate::api::parse_search_replace_payload(&legacy.argv).unwrap(), ("old".into(),"new".into()));
+    }
+    #[test] fn full_read_and_line_window_are_exclusive_in_schema_and_decoder() {
+        let schema=jsonschema::JSONSchema::compile(&argument_schema("read_file")).unwrap();
+        for args in [json!({"path":"a","full":true}),json!({"path":"a","full":false,"limit_lines":1}),json!({"path":"a","offset_line":1})] {assert!(schema.is_valid(&args));}
+        for args in [json!({"path":"a","full":true,"limit_lines":1}),json!({"path":"a","full":true,"offset_line":1})] {
+            assert!(!schema.is_valid(&args));
+            assert!(decode(&json!({"schema_version":1,"tool":"read_file","arguments":args}).to_string()).is_err());
+        }
+    }
+    #[test] fn every_native_variant_uses_the_decoder_schema() {
+        for tool in ["delete_file","search_replace","apply_patch","git_push","github_create_pr","lsp_query","read_file"] {
+            let definition=native_definition(vec![tool.into()]);
+            assert_eq!(definition["function"]["parameters"]["oneOf"][0]["properties"]["arguments"],argument_schema(tool));
+        }
+    }
+}
+
+#[cfg(test)]
+mod literal_schema_tests {
+    use super::*;
+    #[test] fn literal_schemas_express_the_same_case_sensitive_path_content_contract() {
+        let definition=literal_native_definition(vec!["write_file".into(),"read_file".into()],&[("first.txt".into(),"alpha".into()),("second.txt".into(),"éTé".into())]);
+        let schema=jsonschema::JSONSchema::compile(&definition["function"]["parameters"]).unwrap();
+        let call=|path:&str,content:&str|json!({"schema_version":1,"tool":"write_file","arguments":{"path":path,"content":content,"expected_version":"missing"}});
+        for content in ["alpha","alpha\n","alpha\r\n"] {assert!(schema.is_valid(&call("workspace:/first.txt",content)));}
+        assert!(!schema.is_valid(&call("first.txt","Alpha")));assert!(!schema.is_valid(&call("first.txt","éTé")));assert!(!schema.is_valid(&call("other.txt","alpha")));
+        assert!(schema.is_valid(&json!({"schema_version":1,"tool":"read_file","arguments":{"path":"workspace:/CODE_STUDIO_PLAN.md"}})));
     }
 }

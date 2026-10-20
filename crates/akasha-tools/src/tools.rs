@@ -748,6 +748,10 @@ fn grep_content_inner(
                 continue;
             }
         }
+        // File symlinks must not escape the recursive search boundary.
+        let Ok(canonical)=path.canonicalize() else {continue;};
+        let Ok(search_root)=dir.canonicalize() else {continue;};
+        if !canonical.starts_with(&search_root) || !policy.can_read(&canonical) {continue;}
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => continue,

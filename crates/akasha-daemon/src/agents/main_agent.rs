@@ -403,6 +403,8 @@ User message:\n{}",
             message_capped
         );
         let req = CompletionRequest {
+            require_tool: false,
+            conversation: None,
             tools: None,
             prompt,
             max_tokens: Some(128),
@@ -800,6 +802,9 @@ User message:\n{}",
 
     /// Resume a Paused or Interrupted task: set status to Queued and re-inject into conversation worker (Phase 2 AI OS).
     pub fn resume_task(&self, store_path: &Path, task_id: Uuid) -> anyhow::Result<()> {
+        crate::studio_recovery::with_admission(task_id,||self.resume_task_admitted(store_path,task_id)).map_err(anyhow::Error::msg)?
+    }
+    fn resume_task_admitted(&self,store_path:&Path,task_id:Uuid)->anyhow::Result<()> {
         let store = TaskStore::open(store_path)?;
         let task = store.get(task_id)?.ok_or_else(|| anyhow::anyhow!("task not found"))?;
         let resumable = matches!(

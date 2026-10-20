@@ -35,7 +35,10 @@ function appendLog(buffer, record) {
 }
 
 function scrubText(text) {
-  return String(text).replace(/((?:api[_-]?key|token|password|secret|authorization|bearer)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]').slice(0, 2000);
+  return String(text)
+    .replace(/((?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n]+/gi, '$1[redacted]')
+    .replace(/(\bbearer\s+)[^\s,;]+/gi, '$1[redacted]')
+    .replace(/((?:api[_-]?key|token|password|secret|bearer)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]').slice(0, 2000);
 }
 
 function scrubUrl(raw) {

@@ -123,7 +123,13 @@ pub use daemon::{Daemon, RunOutcome};
 pub use health::{HealthState, HealthStatus};
 
 pub(crate) mod studio_tool_contract;
+pub(crate) mod studio_file_effects;
 
 pub(crate) mod studio_recovery;
 
 pub(crate) mod studio_lsp;
+
+pub(crate) mod studio_delivery;
+
+#[cfg(test)]
+mod studio_agentic_tests;

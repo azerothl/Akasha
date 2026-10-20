@@ -1,5 +1,7 @@
 # Capacités, règles et skills Code Studio
 
+> Mise à jour après validation : voir [les parcours réels du 18 octobre](../quality/STUDIO_AGENTIC_VALIDATION_2026_10_18.md). Les mentions « aucun test » ci-dessous décrivent le lot initial, avant cette validation.
+
 Suivi : #153, #154, #155 ; renforcement des rôles : #152. Le contrat des appels typés (#157), la reprise durable (#158), navigateur/PTY/MCP (#156) restent des chantiers distincts.
 
 ## Manifeste contextuel

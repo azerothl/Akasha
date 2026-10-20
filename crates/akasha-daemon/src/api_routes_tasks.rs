@@ -519,7 +519,7 @@ pub(crate) async fn cancel_task(store_path: &Path, id: Uuid, main_agent: &crate:
     };
     let cancellable = matches!(
         task.status,
-        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
+        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running | TaskStatus::Paused | TaskStatus::Interrupted | TaskStatus::WaitingUserInput
     );
     if !cancellable {
         let body = serde_json::json!({
@@ -529,8 +529,10 @@ pub(crate) async fn cancel_task(store_path: &Path, id: Uuid, main_agent: &crate:
         });
         return json_response("400 Bad Request", &body.to_string());
     }
-    if store.update_status(id, TaskStatus::Cancelled).is_err() {
-        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    match store.transition_if(id, &[TaskStatus::Pending, TaskStatus::Queued, TaskStatus::Running, TaskStatus::Paused, TaskStatus::Interrupted, TaskStatus::WaitingUserInput], TaskStatus::Cancelled) {
+        Ok(true) => {},
+        Ok(false) => return json_response("409 Conflict", r#"{"error":"task_changed_before_cancel"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     }
     let _ = main_agent.bus().send(
         EventEnvelope::new(
@@ -562,6 +564,22 @@ pub(crate) fn collect_task_tree_ids(store: &TaskStore, root: Uuid) -> Vec<Uuid> 
     to_cancel
 }
 
+fn cancel_tree_member(store: &TaskStore, id: Uuid) -> Result<bool, String> {
+    store.transition_if(id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running,TaskStatus::Paused,TaskStatus::Interrupted,TaskStatus::WaitingUserInput],TaskStatus::Cancelled).map_err(|e|e.to_string())
+}
+
+async fn clear_cancelled_tree_waits(store_path:&Path,response:&str,waits:&HumanInputStore) {
+    if !response.starts_with("HTTP/1.1 200 ") {return;}
+    let Some(body)=response.split_once("\r\n\r\n").and_then(|(_,body)|serde_json::from_str::<serde_json::Value>(body).ok()) else{return;};
+    let Some(ids)=body["cancelled_ids"].as_array() else{return;};
+    let Ok(store)=TaskStore::open(store_path) else{return;};
+    let mut pending=waits.write().await;
+    for id in ids.iter().filter_map(|id|id.as_str().and_then(|id|Uuid::parse_str(id).ok())) {
+        // A newer wait created after a concurrent resume must also survive.
+        if store.get(id).ok().flatten().is_some_and(|task|task.status==TaskStatus::Cancelled) {pending.remove(&id);}
+    }
+}
+
 /// P6-B4: cancel a parent task and all descendants (aggregated cancel).
 pub(crate) async fn cancel_task_tree(
     store_path: &Path,
@@ -586,23 +604,10 @@ pub(crate) async fn cancel_task_tree(
         let Some(task) = store.get(tid).ok().flatten() else {
             continue;
         };
-        let cancellable = matches!(
-            task.status,
-            TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
-        );
-        if !cancellable {
-            skipped.push(serde_json::json!({
-                "task_id": tid.to_string(),
-                "status": task.status.as_str(),
-            }));
-            continue;
-        }
-        if store.update_status(tid, TaskStatus::Cancelled).is_err() {
-            skipped.push(serde_json::json!({
-                "task_id": tid.to_string(),
-                "error": "store",
-            }));
-            continue;
+        match cancel_tree_member(&store,tid) {
+            Ok(true)=>{},
+            Ok(false)=>{skipped.push(serde_json::json!({"task_id":tid.to_string(),"status":store.get(tid).ok().flatten().map(|task|task.status.as_str().to_owned()).unwrap_or_else(||task.status.as_str().to_owned())}));continue;},
+            Err(_)=>{skipped.push(serde_json::json!({"task_id":tid.to_string(),"error":"store"}));continue;},
         }
         let _ = main_agent.bus().send(
             EventEnvelope::new(
@@ -699,8 +704,10 @@ pub(crate) async fn pause_task(store_path: &Path, id: Uuid, main_agent: &crate::
         });
         return json_response("400 Bad Request", &body.to_string());
     }
-    if store.update_status(id, TaskStatus::Paused).is_err() {
-        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    match store.transition_if(id,&[TaskStatus::Pending,TaskStatus::Queued,TaskStatus::Running,TaskStatus::WaitingUserInput],TaskStatus::Paused) {
+        Ok(true)=>{},
+        Ok(false)=>return json_response("409 Conflict",r#"{"error":"task_changed_before_pause"}"#),
+        Err(_)=>return json_response("500 Internal Server Error",r#"{"error":"store"}"#),
     }
     let _ = main_agent.bus().send(
         EventEnvelope::new(
@@ -2222,7 +2229,9 @@ if method == "POST" && path == "/api/message" {
     let ack_message = build_ack_message(&message);
     // Capture the raw user message for code-RAG retrieval before any prefixes are injected.
     let raw_user_message = message.clone();
-    let mut message_for_llm = message;
+    let mut message_for_llm = if studio_disk_root.is_some() {
+        format!("[Current user request — task scope]\n{message}\n[End current user request]\n\nRespect the exact requested paths and contents. Project templates and examples are context; do not modify them unless this request requires it.")
+    } else { message };
     if let Some(mode) = message_delivery_mode.as_deref() {
         if mode == "steering" || mode == "follow_up" {
             message_for_llm = format!(
@@ -2241,7 +2250,13 @@ if method == "POST" && path == "/api/message" {
         );
     }
     if let Some(ref root) = studio_disk_root {
-        if let Some(plan) = crate::api_studio::studio_code_plan_message_prefix(root) {
+        let direct_files=studio_delegate_single_level && studio_code_mode.as_deref()!=Some("plan")
+            && !matches!(composer_mode.as_deref(),Some("ask"|"architect")) && studio_ticket_id.is_none()
+            && studio_evolution_branch.is_none()
+            && crate::api_llm_loop::scoped_file_request(&raw_user_message);
+        let plan=if direct_files {crate::api_studio::scoped_file_plan_context(root)} else {crate::api_studio::studio_code_plan_message_prefix(root)};
+        let prune_plan_chunks=direct_files && plan.as_deref().is_some_and(|prefix|prefix.starts_with(crate::api_llm_loop::DIRECT_FILE_TASK_MARKER));
+        if let Some(plan) = plan {
             message_for_llm = format!("{plan}{message_for_llm}");
         }
         if let Some(s) = crate::api_studio::studio_project_summary_prefix(root) {
@@ -2315,12 +2330,15 @@ if method == "POST" && path == "/api/message" {
                     .unwrap_or(6_000);
                 let code_ctx = tokio::task::spawn_blocking(move || {
                     let store = crate::code_rag::CodeRagStore::new(&data_dir);
-                    let chunks = store.retrieve(
+                    let mut chunks = store.retrieve(
                         &pid,
                         &root,
                         &query,
                         crate::code_rag::RetrieveOptions { top_k, max_chars },
                     )?;
+                    // The direct-file prefix already preserves plan constraints.
+                    // Do not reintroduce its maintenance templates through RAG.
+                    if prune_plan_chunks {chunks.retain(|chunk|!chunk.path.eq_ignore_ascii_case("CODE_STUDIO_PLAN.md"));}
                     Ok::<_, anyhow::Error>(crate::code_rag::format_retrieved_chunks(
                         &chunks, max_chars,
                     ))
@@ -2459,6 +2477,7 @@ if method == "GET" && path == "/api/pending-human-input" {
             .map(|(id, p)| {
                 serde_json::json!({
                     "task_id": id.to_string(),
+                    "request_id": p.request_id,
                     "question": p.question,
                     "context": p.context,
                     "choices": p.choices
@@ -2476,16 +2495,22 @@ if path.starts_with("/api/tasks/") {
     if let Some(&id_str) = parts.first() {
         if let Ok(id) = Uuid::parse_str(id_str) {
             if method == "POST" && parts.get(1) == Some(&"cancel") {
-                return Some(cancel_task(store_path, id, main_agent).await);
+                let response=cancel_task(store_path,id,main_agent).await;
+                if response.starts_with("HTTP/1.1 200 ") {if let Some(waits)=human_input_store.as_ref(){waits.write().await.remove(&id);}}
+                return Some(response);
             }
             if method == "POST" && parts.get(1) == Some(&"cancel-tree") {
-                return Some(cancel_task_tree(store_path, id, main_agent).await);
+                let response=cancel_task_tree(store_path,id,main_agent).await;
+                if let Some(waits)=human_input_store.as_ref(){clear_cancelled_tree_waits(store_path,&response,waits).await;}
+                return Some(response);
             }
             if method == "GET" && parts.get(1) == Some(&"children") {
                 return Some(get_task_children(store_path, id).await);
             }
             if method == "POST" && parts.get(1) == Some(&"pause") {
-                return Some(pause_task(store_path, id, main_agent).await);
+                let response=pause_task(store_path,id,main_agent).await;
+                if response.starts_with("HTTP/1.1 200 ") {if let Some(waits)=human_input_store.as_ref(){waits.write().await.remove(&id);}}
+                return Some(response);
             }
             if method == "POST" && parts.get(1) == Some(&"resume") {
                 return Some(resume_task(store_path, id, main_agent).await);
@@ -2533,6 +2558,7 @@ if path.starts_with("/api/tasks/") {
                     if let Some(pending) = g.get(&id) {
                         let body = serde_json::json!({
                             "task_id": id.to_string(),
+                            "request_id": pending.request_id,
                             "question": pending.question,
                             "context": pending.context,
                             "choices": pending.choices
@@ -2544,6 +2570,7 @@ if path.starts_with("/api/tasks/") {
             }
             // Human in the loop: POST user reply to unblock the agent
             if method == "POST" && parts.get(1) == Some(&"human-reply") {
+                let request_id = body.as_deref().and_then(|b|serde_json::from_slice::<serde_json::Value>(b).ok()).and_then(|v|v["request_id"].as_str().map(str::to_owned));
                 let response_text = body
                     .as_deref()
                     .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
@@ -2552,6 +2579,9 @@ if path.starts_with("/api/tasks/") {
                 if let Some(ref store) = human_input_store {
                     let pending = {
                         let mut g = store.write().await;
+                        if g.get(&id).is_some_and(|pending| pending.request_id.is_some() && pending.request_id != request_id) {
+                            return Some(json_response("409 Conflict",r#"{"error":"stale_approval_request","detail":"Send the request_id from the current human-input question."}"#));
+                        }
                         g.remove(&id)
                     };
                     if let Some(pending) = pending {
@@ -2739,5 +2769,25 @@ mod tests {
         assert!(ids.contains(&root));
         assert!(ids.contains(&child));
         assert!(ids.contains(&grand));
+    }
+}
+
+#[cfg(test)]
+mod tree_wait_cleanup_tests {
+    use super::*;
+    #[tokio::test]
+    async fn tree_cancel_transitions_waiting_members_and_only_releases_confirmed_cancelled_waits() {
+        let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let store=TaskStore::open(&db).unwrap();let root=Uuid::new_v4();let waiting=Uuid::new_v4();let paused=Uuid::new_v4();let completed=Uuid::new_v4();let unrelated=Uuid::new_v4();let now=chrono::Utc::now();
+        let waits=crate::api::new_human_input_store();let mut receivers=std::collections::HashMap::new();
+        for (id,parent,status) in [(root,None,TaskStatus::Running),(waiting,Some(root),TaskStatus::WaitingUserInput),(paused,Some(root),TaskStatus::Paused),(completed,Some(root),TaskStatus::Completed),(unrelated,None,TaskStatus::WaitingUserInput)] {
+            store.insert(&akasha_store::Task{id,parent_task_id:parent,status,assigned_agent:"studio_fullstack".into(),created_at:now,updated_at:now,initial_message:None,studio_project_id:None}).unwrap();
+            let (tx,rx)=tokio::sync::oneshot::channel();receivers.insert(id,rx);waits.write().await.insert(id,crate::api::PendingHumanInput{request_id:Some(id.to_string()),question:"Continue?".into(),context:String::new(),choices:None,response_tx:tx});
+        }
+        let ids=collect_task_tree_ids(&store,root);let cancelled=ids.into_iter().filter(|id|cancel_tree_member(&store,*id).unwrap()).collect::<Vec<_>>();assert_eq!(cancelled.len(),3);assert_eq!(store.get(waiting).unwrap().unwrap().status,TaskStatus::Cancelled);
+        let response=json_response("200 OK",&serde_json::json!({"cancelled_ids":cancelled,"skipped":[{"task_id":completed}]}).to_string());
+        clear_cancelled_tree_waits(&db,&response,&waits).await;
+        let guard=waits.read().await;assert!(guard.contains_key(&completed));assert!(guard.contains_key(&unrelated));assert!(!guard.contains_key(&waiting));drop(guard);
+        assert!(matches!(receivers.get_mut(&waiting).unwrap().try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Closed)));
+        assert!(matches!(receivers.get_mut(&unrelated).unwrap().try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
     }
 }

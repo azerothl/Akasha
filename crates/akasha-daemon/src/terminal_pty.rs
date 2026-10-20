@@ -364,7 +364,8 @@ impl PtyManager {
         Ok(())
     }
 
-    pub fn close(&self, id: &str) -> anyhow::Result<()> {
+    pub fn close(&self,id:&str)->anyhow::Result<()> {self.close_with_exit_code(id).map(|_|())}
+    pub fn close_with_exit_code(&self, id: &str) -> anyhow::Result<Option<u32>> {
         let inner = {
             let mut map = self
                 .sessions
@@ -373,21 +374,26 @@ impl PtyManager {
             map.remove(id)
                 .ok_or_else(|| anyhow::Error::new(PtySessionNotFound(id.to_string())))?
         };
+        let mut exit_code=None;
         if let Ok(mut c) = inner.child.lock() {
             if let Some(mut ch) = c.take() {
-                let _ = ch.kill();
+                exit_code=ch.try_wait().ok().flatten().map(|status|status.exit_code());
+                if exit_code.is_none(){let _ = ch.kill();}
                 let _ = ch.wait();
             }
         }
         if let Ok(mut h) = inner.reader.lock() {
             if let Some(j) = h.take() {
-                // A descendant may retain the slave; release the master without waiting on a blocked reader.
+                // Let the killed shell's buffered output reach the transcript, bounded
+                // because a descendant may retain the slave indefinitely.
+                let until=std::time::Instant::now()+std::time::Duration::from_secs(2);
+                while !j.is_finished() && std::time::Instant::now()<until {std::thread::sleep(std::time::Duration::from_millis(10));}
                 if j.is_finished() {
                     let _ = j.join();
                 }
             }
         }
-        Ok(())
+        Ok(exit_code)
     }
 
     pub fn list_sessions(&self) -> anyhow::Result<Vec<PtySessionStatus>> {

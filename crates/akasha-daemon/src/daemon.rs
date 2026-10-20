@@ -1517,6 +1517,8 @@ impl Daemon {
                                     let (method, path, body, headers) = parse_request(&full_buf);
                                     let (path_only, _) = crate::api_security::split_path_query(&path);
                                     if method == "GET" && path_only == "/api/events" {
+                                        if let Some(response)=crate::api_security::csrf_reject_response(&method,&path,&headers) {let _=stream.write_all(response.as_bytes()).await;return;}
+
                                         let (_, query) = crate::api_security::split_path_query(&path);
                                         let filter = crate::api::parse_sse_event_filter(query);
                                         let _ =

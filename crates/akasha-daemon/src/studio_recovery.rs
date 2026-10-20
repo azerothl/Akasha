@@ -16,9 +16,36 @@ pub(crate) fn is_active(task: Uuid) -> bool {
         .map(|runs| runs.contains(&task))
         .unwrap_or(true)
 }
+/// Serialize admission with resume's stopped->queued transition and enqueue.
+/// Workers wait briefly here instead of losing an already queued execution.
+pub(crate) fn with_admission<T>(task:Uuid,action:impl FnOnce()->T)->Result<T,String> {
+    use std::sync::{Arc,Mutex,OnceLock,Weak};
+    static LOCKS:OnceLock<Mutex<std::collections::HashMap<Uuid,Weak<Mutex<()>>>>>=OnceLock::new();
+    let lock={
+        let mut locks=LOCKS.get_or_init(||Mutex::new(std::collections::HashMap::new())).lock().map_err(|_|"task admission registry unavailable")?;
+        if locks.len()>1024 {locks.retain(|_,lock|lock.strong_count()>0);}
+        match locks.get(&task).and_then(Weak::upgrade) {
+            Some(lock)=>lock,
+            None=>{let lock=Arc::new(Mutex::new(()));locks.insert(task,Arc::downgrade(&lock));lock}
+        }
+    };
+    let _guard=lock.lock().map_err(|_|"task admission unavailable")?;
+    Ok(action())
+}
+
 pub(crate) struct ActiveRun(Uuid);
 impl ActiveRun {
     pub(crate) fn enter(task: Uuid) -> Result<Self, String> {
+        with_admission(task,||Self::enter_admitted(task))?
+    }
+    pub(crate) fn enter_stopped(db:&Path,task:Uuid)->Result<Self,String> {
+        with_admission(task,||{
+            let record=akasha_store::TaskStore::open(db).map_err(|error|error.to_string())?.get(task).map_err(|error|error.to_string())?.ok_or("task not found")?;
+            if !matches!(record.status,akasha_store::TaskStatus::Paused|akasha_store::TaskStatus::Interrupted|akasha_store::TaskStatus::Completed|akasha_store::TaskStatus::Failed|akasha_store::TaskStatus::Cancelled) {return Err("operator delivery requires a stopped task".into());}
+            Self::enter_admitted(task)
+        })?
+    }
+    fn enter_admitted(task:Uuid)->Result<Self,String> {
         if !active_runs()
             .lock()
             .map_err(|_| "active execution lock unavailable")?
@@ -54,6 +81,8 @@ pub(crate) struct Checkpoint {
     #[serde(default)]
     pub max_tool_rounds: Option<u32>,
     pub prompt: String,
+    #[serde(default)]
+    pub conversation: Vec<akasha_llm::ConversationMessage>,
     pub phase: String,
     pub waiting: Option<Value>,
     pub outcome: crate::task_outcome::RunOutcome,
@@ -166,7 +195,7 @@ pub(crate) fn summary(db: &Path, task: Uuid) -> Result<Value, String> {
     let operations = crate::studio_tool_contract::recovery_summary(db, task)?;
     let children=akasha_store::TaskStore::open(db).map_err(|e|e.to_string())?.get_children(task).map_err(|e|e.to_string())?.into_iter().map(|child|json!({"task_id":child.id,"status":child.status.as_str(),"agent":child.assigned_agent})).collect::<Vec<_>>();
     Ok(
-        json!({"schema_version":1,"checkpoint":checkpoint.map(|c|json!({"schema_version":c.schema_version,"project_id":c.project_id,"workspace":c.workspace,"agent":c.agent,"session_id":c.session_id,"round":c.round,"phase":c.phase,"waiting":c.waiting})),"ledger":operations,"children":children,"execution_active":is_active(task)}),
+        json!({"schema_version":1,"checkpoint":checkpoint.map(|c|json!({"schema_version":c.schema_version,"project_id":c.project_id,"workspace":c.workspace,"agent":c.agent,"session_id":c.session_id,"round":c.round,"max_tool_rounds":c.max_tool_rounds,"phase":c.phase,"waiting":c.waiting})),"ledger":operations,"children":children,"execution_active":is_active(task)}),
     )
 }
 pub(crate) fn resolve(
@@ -192,6 +221,8 @@ pub(crate) fn resolve(
         akasha_store::TaskStatus::Paused
             | akasha_store::TaskStatus::Interrupted
             | akasha_store::TaskStatus::Failed
+            | akasha_store::TaskStatus::Completed
+            | akasha_store::TaskStatus::Cancelled
     ) {
         return Err("pause the task before resolving an unknown operation".into());
     }
@@ -201,9 +232,9 @@ pub(crate) fn resolve(
     let connection = connection(db)?;
     let record =
         json!({"operation_id":operation,"decision":decision,"note":note,"automatic":false});
-    let changed=connection.execute("UPDATE studio_operations SET state=?3,updated_at=?4,result=?5 WHERE task=?1 AND operation=?2 AND state='started'",params![task.to_string(),operation.to_string(),format!("resolved_{decision}"),chrono::Utc::now().to_rfc3339(),record.to_string()]).map_err(|e|e.to_string())?;
+    let changed=resolve_stopped_operation(&connection,task,operation,decision,&record)?;
     if changed != 1 {
-        return Err("unknown operation not found or already resolved".into());
+        return Err("unknown operation not found, already resolved, or task resumed concurrently".into());
     }
     if let Err(error) = store.insert_event(
         task,
@@ -260,4 +291,26 @@ pub(crate) fn route(method: &str, path: &str, body: Option<&[u8]>, db: &Path) ->
         Ok(value) => json_response("200 OK", &value.to_string()),
         Err(error) => json_response("409 Conflict", &json!({"error":error}).to_string()),
     })
+}
+
+fn resolve_stopped_operation(connection: &Connection, task:Uuid, operation:Uuid, decision:&str, record:&Value) -> Result<usize,String> {
+    // The stopped predicate and operation update share one SQLite write. If a
+    // competing resume queued the task after the earlier check, no row changes.
+    connection.execute("UPDATE studio_operations SET state=?3,updated_at=?4,result=?5 WHERE task=?1 AND operation=?2 AND state='started' AND EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND status IN ('paused','interrupted','failed','completed','cancelled'))",params![task.to_string(),operation.to_string(),format!("resolved_{decision}"),chrono::Utc::now().to_rfc3339(),record.to_string()]).map_err(|e|e.to_string())
+}
+#[cfg(test)]
+mod resolution_race_tests {
+    use super::*;
+    #[test] fn queued_resume_between_validation_and_resolution_cannot_resolve_the_effect() {
+        let connection=Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE tasks(id TEXT PRIMARY KEY,status TEXT);CREATE TABLE studio_operations(task TEXT,operation TEXT,state TEXT,updated_at TEXT,result TEXT);").unwrap();
+        let task=Uuid::new_v4();let operation=Uuid::new_v4();
+        connection.execute("INSERT INTO tasks VALUES(?1,'paused')",[task.to_string()]).unwrap();
+        connection.execute("INSERT INTO studio_operations VALUES(?1,?2,'started','',NULL)",params![task.to_string(),operation.to_string()]).unwrap();
+        connection.execute("UPDATE tasks SET status='queued' WHERE id=?1",[task.to_string()]).unwrap();
+        assert_eq!(resolve_stopped_operation(&connection,task,operation,"not_applied",&json!({"decision":"not_applied"})).unwrap(),0);
+        assert_eq!(connection.query_row("SELECT state FROM studio_operations",[],|r|r.get::<_,String>(0)).unwrap(),"started");
+        connection.execute("UPDATE tasks SET status='paused' WHERE id=?1",[task.to_string()]).unwrap();
+        assert_eq!(resolve_stopped_operation(&connection,task,operation,"not_applied",&json!({"decision":"not_applied"})).unwrap(),1);
+    }
 }

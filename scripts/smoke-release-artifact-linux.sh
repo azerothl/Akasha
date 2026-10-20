@@ -28,6 +28,12 @@ LOG="$WORK/smoke.log"
 PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")"
 
 cleanup() {
+  if [[ -n "${SMOKE_EVIDENCE_DIR:-}" ]]; then
+    mkdir -p "$SMOKE_EVIDENCE_DIR"
+    for evidence in "$LOG" "$WORK/task.json" "$WORK/embedded-status.json"; do
+      [[ ! -f "$evidence" ]] || cp -- "$evidence" "$SMOKE_EVIDENCE_DIR/"
+    done
+  fi
   if [[ -n "${DPID:-}" ]]; then
     kill "$DPID" 2>/dev/null || true
     wait "$DPID" 2>/dev/null || true
@@ -84,7 +90,7 @@ log "init_duration_s=$((INIT_END - INIT_START))"
 }
 
 DAEMON_START=$(date +%s)
-./akasha-daemon >>"$LOG" 2>&1 &
+env -u GH_TOKEN -u GITHUB_TOKEN ./akasha-daemon >>"$LOG" 2>&1 &
 DPID=$!
 BASE="http://127.0.0.1:${PORT}"
 
@@ -110,7 +116,7 @@ curl -sf "${BASE}/" | grep -q '"status":"ok"' || { log "::error::GET /"; exit 1;
 curl -sf "${BASE}/api/status" | grep -q '"status":"ok"' || { log "::error::GET /api/status"; exit 1; }
 
 EMBED_STATUS=$(curl -sf "${BASE}/api/router/embedded-status")
-echo "$EMBED_STATUS" | tee -a "$LOG"
+echo "$EMBED_STATUS" | tee "$WORK/embedded-status.json" | tee -a "$LOG"
 echo "$EMBED_STATUS" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('embedded_available') is True, d" \
   || { log "::error::embedded not available"; exit 1; }
 
@@ -119,7 +125,9 @@ if [[ "$SKIP_INFERENCE" == 1 ]]; then
   exit 0
 fi
 
-BODY='{"message":"Réponds uniquement par le mot OK.","provider":"akasha_embedded","max_tokens":32}'
+# Exercise one explicitly routed specialist request, not the multi-agent orchestrator.
+# provider/max_tokens are not accepted by /api/message in this published release.
+BODY='{"message":"Réponds uniquement par le mot OK.","composer_mode":"technical_writer"}'
 INF_START=$(date +%s)
 TASK_JSON=$(curl -sf -X POST -H "Content-Type: application/json" -d "$BODY" "${BASE}/api/message")
 TASK_ID=$(echo "$TASK_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('task_id',''))")
@@ -130,8 +138,10 @@ deadline=$((INF_START + INFERENCE_TIMEOUT_SECS))
 while [[ $(date +%s) -lt $deadline ]]; do
   sleep 2
   T=$(curl -sf "${BASE}/api/tasks/${TASK_ID}")
+  printf '%s\n' "$T" > "$WORK/task.json"
   ST=$(echo "$T" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
   if [[ "$ST" == "done" || "$ST" == "completed" ]]; then
+    echo "$T" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('assigned_agent') == 'technical_writer', d; assert d.get('last_turn_model_used') == 'embedded', d; assert d.get('last_turn_tokens_out',0) > 0, d"
     INF_END=$(date +%s)
     log "first_inference_duration_s=$((INF_END - INF_START))"
     echo "$T" | python3 -m json.tool >>"$LOG" 2>/dev/null || echo "$T" >>"$LOG"
@@ -145,4 +155,9 @@ while [[ $(date +%s) -lt $deadline ]]; do
 done
 
 log "::error::inference timed out after ${INFERENCE_TIMEOUT_SECS}s"
+if [[ -f "$WORK/task.json" ]]; then
+  python3 -m json.tool "$WORK/task.json" | tee -a "$LOG"
+fi
+curl -sf "${BASE}/api/router/embedded-status" | tee "$WORK/embedded-status.json" | tee -a "$LOG" || true
+tail -100 "$LOG" || true
 exit 1
