@@ -2,7 +2,7 @@
 
 mod embedded_spec;
 
-use akasha_core::parse_env_file_content;
+use akasha_core::{env_file_line_entry, env_file_line_key, parse_env_file_content};
 use akasha_vault::Vault;
 use clap::{Parser, Subcommand};
 use std::ffi::OsStr;
@@ -3131,12 +3131,8 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                     }
                     let s = std::fs::read_to_string(&env_path)?;
                     for line in s.lines() {
-                        let line = line.trim();
-                        if line.is_empty() || line.starts_with('#') {
-                            continue;
-                        }
-                        if let Some((k, v)) = line.split_once('=') {
-                            println!("{}={}", k.trim(), v.trim());
+                        if let Some((k, v)) = env_file_line_entry(line) {
+                            println!("{}={}", k, v);
                         }
                     }
                 }
@@ -3146,13 +3142,9 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                     }
                     let s = std::fs::read_to_string(&env_path)?;
                     for line in s.lines() {
-                        let line = line.trim();
-                        if line.starts_with('#') || line.is_empty() {
-                            continue;
-                        }
-                        if let Some((k, v)) = line.split_once('=') {
-                            if k.trim() == key {
-                                println!("{}", v.trim());
+                        if let Some((k, v)) = env_file_line_entry(line) {
+                            if k == key {
+                                println!("{}", v);
                                 return Ok(());
                             }
                         }
@@ -3184,16 +3176,10 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                     let new_line = format!("{}={}", key, value);
                     let mut found = false;
                     for line in lines.iter_mut() {
-                        let trim = line.trim_start();
-                        if trim.is_empty() || trim.starts_with('#') {
-                            continue;
-                        }
-                        if let Some((k, _)) = trim.split_once('=') {
-                            if k.trim() == key {
-                                *line = new_line.clone();
-                                found = true;
-                                break;
-                            }
+                        if env_file_line_key(line).as_deref() == Some(key.as_str()) {
+                            *line = new_line.clone();
+                            found = true;
+                            break;
                         }
                     }
                     if !found {
@@ -4047,47 +4033,27 @@ fn record_restart() {
 
 /// Load connectors.env from data_dir (KEY=VALUE per line, # = comment) and set env on cmd.
 /// Used after `akasha init` so the user doesn't need to source the file manually.
-fn daemon_env_load_connectors(cmd: &mut Command) {
-    let path = akasha_data_dir().join("connectors.env");
+fn daemon_env_load_env_file(cmd: &mut Command, file_name: &str) {
+    let path = akasha_data_dir().join(file_name);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return,
     };
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            let k = k.trim();
-            let v = v.trim().trim_matches('"').trim_matches('\'');
-            if !k.is_empty() {
-                cmd.env(k, v);
-            }
-        }
+    let (map, _) = parse_env_file_content(&content);
+    for (k, v) in map {
+        cmd.env(k, v);
     }
+}
+
+/// Load connectors.env from data_dir (KEY=VALUE per line, # = comment) and set env on cmd.
+/// Used after `akasha init` so the user doesn't need to source the file manually.
+fn daemon_env_load_connectors(cmd: &mut Command) {
+    daemon_env_load_env_file(cmd, "connectors.env");
 }
 
 /// Load akasha.env from data_dir (from `akasha config env set`); applied after connectors.env.
 fn daemon_env_load_akasha_env(cmd: &mut Command) {
-    let path = akasha_data_dir().join("akasha.env");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            let k = k.trim();
-            let v = v.trim().trim_matches('"').trim_matches('\'');
-            if !k.is_empty() {
-                cmd.env(k, v);
-            }
-        }
-    }
+    daemon_env_load_env_file(cmd, "akasha.env");
 }
 
 /// Pass through Akasha-related env vars from current process to the daemon (so they are visible
@@ -4234,10 +4200,10 @@ fn doctor_fix_env_file(
 ) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     let (map, errors) = parse_env_file_content(&content);
-    for (line_no, line) in &errors {
+    for (line_no, err) in &errors {
         fixes.push(format!(
-            "{} ligne {}: format invalide (attendu KEY=value ou ligne vide/commentaire #). Ligne: \"{}\"",
-            name, line_no, line.trim()
+            "{} ligne {}: {} (attendu KEY=value, export KEY=value, ou ligne vide/commentaire #).",
+            name, line_no, err
         ));
     }
     let mut to_append: Vec<String> = Vec::new();
@@ -4650,12 +4616,34 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
     };
     out.push(("tools_policy_yaml".to_string(), ok, msg));
 
-    // connectors.env (existence only)
+    // connectors.env (validate format if present)
     let p = data_dir.join("connectors.env");
-    let (ok, msg) = if p.exists() {
-        (true, "connectors.env: OK".to_string())
-    } else {
+    let (ok, msg) = if !p.exists() {
         (false, "connectors.env: file missing".to_string())
+    } else {
+        match std::fs::read_to_string(&p) {
+            Ok(s) => {
+                let (_, errors) = parse_env_file_content(&s);
+                if errors.is_empty() {
+                    (true, "connectors.env: OK".to_string())
+                } else {
+                    let preview = errors
+                        .iter()
+                        .take(2)
+                        .map(|(line_no, err)| format!("{}:{}", line_no, err))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (
+                        false,
+                        format!(
+                            "connectors.env: invalid line(s) (expected KEY=value): {}",
+                            preview
+                        ),
+                    )
+                }
+            }
+            Err(e) => (false, format!("connectors.env: unreadable — {}", e)),
+        }
     };
     out.push(("connectors_env".to_string(), ok, msg));
 
@@ -4676,7 +4664,7 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
                     let preview = errors
                         .iter()
                         .take(2)
-                        .map(|(line_no, line)| format!("{}:\"{}\"", line_no, line.trim()))
+                        .map(|(line_no, err)| format!("{}:{}", line_no, err))
                         .collect::<Vec<_>>()
                         .join(", ");
                     (

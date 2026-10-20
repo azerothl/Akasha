@@ -66,7 +66,7 @@ Les guides utilisateur (`docs/user_guide_final.md`, `spec/user_guide.md`) doiven
 | Variable documentée | Utilisée dans le code | Fichier / usage |
 |---------------------|------------------------|------------------|
 | `AKASHA_PORT` | ✅ | daemon (port HTTP), CLI, TUI |
-| `AKASHA_DATA_DIR` | ✅ | daemon, CLI (`akasha_data_dir`) |
+| `AKASHA_DATA_DIR` | ✅ | daemon, CLI (`akasha_data_dir`) ; ignorée depuis `akasha.env` |
 | `AKASHA_LOG` | ✅ | daemon main, CLI (daemon_env) |
 | `AKASHA_MAX_RESPONSE_TOKENS` | ✅ | api.rs (réponses chat) |
 | `AKASHA_MAX_CONTEXT_TOKENS` | ✅ | api.rs (compaction mémoire court terme) |
