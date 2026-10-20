@@ -15,6 +15,11 @@ on:
         description: 'Release version (e.g. v0.2.0). Used when running manually; must match an existing tag or the release will be created from the current branch.'
         required: true
         type: string
+      publish:
+        description: Publish the release and notify the site (false = build/measure only)
+        required: true
+        type: boolean
+        default: true
 
 jobs:
   verify-release-version:
@@ -58,6 +63,7 @@ jobs:
           fi
           echo "OK: tag v$TAG_VER matches Cargo workspace, package.json, and tauri.conf.json"
 
+  # Non-Windows builds remain parallel with Windows clients and daemon jobs.
   build:
     needs: verify-release-version
     strategy:
@@ -67,158 +73,95 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: akasha-linux-x86_64
-            ext: ''
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: akasha-macos-x86_64
-            ext: ''
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: akasha-macos-aarch64
-            ext: ''
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: akasha-windows-x86_64
-            ext: .exe
-            cuda: false
-            daemon_features: embedded,embeddings-tract,embedded-baguettotron
-          # CUDA 12.9 supports MSVC/VS 2022 only; windows-latest (VS 2026) breaks nvcc/cudafe++.
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
-            artifact_name: akasha-windows-x86_64-cuda
-            ext: .exe
-            cuda: true
-            daemon_features: embedded,embeddings-tract,embedded-baguettotron,embedded-llama-cpp,embedded-llama-cpp-cuda
+    uses: ./.github/workflows/build-release.yml
+    with:
+      os: ${{ matrix.os }}
+      target: ${{ matrix.target }}
+      artifact_name: ${{ matrix.artifact_name }}
 
-    runs-on: ${{ matrix.os }}
-
+  windows-clients:
+    needs: verify-release-version
+    # VS 2022 client binaries support both the CPU and CUDA Windows archives.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
         with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+          python-version: "3.12"
+      - name: Start measurement
+        run: python scripts/ci/report_build.py start
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-md-${{ hashFiles('**/Cargo.lock', 'vendor/esaxx-rs/build.rs', 'scripts/build-windows-daemon-cuda.ps1') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-${{ matrix.artifact_name }}-lc4-md-
-
-      - name: Build CLI and TUI
-        run: |
-          cargo build --release --target ${{ matrix.target }} -p akasha-cli -p akasha-tui
-
-      - name: Build daemon (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
-
-      # macOS: ort-sys has no prebuilt binaries for x86_64-apple-darwin (and can be fragile on aarch64). Use tract backend like Windows.
-      - name: Build daemon (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
-
-      - name: Install CUDA toolkit (Windows CUDA artifact)
-        if: matrix.cuda == true
-        uses: Jimver/cuda-toolkit@v0.2.35
+          targets: x86_64-pc-windows-msvc
+      - name: Cache Cargo dependencies
+        id: cache
+        uses: ./.github/actions/cargo-cache
         with:
-          cuda: '12.9.1'
-
-      - name: Install LLVM and CMake (Windows CUDA artifact)
-        if: matrix.cuda == true
-        run: choco install llvm cmake -y
-
-      - name: Ensure patch.exe is on PATH (Windows CUDA artifact)
-        if: matrix.cuda == true
-        shell: pwsh
-        run: |
-          $gitUsrBin = Join-Path $env:ProgramFiles 'Git\usr\bin'
-          if (Test-Path $gitUsrBin) {
-            if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $gitUsrBin })) {
-              $gitUsrBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-            }
-          }
-
-      - name: Build daemon (Windows CUDA)
-        if: matrix.cuda == true
-        shell: pwsh
-        env:
-          LIBCLANG_PATH: C:\Program Files\LLVM\bin
-        run: |
-          ./scripts/build-windows-daemon-cuda.ps1 -Target ${{ matrix.target }} -Features "${{ matrix.daemon_features }}"
-
-      - name: Build daemon (Windows)
-        if: runner.os == 'Windows' && matrix.cuda != true
-        run: |
-          cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features ${{ matrix.daemon_features }}
-
-      - name: Prepare artifact (Linux / macOS)
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p staging/docs staging/scripts staging/spec
-          cp target/${{ matrix.target }}/release/akasha${{ matrix.ext }} staging/
-          cp target/${{ matrix.target }}/release/akasha-daemon${{ matrix.ext }} staging/
-          cp target/${{ matrix.target }}/release/akasha-tui${{ matrix.ext }} staging/
-          cp -r docs/user staging/docs/user
-          cp docs/user_guide_final.md staging/docs/user_guide.md
-          cp spec/tools_policy.example.yaml spec/voice_router.example.yaml spec/llm_router.example.yaml spec/embedded_models.json staging/spec/
-          cp -R spec/skills staging/spec/
-          cp scripts/install.sh scripts/setup.sh staging/scripts/
-          mkdir -p staging/playwright-runner
-          cp -R scripts/playwright-runner/. staging/playwright-runner/
-          rm -rf staging/playwright-runner/node_modules
-          chmod +x staging/* staging/scripts/install.sh staging/scripts/setup.sh
-
-      - name: Smoke test staging layout
-        if: runner.os != 'Windows'
-        run: bash scripts/smoke-release-staging.sh staging
-
-      - name: Prepare artifact (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path staging, staging\docs, staging\scripts, staging\spec | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/akasha.exe" -Destination staging/
-          Copy-Item "target/${{ matrix.target }}/release/akasha-daemon.exe" -Destination staging/
-          Copy-Item "target/${{ matrix.target }}/release/akasha-tui.exe" -Destination staging/
-          Copy-Item -Recurse docs\user -Destination staging\docs\user -Force
-          Copy-Item docs/user_guide_final.md -Destination staging/docs/user_guide.md
-          Copy-Item spec\tools_policy.example.yaml, spec\voice_router.example.yaml, spec\llm_router.example.yaml, spec\embedded_models.json -Destination staging\spec\
-          Copy-Item -LiteralPath spec\skills -Destination staging\spec\ -Recurse -Force
-          Copy-Item scripts/install.ps1 -Destination staging/scripts/
-          Copy-Item scripts/setup.ps1 -Destination staging/scripts/
-          New-Item -ItemType Directory -Force -Path staging\playwright-runner | Out-Null
-          Copy-Item -Path scripts\playwright-runner\* -Destination staging\playwright-runner\ -Recurse -Force
-          Remove-Item -Recurse -Force staging\playwright-runner\node_modules -ErrorAction SilentlyContinue
-          if ('${{ matrix.cuda }}' -eq 'true') {
-            $cudaBin = Join-Path $env:CUDA_PATH 'bin'
-            foreach ($pat in @('cudart64_*.dll', 'cublas64_*.dll', 'cublasLt64_*.dll')) {
-              Get-ChildItem -Path $cudaBin -Filter $pat | Copy-Item -Destination staging/ -Force
-            }
-            Write-Host "Bundled CUDA runtime DLLs from $cudaBin into staging/"
-          }
-
-      - name: Smoke test staging layout
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          # CUDA daemon links nvcuda.dll (GPU driver); GitHub-hosted runners have no NVIDIA GPU.
-          AKASHA_SMOKE_SKIP_DAEMON: ${{ matrix.cuda == true && '1' || '' }}
-        run: ./scripts/smoke-release-staging.ps1 staging
-
-      - name: Upload artifact
+          variant: release-windows-2022-x86_64-msvc-clients
+      - name: Build Windows CLI and TUI once
+        run: cargo build --locked --timings --release --target x86_64-pc-windows-msvc -p akasha-cli -p akasha-tui
+      - name: Record hashes and dependency features
+        run: python scripts/ci/windows_clients.py
+      - name: Smoke CLI
+        run: ./target/x86_64-pc-windows-msvc/release/akasha.exe --version
+      - name: Share Windows clients
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: staging/
+          overwrite: true
+          name: windows-clients
+          path: |
+            target/x86_64-pc-windows-msvc/release/akasha.exe
+            target/x86_64-pc-windows-msvc/release/akasha-tui.exe
+            target/x86_64-pc-windows-msvc/release/windows-clients.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Report build/cache
+        if: always()
+        env:
+          BUILD_JOB_STATUS: ${{ job.status }}
+        run: python scripts/ci/report_build.py finish --cache-hit '${{ steps.cache.outputs.cache-hit }}'
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: metrics-windows-clients
+          path: |
+            ci-build-report.json
+            windows-clients-dependencies.txt
+            target/cargo-timings/
+          retention-days: 14
+
+  build-windows:
+    needs: [verify-release-version, windows-clients]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: akasha-windows-x86_64
+            cuda: false
+            daemon_features: embedded,embeddings-tract,embedded-baguettotron
+          # CUDA 12.9 requires VS 2022, not windows-latest/VS 2026.
+          - os: windows-2022
+            artifact_name: akasha-windows-x86_64-cuda
+            cuda: true
+            daemon_features: embedded,embeddings-tract,embedded-baguettotron,embedded-llama-cpp,embedded-llama-cpp-cuda
+    uses: ./.github/workflows/build-release.yml
+    with:
+      os: ${{ matrix.os }}
+      target: x86_64-pc-windows-msvc
+      artifact_name: ${{ matrix.artifact_name }}
+      ext: .exe
+      cuda: ${{ matrix.cuda }}
+      daemon_features: ${{ matrix.daemon_features }}
+      clients_artifact: windows-clients
 
   build-tauri:
     needs: verify-release-version
@@ -237,6 +180,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start measurement
+        run: python scripts/ci/report_build.py start
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -248,16 +197,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo (Tauri)
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies (Tauri)
+        id: cache
+        uses: ./.github/actions/cargo-cache
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            apps/akasha-ui/src-tauri/target
-          key: ${{ runner.os }}-tauri-${{ hashFiles('apps/akasha-ui/src-tauri/Cargo.lock', 'apps/akasha-ui/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-tauri-
+          variant: release-tauri-${{ matrix.os }}
+          workspaces: apps/akasha-ui/src-tauri -> target
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -275,16 +220,34 @@ jobs:
 
       - name: Build Tauri app
         working-directory: apps/akasha-ui
-        run: npx tauri build
+        run: npx tauri build -- --locked --timings
+
+      - name: Report build/cache
+        if: always()
+        env:
+          BUILD_JOB_STATUS: ${{ job.status }}
+        run: python scripts/ci/report_build.py finish --cache-hit '${{ steps.cache.outputs.cache-hit }}' --target-dir apps/akasha-ui/src-tauri/target
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: metrics-${{ matrix.artifact_name }}
+          path: ci-build-report.json
+          retention-days: 14
 
       - name: Upload Tauri bundle
         uses: actions/upload-artifact@v4
         with:
+          overwrite: true
           name: ${{ matrix.artifact_name }}
           path: apps/akasha-ui/src-tauri/target/release/bundle/
+          if-no-files-found: error
+          retention-days: 7
 
   release:
-    needs: [build, build-tauri]
+    if: github.event_name != 'workflow_dispatch' || inputs.publish
+    needs: [build, build-windows, build-tauri]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -295,6 +258,7 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: akasha-*
           path: artifacts
 
       - name: Create archives and release
