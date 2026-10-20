@@ -3372,6 +3372,21 @@ fn replace_bare_dot_yaml(content: &str, replacement: &str) -> String {
     result
 }
 
+/// User-facing line after `akasha init --defaults` once the primary provider is known.
+fn init_defaults_primary_message(primary_provider: &str, primary_model: &str) -> Option<String> {
+    match primary_provider {
+        "akasha_embedded" => Some(
+            "Modèle par défaut : embarqué (local, sans Ollama). Ollama et les fournisseurs cloud restent optionnels."
+                .to_string(),
+        ),
+        "ollama" => Some(format!(
+            "Modèle par défaut : Ollama ({}, détecté en local). Le modèle embarqué et les fournisseurs cloud restent optionnels.",
+            primary_model
+        )),
+        _ => None,
+    }
+}
+
 fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     let data_dir = akasha_data_dir();
     std::fs::create_dir_all(&data_dir)?;
@@ -3442,10 +3457,6 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
 
     println!("=== Akasha — Premier lancement ===\n");
     println!("Répertoire de données : {}\n", data_dir_str);
-
-    if use_defaults {
-        println!("Mode --defaults : configuration minimale (Ollama uniquement).\n");
-    }
 
     // --- 1. Provider LLM ---
     let mut ollama_url = String::from("http://localhost:11434");
@@ -3617,6 +3628,12 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
             _ => ("akasha_embedded", "default"),
         }
     };
+
+    if use_defaults {
+        if let Some(msg) = init_defaults_primary_message(primary_provider, primary_model) {
+            println!("{}\n", msg);
+        }
+    }
 
     let mut providers: HashMap<String, ProviderConfig> = HashMap::new();
     providers.insert(
@@ -5137,6 +5154,24 @@ mod tests {
         }
 
         panic!("failed to create unique temp dir for label {label}");
+    }
+
+    #[test]
+    fn init_defaults_primary_message_embedded() {
+        let msg = init_defaults_primary_message("akasha_embedded", "default").unwrap();
+        assert_eq!(
+            msg,
+            "Modèle par défaut : embarqué (local, sans Ollama). Ollama et les fournisseurs cloud restent optionnels."
+        );
+    }
+
+    #[test]
+    fn init_defaults_primary_message_ollama() {
+        let msg = init_defaults_primary_message("ollama", "tinyllama").unwrap();
+        assert_eq!(
+            msg,
+            "Modèle par défaut : Ollama (tinyllama, détecté en local). Le modèle embarqué et les fournisseurs cloud restent optionnels."
+        );
     }
 
     #[test]
