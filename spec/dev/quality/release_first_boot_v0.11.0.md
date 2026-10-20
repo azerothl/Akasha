@@ -107,3 +107,17 @@ La synthèse expurgée est conservée dans
 [`release_first_boot_candidate_run394319_windows_cpu.json`](release_first_boot_candidate_run394319_windows_cpu.json).
 Le résultat confirme le chemin de démarrage Windows, mais pas une réponse
 fonctionnelle du modèle embarqué. Il ne valide pas les archives CUDA ou UI.
+
+## Compatibilité de l'artefact CUDA sans pilote NVIDIA
+
+Le run de staging #394319 a aussi testé l'artefact CUDA Windows sur
+`windows-2022` sans `nvcuda.dll`. L'audit a confirmé l'import direct de cette
+DLL par le daemon, puis un échec de démarrage `0xC0000135` en 0,047 s, avant
+le choix du backend ou la vérification du GGUF. Les essais GGUF présent/absent
+ne sont donc pas atteints.
+
+La taille de l'archive CUDA autonome est 612 143 000 octets, contre 34 036 657
+pour CPU ; les archives complètes font respectivement 623 520 023 et 45 413 685
+octets. La conclusion est NO-GO pour fusionner les distributions actuelles ;
+les artefacts CPU et CUDA restent séparés. Le rapport expurgé est dans
+[`release_first_boot_candidate_run394319_windows_cuda.json`](release_first_boot_candidate_run394319_windows_cuda.json).

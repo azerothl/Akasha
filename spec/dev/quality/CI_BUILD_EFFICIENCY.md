@@ -253,7 +253,7 @@ Les runs et images Windows sont différents ; cette estimation compare les
 durées des étapes enregistrées, sans chiffrer un coût monétaire ni un gain de
 durée murale.
 
-### Volume de cache après la PR #241
+### Relevé de base après la PR #241
 
 Après la fin de la CI de #241 et sa fusion, ses deux caches de PR, inutiles
 après les jobs, ont été supprimés par identifiant. Le relevé convergé est de
@@ -263,11 +263,62 @@ pour les PR ouvertes #221 et #223 totalisent environ 59,4 Mo chacun. L'API
 d'usage, initialement en retard sur la suppression, a ensuite convergé vers
 le même total.
 
+### Nettoyage après le run 39431939285
+
+Le run de validation a ajouté les partitions de cache associées aux nouveaux
+checksums du workflow ; l'usage API a momentanément atteint 10 887 600 625
+octets. Une fois les jobs terminés, les quatre anciennes entrées main ont été
+supprimées par identifiant (`9218859147`, `9218679955`, `9216930364`,
+`9218548631`). L'inventaire courant compte 15 entrées main pour un total de
+8 841 693 347 octets. L'API d'usage rapporte encore 9 951 111 942 octets ; sa
+valeur n'a pas encore rejoint la somme de l'inventaire, mais les deux mesures
+sont sous le quota de 10 Go. Aucune entrée de cache n'est actuellement listée
+pour les refs de PR #221, #223 ou #242.
+
 ### Validation de l'assemblage des archives
 
 La PR #241 ajoute l'assemblage des archives dans un job dédié, même lorsque
 publish=false, puis vérifie les empreintes et l'identité des exécutables
 Windows CPU/CUDA dans les archives autonomes et complètes. Le run 39431939285,
-déclenché sur le commit fusionné 705d698, est en cours. Les résultats de
-packaging et les smokes de première installation seront ajoutés ici après la
-fin du run ; aucune release publique n'est créée par cette exécution.
+déclenché sur le commit fusionné 705d698, s'est terminé avec succès. Les 9 jobs
+de build mesurés ont tous réussi. Leurs cache hits sont faux : le changement du
+workflow de build a créé de nouvelles clés à checksum distinct, donc ce run a
+réchauffé ces partitions après invalidation ; cela ne contredit pas les hits
+observés entre les runs 39420405894 et 39428283604.
+
+| Cible | Cache | Durée job | Taille target |
+| --- | --- | ---: | ---: |
+| Producteur CLI/TUI Windows | miss | 513,955 s | 1 397 207 242 o |
+| Windows CPU | miss | 1 326,375 s | 3 028 800 455 o |
+| Windows CUDA | miss | 2 777,461 s | 3 549 340 573 o |
+| Linux x86_64 | miss | 833,545 s | 3 354 811 029 o |
+| macOS x86_64 | miss | 1 230,386 s | 2 799 619 599 o |
+| macOS ARM64 | miss | 1 280,873 s | 2 741 553 313 o |
+| Tauri Linux | miss | 377,525 s | 2 112 897 631 o |
+| Tauri macOS | miss | 279,774 s | 1 168 579 815 o |
+| Tauri Windows | miss | 445,609 s | 1 792 980 279 o |
+
+La somme des 9 durées est 9 065,503 runner-seconde (151 min 06 s), sans inclure
+le job de packaging. Le job de packaging a duré 240 s, a assemblé et téléversé
+13 archives, puis a réussi le contrôle des archives.
+
+Le producteur commun Windows a construit une fois akasha.exe et akasha-tui.exe.
+Les jobs CPU et CUDA ont sauté leur compilation CLI/TUI, téléchargé l'artefact
+partagé et vérifié son manifeste. Le job de packaging confirme les deux mêmes
+SHA-256 dans les quatre archives Windows (CPU/CUDA, autonomes/complètes).
+Chacun des deux jobs Windows a téléchargé l'artefact partagé en environ une
+seconde. Le producteur partagé a pris 513,955 s sur ce run froid ; comparé aux
+15 min 11 s de compilation doublée de la release v0.11.0, le gain mesuré est
+d'environ 6 min 37 s de temps runner avant les transferts. Cette mesure ne
+prédit pas la durée murale, car les jobs sont parallèles.
+
+Tailles des archives Windows livrables : CPU autonome 34 036 657 o, CUDA
+autonome 612 143 000 o, CPU complète 45 413 685 o, CUDA complète 623 520 023 o.
+L'artefact Actions release-archives totalise 2 016 258 590 o. Les archives ne
+sont pas publiées par ce run.
+
+Le diagnostic de démarrage Windows sans pilote NVIDIA a également été exécuté
+sur l'artefact CUDA de ce run. Le rapport dédié montre l'import direct de
+nvcuda.dll et l'échec 0xC0000135 avant le choix backend/GGUF ; la décision
+documentée reste NO-GO pour un artefact Windows CPU+CUDA universel. Voir
+[`release_first_boot_candidate_run394319_windows_cuda.json`](release_first_boot_candidate_run394319_windows_cuda.json).
