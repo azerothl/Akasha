@@ -1,6 +1,6 @@
 //! Scoped filesystem evidence. A tool name alone never attests a requested edit.
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -73,7 +73,7 @@ fn explicit_path_kind(det: &str) -> Option<bool> {
 fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> {
     let path = r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;!?"`]+)"#;
     let pattern = format!(
-        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
+        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|(?:fichier|file|folder|directory|dossier|r\x{{e9}}pertoire)(?:\s+(?:named|called|nomm\x{{e9}}(?:e)?|appel\x{{e9}}(?:e)?))?|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
     );
     let re = regex::Regex::new(&pattern).unwrap();
     // Object-before-path requests: "Add logging to config.txt". Keep this
@@ -82,10 +82,10 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
     let object_atom =
         r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[\p{L}\p{N}_/\\:.=@+-]*[\p{L}\p{N}_/\\:=@+-])"#;
     let object_path = regex::Regex::new(&format!(
-        r#"(?i)^\s+(?:{object_atom}\s+){{1,12}}?(?P<prep>to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?P<det>(?:(?:the|le|la|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire)\s+)*)(?P<path>{path})"#
+        r#"(?i)^\s+(?:{object_atom}\s+){{1,12}}?(?P<prep>to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?P<det>(?:(?:the|le|la|(?:fichier|file|folder|directory|dossier|r\x{{e9}}pertoire)(?:\s+(?:named|called|nomm\x{{e9}}(?:e)?|appel\x{{e9}}(?:e)?))?)\s+)*)(?P<path>{path})"#
     )).unwrap();
     let path_list = regex::Regex::new(&format!(
-        r#"(?i)^\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et|&)\s+)(?P<det>(?:(?:the|a|new|le|la|un|une|fichier|file|folder|directory|dossier|r\x{{e9}}pertoire)\s+)*)(?P<path>{path})"#
+        r#"(?i)^\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et|&)\s+)(?P<det>(?:(?:the|a|new|le|la|un|une|(?:fichier|file|folder|directory|dossier|r\x{{e9}}pertoire)(?:\s+(?:named|called|nomm\x{{e9}}(?:e)?|appel\x{{e9}}(?:e)?))?)\s+)*)(?P<path>{path})"#
     )).unwrap();
     let mut outside = vec![true; request.len() + 1];
     let mut quote = None;
@@ -371,10 +371,12 @@ pub(crate) fn scoped_paths(
 }
 pub(crate) fn receipt_effects(before: &BTreeMap<String, String>) -> Result<Value, String> {
     let after = capture_paths(&before.keys().map(PathBuf::from).collect::<Vec<_>>())?;
-    Ok(json!(before
-        .iter()
-        .map(|(path, version)| json!({"path":path,"before":version,"after":after[path]}))
-        .collect::<Vec<_>>()))
+    Ok(json!(
+        before
+            .iter()
+            .map(|(path, version)| json!({"path":path,"before":version,"after":after[path]}))
+            .collect::<Vec<_>>()
+    ))
 }
 fn missing(value: &str) -> bool {
     value == "missing"
@@ -884,6 +886,39 @@ mod tests {
             assert!(has_request(request));
             assert!(paths_for_request(root.path(), request, &policy(root.path())).is_err());
         }
+    }
+    #[test]
+    fn named_and_called_targets_preserve_explicit_kind_and_final_path() {
+        for (request, name, directory) in [
+            ("Create a file named report.txt", "report.txt", false),
+            ("Create a folder called docs", "docs", true),
+            (
+                "Create a file called `report final.txt`",
+                "report final.txt",
+                false,
+            ),
+            ("Crée un dossier nommé notes", "notes", true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let goals = parsed(request);
+            assert_eq!(goals.len(), 1, "{request}");
+            assert_eq!(goals[0].1, name, "{request}");
+            assert_eq!(goals[0].3, Some(directory), "{request}");
+            let mut effect = scope(root.path(), request);
+            let before = capture_paths(&effect.paths()).unwrap();
+            assert!(!effect.verified(&before));
+            if directory {
+                std::fs::create_dir(root.path().join(name)).unwrap();
+            } else {
+                std::fs::write(root.path().join(name), "content").unwrap();
+            }
+            let after = capture_paths(&effect.paths()).unwrap();
+            effect.observe(&before, &after);
+            assert!(effect.verified(&after), "{request}");
+            assert!(!root.path().join("named").exists());
+            assert!(!root.path().join("called").exists());
+        }
+        assert_eq!(parsed("Create file `named`")[0].1, "named");
     }
     #[test]
     fn explicit_directory_and_file_determiners_require_the_requested_kind() {
