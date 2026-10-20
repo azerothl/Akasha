@@ -201,6 +201,7 @@ pub fn eval_llm_provider_fallback() -> EvalResult {
             retry_policy: akasha_llm::retry::RetryPolicy::default(),
         };
         let request = CompletionRequest {
+            tools: None,
             prompt: "ping".into(),
             max_tokens: Some(8),
             temperature: Some(0.0),
