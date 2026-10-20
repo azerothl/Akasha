@@ -54,6 +54,8 @@ Le runner utilise le routeur du daemon : `provider` et `max_tokens` transmis à 
 
 Le résultat local du 20 octobre 2026 sur RTX 4080 SUPER est un relevé exploratoire, pas une comparaison contrôlée à la baseline RTX 3050 Ti de `bench_embedded_results.md` : modèles, matériel et protocole ne sont pas identiques. Ne pas en déduire un facteur d'accélération. Le run matériel GitHub reste en attente d'un runner NVIDIA disponible.
 
+Résultat reproductible exécuté depuis le commit propre `1a82a6b` : [`bench_ar_qwen25_cuda_20261020.json`](bench_ar_qwen25_cuda_20261020.json), journal résumé et hash binaire dans [`bench_ar_qwen25_cuda_20261020.log`](bench_ar_qwen25_cuda_20261020.log), échantillons bruts dans [`bench_ar_qwen25_cuda_20261020_gpu_samples.csv`](bench_ar_qwen25_cuda_20261020_gpu_samples.csv). 5/5 réponses live, route embarquée vérifiée, débit 146–218 tok/s. La VRAM mesurée est système-wide ; le JSON signale les usages concurrents et précise qu'aucune qualité de réponse agentique n'a été évaluée.
+
 ## Hors scope de ce socle
 
 - Exécution benches NVIDIA sur runner self-hosted
