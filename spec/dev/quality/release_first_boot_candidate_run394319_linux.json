@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "run_id": 39431939285,
+  "run_url": "https://github.com/azerothl/Akasha/actions/runs/39431939285",
+  "commit": "705d6981f9be844dd5cb848d2c26e4d0edc4cc8a",
+  "release_published": false,
+  "candidate": {
+    "artifact": "akasha-linux-x86_64",
+    "version": "0.11.0",
+    "target": "x86_64-unknown-linux-gnu"
+  },
+  "environment": {
+    "distribution": "Ubuntu 22.04.5 LTS",
+    "runtime": "WSL NVIDIA-Workbench",
+    "glibc": "2.35"
+  },
+  "checks": {
+    "init_defaults": "success",
+    "daemon_ready_seconds": 1,
+    "spec_09_event_model_yaml": true,
+    "spec_10_data_model_yaml": true,
+    "doctor_exit_code": 1,
+    "doctor_node_check": "missing, incorrectly required because bundled spec/ was treated as a source checkout",
+    "doctor_playwright_node_check": "missing, incorrectly treated as required although managed browser is optional",
+    "glibc_2_39_weak_symbol_warning": true,
+    "binary_version_command": "success"
+  },
+  "embedded_model": {
+    "available": true,
+    "loaded_after_smoke": false,
+    "model_id": "qwen2.5-1.5b-instruct-q4",
+    "llama_cpp_compiled": false,
+    "gguf_present": false
+  },
+  "first_message": {
+    "task_id": "3b727ae8-6ca5-4967-80fd-f9e0d48b8106",
+    "task_status": "completed",
+    "assigned_agent": "technical_writer",
+    "last_turn_model_used": "default",
+    "last_turn_latency_ms": 123133,
+    "last_turn_tokens_out": 0,
+    "expected_reply": "OK",
+    "validated_reply": false
+  },
+  "result": "failed_first_boot_validation",
+  "notes": [
+    "The model task completed without a valid completion; the release smoke correctly rejected it.",
+    "The 22.04 runtime printed a weak GLIBC_2.39 warning but continued to run the CLI and daemon.",
+    "Running the same CLI --version command on Ubuntu 24.04.1 (glibc 2.39) produced no warning; this was not a full smoke on 24.04."
+  ]
+}

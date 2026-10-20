@@ -198,3 +198,76 @@ Contrôle du volume et nettoyage manuel ciblé des anciennes entrées :
 
 Examiner les clés et portées avant suppression par identifiant. Ne pas effacer
 tous les caches pour mesurer un run chaud.
+
+## Mesures comparatives des releases — 20 octobre 2026
+
+Ces mesures actualisent le relevé précédent. Les runs ont été déclenchés
+successivement sur main avec publish=false :
+
+- Run 39420405894, commit 33fcf0e : https://github.com/azerothl/Akasha/actions/runs/39420405894
+- Run 39428283604, commit 58b6273 : https://github.com/azerothl/Akasha/actions/runs/39428283604
+
+Les rapports JSON CI et les rapports Cargo --timings ont été téléchargés depuis
+les artefacts de ces runs. Le tableau reprend la durée complète rapportée par
+chaque job, le résultat de restauration du cache Cargo et la taille du dossier
+target avant nettoyage.
+
+| Cible | Run froid : cache / durée / target | Run chaud : cache / durée / target |
+| --- | --- | --- |
+| Producteur CLI/TUI Windows | miss / 330,884 s / 1 397 041 454 o | hit / 145,582 s / 1 396 388 801 o |
+| Windows CPU | miss / 1 345,919 s / 3 027 819 327 o | hit / 361,376 s / 3 027 356 629 o |
+| Windows CUDA | miss / 2 801,693 s / 3 548 517 065 o | hit / 1 011,442 s / 3 547 782 970 o |
+| Linux x86_64 | miss / 903,165 s / 3 354 321 993 o | hit / 180,143 s / 3 353 556 367 o |
+| macOS x86_64 | miss / 1 198,807 s / 2 798 805 912 o | hit / 405,672 s / 2 798 407 408 o |
+| macOS ARM64 | miss / 1 287,696 s / 2 741 056 507 o | hit / 429,561 s / 2 740 346 102 o |
+
+Pour ces six jobs, la somme des durées mesurées passe de 7 868,164 s
+(131 min 08 s) à 2 533,776 s (42 min 14 s), soit 5 334,388 s de jobs runner
+en moins sur le second run. Ce sont des sommes de temps runner, pas une
+réduction identique de la durée murale d'une release, car les cibles s'exécutent
+en parallèle. Les commits et quelques images runner diffèrent : cette
+comparaison décrit les runs observés et ne constitue pas un essai causal
+contrôlé.
+
+Entre les deux commits, le second build a reçu des changements Rust dans
+akasha-daemon et akasha-tools (PR #238), en plus de l'alignement Tauri suivi
+par #240. Le cache CI conserve les dépendances compatibles et retire les
+artefacts des crates du workspace ; un hit n'importe donc pas les exécutables
+construits d'un ancien commit. Le code courant a été recompilé depuis le
+checkout, tandis que les dépendances compatibles ont été restaurées. Les
+builds des six cibles ont réussi au second run. Le premier run a échoué
+uniquement dans ses trois builds Tauri sur l'écart entre tauri 2.11.5 et
+@tauri-apps/api 2.10.1 ; la correction a été intégrée dans #240 et les trois
+builds Tauri du second run ont réussi.
+
+### Gain de compilation CLI/TUI Windows
+
+Dans le run de release v0.11.0 (36480940401), l'étape de compilation CLI/TUI
+a duré 8 min 19 s sur le job CPU et 6 min 52 s sur le job CUDA, soit 15 min
+11 s de temps runner additionné. Le producteur partagé a duré 330,884 s sur
+son premier run froid et 145,582 s sur le run chaud. Les deux jobs de packaging
+récupèrent ensuite le même artefact d'environ 5,55 Mo ; les téléchargements
+observés ont ajouté environ 4 s au total. L'économie indicative en temps runner
+est donc d'environ 9 min 36 s au premier run et 12 min 42 s au run chaud.
+Les runs et images Windows sont différents ; cette estimation compare les
+durées des étapes enregistrées, sans chiffrer un coût monétaire ni un gain de
+durée murale.
+
+### Volume de cache après la PR #241
+
+Après la fin de la CI de #241 et sa fusion, ses deux caches de PR, inutiles
+après les jobs, ont été supprimés par identifiant. Le relevé convergé est de
+18 entrées pour 9 017 259 036 octets, sous le quota configuré de 10 Go :
+16 caches main totalisent 8 898 390 122 octets ; les deux caches conservés
+pour les PR ouvertes #221 et #223 totalisent environ 59,4 Mo chacun. L'API
+d'usage, initialement en retard sur la suppression, a ensuite convergé vers
+le même total.
+
+### Validation de l'assemblage des archives
+
+La PR #241 ajoute l'assemblage des archives dans un job dédié, même lorsque
+publish=false, puis vérifie les empreintes et l'identité des exécutables
+Windows CPU/CUDA dans les archives autonomes et complètes. Le run 39431939285,
+déclenché sur le commit fusionné 705d698, est en cours. Les résultats de
+packaging et les smokes de première installation seront ajoutés ici après la
+fin du run ; aucune release publique n'est créée par cette exécution.
