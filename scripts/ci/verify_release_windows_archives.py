@@ -9,7 +9,10 @@ import zipfile
 ARCHIVES = (
     "akasha-windows-x86_64.zip",
     "akasha-windows-x86_64-cuda.zip",
+    "akasha-full-windows-x86_64.zip",
+    "akasha-full-windows-x86_64-cuda.zip",
 )
+CLIENTS = ("akasha.exe", "akasha-tui.exe")
 MANIFEST = "windows-clients.json"
 
 
@@ -39,6 +42,10 @@ def verify(directory):
                     raise ValueError(f"{archive_path}: invalid client name {name!r}")
                 if not isinstance(expected_hash, str) or len(expected_hash) != 64:
                     raise ValueError(f"{archive_path}: invalid SHA-256 for {name}")
+                if any(char not in "0123456789abcdefABCDEF" for char in expected_hash):
+                    raise ValueError(f"{archive_path}: invalid SHA-256 for {name}")
+                if name in actual:
+                    raise ValueError(f"{archive_path}: duplicate client {name}")
                 try:
                     payload = archive.read(name)
                 except KeyError as exc:
@@ -48,6 +55,8 @@ def verify(directory):
                     raise ValueError(f"{archive_path}: SHA-256 mismatch for {name}")
                 actual[name] = digest
 
+            if set(actual) != set(CLIENTS):
+                raise ValueError(f"{archive_path}: expected clients {CLIENTS}, found {tuple(sorted(actual))}")
             if reference is None:
                 reference = actual
             elif actual != reference:

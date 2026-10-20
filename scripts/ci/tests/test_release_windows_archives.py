@@ -35,20 +35,28 @@ class ReleaseWindowsArchiveTests(unittest.TestCase):
     def test_rejects_different_clients_between_archives(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            self.write_archive(directory, verify_archives.ARCHIVES[0], {"akasha.exe": b"cpu"})
-            self.write_archive(directory, verify_archives.ARCHIVES[1], {"akasha.exe": b"cuda"})
+            clients = {"akasha.exe": b"cli", "akasha-tui.exe": b"tui"}
+            for archive in verify_archives.ARCHIVES[:-1]:
+                self.write_archive(directory, archive, clients)
+            self.write_archive(directory, verify_archives.ARCHIVES[-1], {
+                "akasha.exe": b"different", "akasha-tui.exe": b"tui"
+            })
             with self.assertRaisesRegex(ValueError, "clients differ"):
                 verify_archives.verify(directory)
 
     def test_rejects_client_hash_mismatch(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            self.write_archive(directory, verify_archives.ARCHIVES[0], {"akasha.exe": b"cli"})
-            with zipfile.ZipFile(directory / verify_archives.ARCHIVES[1], "w") as archive:
+            clients = {"akasha.exe": b"cli", "akasha-tui.exe": b"tui"}
+            for archive_name in verify_archives.ARCHIVES[:-1]:
+                self.write_archive(directory, archive_name, clients)
+            with zipfile.ZipFile(directory / verify_archives.ARCHIVES[-1], "w") as archive:
                 archive.writestr("windows-clients.json", json.dumps({"clients": [
-                    {"name": "akasha.exe", "sha256": "0" * 64}
+                    {"name": "akasha.exe", "sha256": "0" * 64},
+                    {"name": "akasha-tui.exe", "sha256": hashlib.sha256(b"tui").hexdigest()}
                 ]}))
                 archive.writestr("akasha.exe", b"cli")
+                archive.writestr("akasha-tui.exe", b"tui")
             with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
                 verify_archives.verify(directory)
 
