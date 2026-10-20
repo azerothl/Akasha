@@ -56,14 +56,23 @@ pub(crate) fn implementation_role(agent: &str) -> bool {
 }
 fn explicit_path_kind(det: &str) -> Option<bool> {
     let det = det.to_lowercase();
-    if det
-        .split_whitespace()
-        .any(|word| matches!(word, "folder" | "directory" | "dossier" | "r\u{e9}pertoire"))
-    {
+    if det.split_whitespace().any(|word| {
+        matches!(
+            word,
+            "folder"
+                | "folders"
+                | "directory"
+                | "directories"
+                | "dossier"
+                | "dossiers"
+                | "r\u{e9}pertoire"
+                | "r\u{e9}pertoires"
+        )
+    }) {
         Some(true)
     } else if det
         .split_whitespace()
-        .any(|word| matches!(word, "file" | "fichier"))
+        .any(|word| matches!(word, "file" | "files" | "fichier" | "fichiers"))
     {
         Some(false)
     } else {
@@ -73,7 +82,7 @@ fn explicit_path_kind(det: &str) -> Option<bool> {
 fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> {
     let path = r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;!?"`]+)"#;
     let pattern = format!(
-        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|(?:fichier|file|folder|directory|dossier|r\x{{e9}}pertoire)(?:\s+(?:named|called|nomm\x{{e9}}(?:e)?|appel\x{{e9}}(?:e)?))?|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
+        r#"(?im)(?:^|[.!?\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|add|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>(?:(?:the|a|new|le|la|un|une|les|des|(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{{e9}}pertoires?)(?:\s+(?:named|called|nomm\x{{e9}}e?s?|appel\x{{e9}}e?s?))?|uniquement|only|seulement)\s+)*)(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
     );
     let re = regex::Regex::new(&pattern).unwrap();
     // Object-before-path requests: "Add logging to config.txt". Keep this
@@ -82,10 +91,10 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
     let object_atom =
         r#"(?:`[^`\r\n]+`|"[^"\r\n]+"|'[^'\r\n]+'|[\p{L}\p{N}_/\\:.=@+-]*[\p{L}\p{N}_/\\:=@+-])"#;
     let object_path = regex::Regex::new(&format!(
-        r#"(?i)^\s+(?:{object_atom}\s+){{1,12}}?(?P<prep>to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?P<det>(?:(?:the|le|la|(?:fichier|file|folder|directory|dossier|r\x{{e9}}pertoire)(?:\s+(?:named|called|nomm\x{{e9}}(?:e)?|appel\x{{e9}}(?:e)?))?)\s+)*)(?P<path>{path})"#
+        r#"(?i)^\s+(?:{object_atom}\s+){{1,12}}?(?P<prep>to|in|into|from|dans|au|aux|sur|\x{{e0}})\s+(?P<det>(?:(?:the|le|la|les|des|(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{{e9}}pertoires?)(?:\s+(?:named|called|nomm\x{{e9}}e?s?|appel\x{{e9}}e?s?))?)\s+)*)(?P<path>{path})"#
     )).unwrap();
     let path_list = regex::Regex::new(&format!(
-        r#"(?i)^\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et|&)\s+)(?P<det>(?:(?:the|a|new|le|la|un|une|(?:fichier|file|folder|directory|dossier|r\x{{e9}}pertoire)(?:\s+(?:named|called|nomm\x{{e9}}(?:e)?|appel\x{{e9}}(?:e)?))?)\s+)*)(?P<path>{path})"#
+        r#"(?i)^\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et|&)\s+)(?P<det>(?:(?:the|a|new|le|la|un|une|les|des|(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{{e9}}pertoires?)(?:\s+(?:named|called|nomm\x{{e9}}e?s?|appel\x{{e9}}e?s?))?)\s+)*)(?P<path>{path})"#
     )).unwrap();
     let mut outside = vec![true; request.len() + 1];
     let mut quote = None;
@@ -919,6 +928,58 @@ mod tests {
             assert!(!root.path().join("called").exists());
         }
         assert_eq!(parsed("Create file `named`")[0].1, "named");
+    }
+    #[test]
+    fn plural_named_targets_require_every_path_and_kind() {
+        for (request, names, directory) in [
+            (
+                "Create files named a.txt and b.txt",
+                ["a.txt", "b.txt"],
+                false,
+            ),
+            (
+                "Create folders called docs and assets",
+                ["docs", "assets"],
+                true,
+            ),
+            (
+                "Create directories named docs and assets",
+                ["docs", "assets"],
+                true,
+            ),
+            (
+                "Crée les fichiers nommés a.txt et b.txt",
+                ["a.txt", "b.txt"],
+                false,
+            ),
+            (
+                "Crée des répertoires appelés docs et assets",
+                ["docs", "assets"],
+                true,
+            ),
+        ] {
+            assert!(has_request(request), "{request}");
+            let parsed = parsed(request);
+            assert_eq!(parsed.len(), 2, "{request}");
+            for (goal, name) in parsed.iter().zip(names) {
+                assert_eq!(goal.1, name, "{request}");
+                assert_eq!(goal.3, Some(directory), "{request}");
+            }
+            let root = tempfile::tempdir().unwrap();
+            let mut effect = scope(root.path(), request);
+            let before = capture_paths(&effect.paths()).unwrap();
+            assert!(!effect.verified(&before));
+            for (index, name) in names.into_iter().enumerate() {
+                if directory {
+                    std::fs::create_dir(root.path().join(name)).unwrap();
+                } else {
+                    std::fs::write(root.path().join(name), "content").unwrap();
+                }
+                let after = capture_paths(&effect.paths()).unwrap();
+                effect.observe(&before, &after);
+                assert_eq!(effect.verified(&after), index == 1, "{request}");
+            }
+        }
     }
     #[test]
     fn explicit_directory_and_file_determiners_require_the_requested_kind() {
