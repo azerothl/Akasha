@@ -243,6 +243,26 @@ pub fn is_unreadable_fetched_content(body: &str, url: &str) -> bool {
     false
 }
 
+/// Recognize explicit upper word bounds, not arbitrary numbers or minimums.
+pub fn requested_max_words(topic: &str) -> Option<usize> {
+    static LIMIT: OnceLock<Regex> = OnceLock::new();
+    let re = LIMIT.get_or_init(|| Regex::new(
+        r"(?i)(?:\b(\d{1,6})\s+(?:mots?|words?)\s+(?:au\s+maximum|maximum|max\b|au plus)|(?:maximum(?:\s+(?:de|of))?|au plus|at most|no more than|up to|do not exceed|ne pas dépasser|limit\s+(?:the\s+)?(?:answer|report|response)\s+to|limiter\s+(?:la réponse|le rapport)\s+à)\s+(\d{1,6})\s+(?:mots?|words?)\b|(?:\bunder|\bmoins de)\s+(\d{1,6})\s+(?:mots?|words?)\b)"
+    ).expect("word limit regex"));
+    static PER_UNIT: OnceLock<Regex> = OnceLock::new();
+    let per_unit = PER_UNIT.get_or_init(|| Regex::new(r"(?i)^\s*(?:per\b|par\b|/)").expect("per-unit word bound"));
+    re.captures_iter(topic).filter_map(|cap| {
+        // A throughput or per-item constraint is not the report's total length.
+        let matched = cap.get(0)?;
+        if per_unit.is_match(&topic[matched.end()..]) { return None; }
+        let exclusive = cap.get(3).is_some();
+        let value = cap.get(1).or_else(|| cap.get(2)).or_else(|| cap.get(3))?
+            .as_str().parse::<usize>().ok()?;
+        let limit = if exclusive { value.checked_sub(1)? } else { value };
+        (limit > 0).then_some(limit)
+    }).min()
+}
+
 pub fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
 }
@@ -393,6 +413,23 @@ fn normalize_image_url(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_word_maximum_does_not_confuse_sources_dates_or_minimums() {
+        for text in ["400 mots maximum", "400 words max", "au plus 400 mots", "maximum de 400 mots", "at most 400 words", "no more than 400 words", "up to 400 words", "400 mots au maximum", "do not exceed 400 words", "limit the answer to 400 words", "limit the report to 400 words", "ne pas dépasser 400 mots", "limiter la réponse à 400 mots"] {
+            assert_eq!(requested_max_words(text), Some(400), "{text}");
+        }
+        assert_eq!(requested_max_words("keep it under 400 words"), Some(399));
+        assert_eq!(requested_max_words("moins de 400 mots"), Some(399));
+        assert_eq!(requested_max_words("2026 : 4 sources, 400 mots minimum"), None);
+        assert_eq!(requested_max_words("at least 400 words, 3 sources minimum"), None);
+        for metric in ["Which systems can generate up to 10 words per second?", "maximum 400 mots par minute", "up to 10 words/s", "under 20 words per item"] {
+            assert_eq!(requested_max_words(metric), None, "{metric}");
+        }
+        assert_eq!(requested_max_words("up to 10 words per second; answer in 400 words maximum"), Some(400));
+        assert_eq!(requested_max_words("0 words max"), None);
+        assert_eq!(requested_max_words("500 words maximum, at most 300 words"), Some(300));
+    }
 
     #[test]
     fn source_line_wraps_do_not_split_a_qualified_sentence() {
