@@ -89,7 +89,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
     // At most one typed noun: adjectives must not consume a later list item.
     let det = r"(?:(?:the|an?|new|le|la|un|une|les|des|uniquement|only|seulement)\s+)*(?:(?:[\p{L}-]+\s+){0,4}?(?:fichiers?|files?|folders?|director(?:y|ies)|dossiers?|r\x{e9}pertoires?)(?:\s+(?:empty|blank|vide|vides))?(?:\s+(?:named|called|nomm\x{e9}e?s?|appel\x{e9}e?s?))?\s+)?";
     let pattern = format!(
-        r#"(?im)(?:^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?|[.!?;\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|fix|repair|corrige(?:r|z)?|r(?:e|\x{{e9}})pare(?:r|z)?|add|append|prepend|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|copy|copie(?:r|z)?|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>{det})(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
+        r#"(?im)(?:^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?|[.!?;\n,]\s*|\b(?:then|and|puis|ensuite)\s+)(?:(?:please|can\s+you|could\s+you|would\s+you|peux-tu|peux\s+tu|pourrais-tu|pouvez-vous|veuillez|merci\s+de|est-ce\s+que\s+tu\s+peux|hello|hi|bonjour|salut)\s+)*(?P<verb>create|write|modify|update|edit|fix|repair|implement|impl(?:e|\x{{e9}})mente(?:r|z)?|refactor|refactori[sz]e(?:r|z)?|rewrite|overwrite|patch|insert|generate|corrige(?:r|z)?|r(?:e|\x{{e9}})pare(?:r|z)?|add|append|prepend|save|replace|change|remplace(?:r|z)?|change(?:r|z)?|delete|remove|unlink|rename|move|copy|copie(?:r|z)?|cr\x{{e9}}e(?:r|z)?|cree(?:r|z)?|\x{{e9}}cris|ecris|\x{{e9}}crivez|ecrivez|modifie(?:r|z)?|ajoute(?:r|z)?|enregistre(?:r|z)?|supprime(?:r|z)?|efface(?:r|z)?|renomme(?:r|z)?|d\x{{e9}}place(?:r|z)?|deplace(?:r|z)?)\s+(?P<det>{det})(?P<source>{path})(?:\s+(?:to|as|into|en|vers)\s+(?:(?:the|le|la|fichier|file)\s+)*(?P<target>{path}))?"#
     );
     let re = regex::Regex::new(&pattern).unwrap();
     // Object-before-path requests: "Add logging to config.txt". Keep this
@@ -139,7 +139,7 @@ fn parsed(request: &str) -> Vec<(String, String, Option<String>, Option<bool>)> 
             };
             let mut source = clean(raw);
             let verb = verb.as_str().to_lowercase();
-            let mut verb = if verb == "repair" {
+            let mut verb = if matches!(verb.as_str(), "repair" | "refactor") {
                 verb
             } else {
                 verb.strip_suffix(['r', 'z']).unwrap_or(&verb).to_string()
@@ -1291,6 +1291,34 @@ mod tests {
             effect.observe(&before, &capture_paths(&effect.paths()).unwrap());
             assert!(!effect.verified(&capture_paths(&effect.paths()).unwrap()));
             std::fs::write(root.path().join("config.toml"), "fixed").unwrap();
+            let after = capture_paths(&effect.paths()).unwrap();
+            effect.observe(&before, &after);
+            assert!(effect.verified(&after));
+        }
+    }
+    #[test]
+    fn implementation_and_common_edit_verbs_bind_explicit_file_targets() {
+        for (request, expected) in [
+            ("Implement the parser in src/parser.rs", "src/parser.rs"),
+            ("Implémente le parseur dans src/parser.rs", "src/parser.rs"),
+            ("Refactor src/parser.rs", "src/parser.rs"),
+            ("Refactorise le parseur dans src/parser.rs", "src/parser.rs"),
+            ("Rewrite config.toml", "config.toml"),
+            ("Overwrite config.toml", "config.toml"),
+            ("Patch config.toml", "config.toml"),
+            ("Insert this line into config.toml", "config.toml"),
+            ("Generate the file report.txt", "report.txt"),
+        ] {
+            let goals = parsed(request);
+            assert_eq!(goals.len(), 1, "{request}");
+            assert_eq!(goals[0].1, expected, "{request}");
+            let root = tempfile::tempdir().unwrap();
+            let mut effect = scope(root.path(), request);
+            let before = capture_paths(&effect.paths()).unwrap();
+            assert!(!effect.verified(&before));
+            let path = root.path().join(expected);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "implemented").unwrap();
             let after = capture_paths(&effect.paths()).unwrap();
             effect.observe(&before, &after);
             assert!(effect.verified(&after));
