@@ -173,7 +173,9 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
             argv.extend(arg.args);
             argv
         }
-        name if name.starts_with("mcp_") => vec![envelope.arguments.to_string()],
+        name if name.starts_with("mcp_") || name == "lsp_query" => {
+            vec![envelope.arguments.to_string()]
+        }
         _ => {
             let arg: Argv = serde_json::from_value(envelope.arguments.clone())
                 .map_err(|_| "this tool requires {argv:[string,...]}")?;
@@ -216,13 +218,29 @@ pub(crate) fn supports_typed(tool: &str) -> bool {
     )
 }
 
-pub(crate) fn argument_schema(tool:&str)->Value {
+pub(crate) fn argument_schema(tool: &str) -> Value {
     if tool=="read_file" {return json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1},"full":{"type":"boolean"},"offset_line":{"type":"integer","minimum":1},"limit_lines":{"type":"integer","minimum":1,"maximum":5000}}});}
-    if matches!(tool,"read_file"|"write_file"|"write_code"|"edit_file"|"apply_patch"|"delete_file") {
-        let mut required=vec!["path"];
-        if is_file_mutation(tool){required.push("expected_version");}
-        if matches!(tool,"write_file"|"write_code"|"edit_file"|"apply_patch"){required.push("content");}
-        if tool=="edit_file"{required.extend(["start_line","end_line"]);}
+    if tool == "lsp_query" {
+        return json!({"type":"object","additionalProperties":false,"required":["action","path"],"properties":{"action":{"type":"string","enum":["diagnostics","definition","references","rename"]},"path":{"type":"string","minLength":1},"position":{"type":"object","required":["line","character"],"additionalProperties":false,"properties":{"line":{"type":"integer","minimum":0},"character":{"type":"integer","minimum":0}}},"new_name":{"type":"string","maxLength":256},"text":{"type":"string"}}});
+    }
+
+    if matches!(
+        tool,
+        "read_file" | "write_file" | "write_code" | "edit_file" | "apply_patch" | "delete_file"
+    ) {
+        let mut required = vec!["path"];
+        if is_file_mutation(tool) {
+            required.push("expected_version");
+        }
+        if matches!(
+            tool,
+            "write_file" | "write_code" | "edit_file" | "apply_patch"
+        ) {
+            required.push("content");
+        }
+        if tool == "edit_file" {
+            required.extend(["start_line", "end_line"]);
+        }
         json!({"type":"object","additionalProperties":false,"required":required,"properties":{"path":{"type":"string","minLength":1},"content":{"type":"string"},"expected_version":{"type":"string","description":"SHA-256 from read_file, or missing for creation"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}})
     } else if matches!(
         tool,
@@ -311,6 +329,21 @@ fn version(path: &Path) -> Result<String, String> {
     }
 }
 
+pub(crate) async fn workspace_guard(
+    root: &Path,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let lock = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "workspace operation lock unavailable")?
+        .entry(root)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    Ok(lock.lock_owned().await)
+}
+
 pub(crate) struct Operation {
     db: PathBuf,
     task: Uuid,
@@ -331,22 +364,14 @@ impl Operation {
         policy: &akasha_tools::ToolsPolicy,
         typed: Option<&Decoded>,
     ) -> Result<Self, String> {
-        static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
-            OnceLock::new();
         let canonical = root.canonicalize().map_err(|e| e.to_string())?;
-        let lock = LOCKS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .map_err(|_| "workspace operation lock unavailable")?
-            .entry(canonical.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let lock = lock.lock_owned().await;
+        let lock = workspace_guard(&canonical).await?;
         let task_status = akasha_store::TaskStore::open(db).map_err(|e|e.to_string())?
             .get(task).map_err(|e|e.to_string())?.ok_or("Studio task missing after workspace lock")?.status;
         if matches!(task_status,akasha_store::TaskStatus::Failed|akasha_store::TaskStatus::Cancelled|akasha_store::TaskStatus::Paused|akasha_store::TaskStatus::Interrupted|akasha_store::TaskStatus::WaitingUserInput) {
             return Err("task stopped or waiting while acquiring workspace lock".into());
         }
+
         let id = typed
             .map(|t| t.envelope.operation_id)
             .unwrap_or_else(Uuid::new_v4);
@@ -400,6 +425,7 @@ impl Operation {
         let inspection = matches!(
             tool,
             "read_file"
+                | "lsp_query"
                 | "list_dir"
                 | "search_files"
                 | "grep_content"

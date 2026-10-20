@@ -174,6 +174,14 @@ pub(crate) async fn execute_tool_call_impl(
         }
     };
     let result = match tool_name {
+        "lsp_query" | "lsp_apply_rename" => {
+            let Some(root)=workspace_root.filter(|_|is_studio_workspace)else{return(false,"LSP requires a Studio task workspace".into(),None);};
+            let Some(data_dir)=store_path.and_then(|path|path.parent())else{return(false,"Task data directory unavailable".into(),None);};
+            let result=if tool_name=="lsp_query" {
+                match serde_json::from_str::<crate::studio_lsp::Query>(&args.join(" ")){Ok(query)=>crate::studio_lsp::query(data_dir,root,&executor.policy,Some(task_id),query).await,Err(_)=>Err("invalid LSP query JSON".into())}
+            }else{match args.first().and_then(|id|Uuid::parse_str(id).ok()){Some(id)=>{let applied=crate::studio_lsp::apply_plan(data_dir,root,&executor.policy,Some(task_id),id);if applied.is_ok(){crate::studio_lsp::close(&root.canonicalize().unwrap_or_else(|_|root.to_path_buf())).await;}applied},None=>Err("rename plan UUID required".into())}};
+            match result {Ok(value)=>(true,value.to_string(),None),Err(error)=>(false,serde_json::json!({"schema_version":1,"success":false,"error":error}).to_string(),None)}
+        }
         "list_tools" => {
             let Some(role) = assigned_agent_for_task.as_deref() else { return (false, "[list_tools] task role unavailable".into(), None); };
             let tools = crate::studio_capabilities::catalogue(&executor.policy, role).into_iter()
