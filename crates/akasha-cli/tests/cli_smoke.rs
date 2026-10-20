@@ -31,6 +31,16 @@ fn e2e_cli_paths_prints_data_dir() {
         "expected data_dir in output: {}",
         s
     );
+    assert!(
+        s.contains("%USERPROFILE%\\akasha"),
+        "expected Windows default path hint in output: {}",
+        s
+    );
+    assert!(
+        !s.contains("%%USERPROFILE%%"),
+        "akasha paths must not double-escape %USERPROFILE%: {}",
+        s
+    );
 }
 
 #[test]
