@@ -291,6 +291,29 @@ jobs:
           for dir in "$ARTIFACTS_ROOT"/akasha-ui-*; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
+            # actions/upload-artifact stores files without their Unix mode bits.
+            # Restore the Tauri launchers before creating the standalone UI zip.
+            case "$name" in
+              akasha-ui-linux)
+                appdir="$dir/appimage/Akasha.AppDir"
+                for path in "$dir/appimage/Akasha.AppImage" "$appdir/AppRun" "$appdir/AppRun.wrapped" "$appdir/usr/bin/akasha-ui"; do
+                  if [ ! -f "$path" ]; then
+                    echo "::error::Required Linux UI file is missing: $path"
+                    exit 1
+                  fi
+                  chmod +x "$path"
+                done
+                ;;
+              akasha-ui-macos-*)
+                binary="$dir/macos/Akasha.app/Contents/MacOS/akasha-ui"
+                if [ ! -f "$binary" ]; then
+                  echo "::error::Required macOS UI executable is missing: $binary"
+                  find "$dir" -maxdepth 5 -print || true
+                  exit 1
+                fi
+                chmod +x "$binary"
+                ;;
+            esac
             (cd "$dir" && zip -r "$RELEASE_DIR/${name}.zip" .)
           done
 
@@ -309,10 +332,34 @@ jobs:
             full_name="akasha-full-${suffix}"
             mkdir -p "$RELEASE_DIR/${full_name}"
             cp -r "$cli_dir"/* "$RELEASE_DIR/${full_name}/"
-            if [ -d "$ARTIFACTS_ROOT/${ui_name}" ]; then
-              mkdir -p "$RELEASE_DIR/${full_name}/ui"
-              cp -r "$ARTIFACTS_ROOT/${ui_name}"/* "$RELEASE_DIR/${full_name}/ui/"
+            if [ ! -d "$ARTIFACTS_ROOT/${ui_name}" ]; then
+              echo "::error::Required UI artifact is missing: $ARTIFACTS_ROOT/${ui_name}"
+              exit 1
             fi
+            mkdir -p "$RELEASE_DIR/${full_name}/ui"
+            cp -r "$ARTIFACTS_ROOT/${ui_name}"/* "$RELEASE_DIR/${full_name}/ui/"
+            # Restore entry-point modes after download-artifact strips them.
+            case "$suffix" in
+              linux-x86_64)
+                appdir="$RELEASE_DIR/${full_name}/ui/appimage/Akasha.AppDir"
+                for path in "$RELEASE_DIR/${full_name}/ui/appimage/Akasha.AppImage" "$appdir/AppRun" "$appdir/AppRun.wrapped" "$appdir/usr/bin/akasha-ui"; do
+                  if [ ! -f "$path" ]; then
+                    echo "::error::Required Linux UI file is missing from ${full_name}: $path"
+                    exit 1
+                  fi
+                  chmod +x "$path"
+                done
+                ;;
+              macos-x86_64|macos-aarch64)
+                binary="$RELEASE_DIR/${full_name}/ui/macos/Akasha.app/Contents/MacOS/akasha-ui"
+                if [ ! -f "$binary" ]; then
+                  echo "::error::Required macOS UI executable is missing from ${full_name}: $binary"
+                  find "$RELEASE_DIR/${full_name}/ui" -maxdepth 6 -print || true
+                  exit 1
+                fi
+                chmod +x "$binary"
+                ;;
+            esac
             # README at root of full zip (all platforms)
             printf 'To install: Windows: double-click INSTALL.cmd. Linux/macOS: in a terminal, run: chmod +x scripts/setup.sh && ./scripts/setup.sh\n' > "$RELEASE_DIR/${full_name}/README.txt"
             # Windows full zip: entry point that bypasses ExecutionPolicy for setup.ps1

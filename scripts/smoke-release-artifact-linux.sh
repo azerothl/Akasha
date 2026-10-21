@@ -183,10 +183,11 @@ smoke_desktop_ui() {
     Linux)
       local appdir="$ROOT/ui/appimage/Akasha.AppDir"
       local app="$appdir/AppRun"
-      [[ -f "$app" ]] || { log "::error::Linux desktop UI AppRun is missing from the full archive"; return 1; }
+      [[ -x "$app" ]] || { log "::error::Linux desktop UI AppRun is missing or not executable in the full archive"; return 1; }
+      [[ -x "$appdir/AppRun.wrapped" ]] || { log "::error::Linux desktop UI AppRun.wrapped is missing or not executable in the full archive"; return 1; }
+      [[ -x "$appdir/usr/bin/akasha-ui" ]] || { log "::error::Linux desktop UI binary is missing or not executable in the full archive"; return 1; }
       command -v xvfb-run >/dev/null || { log "::error::xvfb-run is required for the Linux desktop UI smoke"; return 1; }
       command -v xdotool >/dev/null || { log "::error::xdotool is required for the Linux desktop UI smoke"; return 1; }
-      chmod +x "$app" "$appdir/usr/bin/akasha-ui" 2>/dev/null || true
       if ! xvfb-run -a bash -c '
         set -euo pipefail
         app="$1"
