@@ -296,7 +296,12 @@ jobs:
             case "$name" in
               akasha-ui-linux)
                 appdir="$dir/appimage/Akasha.AppDir"
-                for path in "$dir/appimage/Akasha.AppImage" "$appdir/AppRun" "$appdir/AppRun.wrapped" "$appdir/usr/bin/akasha-ui"; do
+                appimage=$(find "$dir/appimage" -maxdepth 1 -type f -iname '*.AppImage' -print -quit)
+                if [ -z "$appimage" ]; then
+                  echo "::error::Required Linux AppImage is missing from $dir/appimage"
+                  exit 1
+                fi
+                for path in "$appimage" "$appdir/AppRun" "$appdir/AppRun.wrapped" "$appdir/usr/bin/akasha-ui"; do
                   if [ ! -f "$path" ]; then
                     echo "::error::Required Linux UI file is missing: $path"
                     exit 1
@@ -342,7 +347,12 @@ jobs:
             case "$suffix" in
               linux-x86_64)
                 appdir="$RELEASE_DIR/${full_name}/ui/appimage/Akasha.AppDir"
-                for path in "$RELEASE_DIR/${full_name}/ui/appimage/Akasha.AppImage" "$appdir/AppRun" "$appdir/AppRun.wrapped" "$appdir/usr/bin/akasha-ui"; do
+                appimage=$(find "$RELEASE_DIR/${full_name}/ui/appimage" -maxdepth 1 -type f -iname '*.AppImage' -print -quit)
+                if [ -z "$appimage" ]; then
+                  echo "::error::Required Linux AppImage is missing from ${full_name}/ui/appimage"
+                  exit 1
+                fi
+                for path in "$appimage" "$appdir/AppRun" "$appdir/AppRun.wrapped" "$appdir/usr/bin/akasha-ui"; do
                   if [ ! -f "$path" ]; then
                     echo "::error::Required Linux UI file is missing from ${full_name}: $path"
                     exit 1
