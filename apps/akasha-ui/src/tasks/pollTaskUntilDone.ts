@@ -87,7 +87,6 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
   let lastMsg = "";
   let stallHintShown = false;
   let lastLoggedPct = -1;
-  let pollErrors = 0;
 
   for (let i = 0; i < maxWait; i++) {
     await new Promise((r) => setTimeout(r, pollIntervalMs));
@@ -351,8 +350,8 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
         requestAnimationFrame(() => deps.chatInputRef.current?.focus());
         return;
       }
-    } catch (err) {
-      pollErrors++;
+    } catch {
+      // Keep polling; transient daemon failures are retried until the task deadline.
     }
   }
   deps.setRunningTaskChips((prev) => {
