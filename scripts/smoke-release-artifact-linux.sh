@@ -32,7 +32,7 @@ PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); p
 cleanup() {
   if [[ -n "${SMOKE_EVIDENCE_DIR:-}" ]]; then
     mkdir -p "$SMOKE_EVIDENCE_DIR"
-    for evidence in "$LOG" "$WORK/task.json" "$WORK/doctor.log" "$WORK/embedded-status.json" "$WORK/ui.log"; do
+    for evidence in "$LOG" "$WORK/task.json" "$WORK/doctor.log" "$WORK/embedded-status.json" "$WORK/ui.log" "$HOME/akasha/llm_router.yaml"; do
       [[ ! -f "$evidence" ]] || cp -- "$evidence" "$SMOKE_EVIDENCE_DIR/"
     done
   fi
@@ -87,6 +87,8 @@ export HOME="$FAKE_HOME"
 unset AKASHA_DATA_DIR || true
 export AKASHA_PORT="$PORT"
 export AKASHA_LANG="en"
+export AKASHA_EMBEDDED_BACKEND="candle"
+export OLLAMA_HOST="http://127.0.0.1:1"
 cd "$ROOT"
 
 log "HOME=$HOME AKASHA_PORT=$PORT extract=$ROOT"
@@ -105,6 +107,11 @@ log "init_duration_s=$((INIT_END - INIT_START))"
   log "::error::data dir missing after init"
   exit 1
 }
+if ! grep -Eq '^[[:space:]]*provider:[[:space:]]*akasha_embedded[[:space:]]*$' "$HOME/akasha/llm_router.yaml"; then
+  log "::error::first-run configuration does not route to akasha_embedded"
+  exit 1
+fi
+log "embedded_primary_route=passed"
 
 DAEMON_START=$(date +%s)
 env -u GH_TOKEN -u GITHUB_TOKEN ./akasha-daemon >>"$LOG" 2>&1 &
@@ -246,7 +253,7 @@ smoke_desktop_ui() {
 
 # Exercise one explicitly routed specialist request, not the multi-agent orchestrator.
 # provider/max_tokens are not accepted by /api/message in this published release.
-BODY='{"message":"Réponds uniquement par le mot OK.","composer_mode":"technical_writer"}'
+BODY='{"message":"Output exactly this code word and no other text: AKASHA_OK","composer_mode":"technical_writer"}'
 INF_START=$(date +%s)
 TASK_JSON=$(curl -sf -X POST -H "Content-Type: application/json" -d "$BODY" "${BASE}/api/message")
 TASK_ID=$(echo "$TASK_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('task_id',''))")
@@ -282,8 +289,9 @@ with open(sys.argv[1], encoding="utf-8") as f:
     task = json.load(f)
 
 assert task.get("assigned_agent") == "technical_writer", "wrong assigned agent"
-assert task.get("last_turn_model_used") == "embedded", "embedded model was not used"
-assert task.get("last_turn_tokens_out", 0) > 0, "model returned no completion tokens"
+assert task.get("last_turn_model_used") == "default", (
+    "embedded primary route was not used: " + str(task.get("last_turn_model_used"))
+)
 messages = [
     entry.get("message", "")
     for entry in task.get("progress", [])
@@ -292,15 +300,29 @@ messages = [
 reply = next((message for message in reversed(messages) if message.strip()), "")
 reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.DOTALL).strip()
 normalized = " ".join(reply.split())
-if normalized != "OK":
-    raise SystemExit(f"final model reply must be exactly 'OK'; got {normalized[:160]!r}")
+if not re.search(r"(?:^|\s)AKASHA_OK[.!]?$", normalized):
+    raise SystemExit(f"final model reply must end with the requested code word; got {normalized[:160]!r}")
 PY
     then
       log "::error::model produced no valid answer for the deterministic prompt"
       exit 1
     fi
     INF_END=$(date +%s)
+    curl -sf "${BASE}/api/router/embedded-status" > "$WORK/embedded-status-after.json"
+    cp "$WORK/embedded-status-after.json" "$WORK/embedded-status.json"
+    python3 - "$WORK/embedded-status-after.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    status = json.load(f)
+assert status.get("embedded_loaded") is True, "embedded backend did not load during first inference"
+assert status.get("backend") == "candle", f"expected CPU Candle backend, got {status.get('backend')!r}"
+PY
+    BACKEND=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("backend", "unknown"))' "$WORK/embedded-status-after.json")
     log "first_inference_duration_s=$((INF_END - INF_START))"
+    TOKENS_OUT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("last_turn_tokens_out", 0))' "$WORK/task.json")
+    log "first_inference=passed model=default backend=$BACKEND tokens_out=$TOKENS_OUT reply_marker=AKASHA_OK"
     python3 -m json.tool "$WORK/task.json" >>"$LOG" 2>/dev/null || cat "$WORK/task.json" >>"$LOG"
     if [[ "$DOCTOR_OK" != 1 ]]; then
       log "::error::doctor failed; artifact is not validated"

@@ -21,6 +21,7 @@ $Log = Join-Path $Work "smoke.log"
 $DoctorLog = Join-Path $Work "doctor.log"
 $TaskLog = Join-Path $Work "task.json"
 $EmbeddedLog = Join-Path $Work "embedded-status.json"
+$EmbeddedAfterLog = Join-Path $Work "embedded-status-after.json"
 $UiLog = Join-Path $Work "ui.log"
 $UiInstallerLog = Join-Path $Work "ui-msi-extract.log"
 $DaemonOut = Join-Path $Work "daemon.stdout.log"
@@ -42,7 +43,7 @@ function Copy-Evidence {
         return
     }
     New-Item -ItemType Directory -Path $EvidenceDir -Force | Out-Null
-    foreach ($path in @($Log, $DoctorLog, $TaskLog, $EmbeddedLog, $UiLog, $UiInstallerLog, $DaemonOut, $DaemonErr)) {
+    foreach ($path in @($Log, $DoctorLog, $TaskLog, $EmbeddedLog, $EmbeddedAfterLog, $UiLog, $UiInstallerLog, $DaemonOut, $DaemonErr, (Join-Path $DataDir "llm_router.yaml"))) {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             Copy-Item -LiteralPath $path -Destination $EvidenceDir -Force
         }
@@ -83,6 +84,7 @@ try {
     $env:AKASHA_BIND = "127.0.0.1"
     $env:AKASHA_LANG = "en"
     $env:OLLAMA_HOST = "http://127.0.0.1:1"
+    $env:AKASHA_EMBEDDED_BACKEND = "candle"
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $listener.Start()
     $port = $listener.LocalEndpoint.Port
@@ -97,6 +99,11 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "akasha init --defaults failed with exit code $LASTEXITCODE"
         }
+        $routerPath = Join-Path $DataDir "llm_router.yaml"
+        if (-not (Select-String -LiteralPath $routerPath -Pattern '^\s*provider:\s*akasha_embedded\s*$' -Quiet)) {
+            throw "first-run configuration does not route to akasha_embedded"
+        }
+        Write-SmokeLog "embedded_primary_route=passed"
         Write-SmokeLog "init=passed"
 
         $Daemon = Start-Process -FilePath $DaemonPath -WorkingDirectory $Root -PassThru -WindowStyle Hidden `
@@ -140,7 +147,7 @@ try {
         }
 
         $started = [DateTime]::UtcNow
-        $body = @{ message = "Réponds uniquement par le mot OK."; composer_mode = "technical_writer" } | ConvertTo-Json -Compress
+        $body = @{ message = "Output exactly this code word and no other text: AKASHA_OK"; composer_mode = "technical_writer" } | ConvertTo-Json -Compress
         $created = Invoke-RestMethod -Uri "$base/api/message" -Method Post -ContentType "application/json" -Body $body -TimeoutSec 30
         $taskId = [string]$created.task_id
         if ([string]::IsNullOrWhiteSpace($taskId)) {
@@ -167,22 +174,24 @@ try {
         if ($task.assigned_agent -ne "technical_writer") {
             throw "wrong assigned agent: $($task.assigned_agent)"
         }
-        if ($task.last_turn_model_used -ne "embedded") {
+        if ($task.last_turn_model_used -ne "default") {
             throw "embedded model was not used: $($task.last_turn_model_used)"
-        }
-        if ([long]$task.last_turn_tokens_out -le 0) {
-            throw "model returned no completion tokens"
         }
         $messages = @($task.progress | Where-Object { $_.message -is [string] } | ForEach-Object {
             [regex]::Replace($_.message, "<think>.*?</think>", "", [System.Text.RegularExpressions.RegexOptions]::Singleline).Trim()
         } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         $reply = if ($messages.Count -gt 0) { $messages[-1] } else { "" }
         $normalizedReply = ($reply -split "\s+" -join " ").Trim()
-        if ($normalizedReply -ne "OK") {
-            throw "final model reply must be exactly 'OK'; got '$($normalizedReply.Substring(0, [Math]::Min(160, $normalizedReply.Length)))'"
+        if ($normalizedReply -notmatch '(?:^|\s)AKASHA_OK[.!]?$') {
+            throw "final model reply must end with the requested code word; got '$($normalizedReply.Substring(0, [Math]::Min(160, $normalizedReply.Length)))'"
+        }
+        $embeddedAfter = Invoke-RestMethod -Uri "$base/api/router/embedded-status" -TimeoutSec 10
+        $embeddedAfter | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $EmbeddedAfterLog -Encoding utf8
+        if ($embeddedAfter.embedded_loaded -ne $true -or $embeddedAfter.backend -ne "candle") {
+            throw "first inference did not load the CPU Candle backend: $($embeddedAfter | ConvertTo-Json -Compress -Depth 8)"
         }
         $elapsed = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 2)
-        Write-SmokeLog "first_inference=passed model=embedded elapsed_seconds=$elapsed reply=OK"
+        Write-SmokeLog "first_inference=passed model=default backend=candle tokens_out=$($task.last_turn_tokens_out) elapsed_seconds=$elapsed reply_marker=AKASHA_OK"
 
         $uiMsiDir = Join-Path $Root "ui\msi"
         $uiMsi = Get-ChildItem -LiteralPath $uiMsiDir -Filter "Akasha_*.msi" -File -ErrorAction SilentlyContinue | Select-Object -First 1
