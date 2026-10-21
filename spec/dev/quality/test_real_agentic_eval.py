@@ -1,0 +1,102 @@
+import importlib.util
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+MODULE_PATH = Path(__file__).with_name("real_agentic_eval.py")
+SPEC = importlib.util.spec_from_file_location("real_agentic_eval", MODULE_PATH)
+assert SPEC and SPEC.loader
+eval_runner = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(eval_runner)
+
+
+class RealAgenticEvalTests(unittest.TestCase):
+    def test_clean_env_removes_secrets_but_keeps_runtime_path(self):
+        with patch.dict(os.environ, {"AKASHA_EVAL_TEST_API_KEY": "secret", "AKASHA_EVAL_TEST_TOKEN": "secret", "AKASHA_EVAL_TEST_VISIBLE": "yes"}):
+            cleaned = eval_runner.clean_env()
+        self.assertNotIn("AKASHA_EVAL_TEST_API_KEY", cleaned)
+        self.assertNotIn("AKASHA_EVAL_TEST_TOKEN", cleaned)
+        self.assertEqual(cleaned["AKASHA_EVAL_TEST_VISIBLE"], "yes")
+        self.assertIn("PATH", cleaned)
+
+    def test_tool_policy_scopes_file_access_and_disables_shell(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "data").mkdir()
+            eval_runner.write_eval_tools_policy(root / "data", root)
+            policy = json.loads((root / "data" / "tools_policy.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(policy["allowed_read_paths"], [str(root)])
+        self.assertEqual(policy["allowed_write_paths"], [str(root)])
+        self.assertEqual(policy["allowed_commands"], [])
+        tools = policy["tool_profiles"]["real_agentic_eval"]
+        self.assertIn("write_file", tools)
+        self.assertNotIn("run_command", tools)
+        self.assertNotIn("github_create_pr", tools)
+
+    def test_fallback_uses_known_provider_and_unavailable_model(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            eval_runner.write_router(root, "qwen2.5-coder:14b", "http://127.0.0.1:11434", "cpu", unavailable_primary=True)
+            config = json.loads((root / "llm_router.yaml").read_text(encoding="utf-8"))
+        route = config["task_types"]["conversation"]
+        self.assertEqual(route["primary"]["provider"], "ollama")
+        self.assertEqual(route["primary"]["model"], "qwen2.5-coder:14b-akasha-eval-unavailable")
+        self.assertEqual(route["fallback"][0]["model"], "qwen2.5-coder:14b")
+        self.assertEqual(route["fallback"][0]["config"]["num_gpu"], 0)
+
+    def test_device_verification_uses_ollama_vram_evidence(self):
+        with patch.object(eval_runner, "ollama_processes", return_value=[{"name": "qwen2.5-coder:14b", "size_vram_bytes": 0}]):
+            self.assertEqual(eval_runner.model_device_match("http://ollama", "qwen2.5-coder:14b", "cpu"), (True, 0))
+            self.assertEqual(eval_runner.model_device_match("http://ollama", "qwen2.5-coder:14b", "cuda"), (False, 0))
+            self.assertEqual(eval_runner.model_device_match("http://ollama", "qwen2.5-coder:14b", "auto"), (None, 0))
+
+    def test_comparison_rejects_unmeasured_baseline(self):
+        baseline = {"maximum_scenario_latency_ms": 360000, "measured_baselines": {}}
+        report = {
+            "environment": {"model_requested": "qwen2.5-coder:14b", "execution_device_requested": "cpu"},
+            "no_go": [],
+            "passed": 5,
+            "total": 5,
+            "scenarios": [],
+        }
+        args = type("Args", (), {"model": "qwen2.5-coder:14b", "device": "cpu", "record_baseline": False})()
+        eval_runner.compare_or_record_baseline(report, baseline, args)
+        self.assertIn("measured_baseline_missing", report["no_go"])
+        self.assertEqual(report["baseline_comparison"]["status"], "missing")
+
+    def test_comparison_accepts_same_hardware_within_latency_budget(self):
+        environment = {
+            "model_requested": "qwen2.5-coder:14b",
+            "execution_device_requested": "cpu",
+            "os": "Windows test",
+            "architecture": "AMD64",
+            "cpu": "Test CPU",
+            "cpu_logical_cores": 16,
+            "gpu_devices": ["GPU test, 16 GB"],
+        }
+        scenario = {"name": "tool_choice_execution", "passed": True, "latency_ms": 18000}
+        baseline = {
+            "maximum_scenario_latency_ms": 360000,
+            "latency_regression_factor": 2.0,
+            "latency_regression_slack_ms": 5000,
+            "measured_baselines": {
+                "ollama::qwen2.5-coder:14b@cpu": {
+                    "source_commit": "abc123",
+                    "hardware": eval_runner.hardware_fingerprint(environment, "cpu"),
+                    "scenarios": {"tool_choice_execution": {"passed": True, "latency_ms": 12000}},
+                }
+            },
+        }
+        report = {"environment": environment, "no_go": [], "passed": 1, "total": 1, "scenarios": [scenario]}
+        args = type("Args", (), {"model": "qwen2.5-coder:14b", "device": "cpu", "record_baseline": False})()
+        eval_runner.compare_or_record_baseline(report, baseline, args)
+        self.assertEqual(report["baseline_comparison"]["status"], "matched")
+        self.assertFalse(report["no_go"])
+
+
+if __name__ == "__main__":
+    unittest.main()

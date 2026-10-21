@@ -94,3 +94,30 @@ Le workflow `.github/workflows/ci.yml` définit le job **`evals-mock-ci`** (Ubun
 - Reprise / annulation / pause Studio (**REC-01…REC-09**, PR #168)
 - Politique après interruption de tâche Studio (REC-08)
 - Benchmarks modèle : `spec/dev/quality/bench_ar_protocol.py`, `bench_embedded*.ps1`, GPU CI (`gpu-ci.yml`)
+
+## Profil modèle réel agentique
+
+Le profil `real-agentic-v1` exécute les cinq parcours d'acceptation avec un daemon isolé et un modèle Ollama explicitement choisi. Il est séparé de `mock-ci` : un passage mock ne valide aucun comportement modèle réel.
+
+### Prérequis et commande
+
+- Ollama doit répondre à l'URL configurée et le modèle doit être installé localement.
+- Construire le CLI et le daemon dans la même révision que le script :
+
+```powershell
+cargo build --locked -p akasha-cli -p akasha-daemon
+python spec/dev/quality/real_agentic_eval.py --model qwen2.5-coder:14b --device cpu --record-baseline --output spec/dev/quality/reports/qwen25-coder14b-cpu-baseline.json
+python spec/dev/quality/real_agentic_eval.py --model qwen2.5-coder:14b --device cpu --output spec/dev/quality/reports/qwen25-coder14b-cpu-comparison.json
+```
+
+Pour une mesure NVIDIA, choisir `--device cuda`. Le rapport ne valide ce mode que si Ollama signale une allocation VRAM positive pour le modèle demandé. `--device auto` est réservé au diagnostic et produit un no-go, car le périphérique d'exécution n'est pas vérifiable.
+
+Le script crée un répertoire temporaire pour le home, les données et la base du daemon, retire les clés courantes du processus enfant et supprime ces données à la fin. Il n'utilise donc pas le profil Akasha de l'utilisateur. Les prompts sont limités à des scénarios techniques jetables ; le rapport ne conserve ni réponse brute, ni marqueur de mémoire, ni aperçu d'outil. Le modèle réel peut quand même consommer beaucoup de CPU, de mémoire ou de VRAM ; ne lancer qu'un run à la fois.
+
+### Scénarios et seuils
+
+`spec/dev/quality/evals_agentic_real_baseline.json` contient les cinq scénarios requis, le seuil de latence maximal de 360 secondes par scénario, les cas de no-go et les baselines réelles par modèle/périphérique. `--record-baseline` ne peut ajouter une baseline qu'après un run complet réussi sur un commit propre, et ne remplace jamais une baseline existante. Le run suivant compare les cinq scénarios au même modèle et matériel : chaque parcours doit réussir et rester sous le plafond absolu ou sous 2× sa latence de référence + 5 secondes. Le runner contrôle : choix et réussite de `memory_store`, refus effectif d'une écriture en mode Ask, rappel exact par `memory_search` après redémarrage du daemon, métriques de déclenchement et réussite du fallback, puis création/pause/reprise/exécution exacte/annulation d'une tâche planifiée.
+
+Chaque rapport inclut la révision, l'OS, l'architecture, le matériel GPU détecté, le provider et le modèle observés, les compteurs de tokens, les actions/outils, les latences et les indicateurs de vérification du périphérique. `source_tree_dirty` permet d'écarter un rapport issu d'une copie de travail modifiée. Un rapport ne devient une baseline mesurée d'un modèle qu'après une exécution complète réussie ; le fichier de seuils ne prétend pas être une mesure de qualité.
+
+Le job `evals-mock-ci` vérifie aussi le script et sa politique d'isolation sans appeler de modèle : `python3 spec/dev/quality/test_real_agentic_eval.py`. Exécuter les deux runs réels avant de proposer la fermeture de #143. Archiver leurs JSON et la baseline avec la révision exacte. Les résultats échoués restent des résultats échoués et ne doivent pas être masqués par des mocks ou un fallback implicite.

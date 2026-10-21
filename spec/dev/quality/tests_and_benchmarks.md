@@ -204,6 +204,12 @@ cd apps/akasha-ui && npm run test
 
 En mode watch : `npm run test:watch`.
 
+### 2.9 Évaluations agentiques avec modèle réel
+
+Le runner `spec/dev/quality/real_agentic_eval.py` lance cinq parcours avec Ollama et un daemon isolé : appel d'outil, refus de politique, mémoire après redémarrage, fallback provider et cycle complet d'une tâche planifiée. Son test Python sans modèle (`python3 spec/dev/quality/test_real_agentic_eval.py`) valide l'isolation et la logique de référence ; il est exécuté dans `evals-mock-ci` et ne compte jamais comme preuve de qualité modèle.
+
+Pour mesurer un modèle réel, suivre les deux commandes de bootstrap puis comparaison dans [`spec/runbooks/04_evals.md`](../../runbooks/04_evals.md). Le premier run ne peut enregistrer une baseline que si les cinq scénarios réussissent sur un commit propre ; le second doit comparer les latences et réussir sur le même matériel.
+
 ---
 
 ## 3. Benchmarks
