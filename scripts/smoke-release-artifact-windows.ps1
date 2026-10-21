@@ -175,12 +175,22 @@ browser_enabled: false
         while ([DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Seconds 2
             $task = Invoke-RestMethod -Uri "$base/api/tasks/$taskId" -TimeoutSec 15
-            $task | ConvertTo-Json -Depth 24 | Set-Content -LiteralPath $TaskLog -Encoding utf8
+            $taskEvidence = $task | ConvertTo-Json -Depth 24 | ConvertFrom-Json
+            $thinkOptions = [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+            foreach ($entry in $taskEvidence.progress) {
+                if ($entry.message -is [string]) {
+                    $entry.message = [regex]::Replace($entry.message, "<think>.*?(?:</think>|$)", "", $thinkOptions).Trim()
+                }
+            }
+            if (@($taskEvidence.progress | Where-Object { $_.message -match "<think>" }).Count -gt 0) {
+                throw "refusing to preserve unredacted model reasoning in release diagnostics"
+            }
+            $taskEvidence | ConvertTo-Json -Depth 24 | Set-Content -LiteralPath $TaskLog -Encoding utf8
             if ($task.status -in @("done", "completed")) {
                 break
             }
             if ($task.status -in @("failed", "error")) {
-                throw "model task failed: $($task | ConvertTo-Json -Compress -Depth 12)"
+                throw "model task failed: $($taskEvidence | ConvertTo-Json -Compress -Depth 12)"
             }
         }
         if ($null -eq $task -or $task.status -notin @("done", "completed")) {
