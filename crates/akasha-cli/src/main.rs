@@ -2325,6 +2325,11 @@ fn detect_docker_compose() -> anyhow::Result<(String, Vec<String>)> {
     )
 }
 
+fn compose_file_utf8(path: &Path) -> anyhow::Result<&str> {
+    path.to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid compose path"))
+}
+
 /// Run docker compose in compose_dir. cmd: "up" | "down" | "ps". profiles: e.g. ["ollama", "voice"].
 fn run_docker_compose(
     compose_dir: &Path,
@@ -2443,8 +2448,9 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
             let compose_dir = find_models_compose_dir(compose_dir.as_ref())
                 .ok_or_else(|| anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir."))?;
             let compose_file = compose_dir.join("docker-compose.yml");
+            let cf = compose_file_utf8(&compose_file)?;
             let out = Command::new("docker")
-                .args(["compose", "-f", compose_file.to_str().unwrap(), "ps"])
+                .args(["compose", "-f", cf, "ps"])
                 .current_dir(&compose_dir)
                 .output()?;
             print!("{}", String::from_utf8_lossy(&out.stdout));
@@ -2469,9 +2475,7 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
                 anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
             })?;
             let compose_file = compose_dir.join("docker-compose.yml");
-            let cf = compose_file
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            let cf = compose_file_utf8(&compose_file)?;
             let out = Command::new("docker")
                 .args([
                     "compose",
@@ -2501,9 +2505,7 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
                 anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
             })?;
             let compose_file = compose_dir.join("docker-compose.yml");
-            let cf = compose_file
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            let cf = compose_file_utf8(&compose_file)?;
             let out = Command::new("docker")
                 .args(["compose", "-f", cf, "restart", &service])
                 .current_dir(&compose_dir)
@@ -2523,9 +2525,7 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
                 anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
             })?;
             let compose_file = compose_dir.join("docker-compose.yml");
-            let cf = compose_file
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            let cf = compose_file_utf8(&compose_file)?;
             println!("Compose: {}", compose_dir.display());
             let out = Command::new("docker")
                 .args(["compose", "-f", cf, "ps", "-a"])
@@ -5294,6 +5294,17 @@ mod tests {
         assert!(check.description.contains("10_data_model.yaml"));
 
         std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_file_utf8_rejects_non_utf8_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(OsStr::from_bytes(&[0xff]));
+        let err = compose_file_utf8(path).unwrap_err();
+        assert_eq!(err.to_string(), "invalid compose path");
     }
 
     #[test]
