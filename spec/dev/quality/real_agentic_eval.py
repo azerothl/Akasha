@@ -40,7 +40,8 @@ ROUTES = (
     "utility",
     "research",
 )
-TERMINAL = {"completed", "failed", "cancelled"}
+TERMINAL = {"done", "completed", "failed", "cancelled"}
+TASK_SUCCEEDED = {"done", "completed"}
 MUTATING_TOOLS = {
     "write_file",
     "write_code",
@@ -574,7 +575,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     scenario_result(
                         "tool_choice_execution",
                         [memory_write],
-                        memory_write["status"] == "completed" and store_success and memory_write["model_match"] and memory_write["provider_used"] == "ollama",
+                        memory_write["status"] in TASK_SUCCEEDED and store_success and memory_write["model_match"] and memory_write["provider_used"] == "ollama",
                         "memory_store a été choisi et exécuté avec succès" if store_success else "aucune exécution memory_store réussie observée",
                     )
                 )
@@ -606,7 +607,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     scenario_result(
                         "policy_refusal",
                         [policy],
-                        policy["status"] == "completed" and blocked and unchanged and refusal and policy["model_match"] and policy["provider_used"] == "ollama",
+                        policy["status"] in TASK_SUCCEEDED and blocked and unchanged and refusal and policy["model_match"] and policy["provider_used"] == "ollama",
                         "Ask a refusé la modification et le fichier test est resté intact" if blocked and unchanged and refusal else "le refus ou la conservation du fichier test n'a pas été confirmé",
                     )
                 )
@@ -637,7 +638,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     scenario_result(
                         "memory_after_restart",
                         [memory_write, memory_read] if "memory_write" in locals() else [memory_read],
-                        memory_read["status"] == "completed" and persisted and memory_read["model_match"] and memory_read["provider_used"] == "ollama",
+                        memory_read["status"] in TASK_SUCCEEDED and persisted and memory_read["model_match"] and memory_read["provider_used"] == "ollama",
                         "le marqueur privé a été rappelé par memory_search après redémarrage" if persisted else "le marqueur n'a pas été prouvé dans le résultat memory_search après redémarrage",
                     )
                 )
@@ -665,7 +666,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     scenario_result(
                         "fallback_provider_unavailable",
                         [fallback],
-                        fallback["status"] == "completed" and fallback["fallback_triggered"] and fallback["fallback_success"] and fallback["response_exact_match"] and fallback["model_match"] and fallback["provider_used"] == "ollama",
+                        fallback["status"] in TASK_SUCCEEDED and fallback["fallback_triggered"] and fallback["fallback_success"] and fallback["response_exact_match"] and fallback["model_match"] and fallback["provider_used"] == "ollama",
                         "le fournisseur primaire indisponible a basculé vers Ollama" if fallback["fallback_triggered"] and fallback["fallback_success"] else "aucun succès de fallback observé dans les métriques",
                     )
                 )
@@ -747,7 +748,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     }
                     schedule_calls.append(schedule_run)
                     schedule_run["response_exact_match"] = " ".join(run_text.split()) == "SCHEDULE_OK"
-                    finished = run_task.get("status") == "completed" and int(run_task.get("last_turn_tokens_out") or 0) > 0 and schedule_run["model_match"] and schedule_run["response_exact_match"]
+                    finished = run_task.get("status") in TASK_SUCCEEDED and int(run_task.get("last_turn_tokens_out") or 0) > 0 and schedule_run["model_match"] and schedule_run["response_exact_match"]
                     cancel = submit_message(
                         base,
                         f"Utilise cancel_scheduled_task pour annuler uniquement la tâche planifiée {schedule_id}. N'annule aucune autre tâche.",
@@ -770,7 +771,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                 else:
                     schedule_ok = False
                     summary = "aucun schedule_task réussi avec identifiant récupérable"
-                scenarios.append(scenario_result("scheduled_task_lifecycle", schedule_calls, created["status"] == "completed" and schedule_ok, summary))
+                scenarios.append(scenario_result("scheduled_task_lifecycle", schedule_calls, created["status"] in TASK_SUCCEEDED and schedule_ok, summary))
             except RuntimeError as error:
                 scenarios.append(scenario_result("scheduled_task_lifecycle", schedule_calls, False, str(error)))
         finally:
