@@ -6,18 +6,18 @@ Audit exécuté avec `cargo-audit 0.22.2` et la base RustSec mise à jour le 21 
 
 | Résultat | Nombre | Traitement |
 |---|---:|---|
-| Occurrences vulnérables | 10 | 7 dans la pile TLS Discord, 3 dans `zip` déjà suivis par #205 |
+| Occurrences vulnérables | 3 | Toutes dans `zip`, déjà suivies par #205 |
 | Avis non maintenus | 12 | Classés informatifs selon #219, sans remplacement direct demandé |
 | Avis `unsound` | 0 | Les deux avis `lru` ont disparu avec `lru` 0.18 |
 | Dépendances `yanked` | 0 | Les deux versions précédemment signalées ont disparu après mise à jour du lockfile |
 
-Les changements de cette PR mettent à niveau `reqwest` 0.11 vers 0.12, `async-nats` 0.36 vers 0.50 et `lru` 0.12 vers 0.18. La mise à niveau de `ratatui` 0.28 vers 0.30 retire aussi l'ancienne copie de `lru` retenue par le TUI. Les chaînes `h2` 0.3 et `rustls` 0.21 des anciens clients HTTP ont disparu.
+Les changements de cette PR mettent à niveau `reqwest` 0.11 vers 0.12, `async-nats` 0.36 vers 0.50 et `lru` 0.12 vers 0.18. La mise à niveau de `ratatui` 0.28 vers 0.30 retire aussi l'ancienne copie de `lru` retenue par le TUI. Les chaînes `h2` 0.3 et `rustls` 0.21 des anciens clients HTTP ont disparu. Serenity utilise maintenant son backend TLS natif pris en charge, sans la branche `rustls` 0.22 / `rustls-webpki` 0.102.
 
 ## Avis restant dans le périmètre de #219
 
-Les 7 occurrences restantes sont `rustls` 0.22.4 (2 avis) et `rustls-webpki` 0.102.8 (5 avis), uniquement via `serenity` 0.12.5 → `tokio-tungstenite` 0.21.0. Le graphe de dépendances de cette version Serenity fixe la famille WebSocket 0.21, incompatible avec le correctif rustls 0.23.46. Le registre ne publie pas encore Serenity 0.13 ; la mise à niveau ne peut pas être résolue par un simple update du lockfile.
+La pile WebSocket de Serenity 0.12.5 conservait `rustls` 0.22.4 et `rustls-webpki` 0.102.8, sans mise à niveau simple du lockfile. [La documentation Serenity 0.12.5](https://docs.rs/crate/serenity/0.12.5) décrit aussi le backend `native_tls_backend` : SChannel sous Windows, Secure Transport sous macOS et OpenSSL ailleurs. Ce backend a été choisi pour éliminer la branche vulnérable sans dépendance Git non publiée ni remplacement du client Discord.
 
-Décision appliquée : ne pas remplacer le client Discord par une dépendance Git non publiée ni une autre bibliothèque dans ce lot. Conserver ces avis comme risque explicite et rouvrir l’upgrade lorsque Serenity publiera une version compatible, ou après décision spécifique sur le remplacement du client.
+Le build et les tests multiplateformes de la PR valident la compilation de ce backend. Une connexion à un vrai serveur Discord ne fait pas partie des tests automatisés ; le bot n'est pas activé pendant les tests.
 
 ## Avis suivis ailleurs
 
@@ -28,8 +28,8 @@ Les 12 avis `unmaintained` concernent `anymap2`, `derivative`, `fxhash`, `instan
 ## Vérification
 
 - `cargo check -p akasha-cluster -p akasha-daemon -p akasha-tui` : réussi sur Windows MSVC.
-- `cargo test -p akasha-daemon -p akasha-cluster -p akasha-tui --lib --quiet` : code de sortie 0, 579 tests réussis, 1 ignoré, 0 échec.
-- `cargo audit --file Cargo.lock --json` : 10 occurrences vulnérables, 12 notices non maintenues, aucune notice `unsound` ni dépendance `yanked`.
+- `cargo test -p akasha-daemon -p akasha-cluster -p akasha-tui --lib --quiet` : code de sortie 0, 579 tests réussis, 1 ignoré, 0 échec, après le changement de backend TLS.
+- `cargo audit --file Cargo.lock --json` : 3 occurrences vulnérables liées à `zip`, 12 notices non maintenues, aucune notice `unsound` ni dépendance `yanked`.
 - `git diff --check` : réussi.
 
 La suite GitHub Actions reste la validation finale du SHA de la PR.
