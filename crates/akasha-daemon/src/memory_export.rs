@@ -173,3 +173,25 @@ pub fn import_memory_with_embedder(
     }
     Ok((entries_imported, facts_imported))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_json_contains_memory_content_in_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("memory.db");
+        let marker = "akasha-export-plaintext-audit-marker";
+        let store = LongTermStore::open(&db_path).unwrap();
+        store
+            .insert(marker, &[0; 4], "plaintext_audit_test")
+            .unwrap();
+        drop(store);
+
+        let bundle = export_memory(&db_path).unwrap();
+        let json = serde_json::to_string(&bundle).unwrap();
+        assert!(json.contains(marker));
+        assert!(!json.contains("embedding"));
+    }
+}

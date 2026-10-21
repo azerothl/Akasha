@@ -28,17 +28,20 @@ Lorsque la mémoire court terme (ex. fenêtre des N derniers échanges) devient 
 
 ## Long Terme (cible)
 
-Type: Persistant chiffré  
-Stockage: Base locale sécurisée  
+Type: Persistant ; chiffrement au repos visé mais **non livré**
+
+Stockage actuel: SQLite `memory.db` dans le `data_dir`, **en clair** (contenu et embeddings lisibles sans clé)
 Indexation:
 - Embeddings
 - Tags
 - Entités
 
-Chiffrement:
+Chiffrement cible (non implémenté):
 - AES-256 minimum
 
-## Politique de Stockage (cible)
+`AKASHA_MEMORY_ENCRYPT` est sans effet sur le stockage. Les exports JSON (`GET /api/memory/export`) et copies de sauvegarde ne sont pas chiffrés par Akasha. La section décrit une cible produit et ne constitue pas une garantie de protection actuelle.
+
+## Politique de Stockage (cible, non garantie par un chiffrement applicatif)
 
 **À conserver en long terme :**
 - Informations personnelles importantes
@@ -66,7 +69,7 @@ Pour distinguer ce qui est conservé en long terme de ce qui reste du « bruit �
 |-----------|--------|--------|
 | Court terme structuré | **Oui** | `ShortTermStore` (daemon) : par `session_id`, fenêtre des N derniers tours (user/assistant/system) ; injectée dans le prompt LLM. `session_id` fourni ou généré dans `POST /api/message`, renvoyé dans la réponse ; TUI et Web UI le conservent et le renvoient pour enchaîner la conversation. |
 | Compaction court terme | **Oui** | Si tokens estimés (histoire + message) > 75 % de `AKASHA_MAX_CONTEXT_TOKENS` (défaut 8192), les 50 % plus anciens des tours sont résumés par le LLM et remplacés par un tour système « Résumé de la conversation précédente : … ». **Coût** : un appel LLM (résumé) par compaction. **Plafond** : `MAX_COMPACTIONS_PER_SESSION` (défaut 5) par session ; au-delà, la compaction est refusée (éviter les boucles coûteuses). Si le contexte reste trop long, l’utilisateur peut démarrer une nouvelle session. |
-| Long terme | **Oui** | `LongTermStore` (akasha-store) : SQLite `memory.db` dans le data_dir ; entrées avec `content` + `embedding` (blob f32). **Stockage en clair** sur disque (pas SQLCipher ; `AKASHA_MEMORY_ENCRYPT` sans effet). Recherche par similarité cosinus. **Embeddings** : modèle porté par l’application (crate `akasha-embeddings`, fastembed/ONNX en processus, pas d’application tierce) ; cache du modèle sous `data_dir/embedding_model`. Acteur dédié (thread) pour éviter de passer SQLite entre threads. Promotion automatique des résumés de compaction vers le long terme. Récupération des 5 mémoires les plus pertinentes injectée en préfixe du prompt (« [Mémoire à long terme] »). |
+| Long terme | **Oui** | `LongTermStore` (akasha-store) : SQLite `memory.db` dans le data_dir ; entrées avec `content` + `embedding` (blob f32). **Stockage en clair** sur disque (pas SQLCipher ; `AKASHA_MEMORY_ENCRYPT` sans effet). L’export JSON contient le texte, les faits et les événements ; copies et sauvegardes restent lisibles. Recherche par similarité cosinus. **Embeddings** : modèle porté par l’application (crate `akasha-embeddings`, fastembed/ONNX en processus, pas d’application tierce) ; cache du modèle sous `data_dir/embedding_model`. Acteur dédié (thread) pour éviter de passer SQLite entre threads. Promotion automatique des résumés de compaction vers le long terme. Récupération des 5 mémoires les plus pertinentes injectée en préfixe du prompt (« [Mémoire à long terme] »). |
 | Politique / sélection | Partiel | Promotion automatique des résumés de compaction ; pas encore de critères explicites (importance, récurrence, type d’entité). |
 | Plugin Memory | Stub | Trait `MemoryPlugin` (store/retrieve par clé) dans l’API plugin ; pas d’implémentation ni de branchement dans le flux. |
 | RAG | Oui (spec/runbooks) | RAG pack pour la spec et les runbooks (recherche par mots‑clés), pas pour la mémoire utilisateur. |

@@ -1146,24 +1146,91 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("memory.db");
         let marker = "akasha-plaintext-audit-marker-issue-190";
+        let embedding = embedding_f32_to_bytes(&[0.25, -0.5, 1.0]);
         let store = LongTermStore::open(&db_path).unwrap();
         store
-            .insert(
-                marker,
-                &embedding_f32_to_bytes(&[1.0, 0.0, 0.0]),
-                "plaintext_audit_test",
-            )
+            .insert(marker, &embedding, "plaintext_audit_test")
             .unwrap();
+        drop(store);
 
         let conn = Connection::open(&db_path).unwrap();
-        let content: String = conn
+        let (content, stored_embedding): (String, Vec<u8>) = conn
+            .query_row(
+                "SELECT content, embedding FROM memory_entries WHERE content = ?1",
+                rusqlite::params![marker],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(content, marker);
+        assert_eq!(stored_embedding, embedding);
+        drop(conn);
+
+        let backup_path = dir.path().join("memory-backup.db");
+        std::fs::copy(&db_path, &backup_path).unwrap();
+        let backup = Connection::open(backup_path).unwrap();
+        let backup_content: String = backup
             .query_row(
                 "SELECT content FROM memory_entries WHERE content = ?1",
                 rusqlite::params![marker],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(content, marker);
+        assert_eq!(backup_content, marker);
+    }
+
+    #[test]
+    fn memory_db_remains_plaintext_with_and_without_encryption_flag() {
+        const CHILD: &str = "AKASHA_MEMORY_ENCRYPT_PLAINTEXT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("memory.db");
+            let marker = "akasha-plaintext-with-encryption-flag-marker";
+            let embedding = embedding_f32_to_bytes(&[0.5, -0.25]);
+            let store = LongTermStore::open(&db_path).unwrap();
+            store
+                .insert(marker, &embedding, "plaintext_audit_test")
+                .unwrap();
+            drop(store);
+
+            let conn = Connection::open(db_path).unwrap();
+            let (content, stored_embedding): (String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT content, embedding FROM memory_entries WHERE content = ?1",
+                    rusqlite::params![marker],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(content, marker);
+            assert_eq!(stored_embedding, embedding);
+            return;
+        }
+
+        for flag in [None, Some("1")] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "long_term_memory::tests::memory_db_remains_plaintext_with_and_without_encryption_flag",
+                ])
+                .env(CHILD, "1");
+            if let Some(value) = flag {
+                command.env("AKASHA_MEMORY_ENCRYPT", value);
+            } else {
+                command.env_remove("AKASHA_MEMORY_ENCRYPT");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "child test did not run: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(
+                output.status.success(),
+                "child test failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
