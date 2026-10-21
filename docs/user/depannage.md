@@ -1,6 +1,6 @@
 # Dépannage
 
-## ## 12. Dépannage
+## 12. Dépannage
 
 
 - **Le daemon ne démarre pas** : vérifiez avec `akasha doctor`. Utilisez `akasha doctor --fix` pour créer le data_dir et les fichiers de config manquants.
@@ -14,7 +14,7 @@
 
 ---
 
-## ## 11. Où sont stockés les modèles
+## 11. Où sont stockés les modèles
 
 
 - **Modèles d'embeddings** (mémoire long terme) : dans le data_dir, sous `embedding_model/` (sous-dossiers type `models--<org>--<nom>/`).

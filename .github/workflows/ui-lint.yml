@@ -1,0 +1,37 @@
+name: UI lint
+
+on:
+  pull_request:
+    paths:
+      - "apps/akasha-ui/**"
+      - ".github/workflows/ui-lint.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/akasha-ui/**"
+      - ".github/workflows/ui-lint.yml"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: npm
+          cache-dependency-path: apps/akasha-ui/package-lock.json
+
+      - name: Install UI dependencies
+        working-directory: apps/akasha-ui
+        run: npm ci
+
+      - name: ESLint
+        # Non-blocking while main has lint errors; step still succeeds for required checks.
+        continue-on-error: true
+        working-directory: apps/akasha-ui
+        run: |
+          echo "::add-matcher::${GITHUB_WORKSPACE}/.github/eslint-stylish-problem-matcher.json"
+          npm run lint

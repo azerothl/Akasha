@@ -46,8 +46,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml apps/akasha-ui/package.json apps/akasha-ui/package-lock.json \
-            apps/akasha-ui/src-tauri/Cargo.toml apps/akasha-ui/src-tauri/tauri.conf.json
+          git add Cargo.toml Cargo.lock apps/akasha-ui/package.json apps/akasha-ui/package-lock.json \
+            apps/akasha-ui/src-tauri/Cargo.toml apps/akasha-ui/src-tauri/Cargo.lock apps/akasha-ui/src-tauri/tauri.conf.json
           if git diff --staged --quiet; then
             echo "No changes (version already $VERSION)."
             exit 0

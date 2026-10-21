@@ -631,7 +631,7 @@ fn valid_spec_dir_override(spec_dir_override: Option<&OsStr>) -> Option<PathBuf>
 }
 
 fn doctor_is_source_checkout(cwd: &Path) -> bool {
-    cwd.join("Cargo.toml").exists() || cwd.join(".git").exists() || cwd.join("spec").is_dir()
+    doctor_is_repo_workspace(cwd)
 }
 
 /// Rust monorepo / git tree (not: release dir that only ships `spec/` examples).
@@ -641,6 +641,17 @@ fn doctor_is_repo_workspace(cwd: &Path) -> bool {
 
 fn doctor_uses_source_checkout_checks(cwd: &Path) -> bool {
     doctor_is_source_checkout(cwd)
+}
+
+fn doctor_node_check(node_installed: bool, source_checkout: bool) -> DoctorCheck {
+    if node_installed || source_checkout {
+        DoctorCheck::pass_fail("node", node_installed, "Node.js runtime")
+    } else {
+        DoctorCheck::info(
+            "node",
+            "Node.js runtime not installed (optional outside local build/browser tooling)",
+        )
+    }
 }
 
 const DOCTOR_SPEC_YAML_DEV_MISSING_DESC: &str =
@@ -4759,16 +4770,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool, encrypt_memory: bool) -> anyh
 
     // Check Node
     let node_installed = Command::new("node").arg("--version").output().is_ok();
-    let (node_ok, node_desc) = if node_installed || source_checkout_checks {
-        (node_installed, "Node.js runtime".to_string())
-    } else {
-        (
-            true,
-            "Node.js runtime not installed (optional outside local build/browser tooling)"
-                .to_string(),
-        )
-    };
-    checks.push(DoctorCheck::pass_fail("node", node_ok, node_desc));
+    checks.push(doctor_node_check(node_installed, source_checkout_checks));
 
     // Check daemon binary
     let daemon_ok = find_daemon_binary().is_some();
@@ -5292,6 +5294,35 @@ mod tests {
         assert!(check.description.contains("10_data_model.yaml"));
 
         std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+
+    #[test]
+    fn doctor_source_detection_ignores_release_spec_directory() {
+        let release_dir = make_temp_dir("doctor-release-source-detection");
+        std::fs::create_dir(release_dir.join("spec")).unwrap();
+        assert!(!doctor_uses_source_checkout_checks(&release_dir));
+
+        std::fs::write(release_dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+        assert!(doctor_uses_source_checkout_checks(&release_dir));
+
+        std::fs::remove_dir_all(release_dir).unwrap();
+    }
+
+    #[test]
+    fn doctor_node_is_optional_for_installed_binaries() {
+        let check = doctor_node_check(false, false);
+        assert_eq!(check.id, "node");
+        assert_eq!(check.level, DoctorCheckLevel::Info);
+        assert_eq!(check.status_label(), "INFO");
+        assert!(doctor_checks_all_ok(&[check]));
+    }
+
+    #[test]
+    fn doctor_node_is_required_in_source_workspace() {
+        let check = doctor_node_check(false, true);
+        assert_eq!(check.level, DoctorCheckLevel::PassFail);
+        assert!(!check.ok);
+        assert!(!doctor_checks_all_ok(&[check]));
     }
 
     #[test]

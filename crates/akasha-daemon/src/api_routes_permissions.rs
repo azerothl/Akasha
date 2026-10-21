@@ -135,6 +135,14 @@ if method == "POST"
     if id.is_empty() {
         return Some(json_response("400 Bad Request", r#"{"error":"missing_id"}"#));
     }
+    let Some(item) = crate::permissions_queue::get_request(data_dir,id) else { return Some(json_response("404 Not Found",r#"{"error":"request_not_found"}"#)); };
+    let Some(store) = human_input_store else { return Some(json_response("409 Conflict",r#"{"error":"historical_approval_has_no_live_wait"}"#)); };
+    let Ok(task_id) = Uuid::parse_str(&item.task_id) else { return Some(json_response("409 Conflict",r#"{"error":"invalid_approval_task"}"#)); };
+    // Keep the live wait locked through the durable decision and channel removal.
+    let mut pending_guard = store.write().await;
+    if !pending_guard.get(&task_id).is_some_and(|pending|pending.request_id.as_deref()==Some(id)) {
+        return Some(json_response("409 Conflict",r#"{"error":"stale_approval_request","detail":"Refresh the current question; historical approvals cannot authorize a new wait."}"#));
+    }
     let (note, decision_source) = permission_queue_decision_body(body.as_deref());
     match crate::permissions_queue::update_status(
         data_dir,
@@ -144,16 +152,8 @@ if method == "POST"
         decision_source.or(Some("api".to_string())),
     ) {
         Ok(Some(item)) => {
-            if let (Some(store), Ok(task_id)) =
-                (human_input_store, Uuid::parse_str(&item.task_id))
-            {
-                let pending = {
-                    let mut g = store.write().await;
-                    g.remove(&task_id)
-                };
-                if let Some(pending) = pending {
-                    let _ = pending.response_tx.send("Approuver".to_string());
-                }
+            if let Some(pending) = pending_guard.remove(&task_id) {
+                let _ = pending.response_tx.send("Approuver".to_string());
             }
             return Some(json_response(
                 "200 OK",
@@ -179,6 +179,14 @@ if method == "POST"
     if id.is_empty() {
         return Some(json_response("400 Bad Request", r#"{"error":"missing_id"}"#));
     }
+    let Some(item) = crate::permissions_queue::get_request(data_dir,id) else { return Some(json_response("404 Not Found",r#"{"error":"request_not_found"}"#)); };
+    let Some(store) = human_input_store else { return Some(json_response("409 Conflict",r#"{"error":"historical_approval_has_no_live_wait"}"#)); };
+    let Ok(task_id) = Uuid::parse_str(&item.task_id) else { return Some(json_response("409 Conflict",r#"{"error":"invalid_approval_task"}"#)); };
+    // Keep the live wait locked through the durable decision and channel removal.
+    let mut pending_guard = store.write().await;
+    if !pending_guard.get(&task_id).is_some_and(|pending|pending.request_id.as_deref()==Some(id)) {
+        return Some(json_response("409 Conflict",r#"{"error":"stale_approval_request","detail":"Refresh the current question; historical approvals cannot authorize a new wait."}"#));
+    }
     let (note, decision_source) = permission_queue_decision_body(body.as_deref());
     match crate::permissions_queue::update_status(
         data_dir,
@@ -188,16 +196,8 @@ if method == "POST"
         decision_source.or(Some("api".to_string())),
     ) {
         Ok(Some(item)) => {
-            if let (Some(store), Ok(task_id)) =
-                (human_input_store, Uuid::parse_str(&item.task_id))
-            {
-                let pending = {
-                    let mut g = store.write().await;
-                    g.remove(&task_id)
-                };
-                if let Some(pending) = pending {
-                    let _ = pending.response_tx.send("Refuser".to_string());
-                }
+            if let Some(pending) = pending_guard.remove(&task_id) {
+                let _ = pending.response_tx.send("Refuser".to_string());
             }
             return Some(json_response(
                 "200 OK",
@@ -336,6 +336,34 @@ if method == "DELETE" && path_only.starts_with("/api/permissions/decisions/") {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn historical_queue_decision_cannot_take_a_new_wait_for_the_same_task() {
+        use super::*;
+        use crate::api::{new_human_input_store, PendingHumanInput};
+        let dir=tempfile::tempdir().unwrap();
+        let task=Uuid::new_v4();
+        for id in ["historical","current"] {
+            let item=serde_json::from_value(serde_json::json!({"id":id,"task_id":task,"tool":"write_file","scope":"same","action":"write","description":"test","rationale":"test","urgency":"normal","status":"pending","created_at":"2026-10-18T00:00:00Z","updated_at":"2026-10-18T00:00:00Z"})).unwrap();
+            crate::permissions_queue::upsert_request(dir.path(),item).unwrap();
+        }
+        let waits=new_human_input_store();
+        let (tx,mut rx)=tokio::sync::oneshot::channel();
+        waits.write().await.insert(task,PendingHumanInput {request_id:Some("current".into()),question:"approve".into(),context:String::new(),choices:None,response_tx:tx});
+        for action in ["approve","deny"] {
+            let path=format!("/api/permissions/queue/historical/{action}");
+            let ctx=RouteCtx {data_dir:dir.path(),path:&path,human_input_store:Some(&waits)};
+            let response=try_handle("POST",&path,None,&ctx).await.unwrap();
+            assert!(response.contains("409 Conflict"));
+            assert!(waits.read().await.contains_key(&task));
+            assert!(matches!(rx.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+        }
+        let path="/api/permissions/queue/current/approve";
+        let ctx=RouteCtx {data_dir:dir.path(),path,human_input_store:Some(&waits)};
+        assert!(try_handle("POST",path,None,&ctx).await.unwrap().contains("200 OK"));
+        assert_eq!(rx.await.unwrap(),"Approuver");
+        assert!(!waits.read().await.contains_key(&task));
+    }
+
     #[test]
     fn permissions_paths_smoke() {
         assert!(("/api/permissions/mode", "GET").ok());

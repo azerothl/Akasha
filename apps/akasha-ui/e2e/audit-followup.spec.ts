@@ -224,6 +224,31 @@ for (const resume of [false,true]) {
   });
 }
 
+test('memory graph initializes after its deferred chunk and ref become available', async ({page}) => {
+  test.setTimeout(45_000);
+  await fixture(page,'fr','expert');
+  await page.addInitScript(() => {
+    (window as unknown as {__TAURI_INTERNALS__: unknown}).__TAURI_INTERNALS__ = {
+      invoke: async (command: string) => command === 'get_memory_long_term'
+        ? {entries:[{id:'graph-fixture',content:'Graph fixture node',related:[]}],total:1,long_term_available:true}
+        : command === 'get_memory_short_term' ? {turns:[]} : {},
+      transformCallback: () => 1, unregisterCallback: () => {},
+    };
+  });
+  await page.goto('/');
+  await expect(page.locator('#tab-memory')).toBeVisible();
+  // Delay only chunks requested after the main app has loaded. Memory data is
+  // already available when the graph mounts, so ref arrival must initialize it.
+  await page.route('**/assets/*.js', async route => {
+    await new Promise(resolve => setTimeout(resolve,300));
+    await route.continue();
+  });
+  await page.locator('#tab-memory').click();
+  await page.getByRole('tab',{name:'Long terme',exact:true}).click();
+  await page.getByRole('button',{name:'Vue graphe',exact:true}).click();
+  await expect(page.getByRole('region',{name:'Vue graphe'}).getByText('Graph fixture node',{exact:true})).toBeVisible();
+});
+
 // Rendering fixture only; real-source factual validation is documented separately.
 test('research quoted table retains rows and cost qualifiers', async ({page}) => {
   await fixture(page);

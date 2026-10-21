@@ -18,6 +18,18 @@ pub(crate) struct StudioTool {
     pub parameter_checks_required: bool,
 }
 
+pub(crate) fn executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else { return false; };
+    if !metadata.is_file() { return false; }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    { true }
+}
+
 pub(crate) fn executable_available(program: &str) -> bool {
     let paths = std::env::var_os("PATH").unwrap_or_default();
     let suffixes = if cfg!(windows) {
@@ -28,8 +40,28 @@ pub(crate) fn executable_available(program: &str) -> bool {
     std::env::split_paths(&paths).any(|dir| {
         suffixes
             .iter()
-            .any(|s| dir.join(format!("{program}{s}")).is_file())
+            .any(|s| executable_file(&dir.join(format!("{program}{s}"))))
     })
+}
+
+#[cfg(test)]
+mod executable_file_tests {
+    #[test]
+    fn executable_candidates_require_a_file_and_platform_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!super::executable_file(dir.path()));
+        let file = dir.path().join("candidate");
+        assert!(!super::executable_file(&file));
+        std::fs::write(&file, "fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(!super::executable_file(&file));
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(super::executable_file(&file));
+    }
 }
 
 pub(crate) fn tool(policy: &ToolsPolicy, agent: &str, name: &str) -> Option<StudioTool> {
@@ -58,7 +90,7 @@ fn tool_with_bound(policy: &ToolsPolicy, agent: &str, name: &str, prompt_names: 
             input_schema: descriptor.input_schema,
             announced: allowed && bounded,
             allowed,
-            runnable: allowed && bounded,
+            runnable: allowed,
             requires_user_approval: policy.requires_approval(name),
             rule_sources: vec![
                 format!("mcp_server:{}", descriptor.server),
@@ -107,7 +139,7 @@ fn tool_with_bound(policy: &ToolsPolicy, agent: &str, name: &str, prompt_names: 
     }
     let mut runnable = allowed && row.runnable;
     let mut prerequisites = Vec::new();
-    let required = if name.starts_with("git_") {
+    let required = if name.starts_with("git_") || matches!(name,"github_create_pr"|"github_pr_status") {
         Some("git")
     } else if name == "run_in_container" {
         Some("docker")
@@ -138,6 +170,11 @@ fn tool_with_bound(policy: &ToolsPolicy, agent: &str, name: &str, prompt_names: 
         notes.push("LSP: TypeScript/JavaScript, Rust, Python; server capability checked at invocation".into());
         if name=="lsp_query" && !["rust-analyzer","typescript-language-server","pyright-langserver"].iter().any(|program|policy.can_run_command(program)&&executable_available(program)){runnable=false;notes.push("preflight:no_lsp_server_available_or_allowed".into());}
     }
+    if matches!(name,"git_push"|"github_create_pr"|"github_pr_status") {
+        prerequisites.push("github_cli_authenticated_for_repository".into());
+        if !policy.can_run_command("gh")||!executable_available("gh"){runnable=false;notes.push("preflight:github_cli_unavailable_or_denied".into());}
+    }
+    if name=="git_push"{prerequisites.push("explicit_approval_and_unchanged_local_remote_heads".into());}
     if name == "terminal_session" {
         prerequisites.push("authorized_interactive_executable_and_project_cwd".into());
         if policy.allowed_commands.is_empty() {
@@ -214,7 +251,7 @@ pub(crate) fn prompt(policy: &ToolsPolicy, agent: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ; ");
-    format!("{list}\nStudio tool contract v1: prefer native studio_call or a single TOOL_JSON: {{\"schema_version\":1,\"operation_id\":\"UUID\",\"tool\":\"read_file\",\"arguments\":{{\"path\":\"workspace:/src/main.ts\"}}}} line. Files: path/content/expected_version (SHA-256 from read_file; missing for creation); edit_file also start_line/end_line. Commands: program,args,cwd. MCP: its native argument object. Other tools: argv array. Legacy TOOL remains supported, but existing files must be read before mutation; stale reads are refused. Reuse an operation_id only for the identical completed operation; never replay an unknown result.")
+    format!("{list}\nStudio tool contract v1: prefer native studio_call or a single TOOL_JSON: {{\"schema_version\":1,\"operation_id\":\"UUID\",\"tool\":\"read_file\",\"arguments\":{{\"path\":\"workspace:/src/main.ts\"}}}} line. Files: path/content/expected_version (SHA-256 from read_file; missing for creation); edit_file also start_line/end_line. Commands: program,args,cwd. LSP query, delivery and MCP: their documented JSON argument object. Remaining tools: argv array. Legacy TOOL remains supported, but existing files must be read before mutation; stale reads are refused. Reuse an operation_id only for the identical completed operation; never replay an unknown result.")
 }
 
 pub(crate) fn check(policy: &ToolsPolicy, agent: &str, name: &str) -> Result<(), String> {
@@ -298,6 +335,9 @@ pub(crate) fn preflight(
     {
         return Err((404, "project_not_found".into()));
     }
+    let workspace = crate::studio_project_context::manifest_workspace(data_dir, &pid, scope_task)
+        .map_err(|error| (409, error))?;
+    let policy = &crate::studio_policy::for_workspace(policy, &workspace);
     Ok(serde_json::json!({
         "schema_version":1, "scope":"studio", "project_id":pid, "task_id":scope_task,
         "agent":agent, "preview":scope_task.is_none(),

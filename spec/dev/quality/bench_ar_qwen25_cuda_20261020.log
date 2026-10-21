@@ -1,0 +1,13 @@
+Akasha CUDA inference — 2026-10-20
+commit=1a82a6beefc33474e86f0a10e5fa14e54b5c16a4 source_tree_dirty=false
+daemon_sha256=31278b6c776f6f561a8dc57343414a69426a9942eb3569dfe55b94e4eef1bfcb
+model=qwen2.5-1.5b-instruct-q4 sha256=6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e
+gpu=NVIDIA GeForce RTX 4080 SUPER, 16376 MiB driver=610.88 CUDA=13.3
+engine=llama_cpp/cuda n_gpu_layers=99
+prompt=greet ok=true tokens=18 load_s=1.165705 ttft_s=1.237309 tok_per_s=184.92
+prompt=doctor ok=true tokens=128 load_s=None ttft_s=0.034904 tok_per_s=207.52
+prompt=json ok=true tokens=5 load_s=None ttft_s=0.029188 tok_per_s=146.41
+prompt=fr_explain ok=true tokens=57 load_s=None ttft_s=0.028189 tok_per_s=204.56
+prompt=code_fib ok=true tokens=115 load_s=None ttft_s=0.028581 tok_per_s=217.79
+totals=5/5 gpu_samples=24 vram_mib=2071..12057 gpu_util_peak_pct=60 scope=device-wide
+comparison=not directly comparable to the RTX 3050 Ti baseline; no speedup ratio claimed

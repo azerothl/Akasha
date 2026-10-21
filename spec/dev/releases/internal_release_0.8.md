@@ -1,6 +1,6 @@
 # Notes internes — release 0.8.0 (depuis v0.7.0)
 
-Document à l’usage des **contributeurs** et de l’équipe release. Complète [tests_and_benchmarks.md](tests_and_benchmarks.md), [AGENTS.md](../AGENTS.md) et l’index [README.md](README.md). Le guide utilisateur final reste [user_guide_final.md](user_guide_final.md).
+Document à l’usage des **contributeurs** et de l’équipe release. Complète [tests_and_benchmarks.md](../quality/tests_and_benchmarks.md), [AGENTS.md](../../../AGENTS.md) et l’index [README.md](../README.md). Le guide utilisateur final reste [user_guide_final.md](../../../docs/user_guide_final.md).
 
 ---
 
@@ -19,14 +19,14 @@ Référence git : état du dépôt étiqueté **v0.7.0** → **0.8.0** (`[worksp
   - `POST /api/autonomous-mission/pause` | `resume`.
   - `GET /api/autonomous-mission/events` — historique paginé : query `limit` (défaut 100, max 1000), `since` (RFC3339).
 - **UI** : onglet **Mission** (web / desktop uniquement) : configuration, activité, alignement avec `session_id` pour le mode « sans questions » côté chat.
-- **Spécification utilisateur** : [spec/user_guide.md](../spec/user_guide.md) § interface web ; détail produit à documenter dans une spec dédiée si besoin (événements, schéma YAML).
+- **Spécification utilisateur** : [spec/user_guide.md](../../user_guide.md) § interface web ; détail produit à documenter dans une spec dédiée si besoin (événements, schéma YAML).
 
 ---
 
 ## Graphe projet (workspace graph)
 
 - **Multi-workspaces** : enregistrement nom + racine absolue ; index SQLite scoping par `workspace_id` ; artefacts sous `{data_dir}/workspace_graph/out/<id>/` (`graph.json`, `GRAPH_REPORT.md`, `graph.html`).
-- **API** : préfixe `/api/workspace-graph` — référence canonique [spec/54_workspace_project_knowledge_graph.md](../spec/54_workspace_project_knowledge_graph.md).
+- **API** : préfixe `/api/workspace-graph` — référence canonique [spec/54_workspace_project_knowledge_graph.md](../../54_workspace_project_knowledge_graph.md).
 - **Agents** : injection contextuelle (jusqu’à 5 lignes, recherche sur label/path) dans le profil mémoire enrichi ; outil **`workspace_graph_search`** (≈20 lignes, `--workspace <uuid>` optionnel). Implémentations : `akasha-store`, `akasha-workspace-graph`, `api_workspace_graph.rs`.
 - **UI** : Paramètres → Données → **Graphe projet** : liste, reconstruction, ouverture HTML, suppression ; affichage des résultats de recherche mémoire retravaillé (styles / lisibilité).
 
@@ -72,7 +72,7 @@ Référence git : état du dépôt étiqueté **v0.7.0** → **0.8.0** (`[worksp
 
 ## Release engineering et CI
 
-- **Alignement de version** : workflow GitHub « Sync release version » + script `scripts/sync-release-version.py` ; job `verify-release-version` sur les tags. Secret `VERSION_SYNC_TOKEN` si branche protégée. Décrit dans [AGENTS.md](../AGENTS.md).
+- **Alignement de version** : workflow GitHub « Sync release version » + script `scripts/sync-release-version.py` ; job `verify-release-version` sur les tags. Secret `VERSION_SYNC_TOKEN` si branche protégée. Décrit dans [AGENTS.md](../../../AGENTS.md).
 - **CI** : libération d’espace disque et réduction de la taille des artefacts de debug pour éviter les OOM/OOD sur les runners ; correctifs associés.
 - **UI E2E** : Playwright dans `apps/akasha-ui` (`npm run test:e2e`), serveur custom, timeouts alignés ; génération de captures sous `docs/screenshots/` (voir README AGENTS).
 
@@ -100,4 +100,4 @@ Référence git : état du dépôt étiqueté **v0.7.0** → **0.8.0** (`[worksp
 
 ## Historique 0.7.0 (rappel)
 
-Les nouveautés **0.7.0** (route `orchestrator`, livrables vérifiés, politique de chemins, clamping LLM, correctifs RAG Tauri, etc.) restent décrites dans [spec/user_guide.md](../spec/user_guide.md) § **10** (rappel) ; le guide final utilisateur porte l’équivalent en § **14** (0.8.0 + rappel 0.7.0).
+Les nouveautés **0.7.0** (route `orchestrator`, livrables vérifiés, politique de chemins, clamping LLM, correctifs RAG Tauri, etc.) restent décrites dans [spec/user_guide.md](../../user_guide.md) § **10** (rappel) ; le guide final utilisateur porte l’équivalent en § **14** (0.8.0 + rappel 0.7.0).

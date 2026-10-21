@@ -69,6 +69,8 @@ pub async fn expand_queries(router: &Arc<LLMRouter>, message: &str) -> Vec<Strin
         "Given the user message below, output exactly 3 short search queries (one per line, no numbering) to retrieve relevant memories.\n\nMessage: {message}\n"
     );
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt,
         max_tokens: Some(120),
@@ -121,6 +123,8 @@ pub async fn hyde_document(router: &Arc<LLMRouter>, message: &str) -> Option<Str
         "Write a short factual paragraph (2–4 sentences) that would answer or contextualize this user message as if it were stored memory. No preamble.\n\nMessage: {message}"
     );
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt,
         max_tokens: Some(200),

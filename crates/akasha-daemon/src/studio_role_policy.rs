@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 
 pub(crate) fn restricted_role(role: &str) -> bool {
-    role.eq_ignore_ascii_case("studio_planner") || role.eq_ignore_ascii_case("studio_reviewer")
+    role.eq_ignore_ascii_case("studio_planner") || role.eq_ignore_ascii_case("studio_reviewer") || role.eq_ignore_ascii_case("studio_auditor")
 }
 
 pub(crate) fn allows_tool(role: &str, tool: &str) -> bool {

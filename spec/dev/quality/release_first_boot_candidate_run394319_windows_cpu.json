@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "run_id": 39431939285,
+  "run_url": "https://github.com/azerothl/Akasha/actions/runs/39431939285",
+  "commit": "705d6981f9be844dd5cb848d2c26e4d0edc4cc8a",
+  "release_published": false,
+  "candidate": {
+    "artifact": "akasha-windows-x86_64",
+    "version": "0.11.0",
+    "target": "x86_64-pc-windows-msvc"
+  },
+  "environment": {
+    "os": "Windows 11 Professionnel Insider Preview",
+    "os_version": "10.0.26220",
+    "architecture": "x86_64"
+  },
+  "checks": {
+    "init_defaults": "success",
+    "daemon_ready_seconds": 0.8,
+    "doctor_default_configuration_exit_code": 0,
+    "default_provider_discovered": "ollama/tinyllama",
+    "doctor_embedded_configuration_exit_code": 0,
+    "embedded_configuration_files_copied_from_successful_init": [
+      "connectors.env",
+      "agent_profile.json",
+      "tools_policy.yaml"
+    ]
+  },
+  "embedded_model": {
+    "available": true,
+    "loaded": true,
+    "provider": "akasha_core",
+    "model_id": "core",
+    "backend": "candle",
+    "device": "cpu"
+  },
+  "first_message": {
+    "task_id": "cd207f66-27cb-47c2-8527-d12e20ad3654",
+    "task_status": "completed",
+    "assigned_agent": "technical_writer",
+    "last_turn_model_used": "core",
+    "last_turn_latency_ms": 30252,
+    "task_elapsed_seconds": 40.1,
+    "last_turn_tokens_out": 0,
+    "expected_reply": "OK",
+    "visible_final_text": "Réponds.",
+    "validated_reply": false
+  },
+  "result": "failed_first_boot_validation",
+  "notes": [
+    "The default init discovered a local Ollama tinyllama provider; its task did not expose a valid user-facing answer and is not counted as a successful response.",
+    "The embedded Candle CPU path was explicitly selected and reported loaded, but its completed task returned zero output tokens and an invalid visible final text.",
+    "The first doctor run for the forced embedded configuration used an incomplete copied data directory; after the remaining configuration files were copied from the successful default initialization, doctor passed."
+  ]
+}

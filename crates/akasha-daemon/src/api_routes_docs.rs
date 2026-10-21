@@ -83,9 +83,6 @@ if method == "GET" && path_only.starts_with("/api/docs") {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::path::Path;
-
     #[test]
     fn docs_paths_smoke() {
         assert!(("/", "GET").is_ok_for_docs());

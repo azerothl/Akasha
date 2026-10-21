@@ -39,6 +39,23 @@ pub enum EmbeddedLlmError {
     Config(String),
 }
 
+/// Token and timing measurements available from the embedded inference backend.
+#[derive(Debug, Clone, Default)]
+pub struct EmbeddedInferenceMetrics {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub ttft_ns: Option<u64>,
+    pub load_duration_ns: Option<u64>,
+    pub generation_duration_ns: Option<u64>,
+    pub total_duration_ns: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddedCompletion {
+    pub text: String,
+    pub metrics: EmbeddedInferenceMetrics,
+}
+
 /// Public status snapshot for `/api/router/embedded-status`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EmbeddedStatus {
@@ -107,23 +124,51 @@ impl EmbeddedLlm {
     /// Complete using an optional router model id (compare / explicit route model field).
     pub fn complete_for_router_model(
         &self,
-        router_model: Option<&str>,
+        _router_model: Option<&str>,
         prompt: &str,
         max_tokens: Option<usize>,
         temperature: Option<f64>,
     ) -> Result<String> {
+        Ok(self
+            .complete_for_router_model_with_metrics(router_model, prompt, max_tokens, temperature)?
+            .text)
+    }
+
+    /// Complete with token and timing measurements where the selected backend exposes them.
+    pub fn complete_for_router_model_with_metrics(
+        &self,
+        router_model: Option<&str>,
+        prompt: &str,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+    ) -> Result<EmbeddedCompletion> {
+        let started = std::time::Instant::now();
         let _guard = acquire_inference_lock()?;
+        #[cfg(not(feature = "llama-cpp"))]
+        let _ = router_model;
         #[cfg(feature = "llama-cpp")]
         if config::llama_cpp_compiled() {
-            let path = router_model
+            let path = _router_model
                 .and_then(|m| config::resolve_gguf_path_for_router_model(m))
                 .or_else(config::resolve_gguf_path);
             if let Some(path) = path {
-                return llama_cpp_backend::complete(&path, prompt, max_tokens, temperature);
+                return llama_cpp_backend::complete_with_metrics(
+                    &path,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                );
             }
         }
         let backend = resolve_backend()?;
-        dispatch_complete(&backend, prompt, max_tokens, temperature)
+        let text = dispatch_complete(&backend, prompt, max_tokens, temperature)?;
+        Ok(EmbeddedCompletion {
+            text,
+            metrics: EmbeddedInferenceMetrics {
+                total_duration_ns: Some(started.elapsed().as_nanos() as u64),
+                ..EmbeddedInferenceMetrics::default()
+            },
+        })
     }
 
     pub fn complete_stream<F>(
@@ -136,9 +181,52 @@ impl EmbeddedLlm {
     where
         F: FnMut(&str),
     {
+        Ok(self
+            .complete_stream_with_metrics(None, prompt, max_tokens, temperature, on_chunk)?
+            .text)
+    }
+
+    /// Stream a completion while retaining the same token and timing measurements as the
+    /// non-streaming path.
+    pub fn complete_stream_with_metrics<F>(
+        &self,
+        router_model: Option<&str>,
+        prompt: &str,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+        on_chunk: F,
+    ) -> Result<EmbeddedCompletion>
+    where
+        F: FnMut(&str),
+    {
+        let started = std::time::Instant::now();
         let _guard = acquire_inference_lock()?;
+        #[cfg(not(feature = "llama-cpp"))]
+        let _ = router_model;
+        #[cfg(feature = "llama-cpp")]
+        if config::llama_cpp_compiled() {
+            let path = router_model
+                .and_then(|m| config::resolve_gguf_path_for_router_model(m))
+                .or_else(config::resolve_gguf_path);
+            if let Some(path) = path {
+                return llama_cpp_backend::complete_stream_with_metrics(
+                    &path,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    on_chunk,
+                );
+            }
+        }
         let backend = resolve_backend()?;
-        dispatch_complete_stream(&backend, prompt, max_tokens, temperature, on_chunk)
+        let text = dispatch_complete_stream(&backend, prompt, max_tokens, temperature, on_chunk)?;
+        Ok(EmbeddedCompletion {
+            text,
+            metrics: EmbeddedInferenceMetrics {
+                total_duration_ns: Some(started.elapsed().as_nanos() as u64),
+                ..EmbeddedInferenceMetrics::default()
+            },
+        })
     }
 
     pub fn is_available() -> bool {
@@ -210,7 +298,9 @@ impl EmbeddedLlm {
     pub fn device_hint() -> Option<String> {
         match active_resolved_backend()? {
             #[cfg(feature = "llama-cpp")]
-            config::ResolvedBackend::LlamaCpp(_) => Some(llama_cpp_backend::device_hint().to_string()),
+            config::ResolvedBackend::LlamaCpp(_) => {
+                Some(llama_cpp_backend::device_hint().to_string())
+            }
             #[cfg(feature = "candle")]
             config::ResolvedBackend::Candle => Some(candle_backend::device_hint().to_string()),
             #[cfg(feature = "baguettotron")]
@@ -323,8 +413,7 @@ fn resolve_backend() -> Result<config::ResolvedBackend> {
             return Ok(b.clone());
         }
     }
-    let resolved = config::resolve_backend_choice()
-        .map_err(EmbeddedLlmError::Config)?;
+    let resolved = config::resolve_backend_choice().map_err(EmbeddedLlmError::Config)?;
     if let Ok(mut g) = RESOLVED_BACKEND.write() {
         *g = Some(resolved.clone());
     }
@@ -347,7 +436,9 @@ fn dispatch_complete(
             llama_cpp_backend::complete(path, prompt, max_tokens, temperature)
         }
         #[cfg(feature = "candle")]
-        config::ResolvedBackend::Candle => candle_backend::complete(prompt, max_tokens, temperature),
+        config::ResolvedBackend::Candle => {
+            candle_backend::complete(prompt, max_tokens, temperature)
+        }
         #[cfg(feature = "baguettotron")]
         config::ResolvedBackend::Baguettotron => {
             baguettotron::complete(prompt, max_tokens, temperature)
