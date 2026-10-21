@@ -2295,7 +2295,17 @@ pub(crate) async fn execute_tool_call_impl(
                                 let preview = if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
                                 (true, format!("[pdf {}] extracted {} chars:\n{}", disk_path.display(), text.len(), preview), None)
                             }
-                            Err(e) => (false, format!("[pdf] extraction failed: {}", e), None),
+                            Err(failure) => (
+                                false,
+                                format!(
+                                    "[pdf] {}",
+                                    crate::pdf_extract_safe::pdf_extract_user_message(
+                                        failure,
+                                        crate::pdf_extract_safe::daemon_locale_is_en(),
+                                    )
+                                ),
+                                None,
+                            ),
                         },
                         Err(e) => (false, format!("[pdf] read failed: {} (ensure file exists at {})", e, disk_path.display()), None),
                     }
@@ -2311,7 +2321,17 @@ pub(crate) async fn execute_tool_call_impl(
                                 let preview = if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
                                 (true, format!("[pdf {}] extracted {} chars:\n{}", path.display(), text.len(), preview), None)
                             }
-                            Err(e) => (false, format!("[pdf] extraction failed: {}", e), None),
+                            Err(failure) => (
+                                false,
+                                format!(
+                                    "[pdf] {}",
+                                    crate::pdf_extract_safe::pdf_extract_user_message(
+                                        failure,
+                                        crate::pdf_extract_safe::daemon_locale_is_en(),
+                                    )
+                                ),
+                                None,
+                            ),
                         },
                         Err(e) => (false, format!("[pdf] read failed: {}", e), None),
                     }
