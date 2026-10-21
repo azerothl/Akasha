@@ -1,8 +1,8 @@
 {
   "meta": {
     "product": "Akasha",
-    "version": "0.11.1",
-    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, MCP stdio, Companion LAN pairing, GET /api/capabilities evidence flags, and Tauri/TUI clients (v0.11.1).",
+    "version": "0.12.0",
+    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, MCP stdio, Companion LAN pairing, GET /api/capabilities evidence flags, and Tauri/TUI clients (v0.12.0).",
     "defaultPort": 3876,
     "dataDir": "~/akasha (or AKASHA_DATA_DIR)",
     "sources": [
