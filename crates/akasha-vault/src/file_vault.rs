@@ -64,22 +64,17 @@ impl FileVault {
         String::from_utf8(plain).ok()
     }
 
-    fn load(&self) -> VaultData {
-        let Ok(buf) = fs::read(&self.path) else {
-            return VaultData {
+    fn load(&self) -> Result<VaultData, crate::backend::VaultError> {
+        if !self.path.exists() {
+            return Ok(VaultData {
                 entries: HashMap::new(),
-            };
-        };
-        let b64 = String::from_utf8_lossy(&buf);
-        let entries: HashMap<String, String> = match serde_json::from_str(&b64) {
-            Ok(VaultData { entries }) => entries,
-            Err(_) => {
-                return VaultData {
-                    entries: HashMap::new(),
-                };
-            }
-        };
-        VaultData { entries }
+            });
+        }
+        let buf = fs::read(&self.path).map_err(|e| crate::backend::VaultError::Any(e.into()))?;
+        let json = String::from_utf8(buf).map_err(|_| crate::backend::VaultError::Corrupted)?;
+        let data: VaultData =
+            serde_json::from_str(&json).map_err(|_| crate::backend::VaultError::Corrupted)?;
+        Ok(data)
     }
 
     fn save(&self, data: &VaultData) -> Result<(), crate::backend::VaultError> {
@@ -95,7 +90,7 @@ impl FileVault {
 
 impl crate::backend::Vault for FileVault {
     fn get(&self, key: &str) -> Result<String, crate::backend::VaultError> {
-        let data = self.load();
+        let data = self.load()?;
         let b64 = data
             .entries
             .get(key)
@@ -109,20 +104,20 @@ impl crate::backend::Vault for FileVault {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), crate::backend::VaultError> {
-        let mut data = self.load();
+        let mut data = self.load()?;
         let enc = Self::encrypt(value);
         data.entries.insert(key.to_string(), BASE64.encode(&enc));
         self.save(&data)
     }
 
     fn delete(&self, key: &str) -> Result<(), crate::backend::VaultError> {
-        let mut data = self.load();
+        let mut data = self.load()?;
         data.entries.remove(key);
         self.save(&data)
     }
 
     fn list_keys(&self) -> Result<Vec<String>, crate::backend::VaultError> {
-        let data = self.load();
+        let data = self.load()?;
         Ok(data.entries.keys().cloned().collect())
     }
 }
@@ -272,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupted_json_loads_as_empty_vault_missing_key_not_found() {
+    fn corrupted_json_returns_corruption_error_on_get() {
         let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
@@ -280,11 +275,10 @@ mod tests {
         std::fs::write(&path, b"{not json").expect("write");
         let vault = FileVault::new(path);
         let err = vault.get("any").unwrap_err();
-        assert!(matches!(err, VaultError::NotFound(_)));
+        assert!(matches!(err, VaultError::Corrupted));
     }
 
     #[test]
-    #[ignore = "bug: invalid vault.enc JSON is treated as an empty vault instead of a corruption error"]
     fn corrupted_json_should_return_explicit_error() {
         let _master_key_env = master_key_guard();
         clear_master_key();
@@ -293,11 +287,21 @@ mod tests {
         std::fs::write(&path, b"{not json").expect("write");
         let vault = FileVault::new(path);
         let err = vault.get("any").unwrap_err();
-        assert!(
-            !matches!(err, VaultError::NotFound(_)),
-            "expected corruption error, got {:?}",
-            err
-        );
+        assert!(matches!(err, VaultError::Corrupted));
+    }
+
+    #[test]
+    fn corrupted_json_set_returns_error_and_preserves_file_bytes() {
+        let _master_key_env = master_key_guard();
+        clear_master_key();
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("vault.enc");
+        let original = b"{not json";
+        std::fs::write(&path, original).expect("write");
+        let vault = FileVault::new(path.clone());
+        let err = vault.set("new_key", "new_value").unwrap_err();
+        assert!(matches!(err, VaultError::Corrupted));
+        assert_eq!(std::fs::read(&path).expect("read"), original);
     }
 
     #[test]
