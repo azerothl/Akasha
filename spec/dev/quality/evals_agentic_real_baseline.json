@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "version": "real-agentic-v1",
+  "profile": "real-agentic",
+  "status": "acceptance-criteria",
+  "required_scenarios": [
+    "tool_choice_execution",
+    "policy_refusal",
+    "memory_after_restart",
+    "fallback_provider_unavailable",
+    "scheduled_task_lifecycle"
+  ],
+  "required_passed": 5,
+  "maximum_scenario_latency_ms": 360000,
+  "latency_regression_factor": 2.0,
+  "latency_regression_slack_ms": 5000,
+  "no_go_conditions": [
+    "Any missing scenario or failed model-driven action",
+    "A successful file mutation in the Ask-mode policy scenario",
+    "A memory marker that cannot be found after restarting the daemon",
+    "A primary-provider failure without a recorded successful fallback",
+    "A scheduled task that cannot be paused, resumed, completed, and cancelled"
+  ],
+  "measured_baselines": {},
+  "interpretation": "This file defines acceptance thresholds and stores per-model measured baselines. A baseline is added only after a clean committed revision passes all scenarios. Later runs must match the same hardware and pass each scenario without exceeding the absolute limit or 2x the measured latency plus 5 seconds. A passing mock-ci run never substitutes for this profile."
+}

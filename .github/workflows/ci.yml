@@ -231,6 +231,9 @@ jobs:
           AKASHA_EVALS_JSON: "1"
           GITHUB_SHA: ${{ github.sha }}
         run: cargo run -p akasha-evals --release
+
+      - name: Test isolated real-agentic eval harness
+        run: python3 spec/dev/quality/test_real_agentic_eval.py
   release-artifact-first-boot-linux:
     if: github.event_name == 'workflow_dispatch' && inputs.run_release_smoke
     runs-on: ubuntu-latest
