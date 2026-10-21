@@ -2143,7 +2143,6 @@ function App() {
   const [schedulePromptSaving, setSchedulePromptSaving] = useState(false);
     const [calendarSchedulesSelectedForDelete, setCalendarSchedulesSelectedForDelete] = useState<Set<string>>(new Set());
     const [scheduleDeleting, setScheduleDeleting] = useState(false);
-    const [_calendarRunsCollapsed, _setCalendarRunsCollapsed] = useState(false);
   type CalendarGridView = "day" | "week" | "month";
   const [calendarGridView, setCalendarGridView] = useState<CalendarGridView>("week");
   type CalendarGridEvent = { at: string; task_id?: string; type: string; status: string; label?: string; schedule_id?: string | null; event_id?: string };
@@ -2183,13 +2182,11 @@ function App() {
     let completed = 0;
     let running = 0;
     let failed = 0;
-    let upcoming = 0;
     for (const ev of events) {
       const s = (ev.status ?? "").toLowerCase();
       if (s === "completed") completed++;
       else if (s === "running") running++;
       else if (s === "failed" || s === "cancelled") failed++;
-      else upcoming++;
     }
     const total = events.length;
     if (running > 0) return "calendar-cell-view-all--running";
@@ -6380,7 +6377,7 @@ function App() {
                             navigator.mediaDevices.getUserMedia({ video: true }),
                             new Promise<never>((_, rej) => setTimeout(() => rej(new Error("getUserMedia 15s timeout")), GETUSERMEDIA_TIMEOUT_MS)),
                           ]);
-                        } catch (e) {
+                        } catch {
                           await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
                           return;
                         }
@@ -6412,7 +6409,7 @@ function App() {
                             if (!res.ok) {
                               await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
                             }
-                          } catch (e) {
+                          } catch {
                             await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
                           }
                         } finally {
@@ -6457,7 +6454,7 @@ function App() {
                         runAllow(),
                         new Promise<never>((_, rej) => setTimeout(() => rej(new Error("allow_timeout_90s")), ALLOW_TIMEOUT_MS)),
                       ]);
-                    } catch (e) {
+                    } catch {
                       await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
                     }
                   }}
@@ -10052,7 +10049,7 @@ function App() {
                   {userAvatar ? <img src={userAvatar} alt="" className="settings-avatar-preview" /> : null}
                   <div>
                     <button type="button" className="btn-secondary" onClick={() => userAvatarFileInputRef.current?.click()}>{t("settings.user_avatar_choose")}</button>
-                    {userAvatar ? <button type="button" className="btn-secondary" onClick={() => { setUserAvatar(""); try { localStorage.removeItem("akasha_user_avatar"); } catch {} }}>{t("settings.user_avatar_remove")}</button> : null}
+                    {userAvatar ? <button type="button" className="btn-secondary" onClick={() => { setUserAvatar(""); try { localStorage.removeItem("akasha_user_avatar"); } catch { /* Storage may be unavailable in restricted browser contexts. */ } }}>{t("settings.user_avatar_remove")}</button> : null}
                   </div>
                 </div>
               </dd>
