@@ -12,7 +12,7 @@
 #   AKASHA_REPO     GitHub repo (default: azerothl/Akasha)
 #   RELEASE_TAG     Release tag to download (default: v0.11.0)
 #   ARTIFACT_NAME   Zip name (default: akasha-linux-x86_64.zip)
-#   EXPECTED_VERSION Optional package version check (accepts 0.11.1 or v0.11.1)
+#   EXPECTED_VERSION Optional package version check (accepts 0.12.0 or v0.12.0)
 #   INFERENCE_TIMEOUT_SECS  Max wait for first embedded reply (default: 240)
 set -euo pipefail
 

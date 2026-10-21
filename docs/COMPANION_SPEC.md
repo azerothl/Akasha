@@ -67,7 +67,7 @@ Constantes code : `DISCOVER_PORT = 3877`, `DISCOVER_MAGIC = "AKASHA_DISCOVER"`.
 {
   "service": "akasha",
   "port": 3876,
-  "version": "0.11.1"
+  "version": "0.12.0"
 }
 ```
 
