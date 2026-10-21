@@ -194,11 +194,12 @@ smoke_desktop_ui() {
         log_file="$2"
         find_akasha_window() {
           while IFS= read -r window; do
-            local title class
+            local title class window_pid
             title="$(xdotool getwindowname "$window" 2>/dev/null || true)"
             class="$(xdotool getwindowclassname "$window" 2>/dev/null || true)"
-            if [[ "${title,,} ${class,,}" == *akasha* ]]; then
-              printf "%s|%s|%s\n" "$window" "$title" "$class"
+            window_pid="$(xdotool getwindowpid "$window" 2>/dev/null || true)"
+            if [[ "${title,,} ${class,,}" == *akasha* || "$window_pid" == "${pid:-}" ]]; then
+              printf "%s|%s|%s|%s\n" "$window" "$window_pid" "$title" "$class"
               return 0
             fi
           done < <(xdotool search --onlyvisible --name ".*" 2>/dev/null || true)
@@ -206,12 +207,20 @@ smoke_desktop_ui() {
         }
         list_visible_windows() {
           while IFS= read -r window; do
-            printf "window=%s pid=%s title=%q class=%q\n" \
+            printf "window=%s pid=%s geometry=%q title=%q class=%q\n" \
               "$window" \
               "$(xdotool getwindowpid "$window" 2>/dev/null || echo unknown)" \
+              "$(xdotool getwindowgeometry --shell "$window" 2>/dev/null | tr "\\n" " " || true)" \
               "$(xdotool getwindowname "$window" 2>/dev/null || true)" \
               "$(xdotool getwindowclassname "$window" 2>/dev/null || true)"
+            if command -v xprop >/dev/null 2>&1; then
+              xprop -id "$window" WM_NAME _NET_WM_NAME WM_CLASS _NET_WM_PID 2>/dev/null || true
+            fi
           done < <(xdotool search --onlyvisible --name ".*" 2>/dev/null || true)
+          if command -v xwininfo >/dev/null 2>&1; then
+            xwininfo -root -tree 2>&1 || true
+          fi
+          ps -eo pid,ppid,stat,cmd | grep -E "[a]kasha-ui|[A]ppRun" || true
         }
         cd "$(dirname "$app")"
         ./AppRun >"$log_file" 2>&1 &

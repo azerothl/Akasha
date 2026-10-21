@@ -451,7 +451,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-0 libayatana-appindicator3-1 xvfb xdotool
+          sudo apt-get install -y libwebkit2gtk-4.1-0 libayatana-appindicator3-1 xvfb xdotool x11-utils
 
       - name: Validate Linux / macOS archive first boot and response
         if: runner.os != 'Windows'
