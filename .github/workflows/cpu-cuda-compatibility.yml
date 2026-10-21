@@ -1,0 +1,39 @@
+name: CPU-CUDA compatibility audit
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing release to inspect (no rebuild or publication)
+        type: string
+        default: v0.11.0
+  pull_request:
+    paths:
+      - ".github/workflows/cpu-cuda-compatibility.yml"
+      - "scripts/ci/audit_cuda_portability.py"
+      - "scripts/ci/pe_imports.py"
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download published CUDA archive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.version || 'v0.11.0' }}
+        run: |
+          gh release download "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" --pattern "akasha-windows-x86_64-cuda.zip" --dir audit-download
+          if ($LASTEXITCODE -ne 0) { throw "Release archive download failed" }
+          Expand-Archive -LiteralPath audit-download/akasha-windows-x86_64-cuda.zip -DestinationPath audit-staging
+      - name: Record loader compatibility (does not assert successful inference)
+        run: python scripts/ci/audit_cuda_portability.py audit-staging --try-start
+      - name: Upload compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: cpu-cuda-portability
+          path: cpu-cuda-portability.json
+          if-no-files-found: error
+          retention-days: 14

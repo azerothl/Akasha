@@ -44,7 +44,7 @@ Consolidated tracking after implementation pass aligned with the closure plan.
 | toolcall_delta | Production | S-EVT-01 — `api.rs` SSE emission |
 | Fork tree v2 | Spec + Reporter UI | `SESSION_FORK_SPEC.md` v2 ; arbre `/tree` Reporter |
 | Steering polish | Done | Alt+Enter follow-up in Tauri (see App.tsx) |
-| A4 encryption | Reporter | S-MEM-05 — `AKASHA_MEMORY_ENCRYPT` + doctor ; SQLCipher spike deferred |
+| A4 encryption | Reporter | S-MEM-05 — `memory.db` en clair ; doctor honnête ; SQLCipher spike deferred |
 
 ## Vague 10 — Veille traitée
 

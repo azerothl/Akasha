@@ -6,6 +6,7 @@ use crate::{EmbeddedLlmError, Result};
 use once_cell::sync::{Lazy, OnceCell};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
+use std::time::Instant;
 
 const DEFAULT_N_CTX: u32 = 4096;
 
@@ -67,7 +68,7 @@ pub fn unload() {
 }
 
 pub fn preload(gguf_path: &Path) -> Result<()> {
-    with_lock(|| get_or_load(gguf_path))
+    with_lock(|| get_or_load(gguf_path).map(|_| ()))
 }
 
 pub fn complete(
@@ -76,6 +77,15 @@ pub fn complete(
     max_tokens: Option<usize>,
     temperature: Option<f64>,
 ) -> Result<String> {
+    Ok(complete_with_metrics(gguf_path, prompt, max_tokens, temperature)?.text)
+}
+
+pub fn complete_with_metrics(
+    gguf_path: &Path,
+    prompt: &str,
+    max_tokens: Option<usize>,
+    temperature: Option<f64>,
+) -> Result<crate::EmbeddedCompletion> {
     with_lock(|| run_generation(gguf_path, prompt, max_tokens, temperature, |_| {}))
 }
 
@@ -84,12 +94,25 @@ pub fn complete_stream<F>(
     prompt: &str,
     max_tokens: Option<usize>,
     temperature: Option<f64>,
-    mut on_chunk: F,
+    on_chunk: F,
 ) -> Result<String>
 where
     F: FnMut(&str),
 {
-    with_lock(|| run_generation(gguf_path, prompt, max_tokens, temperature, |s| on_chunk(s)))
+    Ok(complete_stream_with_metrics(gguf_path, prompt, max_tokens, temperature, on_chunk)?.text)
+}
+
+pub fn complete_stream_with_metrics<F>(
+    gguf_path: &Path,
+    prompt: &str,
+    max_tokens: Option<usize>,
+    temperature: Option<f64>,
+    on_chunk: F,
+) -> Result<crate::EmbeddedCompletion>
+where
+    F: FnMut(&str),
+{
+    with_lock(|| run_generation(gguf_path, prompt, max_tokens, temperature, on_chunk))
 }
 
 fn with_lock<R, F: FnOnce() -> Result<R>>(f: F) -> Result<R> {
@@ -108,7 +131,8 @@ fn llama_backend() -> Result<&'static llama_cpp_4::llama_backend::LlamaBackend> 
         .map_err(|e| EmbeddedLlmError::Load(e.to_string()))
 }
 
-fn get_or_load(gguf_path: &Path) -> Result<()> {
+fn get_or_load(gguf_path: &Path) -> Result<Option<u64>> {
+    let load_started = Instant::now();
     let ngl = n_gpu_layers();
     {
         let g = PIPELINE
@@ -116,7 +140,7 @@ fn get_or_load(gguf_path: &Path) -> Result<()> {
             .map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
         let loaded_ngl = LOADED_N_GPU_LAYERS.read().ok().and_then(|n| *n);
         if g.is_some() && loaded_ngl == Some(ngl) {
-            return Ok(());
+            return Ok(None);
         }
     }
     if let Ok(mut g) = PIPELINE.write() {
@@ -126,7 +150,7 @@ fn get_or_load(gguf_path: &Path) -> Result<()> {
         .write()
         .map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
     if g.is_some() {
-        return Ok(());
+        return Ok(None);
     }
     let backend = llama_backend()?;
     #[cfg(feature = "llama-cpp-cuda")]
@@ -135,7 +159,9 @@ fn get_or_load(gguf_path: &Path) -> Result<()> {
     #[cfg(not(feature = "llama-cpp-cuda"))]
     let model_params = llama_cpp_4::model::params::LlamaModelParams::default();
     let model = llama_cpp_4::model::LlamaModel::load_from_file(backend, gguf_path, &model_params)
-        .map_err(|e| EmbeddedLlmError::Load(format!("load GGUF {}: {e}", gguf_path.display())))?;
+        .map_err(|e| {
+        EmbeddedLlmError::Load(format!("load GGUF {}: {e}", gguf_path.display()))
+    })?;
     *g = Some(LlamaCppPipeline { model });
     if let Ok(mut p) = MODEL_PATH.write() {
         *p = Some(gguf_path.to_path_buf());
@@ -143,7 +169,7 @@ fn get_or_load(gguf_path: &Path) -> Result<()> {
     if let Ok(mut n) = LOADED_N_GPU_LAYERS.write() {
         *n = Some(ngl);
     }
-    Ok(())
+    Ok(Some(load_started.elapsed().as_nanos() as u64))
 }
 
 fn run_generation<F>(
@@ -152,17 +178,19 @@ fn run_generation<F>(
     max_tokens: Option<usize>,
     temperature: Option<f64>,
     mut on_piece: F,
-) -> Result<String>
+) -> Result<crate::EmbeddedCompletion>
 where
     F: FnMut(&str),
 {
     use llama_cpp_4::context::params::LlamaContextParams;
     use llama_cpp_4::llama_batch::LlamaBatch;
     use llama_cpp_4::model::AddBos;
+    use llama_cpp_4::model::LlamaChatMessage;
     use llama_cpp_4::model::Special;
     use llama_cpp_4::sampling::LlamaSampler;
 
-    get_or_load(gguf_path)?;
+    let request_started = Instant::now();
+    let load_duration_ns = get_or_load(gguf_path)?;
 
     let pipeline_guard = PIPELINE
         .read()
@@ -172,8 +200,7 @@ where
         .ok_or_else(|| EmbeddedLlmError::Load("llama pipeline not loaded".into()))?;
 
     let backend = llama_backend()?;
-    let n_ctx = std::num::NonZeroU32::new(DEFAULT_N_CTX)
-        .expect("DEFAULT_N_CTX must be non-zero");
+    let n_ctx = std::num::NonZeroU32::new(DEFAULT_N_CTX).expect("DEFAULT_N_CTX must be non-zero");
     let n_batch = effective_n_batch();
     let n_ubatch = n_batch.min(512).max(64);
     let ctx_params = LlamaContextParams::default()
@@ -185,9 +212,19 @@ where
         .new_context(backend, ctx_params)
         .map_err(|e| EmbeddedLlmError::Load(format!("llama context: {e}")))?;
 
+    let chat_message = LlamaChatMessage::new("user".to_string(), prompt.to_string())
+        .map_err(|e| EmbeddedLlmError::Inference(format!("chat message: {e}")))?;
+    let (effective_prompt, add_bos) =
+        match pipeline
+            .model
+            .apply_chat_template(None, &[chat_message], true)
+        {
+            Ok(formatted) => (formatted, AddBos::Never),
+            Err(_) => (prompt.to_string(), AddBos::Always),
+        };
     let mut prompt_tokens = pipeline
         .model
-        .str_to_token(prompt, AddBos::Always)
+        .str_to_token(&effective_prompt, add_bos)
         .map_err(|e| EmbeddedLlmError::Inference(format!("tokenize: {e}")))?;
 
     let max_prompt_tokens = std::env::var("AKASHA_EMBEDDED_MAX_PROMPT_TOKENS")
@@ -200,7 +237,16 @@ where
     }
 
     if prompt_tokens.is_empty() {
-        return Ok(String::new());
+        return Ok(crate::EmbeddedCompletion {
+            text: String::new(),
+            metrics: crate::EmbeddedInferenceMetrics {
+                prompt_tokens: Some(0),
+                completion_tokens: Some(0),
+                load_duration_ns,
+                total_duration_ns: Some(request_started.elapsed().as_nanos() as u64),
+                ..crate::EmbeddedInferenceMetrics::default()
+            },
+        });
     }
 
     let mut batch = LlamaBatch::new(n_batch as usize, 1);
@@ -218,16 +264,23 @@ where
     let mut n_cur = prompt_tokens.len() as i32;
     batch = LlamaBatch::new(1, 1);
 
+    let generation_started = Instant::now();
+    let mut first_token_ns = None;
+    let mut completion_tokens = 0u64;
     for _ in 0..max_new {
         let token = sampler.sample(&ctx, -1);
         if pipeline.model.is_eog_token(token) {
             break;
         }
+        completion_tokens += 1;
         let piece = pipeline
             .model
             .token_to_str(token, Special::Plaintext)
             .map_err(|e| EmbeddedLlmError::Inference(format!("detokenize: {e}")))?;
         if !piece.is_empty() {
+            if first_token_ns.is_none() {
+                first_token_ns = Some(request_started.elapsed().as_nanos() as u64);
+            }
             out.push_str(&piece);
             on_piece(&piece);
         }
@@ -242,7 +295,17 @@ where
         n_cur += 1;
     }
 
-    Ok(out.trim().to_string())
+    Ok(crate::EmbeddedCompletion {
+        text: out.trim().to_string(),
+        metrics: crate::EmbeddedInferenceMetrics {
+            prompt_tokens: Some(prompt_tokens.len() as u64),
+            completion_tokens: Some(completion_tokens),
+            ttft_ns: first_token_ns,
+            load_duration_ns,
+            generation_duration_ns: Some(generation_started.elapsed().as_nanos() as u64),
+            total_duration_ns: Some(request_started.elapsed().as_nanos() as u64),
+        },
+    })
 }
 
 fn decode_prompt_tokens(

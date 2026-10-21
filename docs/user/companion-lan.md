@@ -9,7 +9,7 @@ Cette page décrit ce que le **daemon Akasha** expose déjà sur le réseau loca
 - **Appairer** un identifiant d’appareil et obtenir un jeton stocké dans `companion_devices.json`.
 - Consulter un **snapshot** d’état (LLM, voix, tâches, mode présence) et, si besoin, configurer la **politique VAD** (fichier `companion_presence.json`).
 
-Les routes voix (`/api/voice/*`) existent séparément pour STT/TTS ; le snapshot Companion indique seulement si la voix est configurée. Spécification produit plus large : document développeur **à venir ([#174](https://github.com/azerothl/Akasha/issues/174))**.
+Les routes voix (`/api/voice/*`) existent séparément pour STT/TTS ; le snapshot Companion indique seulement si la voix est configurée. **Spécification technique (protocole, schémas JSON, erreurs)** : [COMPANION_SPEC.md](../COMPANION_SPEC.md).
 
 ## Prérequis
 
@@ -105,7 +105,7 @@ Si `AKASHA_COMPANION_PAIR_SECRET` est **vide**, l’appairage est **ouvert** sur
 - `tasks.active` (tâches pending / queued / running / waiting user input)
 - `presence_mode` : `hands_free` si VAD effectif, sinon `ptt`
 - `vad_enabled`, bloc `presence` (paramètres + `quiet_now`)
-- bloc `notify` : `available` (même stockage que `/api/notifications`), `unread` (nombre de notifications daemon non lues), `headline` (`null` si `unread` = 0, sinon le **titre** de la plus récente non lue — jamais le corps — tronqué à 120 caractères, ellipse comprise) ; `avatar_hint` (`idle`, ou `notify` dès qu'il y a au moins une notification non lue)
+- bloc `notify` : `available` (même stockage que `/api/notifications`), `unread` (nombre de notifications daemon non lues), `headline` (`null` si `unread` = 0, sinon le **titre** de la plus récente non lue — jamais le corps — tronqué à 120 caractères, ellipse comprise) ; `avatar_hint` (`idle`, ou `notify` dès qu’il y a au moins une notification non lue)
 
 ```bash
 curl -sS "$DAEMON/api/companion/snapshot"
@@ -163,4 +163,4 @@ Commandes utiles : `akasha doctor`, page **Dépannage** de cette documentation.
 - Si le stockage des notifications est indisponible, `notify.available` vaut `false`, `notify.unread` reste **0** et `notify.headline` est `null`.
 - La découverte UDP ne transmet pas d’adresse IP : le client utilise l’IP source du datagramme de réponse ou une IP configurée manuellement.
 - Les routes **`/api/voice/*`** ne font pas partie du préfixe `/api/companion` ; un client voix doit les appeler séparément si besoin.
-- Spécification produit Companion complète : **à venir ([#174](https://github.com/azerothl/Akasha/issues/174))** ; le registre `spec/feature_evolution_tracking.md` distingue **Companion LAN** (API) et **matériel ESP32** (Planned).
+- Spécification technique Companion : [COMPANION_SPEC.md](../COMPANION_SPEC.md) ; le registre `spec/feature_evolution_tracking.md` distingue **Companion LAN** (API) et **matériel ESP32** (Planned).

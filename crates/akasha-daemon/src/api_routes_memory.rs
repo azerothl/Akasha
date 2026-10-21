@@ -1,6 +1,6 @@
 //! Memory, agent identity, and second-brain routes.
 
-use crate::api::{load_second_brain_settings, save_second_brain_settings, SecondBrainSettings};
+use crate::api::{load_second_brain_settings, save_second_brain_settings};
 use crate::api_http::json_response;
 use crate::memory_actor::LongTermMemoryClient;
 use std::path::Path;

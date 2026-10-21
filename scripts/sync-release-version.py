@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
@@ -92,6 +93,27 @@ def set_tauri_conf_version(path: Path, version: str) -> None:
     path.write_text(new_text, encoding="utf-8")
 
 
+def set_cargo_lock_versions(path: Path, names: set[str], version: str) -> None:
+    """Keep local package versions in sync without resolving/upgrading dependencies."""
+    text = path.read_text(encoding="utf-8")
+    seen = set()
+
+    def replace(match: re.Match) -> str:
+        if match[2] not in names:
+            return match[0]
+        seen.add(match[2])
+        return match[1] + version + match[3]
+
+    text = re.sub(
+        r'(\[\[package\]\]\nname = "([^"]+)"\nversion = ")[^"]+(")',
+        replace,
+        text,
+    )
+    if seen != names:
+        die(f"Missing workspace packages in {path}: {sorted(names - seen)}")
+    path.write_text(text, encoding="utf-8")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         die("Usage: sync-release-version.py X.Y.Z [REPO_ROOT]")
@@ -108,22 +130,34 @@ def main() -> None:
     lock_json = root / "apps" / "akasha-ui" / "package-lock.json"
     ui_cargo = root / "apps" / "akasha-ui" / "src-tauri" / "Cargo.toml"
     tauri_conf = root / "apps" / "akasha-ui" / "src-tauri" / "tauri.conf.json"
+    cargo_lock = root / "Cargo.lock"
+    ui_lock = ui_cargo.with_name("Cargo.lock")
 
-    for p in (cargo_toml, pkg_json, lock_json, ui_cargo, tauri_conf):
+    for p in (cargo_toml, cargo_lock, pkg_json, lock_json, ui_cargo, ui_lock, tauri_conf):
         if not p.is_file():
             die(f"Missing file: {p}")
+
+    workspace = tomllib.loads(cargo_toml.read_text(encoding="utf-8"))["workspace"]
+    names = {
+        tomllib.loads((directory / "Cargo.toml").read_text(encoding="utf-8"))["package"]["name"]
+        for member in workspace["members"] for directory in root.glob(member)
+    }
 
     set_workspace_package_version(cargo_toml, version)
     set_package_json_version(pkg_json, version)
     set_package_lock_versions(lock_json, version)
     set_akasha_ui_cargo_version(ui_cargo, version)
     set_tauri_conf_version(tauri_conf, version)
+    set_cargo_lock_versions(cargo_lock, names, version)
+    set_cargo_lock_versions(ui_lock, {"akasha-ui"}, version)
 
     print(f"Synced release version to {version}")
     print(f"  {cargo_toml.relative_to(root)}")
+    print(f"  {cargo_lock.relative_to(root)}")
     print(f"  {pkg_json.relative_to(root)}")
     print(f"  {lock_json.relative_to(root)}")
     print(f"  {ui_cargo.relative_to(root)}")
+    print(f"  {ui_lock.relative_to(root)}")
     print(f"  {tauri_conf.relative_to(root)}")
     print(
         "Next (recommended before tag): regenerate spec/dev/architecture/ "

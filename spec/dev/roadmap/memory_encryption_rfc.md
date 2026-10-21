@@ -2,7 +2,7 @@
 
 # RFC — Chiffrement au repos de la mémoire long terme (A4)
 
-**Statut :** Foundation + doctor flag (wave 7) — SQLCipher MVP deferred  
+**Statut :** Non livré — `memory.db` en clair ; SQLCipher MVP deferred  
 **Owner :** Akasha core team  
 **Référence matrice :** [memory_landscape_roadmap_matrix.md](./memory_landscape_roadmap_matrix.md) — ligne **A4**  
 **Exigence spec :** [spec/06_memory_model.md](../../06_memory_model.md) (long terme « persistant chiffré »)
@@ -73,7 +73,7 @@ Master secret (vault ou AKASHA_MEMORY_KEY env)
 
 ### Phase B — MVP (4–6 sem.)
 
-- Migration `akasha doctor --fix --encrypt-memory` (opt-in).
+- Migration opt-in (future) — **pas** via `doctor --fix` tant que le chiffrement n’est pas implémenté.
 - Clé via env ou vault unlock.
 - Tests : export/import round-trip, recall metrics inchangés ±10 %.
 
@@ -83,7 +83,7 @@ Master secret (vault ou AKASHA_MEMORY_KEY env)
 
 ## 7. Critères d’acceptation
 
-- [x] Operator guidance when `AKASHA_MEMORY_ENCRYPT=1` (`akasha doctor --fix` sets env key).
+- [x] Operator guidance : `akasha doctor` indique que la mémoire est stockée en clair ; avertissement si `AKASHA_MEMORY_ENCRYPT` est défini (sans effet).
 - [ ] `memory.db` illisible sans clé (audit `strings` / sqlite3) — requires SQLCipher MVP.
 - [ ] Recall e2e tests passent avec chiffrement activé.
 - [ ] Export v1 reste compatible (migration documentée).
@@ -96,4 +96,4 @@ Master secret (vault ou AKASHA_MEMORY_KEY env)
 - [kinbot-akasha-parity-matrix.md](./kinbot-akasha-parity-matrix.md)
 - KinBot README — Vault AES-256-GCM
 
-**Dernière mise à jour :** 2026-06-06 (wave 7 — `akasha doctor --fix --encrypt-memory` sets `AKASHA_MEMORY_ENCRYPT=1` ; operator guidance in acceptance criteria ; SQLCipher / per-row AES spike via `scripts/bench-memory-encryption.ps1`).
+**Dernière mise à jour :** 2026-10-18 — `akasha doctor` ne prétend plus activer le chiffrement ; `AKASHA_MEMORY_ENCRYPT` documenté comme sans effet ; SQLCipher / per-row AES spike via `scripts/bench-memory-encryption.ps1`.

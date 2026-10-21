@@ -1,13 +1,13 @@
 //! Fallback engine — try primary then chain, retry policy, log switches.
 
 use crate::config::{prepare_ollama_request, ModelOption, RouteEntry, TaskTypeConfig};
-use std::collections::HashMap;
 use crate::metrics::MetricsCollector;
 use crate::provider::{
-    format_fallback_chain_failure, format_provider_error, provider_error_is_context_window_exceeded,
-    CompletionRequest, CompletionResponse, LLMProvider,
+    format_fallback_chain_failure, format_provider_error,
+    provider_error_is_context_window_exceeded, CompletionRequest, CompletionResponse, LLMProvider,
 };
 use crate::retry::{RetryClass, RetryPolicy};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
@@ -76,7 +76,8 @@ impl FallbackEngine {
             let mut disable_thinking_after_empty = false;
             // Do not call provider.is_available() here: OllamaProvider uses blocking reqwest
             // which would block the async runtime and cause "response ended prematurely".
-            for attempt in 0..self.max_retries {
+            // Zero disables retries; it must not suppress the initial provider call.
+            for attempt in 0..self.max_retries.max(1) {
                 let start = Instant::now();
                 // Clone request and apply model-specific config from routing entry.
                 let mut request_with_config = request.clone();
@@ -84,7 +85,14 @@ impl FallbackEngine {
                 if disable_thinking_after_empty {
                     request_with_config.thinking_level = Some("off".to_string());
                 }
-                match provider.complete(&request_with_config, self.timeout_per_call, Some(&entry.model)).await {
+                match provider
+                    .complete(
+                        &request_with_config,
+                        self.timeout_per_call,
+                        Some(&entry.model),
+                    )
+                    .await
+                {
                     Ok(resp) => {
                         // Treat empty/whitespace-only responses as failure so we can retry/fallback.
                         // This happens in practice when a model is still loading or returns an empty completion.
@@ -102,7 +110,10 @@ impl FallbackEngine {
 
                             metrics.record_failure(entry.provider.as_str(), &entry.model);
                             if i > 0 {
-                                metrics.record_fallback_triggered(entry.provider.as_str(), &entry.model);
+                                metrics.record_fallback_triggered(
+                                    entry.provider.as_str(),
+                                    &entry.model,
+                                );
                             }
                             warn!(
                                 provider = %entry.provider,
@@ -125,7 +136,8 @@ impl FallbackEngine {
                             }
 
                             if attempt + 1 < self.max_retries {
-                                tokio::time::sleep(self.retry_policy.delay_for_attempt(attempt)).await;
+                                tokio::time::sleep(self.retry_policy.delay_for_attempt(attempt))
+                                    .await;
                                 continue;
                             }
                             // Give next provider in chain a chance.
@@ -216,11 +228,17 @@ impl FallbackEngine {
                         }
 
                         let latency_ms = start.elapsed().as_millis() as u64;
-                        let tokens = resp.usage.as_ref().map(|u| u.prompt_tokens + u.completion_tokens).unwrap_or(0);
-                        let cost = provider.get_cost(resp.usage.as_ref().unwrap_or(&crate::provider::TokenUsage {
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                        }));
+                        let tokens = resp
+                            .usage
+                            .as_ref()
+                            .map(|u| u.prompt_tokens + u.completion_tokens)
+                            .unwrap_or(0);
+                        let cost = provider.get_cost(resp.usage.as_ref().unwrap_or(
+                            &crate::provider::TokenUsage {
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
+                            },
+                        ));
                         if i > 0 {
                             metrics.record_success_with_fallback(
                                 entry.provider.as_str(),
@@ -232,15 +250,26 @@ impl FallbackEngine {
                                 true,
                             );
                         } else {
-                            metrics.record_success(entry.provider.as_str(), &entry.model, latency_ms, tokens, cost);
+                            metrics.record_success(
+                                entry.provider.as_str(),
+                                &entry.model,
+                                latency_ms,
+                                tokens,
+                                cost,
+                            );
                         }
                         let mut out = resp;
+                        out.provider_used = Some(entry.provider.clone());
                         out.cost_usd = Some(cost);
                         return Ok(out);
                     }
                     Err(e) => {
                         if i > 0 {
-                            metrics.record_failure_with_fallback(entry.provider.as_str(), &entry.model, true);
+                            metrics.record_failure_with_fallback(
+                                entry.provider.as_str(),
+                                &entry.model,
+                                true,
+                            );
                         } else {
                             metrics.record_failure(entry.provider.as_str(), &entry.model);
                         }

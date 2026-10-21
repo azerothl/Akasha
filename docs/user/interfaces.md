@@ -1,6 +1,6 @@
 # Interfaces
 
-## ## 6. Interfaces et onglets
+## 6. Interfaces et onglets
 
 
 ### Interface terminal (TUI)

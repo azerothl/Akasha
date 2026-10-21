@@ -7,6 +7,7 @@ memory:
       trigger_ratio: 0.75   # compact when short_term_tokens > 75% of model context
       strategy: summary     # summary | promote_to_long_term | truncate_with_summary
   long_term:
-    type: encrypted_persistent
-    encryption: AES-256
+    # Implémentation actuelle : persistent SQLite en clair (memory.db). Cible : encrypted_persistent + AES-256 (S-MEM-05).
+    type: persistent
+    encryption: none
     vector_indexing: true

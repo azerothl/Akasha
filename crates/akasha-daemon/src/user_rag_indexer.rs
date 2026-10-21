@@ -44,7 +44,7 @@ fn extract_text_from_bytes(name: &str, mime: &str, bytes: &[u8]) -> anyhow::Resu
         return Ok(String::from_utf8_lossy(bytes).into_owned());
     }
     if name.ends_with(".pdf") || mime == "application/pdf" {
-        return pdf_extract::extract_text_from_mem(bytes)
+        return crate::pdf_extract_safe::extract_text_from_mem(bytes)
             .map_err(|e| anyhow::anyhow!("pdf extract: {}", e));
     }
     anyhow::bail!("unsupported mime for indexing: {mime}")

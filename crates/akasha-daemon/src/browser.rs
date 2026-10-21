@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -27,39 +27,77 @@ pub struct BrowserSession {
 }
 
 impl BrowserSession {
-    /// Send a JSON command and read one JSON response line.
-    pub async fn send_command(&mut self, cmd: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let line = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
-        if let Some(ref mut stdin) = self.stdin {
-            stdin.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+    pub fn reusable(&mut self) -> bool {
+        self.stdin.is_some() && matches!(self._child.try_wait(), Ok(None))
+    }
+    /// Configure policy for every action, including redirects and subresources.
+    pub async fn send_with_policy(
+        &mut self,
+        policy: &akasha_tools::ToolsPolicy,
+        cmd: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let configured = self.send_command(&serde_json::json!({"cmd":"configure_policy","params":{"allowed_domains":policy.browser_allowed_domains,"blocked_domains":policy.browser_blocked_domains,"next_command":cmd.get("cmd")}})).await?;
+        if configured.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            return Err(configured
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Browser policy configuration failed")
+                .into());
+        }
+        self.send_command(cmd).await
+    }
+
+    /// Bounded IPC; a timed out stream cannot be safely reused.
+    pub async fn send_command(
+        &mut self,
+        cmd: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let timeout = cmd
+            .pointer("/params/timeout_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(60)
+            .clamp(1, 300)
+            + 10;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+            let line = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
+            let stdin = self.stdin.as_mut().ok_or("Browser session is closed")?;
+            stdin
+                .write_all(line.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
             stdin.write_all(b"\n").await.map_err(|e| e.to_string())?;
             stdin.flush().await.map_err(|e| e.to_string())?;
-        }
-        let mut buf = String::new();
-        let n = self.stdout.read_line(&mut buf).await.map_err(|e| e.to_string())?;
-        if n == 0 {
-            // Child exited or closed stdout; stderr often has the real reason (import error, Playwright, etc.).
-            let _ = self._child.wait().await;
-            for _ in 0..4 {
-                tokio::task::yield_now().await;
+            let mut buf = Vec::new();
+            (&mut self.stdout)
+                .take(24 * 1024 * 1024 + 1)
+                .read_until(b'\n', &mut buf)
+                .await
+                .map_err(|e| e.to_string())?;
+            if buf.len() > 24 * 1024 * 1024 {
+                return Err("Browser response exceeds 24 MiB".into());
             }
-            let tail = self.stderr_tail.lock().await.clone();
-            let detail = tail.trim();
-            if detail.is_empty() {
-                return Err(
-                    "Runner closed stdout before sending a response (stderr empty). Check that Node.js is installed, scripts/playwright-runner has run npm install, and npx playwright install chromium succeeded."
-                        .to_string(),
-                );
+            if buf.is_empty() {
+                return Err(format!(
+                    "Browser runner closed stdout: {}",
+                    self.stderr_tail.lock().await
+                ));
             }
-            return Err(format!("Runner closed stdout (Node stderr):\n{}", detail));
+            serde_json::from_slice(&buf).map_err(|e| format!("Invalid browser response: {e}"))
+        })
+        .await
+        .unwrap_or_else(|_| Err("Browser IPC timeout; session closed".into()));
+        if result.is_err() {
+            self.stdin.take();
+            let _ = self._child.kill().await;
         }
-        let trimmed = buf.trim();
-        serde_json::from_str(trimmed).map_err(|e| format!("Invalid JSON from runner: {}", e))
+        result
     }
 
     /// Send close and drop the process.
     pub async fn close(&mut self) -> Result<(), String> {
-        let _ = self.send_command(&serde_json::json!({ "cmd": "close" })).await;
+        let _ = self
+            .send_command(&serde_json::json!({ "cmd": "close" }))
+            .await;
         self.stdin.take();
         Ok(())
     }
@@ -73,7 +111,8 @@ pub fn playwright_runner_dir(runner_path: &Path) -> Option<PathBuf> {
 /// Actionable message when `browser_allowed_domains` denies a host.
 pub fn format_domain_denied(host: &str, allowed: &[String], blocked: &[String]) -> String {
     let allow_hint = if allowed.iter().any(|d| d.trim() == "*") {
-        "browser_allowed_domains contains '*' but host may be in browser_blocked_domains".to_string()
+        "browser_allowed_domains contains '*' but host may be in browser_blocked_domains"
+            .to_string()
     } else if allowed.is_empty() {
         "browser_allowed_domains is empty (deny by default)".to_string()
     } else {
@@ -160,12 +199,7 @@ pub async fn ensure_playwright_chromium(runner_dir: &Path) -> Result<(), String>
         .stderr(std::process::Stdio::piped())
         .output()
         .await
-        .map_err(|e| {
-            format!(
-                "npm install failed (is Node.js/npm installed?): {}",
-                e
-            )
-        })?;
+        .map_err(|e| format!("npm install failed (is Node.js/npm installed?): {}", e))?;
 
     if !npm_out.status.success() {
         let stderr = String::from_utf8_lossy(&npm_out.stderr);
@@ -178,7 +212,10 @@ pub async fn ensure_playwright_chromium(runner_dir: &Path) -> Result<(), String>
         ));
     }
 
-    let playwright_pkg = runner_dir.join("node_modules").join("playwright").join("package.json");
+    let playwright_pkg = runner_dir
+        .join("node_modules")
+        .join("playwright")
+        .join("package.json");
     if !playwright_pkg.is_file() {
         return Err(format!(
             "npm install reported success but `playwright` is missing at {}. Run manually in a shell: cd \"{}\" && npm install",
@@ -237,9 +274,7 @@ pub fn find_playwright_runner_path() -> Option<std::path::PathBuf> {
     }
 
     if let Ok(d) = std::env::var("AKASHA_DATA_DIR") {
-        let run = PathBuf::from(d)
-            .join("playwright-runner")
-            .join("run.mjs");
+        let run = PathBuf::from(d).join("playwright-runner").join("run.mjs");
         if run.is_file() {
             return Some(run);
         }
@@ -287,11 +322,18 @@ pub fn find_playwright_runner_path() -> Option<std::path::PathBuf> {
     }
 
     let cwd = std::env::current_dir().ok()?;
-    let from_cwd = cwd.join("scripts").join("playwright-runner").join("run.mjs");
+    let from_cwd = cwd
+        .join("scripts")
+        .join("playwright-runner")
+        .join("run.mjs");
     if from_cwd.is_file() {
         return Some(from_cwd);
     }
-    let from_parent = cwd.join("..").join("scripts").join("playwright-runner").join("run.mjs");
+    let from_parent = cwd
+        .join("..")
+        .join("scripts")
+        .join("playwright-runner")
+        .join("run.mjs");
     if from_parent.is_file() {
         return Some(from_parent.canonicalize().unwrap_or(from_parent));
     }
@@ -299,7 +341,7 @@ pub fn find_playwright_runner_path() -> Option<std::path::PathBuf> {
     None
 }
 
-async fn create_browser_session_once(
+pub(crate) async fn create_browser_session_once(
     runner_path: &Path,
     headless: bool,
     action_timeout_secs: u64,
@@ -323,8 +365,14 @@ async fn create_browser_session_once(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
-        .map_err(|e| format!("Failed to start Playwright runner (is Node installed?): {}", e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to start Playwright runner (is Node installed?): {}",
+                e
+            )
+        })?;
     let stdin = child.stdin.take().ok_or("Failed to take stdin")?;
     let stdout = child.stdout.take().ok_or("Failed to take stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to take stderr")?;
@@ -344,7 +392,11 @@ async fn create_browser_session_once(
                     const MAX: usize = 16384;
                     if g.len() > MAX {
                         let trim = g.len() - MAX;
-                        g.drain(..trim);
+                        let mut end = trim;
+                        while end < g.len() && !g.is_char_boundary(end) {
+                            end += 1;
+                        }
+                        g.drain(..end);
                     }
                 }
                 Err(_) => break,
@@ -371,7 +423,10 @@ async fn create_browser_session_once(
         Err(e) => return Err(e),
     };
 
-    let ok = init_result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ok = init_result
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if !ok {
         let err = init_result
             .get("error")
@@ -380,6 +435,9 @@ async fn create_browser_session_once(
         return Err(err.to_string());
     }
 
+    if init_result["protocol"] != 2 {
+        return Err("Browser runner protocol 2 required; update run.mjs".into());
+    }
     Ok(session)
 }
 
@@ -430,13 +488,9 @@ pub async fn create_browser_session(
                 runner_dir.display()
             );
             ensure_playwright_chromium(&runner_dir).await?;
-            create_browser_session_once(runner_path, headless, action_timeout_secs).await
-                .map_err(|e2| {
-                    format!(
-                        "After auto-install, browser init still failed: {}",
-                        e2
-                    )
-                })
+            create_browser_session_once(runner_path, headless, action_timeout_secs)
+                .await
+                .map_err(|e2| format!("After auto-install, browser init still failed: {}", e2))
         }
     }
 }

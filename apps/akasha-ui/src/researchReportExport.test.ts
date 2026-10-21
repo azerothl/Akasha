@@ -75,3 +75,21 @@ describe("buildResearchReportHtml", () => {
     expect(html).toContain("Quality notes");
   });
 });
+
+it('exports direct URL provenance without inventing a provider or model-only evidence',async()=>{
+  for(const locale of ['fr','en'] as const){
+    for(const degraded of [false,true]){
+      const doc:ResearchReportDocument={topic:'Direct sources',dateLabel:'2026-10-19',reportMarkdown:'## Evidence',locale,
+        reportMeta:{category:'general',word_count:100,sources:[{title:'Page',url:'https://example.org/page'}],providers_used:[],rounds:1,duration_secs:1,search_degraded:degraded,sources_sufficient:true}};
+      const html=await buildResearchReportHtml(doc);
+      expect(html).toContain(locale==='en'?'Direct URL fetching':'Lecture directe des URL');
+      expect(html).not.toContain('brave');
+      expect(html).not.toContain('report relies on model knowledge');
+      expect(html).not.toContain('connaissances du modèle');
+      expect(html).not.toContain('thin sources');
+      expect(html).not.toContain('dégradé (sans web)');
+      const limited=await buildResearchReportHtml({...doc,reportMeta:{...doc.reportMeta!,sources_sufficient:false}});
+      expect(limited).toContain(locale==='en'?'Coverage warning':'Avertissement couverture');
+    }
+  }
+});

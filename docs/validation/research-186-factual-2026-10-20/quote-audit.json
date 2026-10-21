@@ -1,0 +1,18 @@
+{
+  "run_id": "dr_728e0b2688cb43e7b1b01990d33fc24a",
+  "phase": "done",
+  "report_words": 368,
+  "quoted_cells_or_passages_checked": 37,
+  "quotation_violations": [],
+  "case_checks": {
+    "within_requested_word_maximum": true,
+    "vec_original_distinct_push_pop_qualifiers": true,
+    "vec_cost_row_present": true,
+    "vecdeque_cost_row_present": true,
+    "size_not_capacity_definition": true,
+    "amortization_legend_present": true,
+    "removal_qualification_present": true,
+    "original_quotations_present": true
+  },
+  "manual_free_prose_review_required": true
+}

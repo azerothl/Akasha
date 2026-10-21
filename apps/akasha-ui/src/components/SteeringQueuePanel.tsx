@@ -96,7 +96,7 @@ export function SteeringQueuePanel({ taskId, fetchEndpoint, locale, onQueueChang
         <>
           {steering.length > 0 ? (
             <div className="steering-queue-section">
-              <strong>{locale === "en" ? "Steering (next turn)" : "Steering (prochain tour)"}</strong>
+              <strong>{locale === "en" ? "Next turn" : "Pendant la tâche"}</strong>
               <ul>
                 {steering.map((m) => (
                   <li key={m.id}>
@@ -109,7 +109,7 @@ export function SteeringQueuePanel({ taskId, fetchEndpoint, locale, onQueueChang
           ) : null}
           {followUp.length > 0 ? (
             <div className="steering-queue-section">
-              <strong>{locale === "en" ? "Follow-up (after task)" : "Follow-up (après tâche)"}</strong>
+              <strong>{locale === "en" ? "After task" : "Après la tâche"}</strong>
               <ul>
                 {followUp.map((m) => (
                   <li key={m.id}>

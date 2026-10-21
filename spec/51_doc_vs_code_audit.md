@@ -66,7 +66,7 @@ Les guides utilisateur (`docs/user_guide_final.md`, `spec/user_guide.md`) doiven
 | Variable documentée | Utilisée dans le code | Fichier / usage |
 |---------------------|------------------------|------------------|
 | `AKASHA_PORT` | ✅ | daemon (port HTTP), CLI, TUI |
-| `AKASHA_DATA_DIR` | ✅ | daemon, CLI (`akasha_data_dir`) |
+| `AKASHA_DATA_DIR` | ✅ | daemon, CLI (`akasha_data_dir`) ; ignorée depuis `akasha.env` |
 | `AKASHA_LOG` | ✅ | daemon main, CLI (daemon_env) |
 | `AKASHA_MAX_RESPONSE_TOKENS` | ✅ | api.rs (réponses chat) |
 | `AKASHA_MAX_CONTEXT_TOKENS` | ✅ | api.rs (compaction mémoire court terme) |
@@ -211,8 +211,12 @@ Correction historique : le texte d’aide de `/models` indique « liste des mod�
 
 ## 7. Data dir (CLI vs daemon)
 
-- **Daemon** : `AKASHA_DATA_DIR` si défini, sinon `dirs::data_local_dir()/akasha` (ou `.akasha` en secours).
-- **CLI** : utilise le même `AKASHA_DATA_DIR` que le daemon lorsqu’il est défini (vault, config, init, plugin, etc.).
+Sans `AKASHA_DATA_DIR`, le répertoire par défaut est **`{home}/akasha`** (`dirs::home_dir()` puis `join("akasha")`) — typiquement `~/akasha` (Linux/macOS) ou `%USERPROFILE%\akasha` (Windows). Ce n’est pas `~/.local/share/akasha` ni `%LOCALAPPDATA%\akasha`.
+
+- **Daemon** : `crates/akasha-daemon/src/main.rs`, fonction **`main()`** (résolution inline ; secours `.akasha` si `home_dir` est absent).
+- **CLI** : `crates/akasha-cli/src/main.rs`, fonction **`akasha_data_dir()`** (même logique `home/akasha`).
+- **LLM embarqué** : `crates/akasha-embedded-llm/src/config.rs`, fonction **`akasha_data_dir()`** (idem).
+- Lorsque `AKASHA_DATA_DIR` est défini, daemon et CLI utilisent ce chemin (vault, config, init, plugins, etc.).
 
 ---
 

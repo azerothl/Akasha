@@ -668,8 +668,37 @@ pub fn studio_code_plan_message_prefix(project_root: &Path) -> Option<String> {
         cleaned
     };
     Some(format!(
-        "[Contexte projet — CODE_STUDIO_PLAN.md (gabarit à sections fixes ; à respecter tant que l’utilisateur ne demande pas explicitement autre chose ; les agents doivent le mettre à jour **par section**, pas en réécriture totale systématique) :\n{body}\n]\n\n"
+        "[Contexte projet — contenu de CODE_STUDIO_PLAN.md. Le gabarit et ses titres s’appliquent uniquement à CODE_STUDIO_PLAN.md ; ne pas les copier dans les fichiers demandés. Mettre ce plan à jour par section seulement si la tâche le nécessite, sans réécriture totale systématique :\n{body}\n]\n\n"
     ))
+}
+
+/// Keep product constraints for direct file tasks without unrelated history/templates.
+pub(crate) fn scoped_file_plan_context(project_root: &Path) -> Option<String> {
+    let raw=match fs::read_to_string(project_root.join("CODE_STUDIO_PLAN.md")) {
+        Ok(raw)=>raw,
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>String::new(),
+        Err(_)=>return None,
+    };
+    let mut selected=String::new();
+    let mut keep=true;
+    let mut canonical_heading=false;
+    let mut fenced=false;
+    for line in raw.lines() {
+        if line.trim_start().starts_with("```") {fenced=!fenced;}
+        if !fenced && line.starts_with("## ") {
+            if !CODE_STUDIO_PLAN_SECTION_HEADINGS.contains(&line.trim()) {
+                return studio_code_plan_message_prefix(project_root);
+            }
+            canonical_heading=true;
+            keep=matches!(line.trim(),"## Scope"|"## Stack"|"## Structure du projet"|"## Commandes"|"## Fichiers hors scope"|"## Recommandations");
+        }
+        if keep {selected.push_str(line);selected.push('\n');}
+    }
+    let constraints=sanitize_for_prompt(&selected,MAX_CODE_STUDIO_PLAN_INJECT_CHARS);
+    if (!raw.trim().is_empty() && (!canonical_heading || constraints.is_empty())) || selected.trim().chars().count()>constraints.chars().count() {
+        return studio_code_plan_message_prefix(project_root);
+    }
+    Some(format!("{}\nExecute only the user's named file operations, with the exact requested contents and reads in order. Do not add unrelated product planning or copy project maintenance examples into these files. AGENTS.md, tool permissions and the project constraints below still apply. If present, read CODE_STUDIO_PLAN.md with read_file when further project context is needed.\n[Project constraints from CODE_STUDIO_PLAN.md]\n{constraints}\n\n",crate::api_llm_loop::DIRECT_FILE_TASK_MARKER))
 }
 
 /// Build the tech-stack prefix from an already-loaded `StudioMeta`.
@@ -762,7 +791,7 @@ pub fn studio_project_summary_prefix(project_root: &Path) -> Option<String> {
 pub fn studio_code_mode_message_prefix(mode: &str) -> Option<String> {
     match mode.trim().to_lowercase().as_str() {
         "plan" => Some(
-            "[Mode Code Studio — PLANIFICATION : priorité analyse et mise à jour de CODE_STUDIO_PLAN.md ; pas d’implémentation ni commandes mutatrices sauf demande explicite.]\n\n"
+            "[Mode Code Studio — PLANIFICATION : rôle studio_planner, lecture du dépôt et seule écriture de CODE_STUDIO_PLAN.md. Shell, implémentation, extensions et délégation désactivés. Passer en mode implémentation pour modifier les sources.]\n\n"
                 .to_string(),
         ),
         "implement" => Some(
@@ -1659,7 +1688,7 @@ fn allowed_studio_subcommand(cmd: &str, argv: &[String]) -> bool {
     let subcommand = argv.get(1).map(String::as_str);
     match cmd {
         "npm" | "npm.cmd" | "pnpm" | "pnpm.cmd" => {
-            matches!(subcommand, Some("run") | Some("install") | Some("ci"))
+            matches!(subcommand, Some("run") | Some("install") | Some("ci") | Some("test"))
                 || (matches!(subcommand, Some("exec")) && npm_exec_argv_allowed_for_studio_verify(argv))
         }
         "yarn" | "yarn.cmd" => {
@@ -1696,7 +1725,7 @@ fn allowed_studio_subcommand(cmd: &str, argv: &[String]) -> bool {
     }
 }
 
-fn argv_looks_safe(argv: &[String]) -> bool {
+pub(crate) fn argv_looks_safe(argv: &[String]) -> bool {
     if argv.is_empty() {
         return false;
     }
@@ -2137,11 +2166,12 @@ pub(crate) fn studio_project_verify_timeout_sec(project_root: &Path) -> u64 {
         .max(1)
 }
 
-/// After an agent task on a studio disk, run build/check when possible. Err = verify failed (task should fail).
-pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), String> {
+/// Run the configured build/check. Ok(true) = command passed; Ok(false) = skipped;
+/// Err = configured verification failed, including when a weaker fallback bundles successfully.
+pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<bool, String> {
     let meta = load_studio_meta(project_root);
     if meta.as_ref().map(|m| m.verify_skip).unwrap_or(false) {
-        return Ok(());
+        return Ok(false);
     }
     let timeout_sec = meta
         .as_ref()
@@ -2150,7 +2180,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
         .min(3600);
     let argv: Vec<String> = if let Some(v) = meta.as_ref().and_then(|m| m.verify_argv.as_ref()) {
         if v.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         v.clone()
     } else if project_root.join("package.json").is_file() {
@@ -2158,7 +2188,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
     } else if project_root.join("Cargo.toml").is_file() {
         vec!["cargo".into(), "check".into()]
     } else {
-        return Ok(());
+        return Ok(false);
     };
     if !argv_looks_safe(&argv) {
         return Err("verify_argv in .akasha-studio.json is invalid or unsafe".into());
@@ -2166,7 +2196,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
     let is_npm_run_build =
         argv.len() == 3 && argv[0] == "npm" && argv[1] == "run" && argv[2] == "build";
     match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-        Ok((Some(0), _, _)) => Ok(()),
+        Ok((Some(0), _, _)) => Ok(true),
         Ok((mut code, mut out, mut err)) => {
             let first_err = format_verify_failure(code, &out, &err);
             if !is_npm_run_build {
@@ -2179,7 +2209,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
                 fix_notes.push("npm install (dépendances manquantes détectées)".to_string());
                 try_npm_install_autofix(project_root, timeout_sec).await;
                 match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                    Ok((Some(0), _, _)) => return Ok(()),
+                    Ok((Some(0), _, _)) => return Ok(true),
                     Ok((c, o, e)) => {
                         code = c;
                         out = o;
@@ -2199,7 +2229,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
                     Ok(Some(note)) => {
                         fix_notes.push(note.clone());
                         match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                            Ok((Some(0), _, _)) => return Ok(()),
+                            Ok((Some(0), _, _)) => return Ok(true),
                             Ok((c, o, e)) => {
                                 code = c;
                                 out = o;
@@ -2225,7 +2255,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
                                 "fichier {AKASHA_TEST_SHIM_REL} (globals describe/it/expect)"
                             ));
                             match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                                Ok((Some(0), _, _)) => return Ok(()),
+                                Ok((Some(0), _, _)) => return Ok(true),
                                 Ok((c2, o2, e2)) => {
                                     return Err(format!(
                                         "{first_err}\n\n[Tentatives automatiques : {}]\n{}",
@@ -2265,7 +2295,7 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
                         "secours: npm exec -- vite build (sans étape tsc du script build)".into(),
                     );
                     match studio_run_command_capture(project_root, &vite_argv, timeout_sec).await {
-                        Ok((Some(0), _, _)) => return Ok(()),
+                        Ok((Some(0), _, _)) => return Err(format!("{}\n\n[Tentatives automatiques : {}]\nVite fallback passed, but the configured build still failed (TypeScript step not verified).",format_verify_failure(code,&out,&err),fix_notes.join(" ; "))),
                         Ok((cv, ov, ev)) => {
                             fix_notes.push(format!(
                                 "vite build secours — {}",
@@ -2550,6 +2580,7 @@ async fn git_output(project_root: &Path, args: &[&str]) -> Result<std::process::
 
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct StudioGitBranch {
+    pub remote: bool,
     pub name: String,
     pub current: bool,
     pub upstream: Option<String>,
@@ -2579,7 +2610,7 @@ pub(super) struct StudioGitCompare {
 pub(super) async fn git_list_branches(project_root: &Path) -> Result<Vec<StudioGitBranch>, String> {
     let out = git_output(
         project_root,
-        &["for-each-ref", "--format=%(refname:short)|%(upstream:short)|%(HEAD)", "refs/heads"],
+        &["for-each-ref", "--format=%(refname:short)|%(upstream:short)|%(HEAD)|%(refname)", "refs/heads", "refs/remotes"],
     )
     .await?;
     if !out.status.success() {
@@ -2616,7 +2647,10 @@ pub(super) async fn git_list_branches(project_root: &Path) -> Result<Vec<StudioG
                 None
             }
         });
+        let remote=parts.get(3).is_some_and(|reference|reference.starts_with("refs/remotes/"));
+        if remote && name.ends_with("/HEAD") {continue;}
         rows.push(StudioGitBranch {
+            remote,
             name: name.to_string(),
             current,
             upstream,
@@ -3004,6 +3038,20 @@ fn guess_mime_and_text(rel: &str, bytes: &[u8]) -> (&'static str, bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_file_context_retains_constraints_without_copying_maintenance_examples() {
+        let dir=tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CODE_STUDIO_PLAN.md"),"# Title\nPREAMBLE_CONSTRAINT\n## Scope\nPRODUCT_SCOPE\n## Stack\nSTACK_CONSTRAINT\n## Fichiers hors scope\nKEEP.txt must remain unchanged\n## Demandes d'évolutions utilisateur par phase\nMAINTENANCE_EXAMPLE_BAIT\n## Recommandations\nSTYLE_CONSTRAINT\n## Todos\nUNRELATED_BACKLOG").unwrap();
+        let context=super::scoped_file_plan_context(dir.path()).unwrap();
+        for retained in ["PREAMBLE_CONSTRAINT","PRODUCT_SCOPE","STACK_CONSTRAINT","KEEP.txt","STYLE_CONSTRAINT"] {assert!(context.contains(retained));}
+        assert!(!context.contains("MAINTENANCE_EXAMPLE_BAIT"));
+        assert!(!context.contains("UNRELATED_BACKLOG"));
+        assert!(super::studio_code_plan_message_prefix(dir.path()).unwrap().contains("MAINTENANCE_EXAMPLE_BAIT"));
+        std::fs::write(dir.path().join("CODE_STUDIO_PLAN.md"),"## Custom constraints\nCUSTOM_RULE_MUST_REMAIN").unwrap();
+        let custom=super::scoped_file_plan_context(dir.path()).unwrap();
+        assert!(custom.contains("CUSTOM_RULE_MUST_REMAIN"));
+        assert!(!custom.contains(crate::api_llm_loop::DIRECT_FILE_TASK_MARKER));
+    }
     use super::{ensure_main_or_master_branch, git_list_branches, studio_command_from_argv};
     use std::ffi::OsStr;
 

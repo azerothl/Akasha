@@ -44,39 +44,35 @@ pub(crate) async fn execute_tool_call_impl(
     browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
     workspace_root: Option<&std::path::Path>,
     session_id: Option<&str>,
+    approved_delivery_identity: Option<&str>,
 ) -> (bool, String, Option<String>) {
-    let is_studio_workspace =
-        crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
-    let assigned_agent_for_task = if is_studio_workspace {
-        store_path
+    let studio_project_id = store_path.and_then(|sp| TaskStore::open(sp).ok())
+        .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten());
+    let studio_ticket_workspace = studio_project_id.as_deref().and_then(|pid| {
+        let data_dir = store_path?.parent()?;
+        let root = crate::studio::resolve_studio_project_dir(data_dir, pid).ok()?;
+        (root.is_dir() && crate::studio::is_strictly_under_studio_root(&root, &crate::studio::studio_projects_base(data_dir))).then_some(root)
+    }).or_else(|| crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root));
+    let is_studio_workspace = studio_project_id.is_some() || studio_ticket_workspace.is_some();
+    let task_for_role = store_path
             .and_then(|sp| TaskStore::open(sp).ok())
-            .and_then(|store| store.get(task_id).ok().flatten())
-            .map(|t| t.assigned_agent.to_ascii_lowercase())
-    } else {
-        None
-    };
-    if assigned_agent_for_task.as_deref() == Some("studio_reviewer") {
-        let blocked = matches!(
-            tool_name,
-            "write_file"
-                | "write_code"
-                | "delete_file"
-                | "rename_path"
-                | "move_tree"
-                | "edit_file"
-                | "apply_patch"
-                | "search_replace"
-                | "delegate_to_agent"
-        );
-        if blocked {
-            return (
-                false,
-                format!(
-                    "[{}] forbidden for `studio_reviewer`: review agent is read-only and must only validate then update ticket feedback/status.",
-                    tool_name
-                ),
-                None,
-            );
+            .and_then(|store| store.get(task_id).ok().flatten());
+    if task_for_role.as_ref().is_some_and(|task| matches!(task.status,
+        TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Interrupted | TaskStatus::WaitingUserInput | TaskStatus::Failed)) {
+        return (false, "[task] execution denied: task is stopped or waiting for input".into(), None);
+    }
+    let assigned_agent_for_task = task_for_role.map(|task| task.assigned_agent.to_ascii_lowercase());
+    if is_studio_workspace && assigned_agent_for_task.is_none() {
+        return (false, "[studio] cannot resolve task role; execution denied".into(), None);
+    }
+    if let Some(role) = assigned_agent_for_task.as_deref() {
+        if let Err(reason) = crate::studio_role_policy::check(role, tool_name, args, workspace_root) {
+            return (false, reason, None);
+        }
+        if is_studio_workspace {
+            if let Err(reason) = crate::studio_capabilities::check(&executor.policy, role, tool_name) {
+                return (false, reason, None);
+            }
         }
     }
     if tool_name.starts_with("mcp_") {
@@ -87,13 +83,15 @@ pub(crate) async fn execute_tool_call_impl(
                 None,
             );
         }
-        let Some((server, mcp_tool)) = crate::mcp_runtime::parse_mcp_tool_name(tool_name) else {
+        let Some(descriptor) = crate::mcp_runtime::discovered_tool(tool_name) else {
             return (
                 false,
                 format!("[{tool_name}] invalid MCP tool name (expected mcp_<server>_<tool>)"),
                 None,
             );
         };
+        let server = descriptor.server;
+        let mcp_tool = descriptor.tool;
         if !executor.policy.can_use_mcp_tool(&server, &mcp_tool) {
             return (
                 false,
@@ -115,13 +113,18 @@ pub(crate) async fn execute_tool_call_impl(
                 );
             }
         }
-        crate::mcp_budget::record_call(task_id);
         let args_json = if args.is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::json!({ "input": args.join(" ") })
+            match serde_json::from_str::<serde_json::Value>(&args.join(" ")) {
+                Ok(value) if value.is_object() => value,
+                _ => return (false, format!("[{tool_name}] arguments must be one JSON object matching the discovered schema"), None),
+            }
         };
-        return match crate::mcp_runtime::tools_call(&mcp_tool, args_json).await {
+        let Some(descriptor) = crate::mcp_runtime::discovered_tool(tool_name) else {return (false,"MCP tool no longer discovered".into(),None);};
+        if let Err(error)=crate::mcp_runtime::validate_arguments(&descriptor,&args_json) {return (false,error,None);}
+        crate::mcp_budget::record_call(task_id);
+        return match crate::mcp_runtime::call_discovered(tool_name, args_json).await {
             Ok(v) => {
                 let preview = v.to_string();
                 let (p, total, trunc) = crate::tool_output::truncate_utf8_by_bytes(&preview, 12_000);
@@ -131,7 +134,8 @@ pub(crate) async fn execute_tool_call_impl(
                     total,
                     "MCP response truncated",
                 );
-                (true, msg, None)
+                let success = v.get("error").is_none() && !v.pointer("/result/isError").and_then(|value| value.as_bool()).unwrap_or(false);
+                (success, msg, None)
             }
             Err(e) => (false, format!("[{tool_name}] MCP error: {e}"), None),
         };
@@ -141,7 +145,7 @@ pub(crate) async fn execute_tool_call_impl(
     let studio_ticket_tool_ok = matches!(
         tool_name,
         "studio_list_tickets" | "studio_create_ticket" | "studio_update_ticket"
-    ) && crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
+    ) && studio_ticket_workspace.is_some();
     let can_use_named_tool =
         executor.policy.can_use_tool(tool_name) || studio_ticket_tool_ok;
     let can_use_plugin_call =
@@ -171,6 +175,27 @@ pub(crate) async fn execute_tool_call_impl(
         }
     };
     let result = match tool_name {
+        "git_delivery_status" | "git_commit" | "git_push" | "github_create_pr" | "github_pr_status" => {
+            let Some(root)=workspace_root.filter(|_|is_studio_workspace)else{return(false,"Delivery requires a Studio task workspace".into(),None);};
+            let Some(data_dir)=store_path.and_then(|path|path.parent())else{return(false,"Task data directory unavailable".into(),None);};
+            let payload=if args.is_empty()&&matches!(tool_name,"git_delivery_status"|"github_pr_status"){serde_json::json!({})}else{match serde_json::from_str::<serde_json::Value>(&args.join(" ")){Ok(value)if value.is_object()=>value,_=>return(false,"Delivery expects a complete JSON object".into(),None)}};
+            let value=crate::studio_delivery::invoke(data_dir,root,&executor.policy,Some(task_id),tool_name,payload,approved_delivery_identity).await;
+            (value["success"].as_bool().unwrap_or(true),value.to_string(),None)
+        }
+        "lsp_query" | "lsp_apply_rename" => {
+            let Some(root)=workspace_root.filter(|_|is_studio_workspace)else{return(false,"LSP requires a Studio task workspace".into(),None);};
+            let Some(data_dir)=store_path.and_then(|path|path.parent())else{return(false,"Task data directory unavailable".into(),None);};
+            let result=if tool_name=="lsp_query" {
+                match serde_json::from_str::<crate::studio_lsp::Query>(&args.join(" ")){Ok(query)=>crate::studio_lsp::query(data_dir,root,&executor.policy,Some(task_id),query).await,Err(_)=>Err("invalid LSP query JSON".into())}
+            }else{match args.first().and_then(|id|Uuid::parse_str(id).ok()){Some(id)=>{let applied=crate::studio_lsp::apply_plan(data_dir,root,&executor.policy,Some(task_id),id);if applied.is_ok(){crate::studio_lsp::close(&root.canonicalize().unwrap_or_else(|_|root.to_path_buf())).await;}applied},None=>Err("rename plan UUID required".into())}};
+            match result {Ok(value)=>(true,value.to_string(),None),Err(error)=>(false,serde_json::json!({"schema_version":1,"success":false,"error":error}).to_string(),None)}
+        }
+        "list_tools" => {
+            let Some(role) = assigned_agent_for_task.as_deref() else { return (false, "[list_tools] task role unavailable".into(), None); };
+            let tools = crate::studio_capabilities::catalogue(&executor.policy, role).into_iter()
+                .filter(|tool| args.first().map_or(tool.announced, |name| tool.name == *name)).collect::<Vec<_>>();
+            (true, serde_json::to_string(&tools).unwrap_or_default(), None)
+        }
         "workspace_graph_search" => {
             let Some(sp) = store_path else {
                 return (
@@ -443,7 +468,7 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "studio_list_tickets" => {
             let Some(root) =
-                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+                studio_ticket_workspace.clone()
             else {
                 return (
                     false,
@@ -474,7 +499,7 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "studio_create_ticket" => {
             let Some(root) =
-                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+                studio_ticket_workspace.clone()
             else {
                 return (
                     false,
@@ -506,7 +531,7 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "studio_update_ticket" => {
             let Some(root) =
-                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+                studio_ticket_workspace.clone()
             else {
                 return (
                     false,
@@ -634,7 +659,7 @@ pub(crate) async fn execute_tool_call_impl(
                 let key = normalize_apostrophes(&key);
                 let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
                 let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_id);
-                if let Some(ws) = workspace_store {
+                if let Some(ws) = workspace_store.filter(|_| !is_studio_workspace) {
                     let guard = ws.read().await;
                     // Prefer lineage root (where write_file stores); fall back to this task id.
                     let mem_map = guard
@@ -653,7 +678,7 @@ pub(crate) async fn execute_tool_call_impl(
                             }
                         }
                     }
-                } else {
+                } else if workspace_store.is_none() {
                     return (false, "[read_file] workspace paths require a workspace store.".to_string(), None);
                 }
                 let disk_path = strip_verbatim_prefix(
@@ -701,7 +726,8 @@ pub(crate) async fn execute_tool_call_impl(
                     }
                 };
             } else {
-                let p = Path::new(&path_str);
+                let resolved=resolve_tool_disk_path(&path_str,workspace_root);
+                let p = resolved.as_path();
                 if path_extension_is_pdf(p) && executor.policy.can_read(p) {
                     pdf_extract_message_from_disk(p, "read_file").await
                 } else {
@@ -812,6 +838,7 @@ pub(crate) async fn execute_tool_call_impl(
                             stderr.as_ref(),
                         )
                     };
+                    let msg=if is_studio_workspace {serde_json::json!({"output":msg,"exit_code":out.status.code()}).to_string()}else{msg};
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[run_command] failed: {}", e), None),
@@ -854,6 +881,7 @@ pub(crate) async fn execute_tool_call_impl(
                             stderr.as_ref(),
                         )
                     };
+                    let msg=if is_studio_workspace {serde_json::json!({"output":msg,"exit_code":out.status.code()}).to_string()}else{msg};
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[run_terminal] failed: {}", e), None),
@@ -900,90 +928,14 @@ pub(crate) async fn execute_tool_call_impl(
             }
         }
         "terminal_session" => {
-            let sub = args.get(0).map(String::as_str).unwrap_or("");
-            match sub {
-                "list" => {
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().list_sessions()).await {
-                        Ok(Ok(v)) => (true, serde_json::to_string_pretty(&v).unwrap_or_else(|_| "[]".to_string()), None),
-                        Ok(Err(e)) => (false, format!("[terminal_session list] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session list] join: {}", e), None),
-                    }
-                }
-                "start" => {
-                    let create = crate::terminal_pty::PtyCreateBody {
-                        argv: None,
-                        cwd: None,
-                        transcript_name: Some(format!("session-{}", uuid::Uuid::new_v4())),
-                        idle_timeout_secs: Some(900),
-                        cols: 80,
-                        rows: 24,
-                    };
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().create(create)).await {
-                        Ok(Ok(v)) => (
-                            true,
-                            format!(
-                                "[terminal_session start] session_id={} idle_timeout_secs={} (use terminal_session read|write|resize|stop)",
-                                v.session_id, v.idle_timeout_secs
-                            ),
-                            None
-                        ),
-                        Ok(Err(e)) => (false, format!("[terminal_session start] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session start] join: {}", e), None),
-                    }
-                }
-                "read" => {
-                    let sid = args.get(1).cloned().unwrap_or_default();
-                    if sid.trim().is_empty() {
-                        return (false, "[terminal_session read] usage: terminal_session read <session_id> [max]".to_string(), None);
-                    }
-                    let max = args.get(2).and_then(|x| x.parse::<usize>().ok()).unwrap_or(4096);
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().read_output(&sid, max)).await {
-                        Ok(Ok(v)) => (true, serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string()), None),
-                        Ok(Err(e)) => (false, format!("[terminal_session read] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session read] join: {}", e), None),
-                    }
-                }
-                "write" => {
-                    let sid = args.get(1).cloned().unwrap_or_default();
-                    let payload = args.get(2..).unwrap_or(&[]).join(" ");
-                    if sid.trim().is_empty() || payload.is_empty() {
-                        return (false, "[terminal_session write] usage: terminal_session write <session_id> <text...>".to_string(), None);
-                    }
-                    let body = crate::terminal_pty::PtyInputBody { text: Some(payload), bytes_b64: None };
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().write_input(&sid, body)).await {
-                        Ok(Ok(_)) => (true, "[terminal_session write] ok".to_string(), None),
-                        Ok(Err(e)) => (false, format!("[terminal_session write] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session write] join: {}", e), None),
-                    }
-                }
-                "resize" => {
-                    let sid = args.get(1).cloned().unwrap_or_default();
-                    let cols = args.get(2).and_then(|x| x.parse::<u16>().ok()).unwrap_or(80);
-                    let rows = args.get(3).and_then(|x| x.parse::<u16>().ok()).unwrap_or(24);
-                    if sid.trim().is_empty() {
-                        return (false, "[terminal_session resize] usage: terminal_session resize <session_id> <cols> <rows>".to_string(), None);
-                    }
-                    let body = crate::terminal_pty::PtyResizeBody { cols, rows };
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().resize(&sid, body)).await {
-                        Ok(Ok(_)) => (true, "[terminal_session resize] ok".to_string(), None),
-                        Ok(Err(e)) => (false, format!("[terminal_session resize] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session resize] join: {}", e), None),
-                    }
-                }
-                "stop" => {
-                    let sid = args.get(1).cloned().unwrap_or_default();
-                    if sid.trim().is_empty() {
-                        return (false, "[terminal_session stop] usage: terminal_session stop <session_id>".to_string(), None);
-                    }
-                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().close(&sid)).await {
-                        Ok(Ok(_)) => (true, "[terminal_session stop] ok".to_string(), None),
-                        Ok(Err(e)) => (false, format!("[terminal_session stop] {}", e), None),
-                        Err(e) => (false, format!("[terminal_session stop] join: {}", e), None),
-                    }
-                }
-                _ => (true, "[terminal_session] usage: terminal_session start|list|read|write|resize|stop. HTTP API: GET /api/terminal/capabilities.".to_string(), None),
+            let (Some(store_path), Some(root)) = (store_path, workspace_root) else {
+                return (false, "[terminal_session] task and workspace context required".into(), None);
+            };
+            match crate::studio_observation::agent_terminal(&executor.policy, store_path, task_id, root, args).await {
+                Ok(output) => (true, output, None),
+                Err(error) => (false, format!("[terminal_session] {error}"), None),
             }
-        },
+        }
         "process" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
             match (process_registry, sub) {
@@ -1918,16 +1870,17 @@ pub(crate) async fn execute_tool_call_impl(
                 let mut g = registry.write().await;
                 let session = if let Some(mut s) = g.remove(&task_id) {
                     drop(g);
-                    let res = s.send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } })).await;
-                    // Always reinsert the session — a navigate failure doesn't mean the browser is dead.
-                    registry.write().await.insert(task_id, s);
+                    let res = s.send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "navigate", "params": { "url": url, "allow_http": true, "timeout_secs": action_timeout } })).await;
+                    // Preserve application failures only while the IPC session remains reusable.
+                    if s.reusable() { registry.write().await.insert(task_id, s); }
                     res
                 } else {
                     drop(g);
-                    match crate::browser::create_browser_session(&runner_path, headless, action_timeout).await {
+                    let created = if is_studio_workspace { crate::browser::create_browser_session_once(&runner_path, headless, action_timeout).await } else { crate::browser::create_browser_session(&runner_path, headless, action_timeout).await };
+                    match created {
                         Ok(mut new_session) => {
                             let res = new_session
-                                .send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } }))
+                                .send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "navigate", "params": { "url": url, "allow_http": true, "timeout_secs": action_timeout } }))
                                 .await;
                             // Only register if IPC still works; on Err (e.g. runner stdout EOF) the child may
                             // already be reaped — inserting a dead session poisons later navigate/snapshot calls.
@@ -1979,8 +1932,8 @@ pub(crate) async fn execute_tool_call_impl(
                     return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
                 };
                 drop(g);
-                let resp = session.send_command(&serde_json::json!({ "cmd": "snapshot" })).await;
-                registry.write().await.insert(task_id, session);
+                let resp = session.send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "snapshot" })).await;
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2018,9 +1971,9 @@ pub(crate) async fn execute_tool_call_impl(
                 };
                 drop(g);
                 let resp = session
-                    .send_command(&serde_json::json!({ "cmd": "screenshot", "params": { "full_page": false } }))
+                    .send_with_policy(&executor.policy, &serde_json::json!({ "cmd": "screenshot", "params": { "full_page": false } }))
                     .await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2029,6 +1982,13 @@ pub(crate) async fn execute_tool_call_impl(
                                 .pointer("/result/data_base64")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
+                            let artifact = (|| -> Result<serde_json::Value,String> {
+                                use base64::Engine;
+                                let data_dir=store_path.and_then(|p|p.parent()).ok_or("Task data directory unavailable")?;
+                                let bytes=base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e|e.to_string())?;
+                                crate::studio_artifacts::save(data_dir,task_id,"browser_screenshot","image/png",&bytes,serde_json::json!({"url":resp.pointer("/result/url"),"viewport":resp.pointer("/result/viewport")}))
+                            })();
+                            let artifact_note=match artifact {Ok(ref record)=>format!("Evidence saved: {}.",record["id"]),Err(ref error)=>format!("Evidence NOT saved: {error}.")};
                             let vision_attach_enabled = std::env::var("AKASHA_BROWSER_SCREENSHOT_VISION")
                                 .map(|v| {
                                     let l = v.to_lowercase();
@@ -2054,7 +2014,7 @@ pub(crate) async fn execute_tool_call_impl(
                                 crate::tool_output::BROWSER_SCREENSHOT_B64_MAX,
                             );
                             let base = format!(
-                                "[browser] Screenshot PNG (base64, {} bytes of payload):\n{}",
+                                "[browser] {artifact_note} Screenshot PNG (base64, {} bytes of payload):\n{}",
                                 total, preview
                             );
                             let msg = crate::tool_output::with_truncation_footer(
@@ -2063,7 +2023,7 @@ pub(crate) async fn execute_tool_call_impl(
                                 total,
                                 "truncated base64 in text; full frame attached for vision on next model turn when enabled (AKASHA_BROWSER_SCREENSHOT_VISION)",
                             );
-                            (true, msg, captured_for_llm)
+                            (artifact.is_ok(), msg, captured_for_llm)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("screenshot failed");
                             let err = crate::browser::format_runner_error(err, action_timeout, session_timeout);
@@ -2074,6 +2034,28 @@ pub(crate) async fn execute_tool_call_impl(
                         let msg = crate::browser::format_runner_error(&e, action_timeout, session_timeout);
                         (false, format!("[browser] error: {}", msg), None)
                     }
+                }
+            } else if matches!(sub,"console"|"network"|"viewport") {
+                let params=if sub=="viewport" {
+                    let width=args.get(1).and_then(|s|s.parse::<u64>().ok());
+                    let height=args.get(2).and_then(|s|s.parse::<u64>().ok());
+                    if width.is_none() || height.is_none() {return (false,"[browser] usage: browser viewport <width> <height>".into(),None);}
+                    serde_json::json!({"width":width,"height":height})
+                } else {serde_json::json!({})};
+                let Some(mut session)=registry.write().await.remove(&task_id) else {return (false,"[browser] Navigate first.".into(),None);};
+                let response=session.send_with_policy(&executor.policy,&serde_json::json!({"cmd":sub,"params":params})).await;
+                if session.reusable() { registry.write().await.insert(task_id,session); }
+                match response {
+                    Ok(response) if response["ok"]==true => {
+                        let result=&response["result"];
+                        if sub=="viewport" {return (true,format!("[browser] {result}"),None);}
+                        let bytes=serde_json::to_vec(result).unwrap_or_default();
+                        let saved=store_path.and_then(|p|p.parent()).ok_or_else(||"Task data directory unavailable".to_string()).and_then(|dir|crate::studio_artifacts::save(dir,task_id,&format!("browser_{sub}"),"application/json",&bytes,serde_json::json!({"entries":result.get("entries").and_then(|v|v.as_array()).map(|v|v.len())})));
+                        let preview=crate::tool_output::truncate_utf8_by_bytes(&String::from_utf8_lossy(&bytes),12000).0.to_string();
+                        match saved {Ok(record)=>(true,format!("[browser] evidence {}\n{preview}",record["id"]),None),Err(error)=>(false,format!("[browser] Evidence NOT saved: {error}\n{preview}"),None)}
+                    }
+                    Ok(response)=>(false,format!("[browser] {}",response["error"]),None),
+                    Err(error)=>(false,format!("[browser] {error}"),None)
                 }
             } else if sub == "click" {
                 let selector = args[1..].join(" ").trim().to_string();
@@ -2086,12 +2068,12 @@ pub(crate) async fn execute_tool_call_impl(
                 };
                 drop(g);
                 let resp = session
-                    .send_command(&serde_json::json!({
+                    .send_with_policy(&executor.policy, &serde_json::json!({
                         "cmd": "click",
                         "params": { "selector": selector, "timeout_secs": action_timeout }
                     }))
                     .await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2131,12 +2113,12 @@ pub(crate) async fn execute_tool_call_impl(
                 };
                 drop(g);
                 let resp = session
-                    .send_command(&serde_json::json!({
+                    .send_with_policy(&executor.policy, &serde_json::json!({
                         "cmd": "fill",
                         "params": { "selector": sel, "value": value, "timeout_secs": action_timeout }
                     }))
                     .await;
-                registry.write().await.insert(task_id, session);
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2176,8 +2158,8 @@ pub(crate) async fn execute_tool_call_impl(
                         "params": { "selector": arg, "timeout_secs": action_timeout }
                     })
                 };
-                let resp = session.send_command(&cmd).await;
-                registry.write().await.insert(task_id, session);
+                let resp = session.send_with_policy(&executor.policy, &cmd).await;
+                if session.reusable() { registry.write().await.insert(task_id, session); }
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2195,7 +2177,7 @@ pub(crate) async fn execute_tool_call_impl(
                     }
                 }
             } else {
-                (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot | browser click <selector> | browser fill <selector> <text> | browser wait <selector|ms>".to_string(), None)
+                (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot | browser click <selector> | browser fill <selector> <text> | browser wait <selector|ms> | browser viewport <width> <height> | browser console | browser network".to_string(), None)
             }
         }
         "install_playwright" => {
@@ -2308,7 +2290,7 @@ pub(crate) async fn execute_tool_call_impl(
                     (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None)
                 } else {
                     match tokio::fs::read(&disk_path).await {
-                        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+                        Ok(bytes) => match crate::pdf_extract_safe::extract_text_from_mem(&bytes) {
                             Ok(text) => {
                                 let preview = if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
                                 (true, format!("[pdf {}] extracted {} chars:\n{}", disk_path.display(), text.len(), preview), None)
@@ -2324,7 +2306,7 @@ pub(crate) async fn execute_tool_call_impl(
                     (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None)
                 } else {
                     match tokio::fs::read(path).await {
-                        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+                        Ok(bytes) => match crate::pdf_extract_safe::extract_text_from_mem(&bytes) {
                             Ok(text) => {
                                 let preview = if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
                                 (true, format!("[pdf {}] extracted {} chars:\n{}", path.display(), text.len(), preview), None)
@@ -2372,6 +2354,14 @@ pub(crate) async fn execute_tool_call_impl(
                     } else {
                         format!("[search_files] failed: {}", res.summary)
                     };
+                    let msg = if is_studio_workspace && res.success {
+                        let Some(root)=workspace_root else {return (false,"Studio workspace missing".into(),None);};
+                        let Some(data_dir)=store_path.and_then(Path::parent) else {return (false,"Studio task store missing".into(),None);};
+                        match crate::studio_project_context::rules_for_results(root,&paths.iter().take(20).cloned().collect::<Vec<_>>(),&executor.policy,data_dir,task_id) {
+                            Ok(rules)=>format!("{rules}{msg}"),
+                            Err(error)=>return (false,error,None),
+                        }
+                    } else {msg};
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[search_files] failed: {}", e), None),
@@ -2429,12 +2419,36 @@ pub(crate) async fn execute_tool_call_impl(
                     } else {
                         format!("[grep_content] failed: {}", res.summary)
                     };
+                    let msg = if is_studio_workspace && res.success {
+                        let Some(root)=workspace_root else {return (false,"Studio workspace missing".into(),None);};
+                        let Some(data_dir)=store_path.and_then(Path::parent) else {return (false,"Studio task store missing".into(),None);};
+                        match crate::studio_project_context::rules_for_results(root,&matches.iter().take(30).map(|(path,_,_)|path.clone()).collect::<Vec<_>>(),&executor.policy,data_dir,task_id) {
+                            Ok(rules)=>format!("{rules}{msg}"),
+                            Err(error)=>return (false,error,None),
+                        }
+                    } else {msg};
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[grep_content] failed: {}", e), None),
             }
         }
         "write_file" | "write_code" => {
+            if assigned_agent_for_task.as_deref() == Some("studio_planner") {
+                let Some(plan) = workspace_root.map(|root| strip_verbatim_prefix(root.join("CODE_STUDIO_PLAN.md"))) else {
+                    return (false, "[write_file] planner workspace missing".into(), None);
+                };
+                if !executor.policy.can_write(&plan) {
+                    return (false, "[write_file] plan write denied by tools policy".into(), None);
+                }
+                return match crate::studio_role_policy::write_planner_plan(args, workspace_root) {
+                    Ok(path) => {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path,
+                            "workspace:/CODE_STUDIO_PLAN.md", &path).await;
+                        (true, "[write_file workspace:/CODE_STUDIO_PLAN.md] saved (disk).".into(), None)
+                    }
+                    Err(reason) => (false, reason, None),
+                };
+            }
             let code_only = matches!(tool_name, "write_code");
             let usage_tag = if code_only { "write_code" } else { "write_file" };
             let Some((path_str, content)) = parse_write_file_request(args) else {
@@ -2456,6 +2470,29 @@ pub(crate) async fn execute_tool_call_impl(
                 );
             }
             if is_workspace_virtual_path(&path_str) {
+                // Studio workspaces are disk repositories. A memory-only update is
+                // never a successful Studio write; apply policy to the resolved path.
+                if is_studio_workspace {
+                    let Some(root) = workspace_root else {
+                        return (false, format!("[{usage_tag}] Studio disk workspace missing"), None);
+                    };
+                    let rewritten = rewrite_workspace_plan_path_str(&path_str, task_id, store_path);
+                    let disk_path = strip_verbatim_prefix(resolve_tool_disk_path(&rewritten, Some(root)));
+                    if !crate::studio::is_strictly_under_studio_root(&disk_path, root) {
+                        return (false, format!("[{usage_tag}] path escapes Studio workspace"), None);
+                    }
+                    if let Some(reason) = crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content) {
+                        return (false, format!("[{usage_tag}] {reason}"), None);
+                    }
+                    return match executor.write_file(&disk_path, &content).await {
+                        Ok(result) if result.success => {
+                            sync_workspace_store_from_disk(workspace_store, task_id, store_path, &rewritten, &disk_path).await;
+                            (true, format!("[{usage_tag} {}] saved (disk).", disk_path.display()), None)
+                        }
+                        Ok(result) => (false, format!("[{usage_tag}] {}", result.summary), None),
+                        Err(error) => (false, format!("[{usage_tag}] disk write failed: {error}"), None),
+                    };
+                }
                 match workspace_store {
                     Some(ws) => {
                         let key = path_str
@@ -2596,24 +2633,22 @@ pub(crate) async fn execute_tool_call_impl(
                         let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
                         let (key, _) =
                             rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+                        let disk_path_opt = workspace_root
+                            .map(|root| root.join(&key))
+                            .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                            .map(strip_verbatim_prefix);
+                        let policy_path=disk_path_opt.as_deref().unwrap_or_else(||Path::new(&key));
+                        if !executor.policy.can_write(policy_path) || workspace_root.is_some_and(|root|
+                            !crate::studio::is_strictly_under_studio_root(policy_path,root)) {
+                            return (false,"[delete_file] path not allowed by policy".to_string(),None);
+                        }
+                        // Check the resolved disk location before mutating either store.
                         {
                             let mut guard = ws.write().await;
                             if let Some(per_task) = guard.get_mut(&lineage_task_id) {
                                 per_task.remove(&key);
                             }
                         }
-                        let rel_path = Path::new(&key);
-                        if !executor.policy.can_write(rel_path) {
-                            return (
-                                false,
-                                "[delete_file] path not allowed by policy".to_string(),
-                                None,
-                            );
-                        }
-                        let disk_path_opt = workspace_root
-                            .map(|root| root.join(&key))
-                            .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
-                            .map(strip_verbatim_prefix);
                         if let Some(disk_path) = disk_path_opt {
                             if disk_path.is_dir() {
                                 return (

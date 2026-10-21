@@ -23,7 +23,7 @@ else
   exit 1
 fi
 
-for f in docs/user/index.json scripts spec/tools_policy.example.yaml; do
+for f in docs/user/index.json scripts spec/09_event_model.yaml spec/10_data_model.yaml spec/tools_policy.example.yaml; do
   if [[ ! -e "$STAGING_ABS/$f" ]]; then
     echo "::error::Expected $STAGING_ABS/$f missing"
     exit 1

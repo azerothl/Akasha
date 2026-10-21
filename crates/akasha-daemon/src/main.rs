@@ -68,6 +68,8 @@ async fn main() -> anyhow::Result<()> {
     let data_path = std::path::PathBuf::from(&data_dir);
     std::fs::create_dir_all(&data_path).ok();
     init_tracing(&data_path)?;
+    // `AKASHA_DATA_DIR` in env files is ignored — data_path was resolved above (see ENV_FILE_SKIP_KEYS).
+    akasha_core::apply_data_dir_env_files(&data_path);
 
     info!("Akasha daemon starting");
 

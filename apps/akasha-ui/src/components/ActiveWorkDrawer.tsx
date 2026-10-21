@@ -1,4 +1,5 @@
 import { Fragment, useState } from "react";
+import { taskStatus, taskTitle } from "../tasks/presentation";
 
 type ActiveTask = {
   id: string;
@@ -11,6 +12,7 @@ type ActiveTask = {
 
 type Props = {
   locale: "fr" | "en";
+  simple?: boolean;
   tasks: ActiveTask[];
   onOpenTask: (taskId: string) => void;
   onOpenSession?: (sessionId: string) => void;
@@ -41,6 +43,7 @@ function groupTasks(tasks: ActiveTask[]): { roots: ActiveTask[]; childrenOf: Map
 
 export function ActiveWorkDrawer({
   locale,
+  simple = true,
   tasks,
   onOpenTask,
   onOpenSession,
@@ -53,6 +56,9 @@ export function ActiveWorkDrawer({
   const [inspectId, setInspectId] = useState<string | null>(null);
   if (tasks.length === 0) return null;
   const { roots, childrenOf } = groupTasks(tasks);
+  // An absent/inactive parent does not turn an internal subtask into a user request.
+  const visibleRoots = simple ? roots.filter((task) => !task.parent_task_id?.trim()) : roots;
+  if (visibleRoots.length === 0) return null;
   const renderRow = (t: ActiveTask, nested: boolean) => {
     const kids = childrenOf.get(t.id) ?? [];
     const inspecting = inspectId === t.id;
@@ -60,10 +66,10 @@ export function ActiveWorkDrawer({
       <Fragment key={t.id}>
         <li className={`active-work-item${nested ? " active-work-item-child" : ""}`}>
           <button type="button" className="active-work-label" onClick={() => onOpenTask(t.id)}>
-            <span className="active-work-status">{t.status}</span>
+            <span className="active-work-status">{taskStatus(t.status, locale)}</span>
             <span className="active-work-title">
               {nested ? "↳ " : ""}
-              {t.label?.trim() || t.id.slice(0, 8)}
+              {taskTitle(t.label, en ? "Current request" : "Demande en cours")}
             </span>
           </button>
           <div className="active-work-actions">
@@ -72,7 +78,7 @@ export function ActiveWorkDrawer({
                 {en ? "Session" : "Session"}
               </button>
             ) : null}
-            {!nested && kids.length > 0 ? (
+            {!simple && !nested && kids.length > 0 ? (
               <button
                 type="button"
                 className="btn-secondary btn-tiny"
@@ -88,7 +94,7 @@ export function ActiveWorkDrawer({
                 {en ? "Cancel all" : "Tout annuler"}
               </button>
             ) : null}
-            {!nested && kids.length > 0 && onCancelChildren ? (
+            {!simple && !nested && kids.length > 0 && onCancelChildren ? (
               <button type="button" className="btn-secondary btn-tiny" onClick={() => onCancelChildren(t.id)}>
                 {en ? "Cancel children" : "Annuler enfants"}
               </button>
@@ -103,7 +109,7 @@ export function ActiveWorkDrawer({
             </button>
           </div>
         </li>
-        {inspecting && kids.length > 0 ? (
+        {!simple && inspecting && kids.length > 0 ? (
           <li
             id={`active-work-inspect-${t.id}`}
             className="active-work-inspect"
@@ -119,8 +125,8 @@ export function ActiveWorkDrawer({
               {kids.map((c) => (
                 <li key={c.id} className="active-work-inspect-row">
                   <button type="button" className="active-work-inspect-open" onClick={() => onOpenTask(c.id)}>
-                    <span className="active-work-status">{c.status}</span>
-                    <span>{c.label?.trim() || c.id.slice(0, 8)}</span>
+                    <span className="active-work-status">{taskStatus(c.status, locale)}</span>
+                    <span>{taskTitle(c.label, en ? "Current request" : "Demande en cours")}</span>
                     {c.assigned_agent ? (
                       <span className="muted active-work-inspect-agent">{c.assigned_agent}</span>
                     ) : null}
@@ -133,7 +139,7 @@ export function ActiveWorkDrawer({
             </ul>
           </li>
         ) : null}
-        {kids.map((c) => renderRow(c, true))}
+        {!simple && kids.map((c) => renderRow(c, true))}
       </Fragment>
     );
   };
@@ -141,9 +147,9 @@ export function ActiveWorkDrawer({
     <div className="active-work-drawer" role="region" aria-label={en ? "Active work" : "Travail actif"}>
       <div className="active-work-drawer-header">
         <strong>{en ? "Active work" : "Travail actif"}</strong>
-        <span className="muted">({tasks.length})</span>
+        <span className="muted">({simple ? visibleRoots.length : tasks.length})</span>
       </div>
-      <ul className="active-work-list">{roots.map((t) => renderRow(t, false))}</ul>
+      <ul className="active-work-list">{visibleRoots.map((t) => renderRow(t, false))}</ul>
     </div>
   );
 }

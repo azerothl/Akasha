@@ -66,8 +66,9 @@ if (Test-Path $gitUsrBin) {
     }
 }
 
-# CI may restore a partial cache from older /MT builds (restore-keys); force a clean link graph.
-if ($CleanLlamaCache -or $env:CI -eq "true") {
+# The versioned CI cache isolates the native ABI and build script. Rebuilding it
+# on every CI run defeats caching; explicit cleanup remains available for repair.
+if ($CleanLlamaCache) {
     $llcb = Join-Path $env:LOCALAPPDATA "llcb"
     if (Test-Path $llcb) {
         Write-Host "Removing llama-cpp CMake cache: $llcb"
@@ -78,4 +79,6 @@ if ($CleanLlamaCache -or $env:CI -eq "true") {
 }
 
 Write-Host "Building akasha-daemon (CUDA) for $Target ..."
-cargo build --release --target $Target -p akasha-daemon --no-default-features --features $Features
+cargo build --locked --timings --release --target $Target -p akasha-daemon --no-default-features --features $Features
+
+if ($LASTEXITCODE -ne 0) { throw "CUDA daemon build failed (exit $LASTEXITCODE)" }

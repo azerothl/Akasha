@@ -1,0 +1,297 @@
+{
+  "id": "dr_c0f8ad2d4bfc4e209d8f15167d55724c",
+  "topic": "Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) : organisation mémoire, accès par indice, ajout/retrait au début et à la fin, complexités amorties et usages. Citer les documents lus et signaler les limites, sans développement hors sujet. Sources officielles à lire :\nhttps://doc.rust-lang.org/std/vec/index.html\nhttps://doc.rust-lang.org/std/collections/vec_deque/index.html\nhttps://doc.rust-lang.org/std/collections/index.html\nhttps://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+  "phase": "done",
+  "round": 1,
+  "max_rounds": 1,
+  "branches": [
+    {
+      "id": "branch_plan",
+      "label": "Planning",
+      "status": "done",
+      "sub_agents": [
+        {
+          "id": "branch_plan_planner_dab428db2a5b43d2ab343d6d2319dc40",
+          "parent_branch_id": "branch_plan",
+          "role": "planner",
+          "label": "Research plan",
+          "status": "done"
+        },
+        {
+          "id": "branch_plan_classifier_dcaf0c7fb5be4b6ca5f036778218422a",
+          "parent_branch_id": "branch_plan",
+          "role": "classifier",
+          "label": "Category",
+          "status": "done"
+        }
+      ]
+    },
+    {
+      "id": "round_1",
+      "label": "Round 1",
+      "status": "done",
+      "sub_agents": [
+        {
+          "id": "round_1_query_gen_9f5c4122454242828e4ae673fdc8fdb2",
+          "parent_branch_id": "round_1",
+          "role": "query_gen",
+          "label": "Generating queries",
+          "status": "done"
+        },
+        {
+          "id": "round_1_reader_d4783e69c2d7448dbf2e69b5a44f0d29",
+          "parent_branch_id": "round_1",
+          "role": "reader",
+          "label": "https://doc.rust-lang.org/std/vec/index.…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_reader_d3fb4623878d46ceb2ac3c773fb86fea",
+          "parent_branch_id": "round_1",
+          "role": "reader",
+          "label": "https://doc.rust-lang.org/std/collection…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_reader_db814ac7f5f147e591696b060c7b0b52",
+          "parent_branch_id": "round_1",
+          "role": "reader",
+          "label": "https://doc.rust-lang.org/std/collection…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_reader_5635c237afbc449fb36ab02f515966b9",
+          "parent_branch_id": "round_1",
+          "role": "reader",
+          "label": "https://doc.rust-lang.org/std/collection…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_d4fa59ee4c024e1eba3eb5bd86e14ae5",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:doc.rust-lang.org Vec memory layout 2026",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_e4afcd3ae45e4438916f86c75ea13ec3",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:doc.rust-lang.org VecDeque memory layout 20…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_1ef0100da9be4f36a764c4c0d943b274",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:doc.rust-lang.org Vec index access complexi…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_7a48acb2002d4526bb4b0f50ba8ec524",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:doc.rust-lang.org VecDeque index access com…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_17e9e6d2986f49a2b5b5ea22c19d1f30",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:doc.rust-lang.org Vec push/pop amortized co…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_114017ce214c44eca154a3dc6b614d29",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:doc.rust-lang.org VecDeque push/pop amortiz…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_581977cbd51846d485ebf0c01c70ba47",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:stackoverflow.com Rust Vec vs VecDeque perf…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_7abd2cc327ef4912914e075a09e4f7d0",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:github.com issues Vec vs VecDeque usage pat…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_2fe0161538964eafbc520eb8c32c7cd5",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:en.wikipedia.org Comparer Vec et VecDeque e…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_bb7b6159d2d9436a981c403d1f6905c7",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:arxiv.org Comparer Vec et VecDeque en Rust …",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_5f2f701388594d88947c313f23481fe0",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "site:reddit.com Comparer Vec et VecDeque en Rust…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_search_abf895a976474805ae17769aab2c32bf",
+          "parent_branch_id": "round_1",
+          "role": "search",
+          "label": "Comparer Vec et VecDeque en Rust dans une répons…",
+          "status": "done"
+        },
+        {
+          "id": "round_1_analyst_49b34475ea434b6ba2cbfec4e9402aa5",
+          "parent_branch_id": "round_1",
+          "role": "analyst",
+          "label": "Synthesizing",
+          "status": "done"
+        }
+      ]
+    },
+    {
+      "id": "booster_gather",
+      "label": "Additional sources",
+      "status": "done",
+      "sub_agents": []
+    },
+    {
+      "id": "branch_final",
+      "label": "Final report",
+      "status": "done",
+      "sub_agents": [
+        {
+          "id": "branch_final_writer_459afcbe58e5443d9e36650bd8201d1c",
+          "parent_branch_id": "branch_final",
+          "role": "writer",
+          "label": "Writing report",
+          "status": "done"
+        },
+        {
+          "id": "branch_final_critic_0c2f7041a4fd4a2bb4c2dbb09446f006",
+          "parent_branch_id": "branch_final",
+          "role": "critic",
+          "label": "Checking source evidence",
+          "status": "done"
+        }
+      ]
+    }
+  ],
+  "evolving_report": "**Comparaison entre `Vec` et `VecDeque` en Rust**\n\n`Vec<T>` est un tableau dynamique contigu, alloué sur le tas, avec un accès par indice en **O(1)**, des opérations `push` et `pop` à la fin en **amortized O(1)**, et des insertions ou suppressions au début en **O(n)** [https://doc.rust-lang.org/std/vec/index.html](https://doc.rust-lang.org/std/vec/index.html). Il est recommandé pour les cas nécessitant une séquence ordonnée, un tableau redimensionnable, ou une pile [https://doc.rust-lang.org/std/collections/index.html](https://doc.rust-lang.org/std/collections/index.html).\n\n`VecDeque<T>` est une file doublement terminée, implémentée via un tampon en anneau extensible. Il permet des insertions et suppressions à **chaque extrémité en amortized O(1)**, et un accès par indice en **O(1)** [https://doc.rust-lang.org/std/collections/vec_deque/index.html](https://doc.rust-lang.org/std/collections/vec_deque/index.html). Cependant, contrairement à `Vec`, les éléments ne sont pas nécessairement contigus en mémoire, bien que la méthode `make_contiguous` permette d'obtenir un slice contigu [https://doc.rust-lang.org/std/collections/struct.VecDeque.html](https://doc.rust-lang.org/std/collections/struct.VecDeque.html).\n\nEn termes de complexité, `Vec` offre une performance supérieure pour les opérations à la fin, tandis que `VecDeque` est plus efficace pour les opérations aux deux extrémités. Les opérations d'insertion et de suppression en milieu de structure sont en **O(n)** pour les deux types, mais avec des constantes différentes [https://doc.rust-lang.org/std/collections/index.html](https://doc.rust-lang.org/std/collections/index.html).\n\n**Usages typiques** : `Vec` est adapté pour les cas où les ajouts et retraits se font principalement à la fin, ou pour des tableaux redimensionnables. `VecDeque` est préférable pour les files, les piles doubles, ou les cas nécessitant une insertion/retirer aux deux extrémités [https://doc.rust-lang.org/std/collections/index.html](https://doc.rust-lang.org/std/collections/index.html).\n\n**Limites** : `VecDeque` ne garantit pas la contiguïté en mémoire, contrairement à `Vec`. De plus, les sources ne mentionnent pas explicitement les complexités amorties de `Vec` dans la documentation de `VecDeque`, ce qui reste un point à clarifier [https://doc.rust-lang.org/std/collections/struct.VecDeque.html](https://doc.rust-lang.org/std/collections/struct.VecDeque.html).",
+  "findings": [
+    {
+      "url": "https://doc.rust-lang.org/std/vec/index.html",
+      "title": "https://doc.rust-lang.org/std/vec/index.html",
+      "summary": "La page présente Vec comme un type de tableau dynamique contigu en Rust, avec un accès par indice en O(1), des opérations push et pop amorties en O(1) à la fin. Elle mentionne la gestion de la mémoire via le Global allocator pour les types non-ZST, et la conversion entre Vec et des pointeurs bruts. Cependant, elle ne compare pas Vec avec VecDeque, ni ne détaille les performances des opérations au début du tableau.",
+      "evidence": "A contiguous growable array type with heap-allocated contents, written Vec<T>. Vectors have O(1) indexing, amortized O(1) push (to the end) and O(1) pop (from the end). When the type is non-zero-sized and the capacity is nonzero, Vec uses the Global allocator for its allocation. It is valid to convert both ways between such a Vec and a raw pointer allocated with the Global allocator, provided that the Layout used with the allocator is correct for a sequence of capacity elements of the type, and the first len values pointed to by the raw pointer are valid."
+    },
+    {
+      "url": "https://doc.rust-lang.org/std/collections/vec_deque/index.html",
+      "title": "https://doc.rust-lang.org/std/collections/vec_deque/index.html",
+      "summary": "La page présente le module `vec_deque` de la bibliothèque standard Rust, qui implémente une file doublement terminée (deque) avec un tampon de croissance (ring buffer). Elle indique que les opérations d'insertion et de retrait aux deux extrémités ont une complexité amortie O(1), et que l'accès par indice est également en O(1). Le module ne mentionne pas explicitement les différences avec `Vec` en termes d'organisation mémoire ou d'autres usages spécifiques.",
+      "evidence": "A double-ended queue (deque) implemented with a growable ring buffer. This queue has O(1) amortized inserts and removals from both ends of the container. It also has O(1) indexing like a vector."
+    },
+    {
+      "url": "https://doc.rust-lang.org/std/collections/index.html",
+      "title": "https://doc.rust-lang.org/std/collections/index.html",
+      "summary": "La page fournit des informations sur les collections de Rust, notamment Vec et VecDeque. Elle explique les cas d'utilisation, les performances, et les coûts des opérations pour différentes structures de données. Elle mentionne que Vec est adapté pour les cas où les insertions se font principalement à la fin, tandis que VecDeque permet des insertions efficaces aux deux extrémités. Les coûts amortis des opérations sont également présentés, mais les détails spécifiques à Vec et VecDeque sont moins développés.",
+      "evidence": "Use a Vec when: You want to collect items up to be processed or sent elsewhere later, and don’t care about any properties of the actual values being stored. You want a sequence of elements in a particular order, and will only be appending to (or near) the end. You want a stack. You want a resizable array. You want a heap-allocated array.\n\nUse a VecDeque when: You want a Vec that supports efficient insertion at both ends of the sequence. You want a queue. You want a double-ended queue (deque).\n\nCost of Collection Operations: Vec: get(i) O(1), insert(i) O(n-i)*, remove(i) O(n-i), append O(m)*, split_off O(n-i). VecDeque: get(i) O(1), insert(i) O(min(i, n-i))* , remove(i) O(min(i, n-i)), append O(m)*, split_off O(min(i, n-i)).\n\nNote that where ties occur, Vec is generally going to be faster than VecDeque, and VecDeque is generally going to be faster than LinkedList."
+    },
+    {
+      "url": "https://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+      "title": "https://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+      "summary": "La page présente la structure VecDeque de Rust, implémentée comme une file doublement terminée avec un tampon extensible en anneau. Elle fournit des méthodes pour ajouter et retirer des éléments au début et à la fin, ainsi que des accès par indice. Cependant, elle ne compare pas explicitement VecDeque avec Vec, ni ne mentionne les complexités amorties, les usages, ou l'organisation mémoire de Vec.",
+      "evidence": "VecDeque est une file doublement terminée implémentée avec un tampon extensible en anneau. Les éléments ne sont pas nécessairement contigus en mémoire. La méthode make_contiguous permet d'obtenir un slice contigu. Les méthodes push_back, push_front, pop_back, et pop_front sont disponibles. L'accès par indice est possible via get et get_mut. La page ne mentionne pas Vec, ni les complexités amorties, ni les usages typiques de VecDeque par rapport à Vec."
+    }
+  ],
+  "category": "comparison",
+  "providers_used": [],
+  "research_plan": "Sub-questions: Quelle est l'organisation mémoire de Vec et de VecDeque en Rust ?; Quelle est la complexité des accès par indice pour Vec et VecDeque ?; Quelle est la complexité amortie des opérations d'ajout et de retrait au début et à la fin pour Vec et VecDeque ?; Quels sont les usages typiques de Vec et de VecDeque en Rust ?; Quels sont les avantages et inconvénients de chaque structure en termes de performance ?; Quelles sont les limites de chaque structure en pratique ?; Quels documents officiels décrivent ces structures en détail ?\nKey topics: organisation mémoire, accès par indice, ajout/retrait au début et à la fin, complexités amorties, usages typiques, sources officielles, limites pratiques\nSource types: official_docs\nSuccess: Une réponse concise de 400 mots maximum, basée sur des informations vérifiables issues des documents officiels de Rust, couvrant les différences clés entre Vec et VecDeque en termes d'organisation mémoire, d'accès, de complexités et d'usages, avec une mention des sources lues et des limites reconnues.",
+  "plan_sub_questions": [
+    "Quelle est l'organisation mémoire de Vec et de VecDeque en Rust ?",
+    "Quelle est la complexité des accès par indice pour Vec et VecDeque ?",
+    "Quelle est la complexité amortie des opérations d'ajout et de retrait au début et à la fin pour Vec et VecDeque ?",
+    "Quels sont les usages typiques de Vec et de VecDeque en Rust ?",
+    "Quels sont les avantages et inconvénients de chaque structure en termes de performance ?",
+    "Quelles sont les limites de chaque structure en pratique ?",
+    "Quels documents officiels décrivent ces structures en détail ?"
+  ],
+  "report_markdown": "## Comparaison de `Vec` et `VecDeque` en Rust\n\n`Vec<T>` et `VecDeque<T>` sont deux structures de données de la bibliothèque standard de Rust, chacune adaptée à des cas d'utilisation spécifiques. `Vec` est un tableau dynamique contigu, optimisé pour les opérations à la fin, avec des performances amorties en O(1) pour les insertions et suppressions à cette extrémité. `VecDeque`, en revanche, est une file doublement terminée implémentée via un tampon en anneau, permettant des insertions et suppressions efficaces aux deux extrémités, avec des complexités amorties en O(1) pour ces opérations.\n\n---\n\n## Organisation mémoire\n\n`Vec<T>` est un tableau dynamique contigu, alloué sur le tas. Les éléments sont stockés de manière contiguë, ce qui permet un accès rapide via des indices [https://doc.rust-lang.org/std/vec/index.html](https://doc.rust-lang.org/std/vec/index.html).\n\n`VecDeque<T>` est implémenté comme un tampon en anneau (ring buffer), ce qui signifie que les éléments ne sont pas nécessairement contigus en mémoire. Cependant, la méthode `make_contiguous` peut être utilisée pour obtenir un slice contigu [https://doc.rust-lang.org/std/collections/struct.VecDeque.html](https://doc.rust-lang.org/std/collections/struct.VecDeque.html).\n\n---\n\n## Accès par indice\n\nLes deux structures permettent un accès par indice en **O(1)**. Pour `Vec`, cela est naturel en raison de la contiguïté. Pour `VecDeque`, l'accès est également en O(1), bien que l'implémentation en anneau puisse impliquer un calcul d'index plus complexe [https://doc.rust-lang.org/std/collections/vec_deque/index.html](https://doc.rust-lang.org/std/collections/vec_deque/index.html).\n\n---\n\n## Ajout et retrait au début et à la fin\n\n- **`Vec`** :\n  - Ajout ou retrait à la fin : **amortized O(1)**.\n  - Ajout ou retrait au début : **O(n)**, car cela nécessite le déplacement de tous les éléments [https://doc.rust-lang.org/std/vec/index.html](https://doc.rust-lang.org/std/vec/index.html).\n\n- **`VecDeque`** :\n  - Ajout ou retrait à la fin ou au début : **amortized O(1)**.\n  - Ces opérations sont optimisées grâce à l'implémentation en anneau [https://doc.rust-lang.org/std/collections/vec_deque/index.html](https://doc.rust-lang.org/std/collections/vec_deque/index.html).\n\n---\n\n## Complexités amorties\n\n| Opération       | `Vec`           | `VecDeque`        |\n|----------------|------------------|-------------------|\n| `get(i)`       | O(1)             | O(1)              |\n| `insert(i)`    | O(n - i)         | O(min(i, n - i))  |\n| `remove(i)`    | O(n - i)         | O(min(i, n - i))  |\n| `push_back`    | amortized O(1)   | amortized O(1)    |\n| `push_front`   | O(n)             | amortized O(1)    |\n| `pop_back`     | amortized O(1)   | amortized O(1)    |\n| `pop_front`    | O(n)             | amortized O(1)    |\n\nSource : [https://doc.rust-lang.org/std/collections/index.html](https://doc.rust-lang.org/std/collections/index.html)\n\n---\n\n## Usages typiques\n\n- **`Vec`** :\n  - Idéal pour les cas où les insertions et retraits se font principalement à la fin.\n  - Adapté pour les tableaux redimensionnables, les piles, ou les cas nécessitant un accès rapide par indice.\n  - Recommandé pour les cas où la contiguïté en mémoire est importante [https://doc.rust-lang.org/std/collections/index.html](https://doc.rust-lang.org/std/collections/index.html).\n\n- **`VecDeque`** :\n  - Idéal pour les files, les piles doubles, ou les cas nécessitant des insertions et retraits efficaces aux deux extrémités.\n  - Adapté pour les cas où les opérations aux deux extrémités sont fréquentes [https://doc.rust-lang.org/std/collections/index.html](https://doc.rust-lang.org/std/collections/index.html).\n\n---\n\n## Comparaison Table\n\n| Critère              | `Vec`                          | `VecDeque`                     |\n|---------------------|--------------------------------|--------------------------------|\n| **Organisation mémoire** | Contigu                        | Anneau (non contigu par défaut) |\n| **Accès par indice**     | O(1)                           | O(1)                           |\n| **Ajout à la fin**       | amortized O(1)                 | amortized O(1)                 |\n| **Ajout au début**       | O(n)                           | amortized O(1)                 |\n| **Retrait à la fin**     | amortized O(1)                 | amortized O(1)                 |\n| **Retrait au début**     | O(n)                           | amortized O(1)                 |\n| **Usages typiques**      | Tableaux, piles, séquences     | Files, déques, opérations aux deux extrémités |\n\n---\n\n## Sources et méthodologie\n\nLes sources utilisées proviennent de la documentation officielle de Rust, en particulier des pages suivantes :\n- [https://doc.rust-lang.org/std/collections/index.html](https://doc.rust-lang.org/std/collections/index.html)\n- [https://doc.rust-lang.org/std/collections/vec_deque/index.html](https://doc.rust-lang.org/std/collections/vec_deque/index.html)\n- [https://doc.rust-lang.org/std/vec/index.html](https://doc.rust-lang.org/std/vec/index.html)\n- [https://doc.rust-lang.org/std/collections/struct.VecDeque.html](https://doc.rust-lang.org/std/collections/struct.VecDeque.html)\n\nLes informations ont été synthétisées à partir des descriptions des performances, des usages, et des complexités des opérations pour `Vec` et `VecDeque`.\n\n---\n\n## Limitations et confidence\n\n- Les sources ne mentionnent pas explicitement les complexités amorties de `Vec` dans la documentation de `VecDeque`, ce qui reste un point à clarifier.\n- Les performances réelles peuvent varier selon les cas d'utilisation, les tailles des structures, et les configurations du système, mais ces variations ne sont pas documentées dans les sources consultées.\n- Les sources ne fournissent pas de comparaisons directes entre `Vec` et `VecDeque` en termes de performances réelles ou de benchmarks.\n\n**Niveau de confiance** : **Medium** — les informations sont basées sur des documents officiels, mais certaines nuances et comparaisons détaillées manquent.",
+  "report_meta": {
+    "report_title": "Comparaison de `Vec` et `VecDeque` en Rust : performances, organisation mémoire et usages courants",
+    "category": "comparison",
+    "word_count": 683,
+    "sources": [
+      {
+        "title": "https://doc.rust-lang.org/std/vec/index.html",
+        "url": "https://doc.rust-lang.org/std/vec/index.html"
+      },
+      {
+        "title": "https://doc.rust-lang.org/std/collections/vec_deque/index.html",
+        "url": "https://doc.rust-lang.org/std/collections/vec_deque/index.html"
+      },
+      {
+        "title": "https://doc.rust-lang.org/std/collections/index.html",
+        "url": "https://doc.rust-lang.org/std/collections/index.html"
+      },
+      {
+        "title": "https://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+        "url": "https://doc.rust-lang.org/std/collections/struct.VecDeque.html"
+      }
+    ],
+    "providers_used": [],
+    "rounds": 1,
+    "duration_secs": 446,
+    "search_degraded": false,
+    "user_question": "Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) : organisation mémoire, accès par indice, ajout/retrait au début et à la fin, complexités amorties et usages. Citer les documents lus et signaler les limites, sans développement hors sujet. Sources officielles à lire :\nhttps://doc.rust-lang.org/std/vec/index.html\nhttps://doc.rust-lang.org/std/collections/vec_deque/index.html\nhttps://doc.rust-lang.org/std/collections/index.html\nhttps://doc.rust-lang.org/std/collections/struct.VecDeque.html",
+    "search_queries": [
+      "site:doc.rust-lang.org Vec memory layout 2026",
+      "site:doc.rust-lang.org VecDeque memory layout 2026",
+      "site:doc.rust-lang.org Vec index access complexity 2026",
+      "site:doc.rust-lang.org VecDeque index access complexity 2026",
+      "site:doc.rust-lang.org Vec push/pop amortized complexity 2026",
+      "site:doc.rust-lang.org VecDeque push/pop amortized complexity 2026",
+      "site:stackoverflow.com Rust Vec vs VecDeque performance benchmarks 2026",
+      "site:github.com issues Vec vs VecDeque usage patterns 2026",
+      "site:en.wikipedia.org Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) : organisa…",
+      "site:arxiv.org Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) : organisa…",
+      "site:reddit.com Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) : organisa… discussion",
+      "Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) : organisa… news analysis",
+      "Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) … survey overview",
+      "site:scholar.google.com Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) …",
+      "Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) … official documentation",
+      "site:news.ycombinator.com Comparer Vec et VecDeque en Rust dans une réponse concise en français (400 mots maximum) …"
+    ],
+    "sub_questions": [
+      "Quelle est l'organisation mémoire de Vec et de VecDeque en Rust ?",
+      "Quelle est la complexité des accès par indice pour Vec et VecDeque ?",
+      "Quelle est la complexité amortie des opérations d'ajout et de retrait au début et à la fin pour Vec et VecDeque ?",
+      "Quels sont les usages typiques de Vec et de VecDeque en Rust ?",
+      "Quels sont les avantages et inconvénients de chaque structure en termes de performance ?",
+      "Quelles sont les limites de chaque structure en pratique ?",
+      "Quels documents officiels décrivent ces structures en détail ?"
+    ],
+    "pages_fetched": 4,
+    "search_hits_seen": 0,
+    "images_retrieved": 0,
+    "sources_skipped": [],
+    "unique_domains": 1,
+    "sources_sufficient": false,
+    "quality_warnings": [
+      "Only 4 pages were successfully read (below the target minimum); conclusions may be incomplete."
+    ]
+  },
+  "search_degraded": false,
+  "started_at": "2026-10-19T12:15:36.359425300+00:00",
+  "finished_at": "2026-10-19T12:23:02.755829100+00:00"
+}
