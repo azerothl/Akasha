@@ -6,7 +6,7 @@ description = "WASM sandbox for plugins (Wasmtime)"
 
 [dependencies]
 akasha-plugin-api = { path = "../akasha-plugin-api" }
-wasmtime = "22"
+wasmtime = "36"
 anyhow = "1.0"
 tracing = "0.1"
 serde_json = "1.0"
@@ -14,3 +14,7 @@ serde = { version = "1.0", features = ["derive"] }
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 url = "2"
 base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+wat = "1"
