@@ -188,6 +188,7 @@ smoke_desktop_ui() {
       [[ -x "$appdir/usr/bin/akasha-ui" ]] || { log "::error::Linux desktop UI binary is missing or not executable in the full archive"; return 1; }
       command -v xvfb-run >/dev/null || { log "::error::xvfb-run is required for the Linux desktop UI smoke"; return 1; }
       command -v xdotool >/dev/null || { log "::error::xdotool is required for the Linux desktop UI smoke"; return 1; }
+      command -v openbox >/dev/null || { log "::error::openbox is required for the Linux desktop UI smoke"; return 1; }
       if ! xvfb-run -a bash -c '
         set -euo pipefail
         app="$1"
@@ -223,9 +224,34 @@ smoke_desktop_ui() {
           ps -eo pid,ppid,stat,cmd | grep -E "[a]kasha-ui|[A]ppRun" || true
         }
         cd "$(dirname "$app")"
+        openbox --sm-disable >"$log_file.wm" 2>&1 &
+        wm_pid=$!
+        wm_ready=0
+        for _ in $(seq 1 20); do
+          if xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q "window id"; then
+            wm_ready=1
+            break
+          fi
+          if ! kill -0 "$wm_pid" 2>/dev/null; then
+            echo "Openbox exited before the desktop smoke started" >&2
+            cat "$log_file.wm" >&2 || true
+            exit 1
+          fi
+          sleep 0.25
+        done
+        if [[ "$wm_ready" != 1 ]]; then
+          echo "Openbox did not register with the X server" >&2
+          cat "$log_file.wm" >&2 || true
+          exit 1
+        fi
         ./AppRun >"$log_file" 2>&1 &
         pid=$!
-        cleanup_ui() { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
+        cleanup_ui() {
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          kill "$wm_pid" 2>/dev/null || true
+          wait "$wm_pid" 2>/dev/null || true
+        }
         trap cleanup_ui EXIT
         for _ in $(seq 1 60); do
           if ! kill -0 "$pid" 2>/dev/null; then
