@@ -1,0 +1,45 @@
+name: Cargo dependency cache
+description: Cache compatible dependencies, never stale workspace binaries
+inputs:
+  variant:
+    description: OS image, target, profile and native feature/ABI partition
+    required: true
+  workspaces:
+    description: Cargo workspace and target directories
+    default: ". -> target"
+  cuda:
+    description: Also preserve llama-cpp native CMake cache
+    default: "false"
+outputs:
+  cache-hit:
+    description: Exact dependency cache hit
+    value: ${{ steps.cache.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Locate native cache
+      id: native
+      shell: bash
+      env:
+        CACHE_CUDA: ${{ inputs.cuda }}
+      run: |
+        python - <<'PY'
+        import os
+        from pathlib import Path
+        native = str(Path(os.environ["LOCALAPPDATA"]) / "llcb") if os.environ["CACHE_CUDA"] == "true" else ""
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+            out.write(f"directory={native}\n")
+        PY
+    - name: Restore Cargo dependencies
+      id: cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: akasha-deps-v2
+        shared-key: ${{ inputs.variant }}-${{ runner.arch }}-${{ hashFiles('vendor/**', 'scripts/build-windows-daemon-cuda.ps1', '.github/workflows/build-release.yml', '.github/actions/cargo-cache/action.yml') }}
+        env-vars: CARGO CC CFLAGS CXX CMAKE RUST CUDA LIBCLANG LLAMA NVCC ESAXX
+        workspaces: ${{ inputs.workspaces }}
+        cache-directories: ${{ steps.native.outputs.directory }}
+        cache-bin: "false"
+        cache-workspace-crates: "false"
+        # Same-repo PRs can measure warm runs; fork caches remain read-only.
+        save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}

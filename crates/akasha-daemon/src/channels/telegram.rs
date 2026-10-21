@@ -7,9 +7,50 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tracing::{info, warn};
 
-fn telegram_hitl_pending() -> &'static Mutex<HashMap<i64, String>> {
-    static P: OnceLock<Mutex<HashMap<i64, String>>> = OnceLock::new();
+type TelegramWait = (String, Option<String>);
+
+fn telegram_hitl_pending() -> &'static Mutex<HashMap<i64, TelegramWait>> {
+    static P: OnceLock<Mutex<HashMap<i64, TelegramWait>>> = OnceLock::new();
     P.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// None: failed/unknown refresh, keep the wait. Some(None): confirmed consumed.
+// Never overwrite a newer wait installed while the HTTP request was in flight.
+fn reconcile_hitl_reply(pending: &mut HashMap<i64, TelegramWait>, chat: i64, sent: &TelegramWait, next: Option<Option<TelegramWait>>) {
+    if pending.get(&chat) != Some(sent) { return; }
+    if let Some(next) = next {
+        if let Some(wait) = next { pending.insert(chat, wait); } else { pending.remove(&chat); }
+    }
+}
+
+#[cfg(test)]
+mod hitl_reply_tests {
+    use super::*;
+    #[test]
+    fn transient_failure_keeps_wait_and_stale_request_refreshes_without_replay() {
+        let old = ("task".into(), Some("old".into()));
+        let fresh = ("task".into(), Some("fresh".into()));
+        let mut pending = HashMap::from([(7, old.clone())]);
+        let sent = pending.get(&7).cloned().unwrap();
+        reconcile_hitl_reply(&mut pending, 7, &sent, None);
+        assert_eq!(pending.get(&7), Some(&old));
+        reconcile_hitl_reply(&mut pending, 7, &sent, Some(Some(fresh.clone())));
+        assert_eq!(pending.get(&7), Some(&fresh));
+        reconcile_hitl_reply(&mut pending, 7, &sent, Some(None));
+        assert_eq!(pending.get(&7), Some(&fresh));
+        reconcile_hitl_reply(&mut pending, 7, &fresh, Some(None));
+        assert!(!pending.contains_key(&7));
+    }
+    #[test]
+    fn refresh_cannot_replace_another_task_and_confirmed_absence_clears_old_wait() {
+        let old = ("old-task".into(), Some("request".into()));
+        let fresh = ("new-task".into(), Some("new-request".into()));
+        let mut pending = HashMap::from([(7, fresh.clone()), (8, old.clone())]);
+        reconcile_hitl_reply(&mut pending, 7, &old, Some(Some(old.clone())));
+        assert_eq!(pending.get(&7), Some(&fresh));
+        reconcile_hitl_reply(&mut pending, 8, &old, Some(None));
+        assert!(!pending.contains_key(&8));
+    }
 }
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
@@ -420,16 +461,20 @@ pub async fn run_telegram_bot(
             }
 
             info!(chat_id = %chat_id, "Telegram: forwarding message to daemon");
-            let hitl_reply = if let Ok(mut pending) = telegram_hitl_pending().lock() {
-                pending.remove(&chat_id)
+            let hitl_reply = if let Ok(pending) = telegram_hitl_pending().lock() {
+                pending.get(&chat_id).cloned()
             } else {
                 None
             };
-            if let Some(task_id) = hitl_reply {
+            if let Some((task_id, request_id)) = hitl_reply {
+                let sent = (task_id.clone(), request_id.clone());
                 let reply_url = format!("{}/api/tasks/{}/human-reply", daemon_base_url, task_id);
-                let body = serde_json::json!({ "response": payload });
+                let body = serde_json::json!({ "response": payload, "request_id": request_id });
                 match client.post(&reply_url).json(&body).send().await {
                         Ok(r) if r.status().is_success() => {
+                            if let Ok(mut pending) = telegram_hitl_pending().lock() {
+                                reconcile_hitl_reply(&mut pending, chat_id, &sent, Some(None));
+                            }
                             let _ = send_telegram(
                                 &client,
                                 &send_message_url,
@@ -439,11 +484,30 @@ pub async fn run_telegram_bot(
                             .await;
                         }
                         _ => {
+                            let mut next = None;
+                            let mut message = "Impossible d'enregistrer la réponse. Réessayez votre réponse.".to_string();
+                            let current_url = format!("{}/api/tasks/{}/human-input", daemon_base_url, task_id);
+                            if let Ok(response) = client.get(&current_url).send().await {
+                                if response.status() == reqwest::StatusCode::NOT_FOUND {
+                                    next = Some(None);
+                                    message = "Cette tâche n'attend plus de réponse.".into();
+                                } else if response.status().is_success() {
+                                    if let Ok(question) = response.json::<serde_json::Value>().await {
+                                        if let Some(text) = question["question"].as_str() {
+                                            next = Some(Some((task_id.clone(), question["request_id"].as_str().map(str::to_owned))));
+                                            message = format!("Réponse non enregistrée. Question actuelle :\n{text}\n\nRépondez ici pour continuer.");
+                                        }
+                                    }
+                                }
+                            }
+                            if let Ok(mut pending) = telegram_hitl_pending().lock() {
+                                reconcile_hitl_reply(&mut pending, chat_id, &sent, next);
+                            }
                             let _ = send_telegram(
                                 &client,
                                 &send_message_url,
                                 chat_id,
-                                "Impossible d'enregistrer la réponse human-in-the-loop.",
+                                &message,
                             )
                             .await;
                         }
@@ -520,7 +584,7 @@ pub async fn run_telegram_bot(
                                 )
                                 .await;
                                 if let Ok(mut pending) = telegram_hitl_pending().lock() {
-                                    pending.insert(chat_id, task_id.clone());
+                                    pending.insert(chat_id, (task_id.clone(),hi_json["request_id"].as_str().map(str::to_owned)));
                                 }
                                 break "En attente de votre réponse (human-in-the-loop).".to_string();
                             }

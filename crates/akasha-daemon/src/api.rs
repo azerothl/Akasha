@@ -110,6 +110,10 @@ pub(crate) fn save_budget_settings(data_dir: &Path, settings: &BudgetSettings) -
 
 pub(crate) fn tool_scope_key(tool: &str, tool_args: &[String]) -> String {
     match tool {
+        "git_commit"|"git_push"|"github_create_pr"|"lsp_apply_rename"|"terminal_session"=>{
+            use sha2::Digest;
+            format!("exact-operation:{:x}",sha2::Sha256::digest(serde_json::to_vec(tool_args).unwrap_or_default()))
+        }
         "run_command" | "run_terminal" | "run_command_background" => tool_args
             .iter()
             .take(2)
@@ -177,6 +181,17 @@ pub(crate) fn save_permission_mode(data_dir: &Path, state: &PermissionModeState)
 /// `args[0]` = chemin ; le reste = « ancien » puis ` | ` (recommandé) ou `|`, puis « nouveau ».
 /// Retire les `|` initiaux issus du découpage (`path | old | new` → `old | new`).
 pub(crate) fn parse_search_replace_payload(args: &[String]) -> Result<(String, String), &'static str> {
+    // Typed calls use a marked JSON pair to preserve pipes, whitespace and
+    // newlines. Unmarked legacy TOOL arguments keep their original grammar.
+    if args.get(1).is_some_and(|arg| arg == "--studio-search-replace-v1") {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Pair { search: String, replacement: String }
+        if args.len() != 3 { return Err("usage"); }
+        let pair: Pair = serde_json::from_str(&args[2]).map_err(|_| "usage")?;
+        if pair.search.is_empty() { return Err("empty_search"); }
+        return Ok((pair.search, pair.replacement));
+    }
     let mut rest: String = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
     rest = rest.trim().to_string();
     while rest.starts_with('|') {
@@ -1250,6 +1265,7 @@ pub async fn run_delegation_handler(
 
 /// Pending "human in the loop" request: agent is waiting for the user to answer.
 pub struct PendingHumanInput {
+    pub request_id: Option<String>,
     pub question: String,
     pub context: String,
     pub choices: Option<Vec<String>>,
@@ -1348,6 +1364,11 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("merge_todos", "merge_todos <payload> — ajoute des étapes (même format que write_todos) sans supprimer les existantes ; titres déjà présents ignorés (casse insensible)."),
     ("read_todos", "read_todos — retourne la liste des étapes (todos) de la tâche courante."),
     ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
+    ("git_delivery_status", "git_delivery_status [JSON {remote:origin}] — préflight Git local, fichiers/versions, HEAD, branche, accès GitHub et état distant. Aucune publication."),
+    ("git_commit", "git_commit <JSON {paths:[...],expected_versions:{path:sha256},expected_head,message}> — commit des seuls fichiers sélectionnés avec index temporaire et mise à jour de ref conditionnelle ; aucun push."),
+    ("git_push", "git_push <JSON {remote,branch,expected_head,expected_remote_head}> — publication explicite de ce commit uniquement, sans force/tags/sous-modules ; approbation requise."),
+    ("github_create_pr", "github_create_pr <JSON {remote,head,base,expected_head,title,body,draft:true}> — crée une PR GitHub après push vérifié, sans fork/push implicite ni merge ; approbation requise."),
+    ("github_pr_status", "github_pr_status <JSON {remote,number?}> — lecture PR/CI, sans exécuter la CI. Distingue contrôles absents, en attente, échoués, neutres et SHA périmé."),
     ("lsp_query", "lsp_query <JSON {action:diagnostics|definition|references|rename,path,position:{line,character},new_name?,text?}> — serveur LSP préinstallé et autorisé ; positions UTF-16 à base zéro. Rename prépare un plan sans modifier le dépôt."),
     ("lsp_apply_rename", "lsp_apply_rename <plan_uuid> — appliquer un plan LSP de cette tâche, versions et politique contrôlées ; inspecter le plan avant appel."),
     ("list_tools", "list_tools [name] — current task capabilities: permissions, availability, argument schemas. Refresh after MCP or policy changes."),
@@ -1378,6 +1399,11 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
 /// `delegate_to_agent` n’est ajouté que pour `studio_project_manager` et seulement si la politique l’autorise.
 pub(crate) fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent: &str) -> Vec<String> {
     const STUDIO: &[&str] = &[
+        "git_delivery_status",
+        "git_commit",
+        "git_push",
+        "github_create_pr",
+        "github_pr_status",
         "lsp_query",
         "lsp_apply_rename",
         "list_tools",
@@ -2857,7 +2883,7 @@ pub(crate) async fn do_install_skill(
             let (mut commands_added_msg, need_hot_reload) = {
                 let bins = skill_required_bins(&body, &parsed.skill_name);
                 let policy_path = data_dir.join("tools_policy.yaml");
-                if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+                if let Ok(mut policy) = crate::studio_policy::load(&policy_path, data_dir) {
                     let added = policy.add_allowed_commands(&bins);
                     if !added.is_empty() {
                         if let Err(e) = policy.save_to_path(&policy_path) {
@@ -2966,7 +2992,7 @@ pub(crate) async fn do_uninstall_skill(
     let policy_path = data_dir.join("tools_policy.yaml");
     let mut policy_updated = false;
     if policy_path.exists() {
-        if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+        if let Ok(mut policy) = crate::studio_policy::load(&policy_path, data_dir) {
             if policy.remove_allowed_command(name) {
                 if policy.save_to_path(&policy_path).is_ok() {
                     policy_updated = true;
@@ -3085,8 +3111,8 @@ pub(crate) const CODE_STUDIO_APP_CONTEXT: &str = concat!(
     "Concentre-toi sur le code et la documentation de ce dépôt — pas sur l’interface générale d’Akasha (TUI, onglets, skills hors projet, caméra, météo). ",
     "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
     "Réponds dans la même langue que le dernier message utilisateur. ",
-    "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n",
-    "Sur le premier lot d’un projet : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant de commencer le développement applicatif si ce fichier est absent.\n",
+    "Avant de modifier un fichier existant : le lire ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.). Pour créer un fichier absent, utiliser expected_version=missing ; une lecture échouée avant création ne remplace pas une lecture de vérification demandée après l’écriture.\n",
+    "Pour créer ou faire évoluer une application : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant le développement applicatif si ce fichier est absent. Pour une demande ciblée sur des fichiers précis, respecter uniquement son périmètre et son contenu ; les gabarits du projet ne sont pas des modèles de contenu pour ces fichiers.\n",
     "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_code` pour le code source, `write_file` pour markdown/json/config, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
     "Si un outil d’écriture échoue ou est interdit, expliquer clairement la raison avant toute solution de secours.\n\n",
 );
@@ -3285,6 +3311,7 @@ Langue : aligne-toi sur le dernier message utilisateur."),
         "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
         "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
         "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, write_code, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Shell, background processes, containers, MCP/plugins and delegation are technically disabled for this role. Use git_status, git_log and git_diff for diagnostics. You MAY use write_file ONLY on workspace:/CODE_STUDIO_PLAN.md: read its existing content first and preserve unrelated sections. Other edit/delete/move tools are disabled. Explore with read_file, search_files, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
+        "studio_auditor" => Some("You audit code using repository read tools only. Never modify files, update tickets, execute commands or delegate. Ground each finding in an inspected file and identify unverified behavior."),
         "studio_reviewer" => Some("You are the Code Studio QA/Review agent. STRICTLY NON-MUTATING: never modify application files and never run write tools (write_file, write_code, edit_file, search_replace, apply_patch, delete_file, rename_path, move_tree). Your job in ticket `review` is to verify that the work linked to the ticket is present and behaves as expected, then post structured feedback on the ticket. Shell, background processes, containers, MCP/plugins and delegation are technically disabled for this role. Project verification scripts and autofix are not executed by this role; request a separate implementation/QA task when execution is needed. Use read-only inspection (read_file, grep_content, git_*) and finish by updating the ticket via `studio_update_ticket`: if accepted set review_outcome=approved and status=done; if issues remain set review_outcome=changes_requested, add concrete corrective_steps, and set status=in_progress. Do not rewrite the implementation during review."),
         _ => None,
     }
@@ -3521,6 +3548,8 @@ pub(crate) async fn compact_short_term_if_needed(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(2048);
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: summary_prompt,
         max_tokens: Some(summary_max_tokens),
@@ -3627,6 +3656,8 @@ Factual response in English.\n\n{}",
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(1024);
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: summary_prompt,
         max_tokens: Some(summary_max_tokens),
@@ -3974,13 +4005,13 @@ pub(crate) fn spawn_task_stall_watchdog(
                 }
                 let reason = format!(
                     "La tâche n'a produit aucune progression utile après {} secondes. \
-                     Le worker a peut‑être bloqué ou le fournisseur LLM ne répond pas. \
-                     Réessayez ou redémarrez le daemon.",
+                     Aucun signal utile du worker n’a été reçu. La cause précise n’est pas confirmée. \
+                     Consultez le diagnostic et les fichiers avant toute nouvelle demande.",
                     timeout_secs
                 );
-                if let Ok(store) = TaskStore::open(&store_path) {
-                    let _ = store.update_status(task_id, TaskStatus::Failed);
-                }
+                let outcome=serde_json::json!({"schema_version":1,"termination_reason":"inactivity_timeout","result":"failed","reason":reason,"verification":[],"acceptance_verified":false,"timeout_secs":timeout_secs});
+                let persisted=TaskStore::open(&store_path).and_then(|store|store.finalize_outcome(task_id,TaskStatus::Failed,outcome.clone()));
+                if !matches!(persisted,Ok((TaskStatus::Failed,_))) {return;}
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::ProgressUpdate,
@@ -3998,7 +4029,8 @@ pub(crate) fn spawn_task_stall_watchdog(
                         Some(serde_json::json!({
                             "task_id": task_id.to_string(),
                             "status": "failed",
-                            "reason": reason
+                            "reason": reason,
+                            "outcome": outcome
                         })),
                     )
                     .with_correlation(correlation_id),
@@ -4092,7 +4124,7 @@ pub(crate) async fn reload_tools_executor_policy(
     policy_path: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let mut reloaded = akasha_tools::ToolsPolicy::load_from_path(policy_path)?;
+    let mut reloaded = crate::studio_policy::load(policy_path, data_dir)?;
     if let Ok(v) = akasha_vault::open_vault(data_dir) {
         reloaded.apply_vault_api_keys(|k| v.get(k).ok());
     }
@@ -4456,6 +4488,8 @@ Output JSON only.",
         assistant_excerpt.chars().take(1_800).collect::<String>()
     );
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: user,
         max_tokens: Some(500),
@@ -4567,6 +4601,8 @@ Use a short structure: context (1–2 sentences), root cause, files/lines from t
         ),
     };
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: user,
         max_tokens: Some(800),
@@ -4800,9 +4836,10 @@ KNOWN_TS_ERRORS:\n{}\n",
             }
         }
     }
-    let exec = tools_executor.read().await.clone();
+    let exec = crate::studio_policy::executor(tools_executor.read().await.clone(), Some(tool_disk_root));
     let mut any_write_success = false;
     let mut follow_up = String::new();
+    let mut autofix_rules=std::collections::HashSet::<String>::new();
     let mut short_or_no_tool_retries = 0u32;
     let mut writes_ok_count = 0u32;
     /// Nudge only when the same file is read repeatedly without an intervening write (exploration stays allowed across many files).
@@ -4826,6 +4863,9 @@ KNOWN_TS_ERRORS:\n{}\n",
         let not_module_paths = extract_ts2306_not_module_paths(verify_log, 12);
         for p in &not_module_paths {
             let as_path = std::path::Path::new(p);
+            // Deterministic repairs cannot interpret repository instructions.
+            if crate::studio_project_context::rules_for_path(tool_disk_root,p,&exec.policy).map_or(true,|rules|!rules.is_empty()) {continue;}
+
             if !as_path.starts_with(tool_disk_root) {
                 continue;
             }
@@ -4893,6 +4933,8 @@ LAST_FAILED_FILES: {}\n",
             )
         };
         let req = CompletionRequest {
+            require_tool: false,
+            conversation: None,
             tools: None,
             prompt: user_block,
             max_tokens: Some(8192),
@@ -4969,6 +5011,7 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
         let lanes = akasha_tools::schedule_tool_calls(&calls);
         for (_lane, lane_calls) in lanes {
             for (name, args) in &lane_calls {
+                let exec = crate::studio_policy::executor(tools_executor.read().await.clone(), Some(tool_disk_root));
                 let actual_tool = match skill_registry {
                     Some(reg) => reg
                         .get(name)
@@ -4978,6 +5021,9 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                     None => name.clone(),
                 };
                 let actual_tool = canonicalize_tool_name(&actual_tool);
+                let actual_tool=if actual_tool=="studio_call" {
+                    match crate::studio_tool_contract::decode(&args.join(" ")) {Ok(decoded)=>decoded.envelope.tool,Err(error)=>{round_results.push(error);continue;}}
+                }else{actual_tool};
                 last_tool = actual_tool.clone();
                 if !STUDIO_VERIFY_AUTOFIX_TOOLS
                     .iter()
@@ -5007,9 +5053,21 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                     )
                     .with_correlation(timeline_correlation),
                 );
+                let decoded=if name=="studio_call" {crate::studio_tool_contract::decode(&args.join(" ")).ok()}else{None};
+                let target_args=decoded.as_ref().map(|d|d.argv.as_slice()).unwrap_or(args);
+                let mut defer=false;
+                for path in crate::studio_tool_contract::paths_for_tool(&actual_tool,target_args) {
+                    match crate::studio_project_context::rules_for_path(tool_disk_root,&path,&exec.policy) {
+                        Ok(rules)=>for rule in rules {
+                            if autofix_rules.insert(format!("{}:{}",rule.path.display(),rule.sha256)) {first_user.push_str(&rule.prompt());defer=true;}
+                        },
+                        Err(error)=>{round_results.push(error);defer=true;}
+                    }
+                }
+                if defer {round_results.push("Repository instructions loaded; propose the repair again under these rules.".into());continue;}
                 let (success, res, _cap) = execute_tool_call(
                     &exec,
-                    &actual_tool,
+                    if name=="studio_call" {"studio_call"}else{&actual_tool},
                     args,
                     process_registry,
                     long_term_client,
@@ -5182,6 +5240,8 @@ The compiler output already signals what is wrong: apply a minimal fix with `TOO
             }
             if !focused_reads.is_empty() {
                 let fallback_req = CompletionRequest {
+                    require_tool: false,
+                    conversation: None,
                     tools: None,
                     prompt: format!(
                         "Build output:\n{}\n\nFocused file reads:\n{}\n\nReturn ONLY TOOL lines to fix the TS syntax/build errors now. \
@@ -5221,6 +5281,7 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                         let lanes = akasha_tools::schedule_tool_calls(&calls);
                         for (_lane, lane_calls) in lanes {
                             for (name, args) in &lane_calls {
+                let exec = crate::studio_policy::executor(tools_executor.read().await.clone(), Some(tool_disk_root));
                                 let actual_tool = canonicalize_tool_name(name);
                                 if !matches!(
                                     actual_tool.as_str(),
@@ -5229,6 +5290,8 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 ) {
                                     continue;
                                 }
+                                if exec.policy.requires_approval(&actual_tool) {continue;}
+                                if crate::studio_tool_contract::paths_for_tool(&actual_tool,args).iter().any(|path|crate::studio_project_context::rules_for_path(tool_disk_root,path,&exec.policy).map_or(true,|rules|rules.iter().any(|rule|!autofix_rules.contains(&format!("{}:{}",rule.path.display(),rule.sha256))))) {continue;}
                                 let (success, _res, _cap) = execute_tool_call(
                                     &exec,
                                     &actual_tool,
@@ -5511,6 +5574,7 @@ pub async fn handle_api(
         path: path_only.to_string(),
     };
     crate::lifecycle_hooks::run_http_request_pre_hooks(data_dir, method, path_only).await;
+    if let Some(response)=crate::studio_delivery::route(method,path_only,query_str,body.as_deref(),data_dir,tools_executor).await{return response;}
     if let Some(response)=crate::studio_lsp::route(method,path_only,body.as_deref(),data_dir,tools_executor).await{return response;}
     if let Some(response)=crate::studio_recovery::route(method,path_only,body.as_deref(),store_path){return response;}
     if let Some(response) = crate::studio_observation::handle_route(method, path_only, query_str, body.as_deref(), data_dir, tools_executor).await {

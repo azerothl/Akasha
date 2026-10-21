@@ -7,11 +7,11 @@ Référence : analyse des dossiers `buddy`, `services`, `commands` sous le dép�
 | Concept (Claude) | Akasha aujourd’hui | Écart |
 |------------------|-------------------|--------|
 | Export conversation `.txt` | Pas d’export du fil de chat ; export CSV/PNG pour **visualisations** plugins (cartes, etc.) uniquement | Ajout **Export transcript** dans l’onglet Chat (voir implémentation) |
-| Titre de session / rename LLM | Tâches avec `initial_message` en base ([`akasha-store`](../../crates/akasha-store/src/tasks.rs)) ; pas de flux « générer un titre » depuis l’UI | Option future : endpoint daemon + bouton « Renommer » (spec ci‑dessous) |
+| Titre de session / rename LLM | Tâches avec `initial_message` en base ([`akasha-store`](../../../../crates/akasha-store/src/tasks.rs)) ; pas de flux « générer un titre » depuis l’UI | Option future : endpoint daemon + bouton « Renommer » (spec ci‑dessous) |
 | Résumé une ligne post-outils (Haiku) | Libellés **déterministes** dans l’UI (`tasks.tool_summary_prefix`, événements orchestration) ; pas de second appel LLM pour résumer un batch d’outils | Spec : heuristique locale **ou** modèle léger optionnel (voir §3) |
 | Suggestions de prompts suivants | Non | Puces optionnelles sous le champ (contenu + réglage) |
 | Tips onboarding | Non | `public/tips.json` + bandeau optionnel |
-| MCP OAuth / transports complets | `PluginKind::Mcp` dans [`akasha-plugin-api`](../../crates/akasha-plugin-api/src/kinds.rs) ; hôte à finaliser | Roadmap §5 |
+| MCP OAuth / transports complets | `PluginKind::Mcp` dans [`akasha-plugin-api`](../../../../crates/akasha-plugin-api/src/kinds.rs) ; hôte à finaliser | Roadmap §5 |
 | Buddy / mascotte | Non | Ligne optionnelle type « compagnon » (réglage) |
 
 ## 2. Export et nom de fichier (spec)
@@ -37,10 +37,10 @@ Ordre de travail plausible :
 
 1. Transport **stdio** et/ou **HTTP** vers processus MCP (config utilisateur).
 2. **OAuth** pour serveurs qui l’exigent (cache token local chiffré ou keyring).
-3. Cartographie `PluginKind::Mcp` → chargement dynamique dans [`akasha-plugin-host`](../../crates/akasha-plugin-host).
+3. Cartographie `PluginKind::Mcp` → chargement dynamique dans [`akasha-plugin-host`](../../../../crates/akasha-plugin-host).
 4. Tests avec un serveur MCP de référence (filesystem, fetch).
 
-Fichier [`kinds.rs`](../../crates/akasha-plugin-api/src/kinds.rs) : variante `Mcp` déjà présente pour le typage ; l’intégration runtime reste à faire.
+Fichier [`kinds.rs`](../../../../crates/akasha-plugin-api/src/kinds.rs) : variante `Mcp` déjà présente pour le typage ; l’intégration runtime reste à faire.
 
 ## 6. Buddy (spec)
 

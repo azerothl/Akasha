@@ -15,6 +15,8 @@ on:
       - ".github/workflows/release.yml"
       - "scripts/install.ps1"
       - "scripts/build-windows-daemon-cuda.ps1"
+      - "spec/dev/quality/bench_ar_protocol.py"
+      - "spec/dev/quality/bench_ar_protocol.json"
       - "spec/dev/quality/bench_embedded*.ps1"
   pull_request:
     paths:
@@ -25,17 +27,31 @@ on:
       - ".github/workflows/release.yml"
       - "scripts/install.ps1"
       - "scripts/build-windows-daemon-cuda.ps1"
+      - "spec/dev/quality/bench_ar_protocol.py"
+      - "spec/dev/quality/bench_ar_protocol.json"
       - "spec/dev/quality/bench_embedded*.ps1"
   workflow_dispatch:
+    inputs:
+      run_model_matrix:
+        description: Run the optional multi-model performance matrix
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   gpu-smoke:
     runs-on: [self-hosted, gpu, nvidia]
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Build CUDA daemon
         shell: pwsh
@@ -62,37 +78,93 @@ jobs:
           & "$ReleaseDir\akasha.exe" init --defaults
           & "$ReleaseDir\akasha.exe" config models embedded-download
 
-      - name: Smoke HTTP CUDA daemon
+      - name: Run live CUDA inference protocol
         shell: pwsh
         env:
           AKASHA_DATA_DIR: ${{ runner.temp }}\akasha-gpu-ci
+          AKASHA_PORT: "3876"
+          AKASHA_EMBEDDED_BACKEND: llama_cpp
+          AKASHA_EMBEDDED_N_GPU_LAYERS: "99"
         run: |
+          if (-not $env:CUDA_PATH) {
+            $cudaFallback = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
+            if (Test-Path (Join-Path $cudaFallback "bin\nvcc.exe")) { $env:CUDA_PATH = $cudaFallback }
+          }
           $ReleaseDir = "target\x86_64-pc-windows-msvc\release"
-          $daemon = Start-Process -FilePath "$ReleaseDir\akasha-daemon.exe" -PassThru -WindowStyle Hidden
+          $evidenceDir = $env:AKASHA_DATA_DIR
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          $daemonOut = Join-Path $evidenceDir "daemon.stdout.log"
+          $daemonErr = Join-Path $evidenceDir "daemon.stderr.log"
+          $benchReport = Join-Path $evidenceDir "bench-ar-qwen25-cuda.json"
+          $gpuSamples = Join-Path $evidenceDir "gpu-samples.csv"
+          $gpuErrors = Join-Path $evidenceDir "gpu-samples.err"
+          $nvidiaSmi = (Get-Command nvidia-smi.exe -ErrorAction Stop).Source
+          $sampler = Start-Process -FilePath $nvidiaSmi -ArgumentList @(
+            "--query-gpu=timestamp,memory.used,utilization.gpu",
+            "--format=csv,noheader",
+            "--loop-ms=250"
+          ) -PassThru -WindowStyle Hidden -RedirectStandardOutput $gpuSamples -RedirectStandardError $gpuErrors
+          $daemon = Start-Process -FilePath "$ReleaseDir\akasha-daemon.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput $daemonOut -RedirectStandardError $daemonErr
           try {
             $ok = $false
             for ($i = 0; $i -lt 60; $i++) {
               try {
-                Invoke-RestMethod -Uri "http://127.0.0.1:3876/api/status" -TimeoutSec 2 | Out-Null
+                Invoke-RestMethod -Uri "http://127.0.0.1:$env:AKASHA_PORT/api/status" -TimeoutSec 2 | Out-Null
                 $ok = $true
                 break
-              } catch { Start-Sleep -Seconds 2 }
+              } catch {
+                if ($daemon.HasExited) { throw "daemon exited before becoming ready; see $daemonErr" }
+                Start-Sleep -Seconds 2
+              }
             }
             if (-not $ok) { throw "daemon did not become ready" }
-            $status = Invoke-RestMethod -Uri "http://127.0.0.1:3876/api/status"
-            if ($status.status -ne "ok") { throw "unexpected status: $($status | ConvertTo-Json -Compress)" }
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:$env:AKASHA_PORT/api/router/embedded-status"
+            if ($status.embedded_available -ne $true) { throw "embedded model is unavailable: $($status | ConvertTo-Json -Compress)" }
+            if ($status.engine_mode -ne "cuda" -or [int]$status.n_gpu_layers -lt 1) {
+              throw "daemon is not configured for CUDA inference: $($status | ConvertTo-Json -Compress)"
+            }
+            if ($status.active_model_id -notlike "qwen2.5-1.5b-instruct-q4*") {
+              throw "unexpected active model: $($status.active_model_id)"
+            }
+
+            python spec/dev/quality/bench_ar_protocol.py --live `
+              --candidate qwen2.5-1.5b-instruct-q4 `
+              --expected-model qwen2.5-1.5b-instruct-q4 `
+              --port $env:AKASHA_PORT --gpu-samples $gpuSamples --json | Tee-Object -FilePath $benchReport
+            if ($LASTEXITCODE -ne 0) { throw "live CUDA inference protocol failed with exit code $LASTEXITCODE" }
+
+            $report = Get-Content -LiteralPath $benchReport -Raw | ConvertFrom-Json
+            if ($report.totals.ok -ne $report.totals.expected_rows) {
+              throw "live CUDA protocol did not pass every prompt: $($report.totals | ConvertTo-Json -Compress)"
+            }
+            if (-not $report.environment.nvidia_driver_version -or -not $report.environment.cuda_toolkit_version) {
+              throw "GPU driver or CUDA toolkit version is missing from the report: $($report.environment | ConvertTo-Json -Compress)"
+            }
+            if ([int]$report.environment.gpu_memory_samples.sample_count -lt 1) {
+              throw "no nvidia-smi VRAM/utilization samples were recorded"
+            }
+            Write-Host "Live CUDA inference passed $($report.totals.ok)/$($report.totals.expected_rows) prompts."
           } finally {
+            if ($sampler -and -not $sampler.HasExited) { Stop-Process -Id $sampler.Id -Force -ErrorAction SilentlyContinue }
             if ($daemon -and -not $daemon.HasExited) { Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue }
           }
 
-      - name: Bench embedded (strict JSON)
-        shell: pwsh
-        env:
-          AKASHA_DATA_DIR: ${{ runner.temp }}\akasha-gpu-ci
-        run: |
-          pwsh ./spec/dev/quality/bench_embedded.ps1 -Backend llama_cpp -Strict -Json
+      - name: Preserve CUDA inference evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-inference-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}\akasha-gpu-ci\bench-ar-qwen25-cuda.json
+            ${{ runner.temp }}\akasha-gpu-ci\daemon.stdout.log
+            ${{ runner.temp }}\akasha-gpu-ci\daemon.stderr.log
+            ${{ runner.temp }}\akasha-gpu-ci\gpu-samples.csv
+            ${{ runner.temp }}\akasha-gpu-ci\gpu-samples.err
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Bench embedded models matrix
+        if: github.event_name == 'workflow_dispatch' && inputs.run_model_matrix
         shell: pwsh
         env:
           AKASHA_DATA_DIR: ${{ runner.temp }}\akasha-gpu-ci

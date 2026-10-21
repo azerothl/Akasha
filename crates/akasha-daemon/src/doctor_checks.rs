@@ -55,6 +55,29 @@ pub fn build_local_llm_runtime_check(
     })
 }
 
+/// Optional tool runtimes affect their feature only, not the core daemon readiness.
+pub fn build_optional_runtime_check(
+    id: &str,
+    available: bool,
+    available_desc: &str,
+    unavailable_desc: &str,
+) -> serde_json::Value {
+    if available {
+        serde_json::json!({
+            "id": id,
+            "ok": true,
+            "description": available_desc,
+        })
+    } else {
+        serde_json::json!({
+            "id": id,
+            "ok": false,
+            "level": "info",
+            "description": unavailable_desc,
+        })
+    }
+}
+
 /// Info-level daemon checks do not fail aggregate `ok`.
 pub fn doctor_check_counts_toward_ok(check: &serde_json::Value) -> bool {
     if check.get("level").and_then(|v| v.as_str()) == Some("info") {
@@ -157,5 +180,30 @@ mod tests {
             ),
         ];
         assert!(!doctor_checks_all_ok(&checks));
+    }
+
+    #[test]
+    fn missing_optional_browser_runtimes_are_informational() {
+        let checks = vec![
+            build_optional_runtime_check(
+                "playwright_node",
+                false,
+                "node on PATH",
+                "Node.js not installed; install it to enable managed browser",
+            ),
+            build_optional_runtime_check(
+                "playwright_npm",
+                false,
+                "npm on PATH",
+                "npm not installed; install it to enable managed browser",
+            ),
+        ];
+
+        assert_eq!(
+            checks[0].get("level").and_then(|v| v.as_str()),
+            Some("info")
+        );
+        assert_eq!(checks[0].get("ok").and_then(|v| v.as_bool()), Some(false));
+        assert!(doctor_checks_all_ok(&checks));
     }
 }

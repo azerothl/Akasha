@@ -1,11 +1,11 @@
 //! Encrypted file vault - AES-256-GCM, key from env or Argon2 default
 
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm,
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use argon2::Argon2;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -14,7 +14,8 @@ use std::path::PathBuf;
 const DEFAULT_PASSPHRASE: &str = "akasha-vault-default-change-in-production";
 
 fn master_key() -> [u8; 32] {
-    let pass = std::env::var("AKASHA_VAULT_MASTER_KEY").unwrap_or_else(|_| DEFAULT_PASSPHRASE.to_string());
+    let pass =
+        std::env::var("AKASHA_VAULT_MASTER_KEY").unwrap_or_else(|_| DEFAULT_PASSPHRASE.to_string());
     let salt = b"akasha-vault-salt-v1";
     let mut key = [0u8; 32];
     Argon2::default()
@@ -45,9 +46,7 @@ impl FileVault {
     fn encrypt(plain: &str) -> Vec<u8> {
         let cipher = Self::cipher();
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-        let ciphertext = cipher
-            .encrypt(&nonce, plain.as_bytes())
-            .expect("encrypt");
+        let ciphertext = cipher.encrypt(&nonce, plain.as_bytes()).expect("encrypt");
         let mut out = nonce.to_vec();
         out.extend(ciphertext);
         out
@@ -82,7 +81,8 @@ impl FileVault {
         if let Some(p) = self.path.parent() {
             let _ = fs::create_dir_all(p);
         }
-        let json = serde_json::to_string(data).map_err(|e| crate::backend::VaultError::Any(e.into()))?;
+        let json =
+            serde_json::to_string(data).map_err(|e| crate::backend::VaultError::Any(e.into()))?;
         fs::write(&self.path, json).map_err(|e| crate::backend::VaultError::Any(e.into()))?;
         Ok(())
     }
@@ -91,9 +91,16 @@ impl FileVault {
 impl crate::backend::Vault for FileVault {
     fn get(&self, key: &str) -> Result<String, crate::backend::VaultError> {
         let data = self.load()?;
-        let b64 = data.entries.get(key).ok_or(crate::backend::VaultError::NotFound(key.to_string()))?;
-        let raw = BASE64.decode(b64.as_bytes()).map_err(|e| crate::backend::VaultError::Any(e.into()))?;
-        Self::decrypt(&raw).ok_or(crate::backend::VaultError::Any(anyhow::anyhow!("decrypt failed")))
+        let b64 = data
+            .entries
+            .get(key)
+            .ok_or(crate::backend::VaultError::NotFound(key.to_string()))?;
+        let raw = BASE64
+            .decode(b64.as_bytes())
+            .map_err(|e| crate::backend::VaultError::Any(e.into()))?;
+        Self::decrypt(&raw).ok_or(crate::backend::VaultError::Any(anyhow::anyhow!(
+            "decrypt failed"
+        )))
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), crate::backend::VaultError> {
@@ -122,12 +129,38 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    static MASTER_KEY_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct MasterKeyGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original: Option<std::ffi::OsString>,
+    }
+    impl Drop for MasterKeyGuard {
+        fn drop(&mut self) {
+            // All tests in this module hold the same guard while using the key.
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var("AKASHA_VAULT_MASTER_KEY", value),
+                    None => std::env::remove_var("AKASHA_VAULT_MASTER_KEY"),
+                }
+            }
+        }
+    }
+    fn master_key_guard() -> MasterKeyGuard {
+        let lock = MASTER_KEY_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        MasterKeyGuard {
+            _lock: lock,
+            original: std::env::var_os("AKASHA_VAULT_MASTER_KEY"),
+        }
+    }
+
     fn file_vault_in(dir: &Path) -> FileVault {
         FileVault::new(dir.join("vault.enc"))
     }
 
     fn set_master_key(key: &str) {
-        // SAFETY: tests run single-threaded; no concurrent env access in this crate's tests.
+        // SAFETY: every test holds the shared master-key environment guard.
         unsafe { std::env::set_var("AKASHA_VAULT_MASTER_KEY", key) };
     }
 
@@ -137,6 +170,7 @@ mod tests {
 
     #[test]
     fn init_creates_encrypted_file_on_first_set() {
+        let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
         let vault = file_vault_in(dir.path());
@@ -149,6 +183,7 @@ mod tests {
 
     #[test]
     fn set_then_get_round_trip() {
+        let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
         let vault = file_vault_in(dir.path());
@@ -159,6 +194,7 @@ mod tests {
 
     #[test]
     fn reopen_reads_secret_after_drop() {
+        let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("vault.enc");
@@ -172,6 +208,7 @@ mod tests {
 
     #[test]
     fn missing_key_returns_not_found() {
+        let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
         let vault = file_vault_in(dir.path());
@@ -181,6 +218,7 @@ mod tests {
 
     #[test]
     fn wrong_master_key_returns_decrypt_error() {
+        let _master_key_env = master_key_guard();
         set_master_key("vault-test-pass-a");
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("vault.enc");
@@ -197,6 +235,7 @@ mod tests {
 
     #[test]
     fn invalid_base64_entry_returns_error() {
+        let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("vault.enc");
@@ -208,6 +247,7 @@ mod tests {
 
     #[test]
     fn tampered_ciphertext_returns_decrypt_error() {
+        let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("vault.enc");
@@ -228,6 +268,7 @@ mod tests {
 
     #[test]
     fn corrupted_json_returns_corruption_error_on_get() {
+        let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("vault.enc");
@@ -239,6 +280,7 @@ mod tests {
 
     #[test]
     fn corrupted_json_should_return_explicit_error() {
+        let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("vault.enc");
@@ -250,6 +292,7 @@ mod tests {
 
     #[test]
     fn corrupted_json_set_returns_error_and_preserves_file_bytes() {
+        let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("vault.enc");
@@ -263,6 +306,7 @@ mod tests {
 
     #[test]
     fn list_keys_includes_set_secret() {
+        let _master_key_env = master_key_guard();
         clear_master_key();
         let dir = TempDir::new().expect("tempdir");
         let vault = file_vault_in(dir.path());

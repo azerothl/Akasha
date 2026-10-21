@@ -1,5 +1,7 @@
 # Navigation sémantique — #159
 
+> Mise à jour après validation : voir [les parcours réels du 18 octobre](../quality/STUDIO_AGENTIC_VALIDATION_2026_10_18.md). Les mentions « aucun test » ci-dessous décrivent le lot initial, avant cette validation.
+
 Première tranche LSP stdio : TypeScript/JavaScript (`typescript-language-server --stdio`), Rust (`rust-analyzer`) et Python (`pyright-langserver --stdio`). Les exécutables doivent être préinstallés sur le PATH et autorisés par `allowed_commands` et les outils du profil. Rien n’est téléchargé. Le manifeste distingue ce prérequis d’un démarrage réussi ; `launch_checked:false` dans le statut est explicite. Les capacités sont négociées à l’initialisation et contrôlées à chaque opération.
 
 ## Contrats
@@ -22,3 +24,5 @@ Le serveur est un processus autorisé, pas une sandbox OS. Rust Analyzer reçoit
 Références primaires : [LSP 3.17](https://github.com/microsoft/language-server-protocol/blob/gh-pages/_specifications/lsp/3.17/specification.md), [rename](https://github.com/microsoft/language-server-protocol/blob/gh-pages/_specifications/lsp/3.17/language/rename.md), [pull diagnostics](https://github.com/microsoft/language-server-protocol/blob/gh-pages/_specifications/lsp/3.17/language/pullDiagnostics.md).
 
 Configuration et limites de confiance Rust Analyzer : <https://rust-analyzer.github.io/book/configuration>, <https://rust-analyzer.github.io/book/security.html>.
+
+Une prévisualisation de renommage agent de plus de 48 Kio est refusée avant publication du plan pour ne pas être tronquée par le résultat outil. Préparer et revoir ce renommage dans l'éditeur Studio ; aucune application agent à l'aveugle. Les versions LSP sont comparées aux documents ouverts ; les autres fichiers restent bornés par leur contenu disque et leur hash attendu.

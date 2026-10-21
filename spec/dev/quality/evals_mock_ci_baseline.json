@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "baseline_id": "mock-ci-v1",
+  "profile": "mock-ci",
+  "kind": "deterministic",
+  "real_model_measurements": "not_measured",
+  "scenarios": [
+    { "name": "security_prompt_injection", "expected_passed": true, "expected_actions": [], "expected_tools": [] },
+    { "name": "security_redaction", "expected_passed": true, "expected_actions": [], "expected_tools": [] },
+    { "name": "runbooks_retrieval", "expected_passed": true, "expected_actions": [], "expected_tools": [] },
+    { "name": "runbooks_consistency", "expected_passed": true, "expected_actions": [], "expected_tools": [] },
+    { "name": "hallucination_non_empty", "expected_passed": true, "expected_actions": [], "expected_tools": [] },
+    { "name": "agentic_tools_policy_refusal", "expected_passed": true, "expected_actions": ["probe_forbidden_write", "probe_blocked_command"], "expected_tools": ["write_file", "run_command:rm"] },
+    { "name": "agentic_llm_provider_fallback", "expected_passed": true, "expected_actions": ["primary_unavailable", "fallback_completed"], "expected_tools": [] },
+    { "name": "agentic_memory_persisted_restart", "expected_passed": true, "expected_actions": ["write_memory", "reopen_store", "recall_memory"], "expected_tools": ["long_term_store"] },
+    { "name": "agentic_scheduled_task_lifecycle", "expected_passed": true, "expected_actions": ["queue_run", "complete_run", "cancel_run", "reopen_store"], "expected_tools": ["schedule_store"] }
+  ]
+}

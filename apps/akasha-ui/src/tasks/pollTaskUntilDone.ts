@@ -55,7 +55,7 @@ export type PollTaskUntilDoneDeps = {
   setRunningTaskEvents: Dispatch<SetStateAction<Record<string, TaskEventRow[]>>>;
   setTasksEvents: Dispatch<SetStateAction<TaskEventRow[]>>;
   setPendingHumanInput: Dispatch<
-    SetStateAction<Record<string, { question: string; context: string; choices?: string[] }>>
+    SetStateAction<Record<string, { question: string; context: string; choices?: string[]; request_id?: string }>>
   >;
   setHumanInputModalTaskId: Dispatch<SetStateAction<string | null>>;
   setChatMapByTaskId: Dispatch<SetStateAction<Record<string, ChatMapVisual>>>;
@@ -95,7 +95,7 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
       const [raw, eventsPayloadRaw, humanInputData] = await Promise.all([
         invoke<string>("get_task_status", { taskId, port: deps.daemonPort }),
         invoke<unknown>("get_task_events", { taskId, port: deps.daemonPort }).catch(() => null),
-        invoke<{ question?: string; context?: string; choices?: string[] }>("get_task_human_input", {
+        invoke<{ question?: string; context?: string; choices?: string[]; request_id?: string }>("get_task_human_input", {
           taskId,
           port: deps.daemonPort,
         }).catch(() => null),
@@ -188,6 +188,7 @@ export async function pollTaskUntilDone(taskId: string, deps: PollTaskUntilDoneD
             question: humanInputData.question ?? "",
             context: humanInputData.context ?? "",
             choices: humanInputData.choices,
+            request_id: humanInputData.request_id,
           },
         }));
         if (!deps.humanInputAutoOpenedRef.current.has(taskId)) {

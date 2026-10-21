@@ -42,5 +42,5 @@ Une règle : (acteur, ressource, action, conditions) → allow | deny.
 
 ## 6. Références
 
-- [akasha-tools/src/policy.rs](crates/akasha-tools/src/policy.rs) — ToolsPolicy actuel.
-- [memory_orchestrator.rs](crates/akasha-daemon/src/memory_orchestrator.rs) — scope mémoire.
+- [akasha-tools/src/policy.rs](../crates/akasha-tools/src/policy.rs) — ToolsPolicy actuel.
+- [memory_orchestrator.rs](../crates/akasha-daemon/src/memory_orchestrator.rs) — scope mémoire.

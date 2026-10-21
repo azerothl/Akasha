@@ -34,6 +34,9 @@ pub async fn try_handle(
     let llm_router = ctx.llm_router;
     let ollama_base_url = ctx.ollama_base_url;
     let task_usage_store = ctx.task_usage_store;
+if method == "GET" && path == "/api/router/studio-options" {
+    return Some(json_response("200 OK", &crate::studio_execution::catalog(llm_router).to_string()));
+}
 if method == "GET" && path == "/api/voice/status" {
     let config = crate::voice::load_voice_config(data_dir);
     let body = serde_json::json!({

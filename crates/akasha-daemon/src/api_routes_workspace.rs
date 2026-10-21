@@ -573,6 +573,8 @@ async fn run_compare(
             config: None,
         };
         let req = CompletionRequest {
+            require_tool: false,
+            conversation: None,
             tools: None,
             prompt: prompt.to_string(),
             max_tokens: Some(compare_max_tokens_for_provider(provider)),
@@ -646,6 +648,8 @@ async fn run_compare(
             .join("\n\n")
     );
     let synth_req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: synthesis_prompt,
         max_tokens: Some(800),
@@ -710,6 +714,8 @@ async fn research_plan_subquestions(
         "Research topic: {topic}\n\nProduce a JSON array of {max_steps} search sub-questions (strings only, no markdown). Example: [\"q1\",\"q2\"]"
     );
     let plan_req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: plan_prompt,
         max_tokens: Some(512),
@@ -759,6 +765,8 @@ async fn run_research_step(
         "Research topic: {topic}\n\nResearch step {step}/{total_steps} — answer this sub-question with structured notes and cite sources as [Source: title — url] when you infer them from general knowledge:\n\n{question}"
     );
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: step_prompt,
         max_tokens: Some(1200),
@@ -808,6 +816,8 @@ async fn synthesize_research_report(
             .join("\n\n")
     );
     let report_req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: report_prompt,
         max_tokens: Some(2048),
@@ -855,6 +865,8 @@ async fn run_deep_research(
             "Research step {step}/{max_steps} — answer this sub-question with structured notes and cite sources as [Source: title — url] when you infer them from general knowledge:\n\n{q}"
         );
         let req = CompletionRequest {
+            require_tool: false,
+            conversation: None,
             tools: None,
             prompt: step_prompt,
             max_tokens: Some(1200),
@@ -895,6 +907,8 @@ async fn run_deep_research(
             .join("\n\n")
     );
     let report_req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: report_prompt,
         max_tokens: Some(2048),

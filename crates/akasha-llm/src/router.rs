@@ -16,9 +16,7 @@ fn is_custom_route(config: &TaskTypeConfig) -> bool {
     config
         .primary
         .as_ref()
-        .map(|p| {
-            p.provider != "akasha_embedded" && p.provider != "akasha_core"
-        })
+        .map(|p| p.provider != "akasha_embedded" && p.provider != "akasha_core")
         .unwrap_or(false)
 }
 
@@ -29,7 +27,10 @@ fn agent_task_type_and_fallbacks(agent: &str) -> (&'static str, &'static [&'stat
         "financial" => ("financial", &["data_analysis", "conversation"][..]),
         "documentalist" => ("documentalist", &["conversation"][..]),
         "project_manager" => ("project_manager", &["conversation"][..]),
-        "technical_writer" => ("technical_writer", &["creative_writing", "conversation"][..]),
+        "technical_writer" => (
+            "technical_writer",
+            &["creative_writing", "conversation"][..],
+        ),
         "research" => ("research", &["scientific_analysis", "conversation"][..]),
         "security_audit" => (
             "security_audit",
@@ -40,12 +41,21 @@ fn agent_task_type_and_fallbacks(agent: &str) -> (&'static str, &'static [&'stat
         "search" => ("conversation", &[]),
         "conversation" => ("conversation", &[]),
         "analyst" => ("conversation", &["creative_writing"][..]),
-        "architect" => ("code_generation", &["system_diagnostic", "conversation"][..]),
+        "architect" => (
+            "code_generation",
+            &["system_diagnostic", "conversation"][..],
+        ),
         "frontend" | "backend" | "integration" => ("code_generation", &["conversation"][..]),
         "database" => ("data_analysis", &["code_generation", "conversation"][..]),
-        "qa" => ("system_diagnostic", &["code_generation", "conversation"][..]),
+        "qa" => (
+            "system_diagnostic",
+            &["code_generation", "conversation"][..],
+        ),
         "system" => ("system_diagnostic", &["conversation"][..]),
-        "image_generation" => ("image_generation", &["creative_writing", "conversation"][..]),
+        "image_generation" => (
+            "image_generation",
+            &["creative_writing", "conversation"][..],
+        ),
         _ => ("conversation", &[]),
     }
 }
@@ -96,7 +106,10 @@ fn resolve_preferred_task_type(preferred: &str, config: &RoutingConfig) -> Strin
 }
 
 /// When `enable_fallback` is false, only the primary route is attempted.
-fn task_config_for_completion(task_config: &TaskTypeConfig, enable_fallback: bool) -> TaskTypeConfig {
+fn task_config_for_completion(
+    task_config: &TaskTypeConfig,
+    enable_fallback: bool,
+) -> TaskTypeConfig {
     if enable_fallback {
         return task_config.clone();
     }
@@ -118,15 +131,12 @@ impl LLMRouter {
         Self::new_with_persistence(config, None)
     }
 
-    pub fn new_with_persistence(config: RoutingConfig, persistence: Option<Arc<dyn MetricsPersistence>>) -> Self {
-        let timeout_secs = config
-            .global
-            .default_timeout_secs
-            .unwrap_or(300);
-        let max_retries = config
-            .global
-            .default_max_retries
-            .unwrap_or(2);
+    pub fn new_with_persistence(
+        config: RoutingConfig,
+        persistence: Option<Arc<dyn MetricsPersistence>>,
+    ) -> Self {
+        let timeout_secs = config.global.default_timeout_secs.unwrap_or(300);
+        let max_retries = config.global.default_max_retries.unwrap_or(2);
         let fallback = FallbackEngine {
             max_retries,
             timeout_per_call: std::time::Duration::from_secs(timeout_secs),
@@ -191,7 +201,9 @@ impl LLMRouter {
     }
 
     /// List models per provider from routing config (for GET /api/router/models).
-    pub fn provider_configs(&self) -> std::collections::HashMap<String, crate::config::ProviderConfig> {
+    pub fn provider_configs(
+        &self,
+    ) -> std::collections::HashMap<String, crate::config::ProviderConfig> {
         self.config
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -201,12 +213,19 @@ impl LLMRouter {
 
     /// List models per provider from routing config (for GET /api/router/models).
     pub fn list_models_from_config(&self) -> std::collections::HashMap<String, Vec<String>> {
-        self.config.read().unwrap_or_else(|e| e.into_inner()).list_models_by_provider()
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .list_models_by_provider()
     }
 
     /// Routes by category (primary + fallback) for GET /api/router/routes and CLI/TUI.
     pub fn routes_by_category(&self) -> HashMap<String, TaskTypeConfig> {
-        self.config.read().unwrap_or_else(|e| e.into_inner()).task_types.clone()
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .task_types
+            .clone()
     }
 
     /// Resolve which task_type to use for routing given an assigned_agent. If the agent's task_type
@@ -291,8 +310,7 @@ impl LLMRouter {
     /// Preload the embedded model in the current thread (blocking). Call from spawn_blocking at daemon startup to reduce first-request latency.
     #[cfg(feature = "embedded")]
     pub fn embedded_preload(&self) -> Result<(), String> {
-        akasha_embedded_llm::EmbeddedLlm::preload()
-            .map_err(|e| e.to_string())
+        akasha_embedded_llm::EmbeddedLlm::preload().map_err(|e| e.to_string())
     }
 
     #[cfg(not(feature = "embedded"))]
@@ -330,9 +348,7 @@ impl LLMRouter {
 
     /// Poll download progress.
     #[cfg(all(feature = "embedded", feature = "embedded-download"))]
-    pub fn embedded_download_status(
-        &self,
-    ) -> akasha_embedded_llm::download::DownloadProgress {
+    pub fn embedded_download_status(&self) -> akasha_embedded_llm::download::DownloadProgress {
         let _ = self;
         akasha_embedded_llm::download::download_progress_snapshot()
     }
@@ -344,8 +360,8 @@ impl LLMRouter {
         let profile = akasha_embedded_llm::hardware::detect_hardware();
         let candidates =
             akasha_embedded_llm::profiles::calibration_candidates(&profile, 3).unwrap_or_default();
-        let models_for_tier = akasha_embedded_llm::profiles::models_for_tier(&profile.tier_id)
-            .unwrap_or_default();
+        let models_for_tier =
+            akasha_embedded_llm::profiles::models_for_tier(&profile.tier_id).unwrap_or_default();
         Ok(serde_json::json!({
             "profile": profile,
             "static_candidates": candidates,
@@ -354,17 +370,23 @@ impl LLMRouter {
     }
 
     /// Start embedded micro-bench calibration (background thread).
-    #[cfg(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp"))]
+    #[cfg(all(
+        feature = "embedded",
+        feature = "embedded-download",
+        feature = "embedded-llama-cpp"
+    ))]
     pub fn embedded_start_calibrate(&self, max_configs: usize) -> Result<(), String> {
         let _ = self;
         akasha_embedded_llm::calibrate::start_calibration_background(max_configs)
     }
 
     /// Poll calibration progress.
-    #[cfg(all(feature = "embedded", feature = "embedded-download", feature = "embedded-llama-cpp"))]
-    pub fn embedded_calibrate_status(
-        &self,
-    ) -> akasha_embedded_llm::calibrate::CalibrateProgress {
+    #[cfg(all(
+        feature = "embedded",
+        feature = "embedded-download",
+        feature = "embedded-llama-cpp"
+    ))]
+    pub fn embedded_calibrate_status(&self) -> akasha_embedded_llm::calibrate::CalibrateProgress {
         let _ = self;
         akasha_embedded_llm::calibrate::calibrate_progress_snapshot()
     }
@@ -375,6 +397,9 @@ impl LLMRouter {
         let _ = self;
         akasha_embedded_llm::config::apply_persisted_runtime();
     }
+
+    #[cfg(not(feature = "embedded"))]
+    pub fn embedded_apply_runtime(&self) {}
 
     /// Runtime settings snapshot (model, engine mode, tier).
     #[cfg(feature = "embedded")]
@@ -412,6 +437,45 @@ impl LLMRouter {
         entry: &crate::config::RouteEntry,
     ) -> Result<CompletionResponse, String> {
         let resolve = self.resolve();
+        let provider = resolve(entry.provider.as_str())
+            .ok_or_else(|| format!("provider '{}' is not registered", entry.provider))?;
+        if self.degraded_mode && !provider.is_local() {
+            return Err(format!(
+                "degraded mode: provider '{}' unavailable",
+                entry.provider
+            ));
+        }
+        let timeout_secs = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .default_timeout_secs
+            .unwrap_or(300);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let mut req = request.clone();
+        let model_options = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .model_options
+            .clone();
+        entry.apply_config_to_request(&mut req);
+        prepare_ollama_request(entry, &mut req, &model_options);
+        provider
+            .complete(&req, timeout, Some(entry.model.as_str()))
+            .await
+            .map_err(|e| crate::provider::format_provider_error(entry.provider.as_str(), &e))
+    }
+
+    /// Stream using one explicitly selected route; never silently fall back.
+    pub async fn complete_stream_for_entry(
+        &self,
+        request: &CompletionRequest,
+        entry: &crate::config::RouteEntry,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, String> {
+        let resolve = self.resolve();
         let provider = resolve(entry.provider.as_str()).ok_or_else(|| {
             format!(
                 "provider '{}' is not registered",
@@ -439,9 +503,11 @@ impl LLMRouter {
             .unwrap_or_else(|e| e.into_inner())
             .model_options
             .clone();
+        entry.apply_config_to_request(&mut req);
         prepare_ollama_request(entry, &mut req, &model_options);
+        if let Some(limit)=request.max_tokens { req.max_tokens=Some(req.max_tokens.unwrap_or(limit).min(limit)); }
         provider
-            .complete(&req, timeout, Some(entry.model.as_str()))
+            .complete_stream(&req, timeout, Some(entry.model.as_str()), chunk_tx)
             .await
             .map_err(|e| crate::provider::format_provider_error(entry.provider.as_str(), &e))
     }
@@ -478,8 +544,14 @@ impl LLMRouter {
     }
 
     /// Complete using preferred_task_type if set, else classifier on prompt; then routing config and fallback.
-    pub async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, String> {
-        let preferred = request.preferred_task_type.as_deref().filter(|s| !s.is_empty());
+    pub async fn complete(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<CompletionResponse, String> {
+        let preferred = request
+            .preferred_task_type
+            .as_deref()
+            .filter(|s| !s.is_empty());
         let task_type_str = if let Some(p) = preferred {
             let config = self.config.read().unwrap_or_else(|e| e.into_inner());
             resolve_preferred_task_type(p, &config)
@@ -490,7 +562,10 @@ impl LLMRouter {
         let task_type_str = task_type_str.as_str();
         let span = tracing::info_span!("llm_call", task_type = task_type_str);
         if preferred.is_some() {
-            info!(task_type = task_type_str, "Router using preferred task type (system/memory)");
+            info!(
+                task_type = task_type_str,
+                "Router using preferred task type (system/memory)"
+            );
         } else {
             info!(task_type = task_type_str, "Router classify");
         }
@@ -501,20 +576,18 @@ impl LLMRouter {
             .unwrap_or_else(|e| e.into_inner())
             .get_route(task_type_str)
             .cloned()
-            .unwrap_or_else(|| {
-                crate::config::TaskTypeConfig {
-                    primary: Some(crate::config::RouteEntry {
-                        provider: "akasha_embedded".into(),
-                        model: "default".into(),
-                        config: None,
-                    }),
-                    fallback: vec![crate::config::RouteEntry {
-                        provider: "akasha_core".into(),
-                        model: "core".into(),
-                        config: None,
-                    }],
-                    constraints: None,
-                }
+            .unwrap_or_else(|| crate::config::TaskTypeConfig {
+                primary: Some(crate::config::RouteEntry {
+                    provider: "akasha_embedded".into(),
+                    model: "default".into(),
+                    config: None,
+                }),
+                fallback: vec![crate::config::RouteEntry {
+                    provider: "akasha_core".into(),
+                    model: "core".into(),
+                    config: None,
+                }],
+                constraints: None,
             });
 
         let enable_fallback = self
@@ -552,7 +625,10 @@ impl LLMRouter {
         request: &CompletionRequest,
         chunk_tx: std::sync::mpsc::Sender<String>,
     ) -> Result<CompletionResponse, String> {
-        let preferred = request.preferred_task_type.as_deref().filter(|s| !s.is_empty());
+        let preferred = request
+            .preferred_task_type
+            .as_deref()
+            .filter(|s| !s.is_empty());
         let task_type_str = if let Some(p) = preferred {
             let config = self.config.read().unwrap_or_else(|e| e.into_inner());
             resolve_preferred_task_type(p, &config)
@@ -569,20 +645,18 @@ impl LLMRouter {
             .unwrap_or_else(|e| e.into_inner())
             .get_route(task_type_str)
             .cloned()
-            .unwrap_or_else(|| {
-                crate::config::TaskTypeConfig {
-                    primary: Some(crate::config::RouteEntry {
-                        provider: "akasha_embedded".into(),
-                        model: "default".into(),
-                        config: None,
-                    }),
-                    fallback: vec![crate::config::RouteEntry {
-                        provider: "akasha_core".into(),
-                        model: "core".into(),
-                        config: None,
-                    }],
-                    constraints: None,
-                }
+            .unwrap_or_else(|| crate::config::TaskTypeConfig {
+                primary: Some(crate::config::RouteEntry {
+                    provider: "akasha_embedded".into(),
+                    model: "default".into(),
+                    config: None,
+                }),
+                fallback: vec![crate::config::RouteEntry {
+                    provider: "akasha_core".into(),
+                    model: "core".into(),
+                    config: None,
+                }],
+                constraints: None,
             });
 
         let enable_fallback = self
@@ -620,8 +694,7 @@ impl LLMRouter {
                     // This prevents sending the full fallback text on top of already-streamed partial content.
                     let chunk_tx_fallback = chunk_tx.clone();
                     let (proxy_tx, proxy_rx) = std::sync::mpsc::channel::<String>();
-                    let any_chunk_sent =
-                        Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let any_chunk_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let flag_bridge = any_chunk_sent.clone();
                     let real_tx = chunk_tx;
                     let bridge_handle = tokio::task::spawn_blocking(move || {
@@ -631,18 +704,14 @@ impl LLMRouter {
                         }
                     });
                     match provider
-                        .complete_stream(
-                            &stream_req,
-                            timeout,
-                            Some(&entry.model),
-                            proxy_tx,
-                        )
+                        .complete_stream(&stream_req, timeout, Some(&entry.model), proxy_tx)
                         .await
                     {
-                        Ok(resp) => {
+                        Ok(mut resp) => {
                             // proxy_tx was moved into complete_stream and is now dropped.
                             // Await the bridge so all queued chunks are forwarded before returning.
                             let _ = bridge_handle.await;
+                            resp.provider_used = Some(entry.provider.clone());
                             return Ok(resp);
                         }
                         Err(e) => {
@@ -735,6 +804,10 @@ mod tests {
                 done_reason: None,
                 eval_count: None,
                 total_duration_ns: None,
+                provider_used: None,
+                ttft_ns: None,
+                load_duration_ns: None,
+                generation_duration_ns: None,
             })
         }
     }
@@ -792,7 +865,9 @@ mod tests {
                 temperature: Some(0.0),
                 preferred_task_type: Some("conversation".into()),
                 system_prompt: None,
+                conversation: None,
                 tools: None,
+                require_tool: false,
                 image_data_urls: None,
                 top_p: None,
                 top_k: None,
@@ -803,7 +878,10 @@ mod tests {
                 num_gpu: None,
                 thinking_level: None,
             };
-            let response = router.complete(&request).await.expect("complete should succeed");
+            let response = router
+                .complete(&request)
+                .await
+                .expect("complete should succeed");
             assert_eq!(response.text, mock_text);
             assert_eq!(response.model_used, "mock");
         }
@@ -866,7 +944,10 @@ mod tests {
     fn router_resolve_task_type_conversation_returns_conversation() {
         let config = RoutingConfig::default_config();
         let router = LLMRouter::new(config);
-        assert_eq!(router.resolve_task_type_for_agent("conversation"), "conversation");
+        assert_eq!(
+            router.resolve_task_type_for_agent("conversation"),
+            "conversation"
+        );
     }
 
     #[test]
@@ -906,4 +987,52 @@ mod tests {
             "default config must NOT have an 'orchestrator' route; decomposer falls back to 'system'"
         );
     }
+    struct RecordingModelProvider(Arc<std::sync::Mutex<Vec<String>>>);
+    #[async_trait]
+    impl LLMProvider for RecordingModelProvider {
+        fn name(&self)->&str {"mock_local"}
+        fn is_available(&self)->bool {true}
+        fn is_local(&self)->bool {true}
+        async fn complete(&self, request:&CompletionRequest, timeout:Duration, model:Option<&str>)->Result<crate::provider::CompletionResponse,ProviderError> {
+            self.0.lock().unwrap().push(model.unwrap_or_default().into());
+            assert_eq!(request.num_ctx,Some(4096));
+            let mut response=MockLocalProvider{response_text:"selected response".into()}.complete(request,timeout,model).await?;
+            response.model_used=model.unwrap_or_default().into(); Ok(response)
+        }
+    }
+    #[tokio::test]
+    async fn selected_stream_uses_exact_model_and_never_falls_back() {
+        let calls=Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut router=LLMRouter::new(RoutingConfig::default_config());
+        router.register_provider(Arc::new(RecordingModelProvider(calls.clone())));
+            let request = CompletionRequest {
+                prompt: "Hello".into(),
+                max_tokens: Some(10),
+                temperature: Some(0.0),
+                preferred_task_type: Some("conversation".into()),
+                system_prompt: None,
+                conversation: None,
+                tools: None,
+                require_tool: false,
+                image_data_urls: None,
+                top_p: None,
+                top_k: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                repeat_penalty: None,
+                num_ctx: None,
+                num_gpu: None,
+                thinking_level: None,
+            };
+        let (tx,rx)=std::sync::mpsc::channel();
+        let route=RouteEntry{provider:"mock_local".into(),model:"chosen-v2".into(),config:Some(serde_json::json!({"num_ctx":4096}))};
+        let response=router.complete_stream_for_entry(&request,&route,tx).await.unwrap();
+        assert_eq!(response.model_used,"chosen-v2"); assert_eq!(rx.recv().unwrap(),"selected response");
+        assert_eq!(*calls.lock().unwrap(),vec!["chosen-v2"]);
+        let (tx,_)=std::sync::mpsc::channel();
+        let missing=RouteEntry{provider:"unregistered".into(),..route};
+        assert!(router.complete_stream_for_entry(&request,&missing,tx).await.is_err());
+        assert_eq!(calls.lock().unwrap().len(),1);
+    }
+
 }

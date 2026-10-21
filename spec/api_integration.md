@@ -23,8 +23,8 @@ Ce document décrit les points d’intégration stables pour utiliser Akasha com
 | POST | `/api/tasks/:id/cancel` | Annuler une tâche (Pending/Queued/Running) ; émet task_cancelled. |
 | GET | `/api/tasks/:id` | Statut d’une tâche (progress, status, tokens_used, cost_usd). |
 | GET | `/api/tasks/:id/events` | Liste des événements (délégation, progression, complétion). |
-| GET | `/api/tasks/:id/human-input` | Question en attente (human-in-the-loop). |
-| POST | `/api/tasks/:id/human-reply` | Répondre à une question en attente (body: response). |
+| GET | `/api/tasks/:id/human-input` | Question en attente, avec son `request_id` (human-in-the-loop). |
+| POST | `/api/tasks/:id/human-reply` | Répondre à la question courante (body: `response`, `request_id`). |
 | GET | `/api/metrics/summary` | Métriques LLM par provider/model (P50/P95/P99 latence, coût). |
 | GET | `/api/router/metrics` | Métriques détaillées (option period=day|week|month|year). |
 | GET | `/api/update/status` | Dernière version connue (pour bannière de mise à jour). |
@@ -33,6 +33,25 @@ Ce document décrit les points d’intégration stables pour utiliser Akasha com
 | POST | `/api/voice/stt` | Transcription : body `{ "data_url": "data:audio/...;base64,..." }` ou `{ "audio_base64": "..." }` → `{ "text": "..." }`. |
 
 Les réponses sont en JSON. Le daemon écoute par défaut sur le port 3876 (`AKASHA_PORT`).
+
+### Contrat de réponse humaine, version 2
+
+Les clients doivent lire la question avec `GET /api/tasks/:id/human-input`, afficher
+son contenu puis transmettre son `request_id` exact avec la réponse :
+
+```json
+{"response":"Continuer avec cette modification", "request_id":"identifiant-retourne-par-human-input"}
+```
+
+Ce changement du contrat exige une migration des scripts et canaux personnalisés
+qui n'envoyaient que `response`. Chaque nouvelle question, y compris une attente
+au plafond des tours, reçoit un identifiant différent. Si l'identifiant est absent
+ou périmé, le serveur répond `409 Conflict` avec `error: stale_approval_request`
+et conserve la question en attente. Le client doit alors relire et afficher la
+question courante ; il ne doit pas rejouer automatiquement une ancienne réponse
+avec le nouvel identifiant. Un `404 no_pending_human_input` signifie qu'aucune
+question n'attend de réponse. Cette exigence empêche une réponse ancienne
+d'autoriser une opération différente après une reprise.
 
 ---
 

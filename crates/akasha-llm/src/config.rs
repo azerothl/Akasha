@@ -354,6 +354,8 @@ mod tests {
 
     fn empty_request() -> CompletionRequest {
         CompletionRequest {
+            require_tool: false,
+            conversation: None,
             tools: None,
             prompt: "test".into(),
             max_tokens: None,

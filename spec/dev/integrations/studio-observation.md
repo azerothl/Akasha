@@ -1,5 +1,7 @@
 # Observation Studio — issue #156
 
+> Mise à jour après validation : voir [les parcours réels du 18 octobre](../quality/STUDIO_AGENTIC_VALIDATION_2026_10_18.md). Les mentions « aucun test » ci-dessous décrivent le lot initial, avant cette validation.
+
 Implémentation sur la branche `codex/studio-observation`, empilée sur les capacités contextuelles. Aucun scénario navigateur, PTY ou MCP réel exécuté pour cette livraison.
 
 ## Contrats

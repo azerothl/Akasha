@@ -144,6 +144,7 @@ pub async fn execute_tool_call(
         ctx.browser_registry,
         ctx.workspace_root,
         ctx.session_id,
+        decoded.as_ref().and_then(|call|call.envelope.approval_identity.as_deref()),
     )
     .await;
     if let Some(operation) = operation {

@@ -174,6 +174,7 @@ impl SkillRegistry {
             {
                 if let Ok(content) = read_text_bounded(&path, 64 * 1024).await {
                     if let Ok(mut skill) = serde_yaml::from_str::<SkillDef>(&content) {
+                        anyhow::ensure!(!crate::api::AVAILABLE_TOOLS.iter().any(|(name,_)|*name==skill.name) || skill.tool_ref==skill.name,"skill cannot shadow a builtin tool with another capability");
                         skill.body_path = None;
                         skill.source_root = path.parent().map(Path::to_path_buf);
                         skill.sha256 = Some(format!("{:x}", Sha256::digest(content.as_bytes())));

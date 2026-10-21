@@ -2,6 +2,8 @@
 /target/
 staging/
 Cargo.lock
+!/Cargo.lock
+!/apps/akasha-ui/src-tauri/Cargo.lock
 
 # Node / npm
 node_modules/

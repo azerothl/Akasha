@@ -116,7 +116,7 @@ fn relative(root: &Path, path: &Path) -> Result<String, String> {
 }
 fn server(path: &Path) -> Result<(&'static str, &'static str, Vec<&'static str>), String> {
     match path.extension().and_then(|v| v.to_str()).unwrap_or("") {
-        "ts" => Ok(("typescript", "typescript-language-server", vec!["--stdio"])),
+        "ts" | "mts" | "cts" => Ok(("typescript", "typescript-language-server", vec!["--stdio"])),
         "tsx" => Ok((
             "typescriptreact",
             "typescript-language-server",
@@ -133,7 +133,9 @@ fn server(path: &Path) -> Result<(&'static str, &'static str, Vec<&'static str>)
         _ => Err("LSP language unsupported; supported: TypeScript/JavaScript, Rust, Python".into()),
     }
 }
+#[derive(Clone)]
 struct Document {
+    language: String,
     version: i32,
     text: String,
 }
@@ -232,7 +234,7 @@ impl Session {
                 if let Some(key) = self.document_key(uri) {
                     let document = &self.documents[&key];
                     let version = message.pointer("/params/version").and_then(Value::as_i64);
-                    if version.is_none_or(|version| version == i64::from(document.version)) {
+                    if version.is_some_and(|version| version == i64::from(document.version)) || version.is_none() && document.version==1 {
                         if let Some(list) = message
                             .pointer("/params/diagnostics")
                             .and_then(Value::as_array)
@@ -330,7 +332,7 @@ impl Session {
                 _ => return Err("LSP server does not synchronize changed buffers".into()),
             };
             self.notify("textDocument/didChange",json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[change]})).await?;
-            self.documents.insert(uri.into(), Document {version,text});
+            self.documents.insert(uri.into(), Document {language: language.into(),version,text});
             self.diagnostics.remove(uri);
             Ok(())
         } else {
@@ -342,6 +344,7 @@ impl Session {
             self.documents.insert(
                 uri.into(),
                 Document {
+                    language: language.into(),
                     version: 1,
                     text: text.clone(),
                 },
@@ -354,6 +357,34 @@ impl Session {
         }
     }
 }
+fn resolve_executable(program: &str, paths: &std::ffi::OsStr) -> Result<PathBuf, String> {
+    let suffixes = if cfg!(windows) { vec![".exe", ".cmd", ".bat", ".com", ""] } else { vec![""] };
+    std::env::split_paths(paths).filter(|dir| dir.is_absolute())
+        .flat_map(|dir| suffixes.iter().map(move |suffix| dir.join(format!("{program}{suffix}"))))
+        .find(|path| crate::studio_capabilities::executable_file(path))
+        .ok_or_else(|| "LSP executable missing from absolute PATH directories".to_string())
+}
+
+#[cfg(all(test, unix))]
+mod executable_resolution_tests {
+    #[test]
+    fn nonexecutable_shadow_does_not_hide_later_language_server() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shadow = dir.path().join("shadow");
+        let tools = dir.path().join("tools");
+        for path in [&shadow, &tools] { std::fs::create_dir(path).unwrap(); }
+        std::fs::write(shadow.join("language-server"), "not executable").unwrap();
+        std::fs::write(tools.join("language-server"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(shadow.join("language-server"),std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(tools.join("language-server"),std::fs::Permissions::from_mode(0o755)).unwrap();
+        let paths=std::env::join_paths([&shadow,&tools]).unwrap();
+        let resolved=super::resolve_executable("language-server",&paths).unwrap();
+        assert_eq!(resolved,tools.join("language-server"));
+        assert!(std::process::Command::new(resolved).status().unwrap().success());
+    }
+}
+
 async fn start(
     root: &Path,
     program: &str,
@@ -365,11 +396,10 @@ async fn start(
     {
         return Err(format!("LSP server unavailable or denied: {program}. Install/configure it explicitly; no automatic install."));
     }
-    let executable = if cfg!(windows) && program != "rust-analyzer" {
-        format!("{program}.cmd")
-    } else {
-        program.into()
-    };
+    let executable=resolve_executable(program,&std::env::var_os("PATH").unwrap_or_default())?;
+    // Preserve the filename for multicall shims such as rustup's rust-analyzer.
+    // Resolve only for containment checks; spawning rustup.exe loses its mode.
+    if executable.canonicalize().map_err(|e|e.to_string())?.starts_with(root) || executable.parent().and_then(|p|p.canonicalize().ok()).is_some_and(|p|p.starts_with(root)) {return Err("workspace-controlled LSP executable refused".into());}
     let mut command = Command::new(executable);
     command
         .args(args)
@@ -552,8 +582,6 @@ pub(crate) async fn query(
     if locked.is_none() {
         *locked = Some(start(&root, program, &args, policy).await?);
     }
-    let session = locked.as_mut().ok_or("LSP session missing")?;
-    session.last_used = std::time::Instant::now();
     let disk_text = read_text(&path)?;
     let text = query.text.unwrap_or_else(|| disk_text.clone());
     if text.len() > FILE_LIMIT {
@@ -565,6 +593,26 @@ pub(crate) async fn query(
     let uri = url::Url::from_file_path(&path)
         .map_err(|_| "invalid document URI")?
         .to_string();
+    // Push notifications carry no request identity and may omit document version.
+    // A new process/reader is the freshness barrier for changed push-only buffers:
+    // neither queued nor delayed diagnostics from the old process can be accepted.
+    let restarted_for_freshness = locked.as_ref().is_some_and(|session| {
+        session.documents.get(&uri).is_some_and(|document| {
+            requires_push_restart(&session.capabilities, &document.text, &text)
+        })
+    });
+    if restarted_for_freshness {
+        let snapshots = locked.as_ref().map(|old| old.documents.iter()
+            .filter(|(key, _)| *key != &uri)
+            .map(|(key, document)| (key.clone(), document.clone())).collect::<Vec<_>>()).unwrap_or_default();
+        if let Some(mut old) = locked.take() { let _ = old.child.kill().await; }
+        *locked = Some(start(&root, program, &args, policy).await?);
+        let fresh = locked.as_mut().ok_or("LSP session missing")?;
+        // Keep unsaved context from other open buffers across the barrier.
+        for (key, document) in snapshots { fresh.open(&key, &document.language, document.text).await?; }
+    }
+    let session = locked.as_mut().ok_or("LSP session missing")?;
+    session.last_used = std::time::Instant::now();
     session.open(&uri, language, text.clone()).await?;
     let document_version = session
         .documents
@@ -689,7 +737,7 @@ pub(crate) async fn query(
         _ => return Err("LSP action must be diagnostics, definition, references or rename".into()),
     };
     Ok(
-        json!({"schema_version":1,"server":program,"language":language,"path":relative(&root,&path)?,"document_version":document_version,"file_version":hash(&text),"result":result}),
+        json!({"schema_version":1,"server":program,"language":language,"path":relative(&root,&path)?,"document_version":document_version,"session_restarted_for_freshness":restarted_for_freshness,"file_version":hash(&text),"result":result}),
     )
 }
 
@@ -709,6 +757,12 @@ struct RenamePlan {
     workspace: PathBuf,
     created_at: chrono::DateTime<chrono::Utc>,
     files: Vec<PlanFile>,
+}
+const PLAN_LIMIT: usize = 8 * 1024 * 1024;
+fn encode_plan(plan: &RenamePlan) -> Result<Vec<u8>,String> {
+    let bytes=serde_json::to_vec(plan).map_err(|e|e.to_string())?;
+    if bytes.len()>PLAN_LIMIT {return Err("LSP plan exceeds limit".into());}
+    Ok(bytes)
 }
 fn plan_dir(data_dir: &Path) -> Result<PathBuf, String> {
     let data = data_dir.canonicalize().map_err(|e| e.to_string())?;
@@ -822,8 +876,9 @@ fn prepare_plan(
         created_at: chrono::Utc::now(),
         files,
     };
+    let bytes=encode_plan(&plan)?;
     let dir = plan_dir(data_dir)?;
-    if task.is_some() && serde_json::to_vec(&plan).map_err(|e|e.to_string())?.len()>48*1024 {
+    if task.is_some() && bytes.len()>48*1024 {
         return Err("Rename preview exceeds the agent tool result budget; prepare and review this rename in the Studio editor before applying it".into());
     }
     let mut active = 0;
@@ -855,7 +910,6 @@ fn prepare_plan(
     if active >= 256 {
         return Err("LSP active rename plan limit reached (256)".into());
     }
-    let bytes = serde_json::to_vec(&plan).map_err(|e| e.to_string())?;
     let mut tmp = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
     tmp.write_all(&bytes).map_err(|e| e.to_string())?;
     tmp.persist(dir.join(format!("{}.json", plan.id)))
@@ -876,6 +930,41 @@ fn prepare_plan(
         json!({"status":"planned","artifact":artifact,"plan_id":plan.id,"expires_in_secs":7200,"files":plan.files.iter().map(|file|json!({"path":file.path,"expected_version":file.expected_version,"edit_count":file.edit_count,"before":file.before,"after":file.after})).collect::<Vec<_>>()}),
     )
 }
+pub(crate) fn plan_paths(
+    data_dir: &Path,
+    root: &Path,
+    task: Uuid,
+    id: Uuid,
+) -> Result<Vec<String>, String> {
+    let dir = plan_dir(data_dir)?;
+    let path = dir
+        .join(format!("{id}.json"))
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !path.starts_with(&dir) {
+        return Err("LSP plan path escapes data".into());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(PLAN_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > PLAN_LIMIT {
+        return Err("LSP plan too large".into());
+    }
+    let plan: RenamePlan = serde_json::from_slice(&bytes).map_err(|_| "invalid LSP plan")?;
+    if plan.id != id
+        || plan.schema_version != 1
+        || plan.task_id != Some(task)
+        || plan.workspace != root.canonicalize().map_err(|e| e.to_string())?
+        || plan.files.len() > 32
+    {
+        return Err("LSP plan belongs to another task/workspace".into());
+    }
+    Ok(plan.files.into_iter().map(|file| file.path).collect())
+}
+
 fn atomic_write(path: &Path, text: &str) -> Result<(), String> {
     let mut tmp = tempfile::NamedTempFile::new_in(path.parent().ok_or("file parent missing")?)
         .map_err(|e| e.to_string())?;
@@ -909,10 +998,10 @@ pub(crate) fn apply_plan(
     let mut bytes = Vec::new();
     std::fs::File::open(&path)
         .map_err(|e| e.to_string())?
-        .take(8 * 1024 * 1024 + 1)
+        .take(PLAN_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > 8 * 1024 * 1024 {
+    if bytes.len() > PLAN_LIMIT {
         return Err("LSP plan exceeds limit".into());
     }
     let plan: RenamePlan = serde_json::from_slice(&bytes).map_err(|_| "invalid rename plan")?;
@@ -1033,7 +1122,12 @@ pub(crate) async fn route(
         },
         _ => Err("unsupported LSP route".into()),
     };
-    if result.as_ref().is_ok_and(|value|value["status"]=="applied"){close(&root).await;}
+    if result
+        .as_ref()
+        .is_ok_and(|value| value["status"] == "applied")
+    {
+        close(&root).await;
+    }
     Some(match result {
         Ok(value) => json_response("200 OK", &value.to_string()),
         Err(error) => json_response(
@@ -1041,4 +1135,33 @@ pub(crate) async fn route(
             &json!({"schema_version":1,"error":error}).to_string(),
         ),
     })
+}
+
+fn requires_push_restart(capabilities: &Value, previous: &str, current: &str) -> bool {
+    previous != current && !capabilities.get("diagnosticProvider").is_some_and(|v| *v != false && !v.is_null())
+}
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+    #[test] fn changed_push_buffers_need_a_new_process_but_pull_and_unchanged_buffers_do_not() {
+        for caps in [json!({}),json!({"diagnosticProvider":false}),json!({"diagnosticProvider":null})] {
+            assert!(requires_push_restart(&caps,"old","new"));
+            assert!(!requires_push_restart(&caps,"old","old"));
+        }
+        for caps in [json!({"diagnosticProvider":true}),json!({"diagnosticProvider":{}})] {
+            assert!(!requires_push_restart(&caps,"old","new"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod persisted_plan_limit_tests {
+    use super::*;
+    #[test] fn escaped_plan_is_refused_before_it_can_be_returned_or_persisted() {
+        let plan=|text: String| RenamePlan{schema_version:1,id:Uuid::new_v4(),task_id:None,workspace:PathBuf::from("fixture"),created_at:chrono::Utc::now(),files:(0..4).map(|i|PlanFile{path:format!("{i}.txt"),expected_version:"missing".into(),before:text.clone(),after:text.clone(),edit_count:1}).collect()};
+        assert!(encode_plan(&plan("small".into())).is_ok());
+        let oversized=plan("\u{0001}".repeat(FILE_LIMIT));
+        assert_eq!(oversized.files.iter().map(|file|file.before.len()+file.after.len()).sum::<usize>(),4*1024*1024);
+        assert!(encode_plan(&oversized).unwrap_err().contains("exceeds limit"));
+    }
 }

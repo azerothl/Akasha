@@ -1,5 +1,7 @@
 # Code Studio — terminaison et rôles restreints
 
+> Mise à jour après validation : voir [les parcours réels du 18 octobre](STUDIO_AGENTIC_VALIDATION_2026_10_18.md). Les mentions « aucun test » ci-dessous décrivent le lot initial, avant cette validation.
+
 Travail associé : [#151](https://github.com/azerothl/Akasha/issues/151) et [#152](https://github.com/azerothl/Akasha/issues/152). Audit initial : Code Studio `7ead866`, daemon `4f3ee5f`.
 
 ## Contrat de résultat

@@ -101,6 +101,8 @@ If uncertain, prefer false for both booleans.";
     );
 
     let req = CompletionRequest {
+        require_tool: false,
+        conversation: None,
         tools: None,
         prompt: user,
         max_tokens: Some(120),
