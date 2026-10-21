@@ -12,6 +12,7 @@
 #   AKASHA_REPO     GitHub repo (default: azerothl/Akasha)
 #   RELEASE_TAG     Release tag to download (default: v0.11.0)
 #   ARTIFACT_NAME   Zip name (default: akasha-linux-x86_64.zip)
+#   EXPECTED_VERSION Optional package version check (accepts 0.11.1 or v0.11.1)
 #   INFERENCE_TIMEOUT_SECS  Max wait for first embedded reply (default: 240)
 set -euo pipefail
 
@@ -20,6 +21,7 @@ RELEASE_TAG="${RELEASE_TAG:-v0.11.0}"
 ARTIFACT_NAME="${ARTIFACT_NAME:-akasha-linux-x86_64.zip}"
 INFERENCE_TIMEOUT_SECS="${INFERENCE_TIMEOUT_SECS:-240}"
 SKIP_INFERENCE="${SKIP_INFERENCE:-0}"
+EXPECTED_VERSION="${EXPECTED_VERSION#v}"
 
 WORK="$(mktemp -d)"
 FAKE_HOME="$(mktemp -d)"
@@ -85,7 +87,11 @@ cd "$ROOT"
 log "HOME=$HOME AKASHA_PORT=$PORT extract=$ROOT"
 
 INIT_START=$(date +%s)
-./akasha --version | tee -a "$LOG"
+VERSION_OUTPUT=$(./akasha --version | tee -a "$LOG")
+if [[ -n "$EXPECTED_VERSION" && "$VERSION_OUTPUT" != *"$EXPECTED_VERSION"* ]]; then
+  log "::error::expected package version $EXPECTED_VERSION; got $VERSION_OUTPUT"
+  exit 1
+fi
 ./akasha init --defaults 2>&1 | tee -a "$LOG"
 INIT_END=$(date +%s)
 log "init_duration_s=$((INIT_END - INIT_START))"

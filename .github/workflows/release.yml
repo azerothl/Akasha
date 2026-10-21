@@ -358,9 +358,67 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  validate-release-archives:
+    needs: [verify-release-version, package]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: akasha-full-linux-x86_64.zip
+          - os: macos-15-intel
+            artifact: akasha-full-macos-x86_64.zip
+          - os: macos-latest
+            artifact: akasha-full-macos-aarch64.zip
+          - os: windows-latest
+            artifact: akasha-full-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download packaged release archives
+        uses: actions/download-artifact@v4
+        with:
+          name: release-archives
+          path: release
+
+      - name: Validate Linux / macOS archive first boot and response
+        if: runner.os != 'Windows'
+        env:
+          ARTIFACT_ZIP: release/${{ matrix.artifact }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          INFERENCE_TIMEOUT_SECS: "360"
+          SMOKE_EVIDENCE_DIR: ${{ runner.temp }}/release-first-boot
+        run: bash scripts/smoke-release-artifact-linux.sh
+
+      - name: Validate Windows archive first boot and response
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          ./scripts/smoke-release-artifact-windows.ps1
+          -ArtifactZip "release\${{ matrix.artifact }}"
+          -ExpectedVersion "${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}"
+          -InferenceTimeoutSecs 360
+          -EvidenceDir "${{ runner.temp }}\release-first-boot"
+
+      - name: Preserve first-boot diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-boot-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/release-first-boot
+          if-no-files-found: warn
+          retention-days: 14
+
   release:
     if: github.event_name != 'workflow_dispatch' || inputs.publish
-    needs: [package]
+    needs: [package, validate-release-archives]
     runs-on: ubuntu-latest
     permissions:
       contents: write
