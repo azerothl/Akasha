@@ -15,6 +15,10 @@ SPEC.loader.exec_module(eval_runner)
 
 
 class RealAgenticEvalTests(unittest.TestCase):
+    def test_task_completion_status_aliases_are_supported(self):
+        self.assertEqual(eval_runner.TASK_SUCCEEDED, {"done", "completed"})
+        self.assertTrue(eval_runner.TASK_SUCCEEDED <= eval_runner.TERMINAL)
+
     def test_clean_env_removes_secrets_but_keeps_runtime_path(self):
         with patch.dict(os.environ, {"AKASHA_EVAL_TEST_API_KEY": "secret", "AKASHA_EVAL_TEST_TOKEN": "secret", "AKASHA_EVAL_TEST_VISIBLE": "yes"}):
             cleaned = eval_runner.clean_env()
