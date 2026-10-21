@@ -18,7 +18,7 @@ Document de test d'installation **fraîche** (hors build CI du workspace). Compl
 | `akasha-macos-aarch64.zip`, `akasha-full-macos-aarch64.zip` | v0.11.0 | aarch64 | non testé | — | — | — | — | — | Non testé |
 | `akasha-ui-linux.zip` | v0.11.0 | x86_64 | non testé | — | — | — | sans objet | non testée | Non testé |
 | `akasha-ui-macos.zip` | v0.11.0 | x86_64 / aarch64 | non testé | — | — | — | sans objet | non testée | Non testé |
-| `akasha-ui-windows.zip` | v0.11.0 | x86_64 | Windows 11 Pro Insider Preview 10.0.26220, 21 oct. | sans objet | — | — | sans objet | Archive MSI/NSIS inventoriée et MSI extrait en temporaire ; application non lancée | Non testé |
+| `akasha-ui-windows.zip` | v0.11.0 | x86_64 | Windows 11 Pro Insider Preview 10.0.26220, 21 oct. | sans objet | — | — | sans objet | Fenêtre « Akasha » créée depuis le MSI extrait sans installation système ; interactions non testées | **Lancement validé** |
 | `akasha-windows-x86_64-cuda.zip` / `akasha-full-windows-x86_64-cuda.zip` | v0.11.0 | x86_64 + NVIDIA | Windows 11 Pro Insider Preview 10.0.26220, RTX 4080 SUPER, 21 oct. | OK | OK | **Échec** : mêmes specs absentes | Inférence CUDA réelle Qwen2.5 1.5B ; réponse exacte `OK` en ~20 s | sans objet | Inférence validée, installation non validée ; validation CUDA suivie séparément par #142 |
 
 Aucune cible non testée n'est comptée comme validée. Une réponse réelle ne compense pas l'échec du diagnostic requis.
@@ -49,6 +49,9 @@ Archive identifiée par SHA-256 `EF49BA83085851E1DA8E2889B249964993EEF64C6DA19B6
 
 Le rapport expurgé de ce contrôle est [`release_first_boot_windows_cpu_v0.11.0_20261021.json`](../quality/release_first_boot_windows_cpu_v0.11.0_20261021.json). Le commentaire de suivi est [lié à #141](https://github.com/azerothl/Akasha/issues/141#issuecomment-6315016258).
 
+### Windows UI — archive publique v0.11.0
+
+`akasha-ui-windows.zip` contient un installateur NSIS et `Akasha_0.11.0_x64_en-US.msi`. Le MSI a été extrait en mode administratif dans un répertoire temporaire (aucune installation système). L'exécutable `PFiles/Akasha/akasha-ui.exe` a démarré et créé une fenêtre nommée `Akasha` sur Windows 11 Pro Insider Preview 10.0.26220. Le processus a ensuite été arrêté ; aucune interaction de parcours ou de chat n'a été évaluée. Rapport : [`release_ui_launch_windows_v0.11.0_20261021.json`](../quality/release_ui_launch_windows_v0.11.0_20261021.json).
 ### Candidate de release non publiée
 
 Le run manuel [39590849411](https://github.com/azerothl/Akasha/actions/runs/39590849411), lancé avec `publish=false` sur le code ensuite fusionné dans `main`, teste la chaîne de build et le staging corrigé ; il ne modifie pas les archives publiques de v0.11.0.
