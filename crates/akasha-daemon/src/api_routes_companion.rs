@@ -158,24 +158,43 @@ fn bearer_token(headers: &std::collections::HashMap<String, String>) -> Option<S
     }
 }
 
-/// Soft auth: empty bearer always OK (LAN). If Authorization present, accept known device token
-/// or (when set) `AKASHA_API_TOKEN` / `AKASHA_TOKEN`.
+/// Companion data routes require a token issued by a successful device pairing.
 fn companion_auth_ok(data_dir: &Path, headers: &std::collections::HashMap<String, String>) -> bool {
     let Some(token) = bearer_token(headers) else {
-        return true;
+        return false;
     };
-    if let Ok(env_tok) = std::env::var("AKASHA_API_TOKEN") {
-        if !env_tok.is_empty() && env_tok == token {
-            return true;
-        }
-    }
-    if let Ok(env_tok) = std::env::var("AKASHA_TOKEN") {
-        if !env_tok.is_empty() && env_tok == token {
-            return true;
-        }
-    }
     let file = load_devices(data_dir);
-    file.devices.iter().any(|d| d.token == token)
+    file.devices
+        .iter()
+        .any(|d| constant_time_eq(d.token.as_bytes(), token.as_bytes()))
+}
+
+fn constant_time_eq(expected: &[u8], actual: &[u8]) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    expected
+        .iter()
+        .zip(actual)
+        .fold(0u8, |diff, (left, right)| diff | (*left ^ *right))
+        == 0
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PairSecretError {
+    Disabled,
+    Invalid,
+}
+
+fn verify_pair_secret(expected: Option<&str>, provided: &str) -> Result<(), PairSecretError> {
+    let Some(expected) = expected.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(PairSecretError::Disabled);
+    };
+    if constant_time_eq(expected.as_bytes(), provided.trim().as_bytes()) {
+        Ok(())
+    } else {
+        Err(PairSecretError::Invalid)
+    }
 }
 
 const NOTIFY_HEADLINE_MAX_CHARS: usize = 120;
@@ -310,7 +329,8 @@ pub async fn try_handle(
         return None;
     }
 
-    if !companion_auth_ok(ctx.data_dir, ctx.headers) {
+    let pairing_route = method == "POST" && path_only == "/api/companion/pair";
+    if !pairing_route && !companion_auth_ok(ctx.data_dir, ctx.headers) {
         return Some(json_response(
             "401 Unauthorized",
             r#"{"error":"invalid_token"}"#,
@@ -442,6 +462,7 @@ pub async fn try_handle(
     }
 
     if method == "POST" && path_only == "/api/companion/pair" {
+        let expected = std::env::var("AKASHA_COMPANION_PAIR_SECRET").ok();
         let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
         let device_id = body_json
             .as_ref()
@@ -472,18 +493,20 @@ pub async fn try_handle(
             ));
         }
 
-        let expected = std::env::var("AKASHA_COMPANION_PAIR_SECRET").unwrap_or_default();
-        if !expected.is_empty() && secret != expected {
-            return Some(json_response(
-                "403 Forbidden",
-                r#"{"error":"pair_secret_invalid"}"#,
-            ));
-        }
-        if expected.is_empty() {
-            tracing::warn!(
-                "AKASHA_COMPANION_PAIR_SECRET unset — pairing open on LAN for device_id={}",
-                device_id
-            );
+        match verify_pair_secret(expected.as_deref(), &secret) {
+            Ok(()) => {}
+            Err(PairSecretError::Disabled) => {
+                return Some(json_response(
+                    "503 Service Unavailable",
+                    r#"{"error":"pairing_disabled"}"#,
+                ));
+            }
+            Err(PairSecretError::Invalid) => {
+                return Some(json_response(
+                    "403 Forbidden",
+                    r#"{"error":"pair_secret_invalid"}"#,
+                ));
+            }
         }
 
         let token = format!("cmp_{}", uuid::Uuid::new_v4().simple());
@@ -526,6 +549,9 @@ mod tests {
     use super::*;
     use akasha_store::NotificationRow;
     use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static PAIR_SECRET_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn notify_summary_reflects_unread_store() {
@@ -636,7 +662,23 @@ mod tests {
         let router = Arc::new(akasha_llm::LLMRouter::new(
             akasha_llm::RoutingConfig::default_config(),
         ));
-        let headers = HashMap::new();
+        save_devices(
+            dir.path(),
+            &CompanionDevicesFile {
+                devices: vec![CompanionDevice {
+                    device_id: "test-device".into(),
+                    token: "cmp_test_token".into(),
+                    name: "test".into(),
+                    paired_at: "2026-10-21T00:00:00Z".into(),
+                }],
+                last_presence_event: None,
+            },
+        )
+        .unwrap();
+        let headers = HashMap::from([(
+            "authorization".to_string(),
+            "Bearer cmp_test_token".to_string(),
+        )]);
         let ctx = RouteCtx {
             data_dir: dir.path(),
             store_path: &store_path,
@@ -665,6 +707,8 @@ mod tests {
 
     #[test]
     fn pair_secret_gate() {
+        let _guard = PAIR_SECRET_TEST_LOCK.lock().unwrap();
+        let previous_secret = std::env::var_os("AKASHA_COMPANION_PAIR_SECRET");
         std::env::set_var("AKASHA_COMPANION_PAIR_SECRET", "test-secret");
         let dir = tempfile::tempdir().expect("tmpdir");
         let store_path = dir.path().join("tasks.db");
@@ -702,14 +746,96 @@ mod tests {
         let r = resp_ok.unwrap();
         assert!(r.contains("200 OK"));
         assert!(r.contains("cmp_"));
-        std::env::remove_var("AKASHA_COMPANION_PAIR_SECRET");
+        let token = load_devices(dir.path()).devices[0].token.clone();
+        let mut paired_headers = HashMap::new();
+        paired_headers.insert("authorization".into(), format!("Bearer {token}"));
+        assert!(companion_auth_ok(dir.path(), &paired_headers));
+        match previous_secret {
+            Some(value) => std::env::set_var("AKASHA_COMPANION_PAIR_SECRET", value),
+            None => std::env::remove_var("AKASHA_COMPANION_PAIR_SECRET"),
+        }
     }
 
     #[test]
-    fn bearer_empty_allowed() {
+    fn pairing_is_disabled_without_a_configured_secret() {
+        let _guard = PAIR_SECRET_TEST_LOCK.lock().unwrap();
+        let previous_secret = std::env::var_os("AKASHA_COMPANION_PAIR_SECRET");
+        std::env::remove_var("AKASHA_COMPANION_PAIR_SECRET");
         let dir = tempfile::tempdir().expect("tmpdir");
+        let store_path = dir.path().join("tasks.db");
+        let router = Arc::new(akasha_llm::LLMRouter::new(
+            akasha_llm::RoutingConfig::default_config(),
+        ));
         let headers = HashMap::new();
+        let ctx = RouteCtx {
+            data_dir: dir.path(),
+            store_path: &store_path,
+            llm_router: &router,
+            headers: &headers,
+        };
+        let response = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(try_handle(
+                "POST",
+                "/api/companion/pair",
+                None,
+                Some(br#"{"device_id":"unauthorized","secret":"anything"}"#),
+                &ctx,
+            ))
+            .unwrap();
+        assert!(response.contains("503 Service Unavailable"));
+        assert!(response.contains("pairing_disabled"));
+        assert!(load_devices(dir.path()).devices.is_empty());
+        match previous_secret {
+            Some(value) => std::env::set_var("AKASHA_COMPANION_PAIR_SECRET", value),
+            None => std::env::remove_var("AKASHA_COMPANION_PAIR_SECRET"),
+        }
+    }
+
+    #[test]
+    fn companion_data_requires_a_paired_device_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut headers = HashMap::new();
+        assert!(!companion_auth_ok(dir.path(), &headers));
+        headers.insert("authorization".into(), "Bearer invalid-token".into());
+        assert!(!companion_auth_ok(dir.path(), &headers));
+        save_devices(
+            dir.path(),
+            &CompanionDevicesFile {
+                devices: vec![CompanionDevice {
+                    device_id: "test-device".into(),
+                    token: "cmp_test_token".into(),
+                    name: "test".into(),
+                    paired_at: "2026-10-21T00:00:00Z".into(),
+                }],
+                last_presence_event: None,
+            },
+        )
+        .unwrap();
+        headers.insert("authorization".into(), "Bearer cmp_test_token".into());
         assert!(companion_auth_ok(dir.path(), &headers));
+    }
+
+    #[test]
+    fn pair_secret_must_be_configured_and_match() {
+        assert_eq!(
+            verify_pair_secret(None, "anything"),
+            Err(PairSecretError::Disabled)
+        );
+        assert_eq!(
+            verify_pair_secret(Some("  "), "anything"),
+            Err(PairSecretError::Disabled)
+        );
+        assert_eq!(
+            verify_pair_secret(Some("shared-secret"), "wrong"),
+            Err(PairSecretError::Invalid)
+        );
+        assert_eq!(
+            verify_pair_secret(Some(" shared-secret "), "shared-secret"),
+            Ok(())
+        );
     }
 
     #[test]

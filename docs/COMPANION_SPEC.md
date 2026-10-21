@@ -87,11 +87,11 @@ Toutes les routes dont le chemin commence par `/api/companion` passent par `comp
 
 | En-tête `Authorization` | Comportement |
 |-------------------------|--------------|
-| Absent | **Accès autorisé** (mode LAN implicite) |
-| `Bearer <token>` ou `bearer <token>` | Token non vide : doit égaler un `token` d’entrée dans `companion_devices.json`, **ou** `AKASHA_API_TOKEN` si défini et non vide, **ou** `AKASHA_TOKEN` si défini et non vide |
-| Bearer présent mais token invalide | **401** `{"error":"invalid_token"}` |
+| Absent | Routes de données refusées (**401** `{"error":"invalid_token"}`) ; `POST /pair` vérifie son secret d’appairage |
+| `Bearer <token>` ou `bearer <token>` | Les routes de données acceptent uniquement un token enregistré dans `companion_devices.json` |
+| Bearer présent mais token absent du fichier | **401** `{"error":"invalid_token"}` |
 
-**Écart connu ([#172](https://github.com/azerothl/Akasha/issues/172)) :** sans en-tête `Authorization`, snapshot, présence et appairage restent accessibles sur un daemon bindé en `0.0.0.0`. `AKASHA_API_TOKEN` / `AKASHA_TOKEN` ne s’appliquent que lorsqu’un Bearer est envoyé.
+Le token d’API global (`AKASHA_API_TOKEN` / `AKASHA_TOKEN`) n’est pas un token Companion. Le secret de pairage autorise uniquement l’amorçage de `POST /pair` ; les autres routes nécessitent le token de l’appareil obtenu après un appairage valide.
 
 ---
 
@@ -111,12 +111,12 @@ Appairage (ou ré-appairage) d’un `device_id`.
 |-------|------|-------------|----------------|
 | `device_id` | string | oui | Trim ; vide → **400** `device_id_required` |
 | `name` | string | non | Défaut `"companion"` |
-| `secret` | string | conditionnel | Comparé à `AKASHA_COMPANION_PAIR_SECRET` si cette variable est **non vide** ; sinon ignoré pour l’auth |
+| `secret` | string | oui | Doit correspondre à `AKASHA_COMPANION_PAIR_SECRET` |
 
 **Secret d’appairage :**
 
-- Si `AKASHA_COMPANION_PAIR_SECRET` est non vide et `secret` ≠ valeur attendue → **403** `{"error":"pair_secret_invalid"}`.
-- Si `AKASHA_COMPANION_PAIR_SECRET` est vide → appairage **ouvert** ; le daemon log un avertissement (`AKASHA_COMPANION_PAIR_SECRET unset — pairing open on LAN`).
+- Si `AKASHA_COMPANION_PAIR_SECRET` est absent ou vide → **503** `{"error":"pairing_disabled"}` ; aucun appareil n’est enregistré.
+- Si le secret fourni est incorrect → **403** `{"error":"pair_secret_invalid"}`.
 
 **Succès 200 :**
 
@@ -329,6 +329,8 @@ Schéma `PresencePolicy` (valeurs par défaut si fichier absent) :
 |-----------|---------|-------------------|
 | 401 | `invalid_token` | Bearer fourni et non reconnu |
 | 403 | `pair_secret_invalid` | `POST /pair` secret incorrect |
+| 503 | `pairing_disabled` | `POST /pair` sans secret configuré sur le daemon |
+| 401 | `invalid_token` | Route de données sans token d’appareil appairé valide |
 | 400 | `device_id_required` | `POST /pair` sans `device_id` |
 | 400 | `event_required` | `POST /presence/event` sans `event` |
 | 400 | `event_unknown` | `POST /presence/event` event hors liste |
@@ -342,8 +344,8 @@ Schéma `PresencePolicy` (valeurs par défaut si fichier absent) :
 | Variable | Effet |
 |----------|--------|
 | `AKASHA_BIND` / `AKASHA_PORT` | Écoute HTTP |
-| `AKASHA_COMPANION_PAIR_SECRET` | Secret `POST /pair` |
-| `AKASHA_API_TOKEN` / `AKASHA_TOKEN` | Acceptés comme Bearer sur routes Companion |
+| `AKASHA_COMPANION_PAIR_SECRET` | Secret obligatoire de `POST /pair` ; vide ou absent désactive l’appairage |
+| `AKASHA_API_TOKEN` / `AKASHA_TOKEN` | Protègent l’API générale ; ne remplacent pas le token d’appareil sur Companion |
 | `AKASHA_COMPANION_VAD_ENABLED` | Override `enabled` au chargement de `companion_presence.json` |
 
 ---
@@ -352,7 +354,7 @@ Schéma `PresencePolicy` (valeurs par défaut si fichier absent) :
 
 | ID | Sujet | État code |
 |----|--------|-----------|
-| [#172](https://github.com/azerothl/Akasha/issues/172) | Routes `/api/companion/*` accessibles sans `Authorization` sur LAN ; appairage ouvert sans `AKASHA_COMPANION_PAIR_SECRET` | Comportement actuel documenté ci-dessus |
+| [#172](https://github.com/azerothl/Akasha/issues/172) | Routes Companion exigent un token d’appareil ; appairage fermé sans secret | Corrigé : les routes de données refusent l’absence de token ; `POST /pair` exige le secret configuré |
 | [#173](https://github.com/azerothl/Akasha/issues/173) | `notify.unread` / `notify.headline` non alimentés | Toujours `0` / `null` dans `build_snapshot` |
 | — | Matériel ESP32 / avatar | **Planned** (registre features) |
 
@@ -361,8 +363,8 @@ Schéma `PresencePolicy` (valeurs par défaut si fichier absent) :
 ## Checklist client minimal
 
 1. (Optionnel) Probe UDP `AKASHA_DISCOVER` → port 3876 + version.
-2. `POST /api/companion/pair` avec `device_id` et `secret` si configuré côté daemon.
-3. Polling ou affichage via `GET /api/companion/snapshot` (Bearer recommandé si #172 corrigé ultérieurement).
+2. `POST /api/companion/pair` avec `device_id` et le secret configuré ; l’appairage échoue avec `503 pairing_disabled` si aucun secret n’est défini.
+3. Conserver le token retourné puis l’envoyer comme Bearer sur chaque route de données Companion.
 4. Si VAD côté client : lire `GET /api/companion/presence/config`, ajuster via `POST …/config`, remonter les événements via `POST …/event`.
 
 Pour l’exploitation et le dépannage réseau : [user/companion-lan.md](user/companion-lan.md).
