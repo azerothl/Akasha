@@ -88,9 +88,19 @@ pub fn question_source_urls(topic: &str, limit: usize) -> Vec<String> {
     let mut previous_end = 0;
     re.find_iter(topic).filter_map(|m| {
         if m.start() < previous_end { return None; }
-        let prefix = balanced_url_prefix(&topic[m.start()..]);
+        let tail = &topic[m.start()..];
+        let prefix = balanced_url_prefix(tail);
         previous_end = m.start() + prefix.len();
-        let raw = prefix.trim_end_matches([',', ';', '.']);
+        // Plain prose URLs conventionally leave terminal punctuation outside the
+        // link. Use angle brackets or Markdown link syntax when a URL itself ends
+        // with punctuation, so that valid path characters remain unambiguous.
+        let prefix_is_delimited = topic[..m.start()].ends_with('<')
+            || topic[..m.start()].ends_with("](");
+        let raw = if prefix_is_delimited {
+            prefix
+        } else {
+            prefix.trim_end_matches(['.', ',', ';', ':', '!', '?', '\u{ff01}', '\u{ff1f}'])
+        };
         let mut url = url::Url::parse(raw).ok()?;
         if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
             return None;
@@ -105,12 +115,20 @@ pub fn question_source_urls(topic: &str, limit: usize) -> Vec<String> {
 /// delimiter. Character offsets also preserve Unicode source URLs.
 fn balanced_url_prefix(text: &str) -> &str {
     let mut depth = 0usize;
+    let mut square_depth = 0usize;
     for (index, ch) in text.char_indices() {
         match ch {
             '(' => depth += 1,
             ')' if depth > 0 => depth -= 1,
             ')' => return &text[..index],
-            _ if ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | ']') => return &text[..index],
+            '[' => square_depth += 1,
+            ']' if square_depth > 0 => square_depth -= 1,
+            ']' => return &text[..index],
+            _ if ch.is_whitespace()
+                || matches!(ch, '<' | '>' | '"' | '\'' | '`' | '“' | '”' | '‘' | '’' | '«' | '»' | '‹' | '›') =>
+            {
+                return &text[..index]
+            }
             _ => {}
         }
     }
@@ -494,6 +512,26 @@ mod tests {
         assert_eq!(question_source_urls("[Rust](<https://example.org/a_(b)>)", 5), vec!["https://example.org/a_(b)"]);
         let redirect = "https://example.org/?next=https://other.org/page";
         assert_eq!(question_source_urls(redirect, 5), vec![redirect]);
+    }
+
+    #[test]
+    fn explicit_sources_separate_prose_punctuation_from_url_delimiters() {
+        assert_eq!(
+            question_source_urls("Consultez «https://example.org/page!» puis https://example.org/other?", 5),
+            vec!["https://example.org/page", "https://example.org/other"]
+        );
+        assert_eq!(
+            question_source_urls("https://example.org/a!b [lien](https://example.org/path!) <https://example.org/quoted?>", 5),
+            vec![
+                "https://example.org/a!b",
+                "https://example.org/path!",
+                "https://example.org/quoted?",
+            ]
+        );
+        assert_eq!(
+            question_source_urls("IPv6: https://[::1]/a_(b).", 5),
+            vec!["https://[::1]/a_(b)"]
+        );
     }
 
     #[test]

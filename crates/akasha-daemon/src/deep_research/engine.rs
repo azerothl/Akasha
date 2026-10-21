@@ -530,6 +530,11 @@ async fn run_engine(
         finish_branch(run_id, &branch_final, StepStatus::Error).await;
         return Err("research_no_evidence".into());
     }
+    let source_urls: Vec<_> = findings
+        .iter()
+        .filter(|finding| !finding.url.is_empty())
+        .map(|finding| finding.url.as_str())
+        .collect();
     let final_report = {
         let mut md = require_report(final_report(
             ctx,
@@ -549,9 +554,6 @@ async fn run_engine(
             search_degraded,
             report_word_target,
         );
-        let source_urls: Vec<_> = findings.iter()
-            .filter(|f| !f.url.is_empty())
-            .map(|f| f.url.as_str()).collect();
         let unknown = unconsulted_citation_urls(&md, &source_urls);
         let over_word_limit = requested_word_limit.is_some_and(|limit| word_count(&md) > limit);
         if quality.needs_retry || !unknown.is_empty() || over_word_limit {
@@ -567,7 +569,18 @@ async fn run_engine(
                 format!("{issues}\n- Hard maximum: {limit} words including headings. Shorten; omit secondary sections, never truncate a quotation or drop its qualifier.")
             } else { issues };
             let revision = final_report_retry(ctx, topic, &md, &manifest, &issues, &user_ctx).await;
-            md = require_report(select_report_revision(revision, md, !unknown.is_empty()),
+            if let Some(candidate) = revision.as_deref().filter(|text| !text.trim().is_empty()) {
+                let unconsulted = unconsulted_citation_urls(candidate, &source_urls);
+                if !unconsulted.is_empty() {
+                    finish_sub_agent(run_id, &branch_final, &sa_writer, StepStatus::Error).await;
+                    finish_branch(run_id, &branch_final, StepStatus::Error).await;
+                    return Err(format!(
+                        "research_report_unconsulted_citations: {}",
+                        unconsulted.join(", ")
+                    ));
+                }
+            }
+            md = require_report(select_report_revision(revision, md, !unknown.is_empty(), &source_urls),
                 run_id, &branch_final, &sa_writer).await?;
         }
         md
@@ -588,6 +601,15 @@ async fn run_engine(
             }
         }
     } else { (final_report, 0, 0) };
+    let unconsulted = unconsulted_citation_urls(&final_report, &source_urls);
+    if !unconsulted.is_empty() {
+        finish_sub_agent(run_id, &branch_final, &sa_writer, StepStatus::Error).await;
+        finish_branch(run_id, &branch_final, StepStatus::Error).await;
+        return Err(format!(
+            "research_report_unconsulted_citations: {}",
+            unconsulted.join(", ")
+        ));
+    }
     let final_report = require_report(enforce_report_limit(final_report, requested_word_limit),
         run_id, &branch_final, &sa_writer).await?;
 
@@ -1284,9 +1306,16 @@ async fn require_report(report: Option<String>, run_id: &str, branch: &str, writ
     Err("research_report_generation_failed".into())
 }
 
-fn select_report_revision(revision: Option<String>, original: String, must_replace: bool) -> Option<String> {
-    revision.filter(|text| !text.trim().is_empty())
-        .or_else(|| (!must_replace).then_some(original))
+fn select_report_revision(
+    revision: Option<String>,
+    original: String,
+    must_replace: bool,
+    consulted_sources: &[&str],
+) -> Option<String> {
+    let original_is_valid = unconsulted_citation_urls(&original, consulted_sources).is_empty();
+    let revision = revision.filter(|text| !text.trim().is_empty())
+        .filter(|text| unconsulted_citation_urls(text, consulted_sources).is_empty());
+    revision.or_else(|| (!must_replace && original_is_valid).then_some(original))
 }
 
 async fn final_report(
@@ -1961,16 +1990,51 @@ mod tests {
     }
 
     #[test]
-    fn optional_quality_revision_keeps_original_but_unknown_citations_fail_closed() {
+    fn report_revision_must_keep_all_citations_in_the_consulted_manifest() {
+        let consulted = ["https://consulted.example/page"];
+        let initial = "Initial claim [source](https://unconsulted.example/page)".to_string();
+        let kept_unknown = "Revised claim [source](https://unconsulted.example/page)".to_string();
+        let introduced_unknown = "Revised claim [source](https://new.example/page)".to_string();
+        let supported = "Revised claim [source](https://consulted.example/page)".to_string();
+
+        assert_eq!(
+            super::select_report_revision(Some(kept_unknown), initial.clone(), true, &consulted),
+            None,
+            "a revision must not retain an unconsulted citation"
+        );
+        assert_eq!(
+            super::select_report_revision(Some(introduced_unknown), initial.clone(), true, &consulted),
+            None,
+            "a revision must not introduce a new unconsulted citation"
+        );
+        assert_eq!(
+            super::select_report_revision(Some(supported.clone()), initial.clone(), true, &consulted),
+            Some(supported),
+            "a revision citing only a consulted source remains acceptable"
+        );
+        assert_eq!(
+            super::select_report_revision(Some("  ".into()), initial, true, &consulted),
+            None,
+            "an empty revision must not restore an invalid original report"
+        );
+    }
+
+    #[test]
+    fn quality_revision_falls_back_only_to_a_valid_original_report() {
+        let consulted = ["https://consulted.example/page"];
         for revision in [None, Some("  ".into())] {
-            assert_eq!(super::select_report_revision(revision.clone(), "Final report".into(), false),
+            assert_eq!(super::select_report_revision(revision.clone(), "Final report".into(), false, &consulted),
                 Some("Final report".into()));
-            assert_eq!(super::select_report_revision(revision, "Unknown citations".into(), true), None);
+            assert_eq!(super::select_report_revision(revision, "Unknown citations".into(), true, &consulted), None);
         }
         for must_replace in [false, true] {
-            assert_eq!(super::select_report_revision(Some("Revised report".into()), "Original".into(), must_replace),
+            assert_eq!(super::select_report_revision(Some("Revised report".into()), "Original".into(), must_replace, &consulted),
                 Some("Revised report".into()));
         }
+        assert_eq!(
+            super::select_report_revision(None, "Invalid [source](https://invented.example)".into(), false, &consulted),
+            None
+        );
     }
 
     #[test]
