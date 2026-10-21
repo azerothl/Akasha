@@ -28,7 +28,7 @@ Variables d’environnement utiles :
 
 - **`AKASHA_PORT`** : port du daemon (défaut : 3876).
 - **`AKASHA_LANG`** : langue de l’interface (prioritaire sur `LANG`). Valeur commençant par `en` = anglais, sinon français.
-- **`AKASHA_DATA_DIR`** : répertoire de données (vault, config) si différent du défaut (`~/akasha` ou `%USERPROFILE%\akasha`).
+- **`AKASHA_DATA_DIR`** : répertoire de données (vault, config) si différent du défaut (`~/akasha` ou `%USERPROFILE%\akasha`). Variable de processus (shell ou `akasha start`) ; ignorée si présente dans `akasha.env`.
 
 ### Interface desktop (Tauri)
 

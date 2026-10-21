@@ -1,6 +1,6 @@
 # Installation
 
-## ## 1. Obtenir et lancer Akasha
+## 1. Obtenir et lancer Akasha
 
 
 ### Téléchargement

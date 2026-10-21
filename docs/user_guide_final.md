@@ -315,7 +315,6 @@ Clés supportées (principales et documentées) :
 |---|---|---|
 | `AKASHA_PORT` | int | Port HTTP daemon. |
 | `AKASHA_LOG` | string | Niveau log (`trace`,`debug`,`info`,`warn`,`error`). |
-| `AKASHA_DATA_DIR` | path | Répertoire données. |
 | `AKASHA_MAX_RESPONSE_TOKENS` | int | Tokens max réponses chat. |
 | `AKASHA_SYSTEM_TASK_MAX_TOKENS` | int | Budget tokens tâches internes. |
 | `AKASHA_LLM_TIMEOUT_SECS` | int | Timeout global LLM. |
@@ -336,6 +335,8 @@ Clés supportées (principales et documentées) :
 | `AKASHA_NATS_TLS_CA` | path | CA NATS TLS. |
 | `AKASHA_NATS_CLIENT_CERT` | path | Certificat client NATS. |
 | `AKASHA_NATS_CLIENT_KEY` | path | Clé client NATS. |
+
+**`AKASHA_DATA_DIR`** : à définir dans le shell (ou l’environnement de `akasha start`), pas dans ce fichier. Si elle est présente dans `akasha.env`, elle est ignorée au démarrage du daemon.
 
 ### `connectors.env`
 
@@ -468,7 +469,7 @@ En cas de fichier manquant, `akasha doctor --fix` crée le data_dir et des fichi
 | Variable | Description | Défaut |
 |----------|-------------|--------|
 | `AKASHA_PORT` | Port du daemon | 3876 |
-| `AKASHA_DATA_DIR` | Répertoire de données | %USERPROFILE%\akasha (Windows) / ~/akasha (Linux/macOS) |
+| `AKASHA_DATA_DIR` | Répertoire de données (shell ou environnement de `akasha start` ; ignorée si présente dans `akasha.env`) | %USERPROFILE%\akasha (Windows) / ~/akasha (Linux/macOS) |
 | `AKASHA_LOG` | Niveau de log (trace, debug, info, warn, error) | info |
 | `AKASHA_LANG` | Langue de l'interface TUI (`en` = anglais, sinon français) | Détection via LANG / LC_ALL |
 | `AKASHA_MAX_RESPONSE_TOKENS` | Nombre max de tokens pour les réponses chat | 4096 |
@@ -482,7 +483,7 @@ En cas de fichier manquant, `akasha doctor --fix` crée le data_dir et des fichi
 | `OPENROUTER_API_KEY` | Clé API OpenRouter | — |
 | `OPENAI_API_KEY` | Clé API OpenAI | — |
 
-Les variables définies via `akasha config env set` sont enregistrées dans le fichier `akasha.env` du data_dir et rechargées au démarrage du daemon. Pour qu'OpenRouter affiche votre usage dans son dashboard, définissez `OPENROUTER_SITE_URL` et `OPENROUTER_APP_TITLE` (ou les champs correspondants dans `llm_router.yaml`).
+Les variables définies via `akasha config env set` sont enregistrées dans le fichier `akasha.env` du data_dir et rechargées au démarrage du daemon. Exception : **`AKASHA_DATA_DIR`** (section `akasha.env` ci-dessus). Pour qu'OpenRouter affiche votre usage dans son dashboard, définissez `OPENROUTER_SITE_URL` et `OPENROUTER_APP_TITLE` (ou les champs correspondants dans `llm_router.yaml`).
 
 ---
 

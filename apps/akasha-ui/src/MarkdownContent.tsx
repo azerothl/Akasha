@@ -9,8 +9,8 @@ import remarkGfm from "remark-gfm";
 import { useI18n } from "./useI18n";
 import { preprocessDataUrlImages, preprocessDataUrlAudio } from "./preprocessDataUrlImages";
 
-const SAFE_DATA_IMAGE_RE = /^data:image\/[a-zA-Z0-9+\-]+(?:;[a-zA-Z0-9\-=]+)*;base64,[A-Za-z0-9+/]+={0,2}$/;
-const SAFE_DATA_AUDIO_RE = /^data:audio\/[a-zA-Z0-9+\-]+(?:;[a-zA-Z0-9\-=]+)*;base64,[A-Za-z0-9+/]+={0,2}$/;
+const SAFE_DATA_IMAGE_RE = /^data:image\/[a-zA-Z0-9+.-]+(?:;[a-zA-Z0-9=-]+)*;base64,[A-Za-z0-9+/]+={0,2}$/;
+const SAFE_DATA_AUDIO_RE = /^data:audio\/[a-zA-Z0-9+.-]+(?:;[a-zA-Z0-9=-]+)*;base64,[A-Za-z0-9+/]+={0,2}$/;
 
 /** react-markdown's defaultUrlTransform only allows http(s)/irc/mailto/xmpp; it strips `data:` to "" so <img src="data:..."> never reaches our component. */
 function markdownUrlTransform(value: string, key: string) {
@@ -59,7 +59,7 @@ function autoFormatLongUnstructuredPlainText(input: string): string {
 
   // 1) Detect and expand ordered lists like: "1) ... 2) ..." into Markdown list:
   // Note: we only do this when we see multiple list-like markers to reduce false positives.
-  const orderedMarkerCount = Array.from(candidate.matchAll(/\b\d+[\.\)]\s+/g)).length;
+  const orderedMarkerCount = Array.from(candidate.matchAll(/\b\d+[.)]\s+/g)).length;
   if (orderedMarkerCount >= 2) {
     // Convert "1) " to "1. "
     candidate = candidate.replace(/\b(\d+)\)\s+/g, "$1. ");
@@ -68,9 +68,9 @@ function autoFormatLongUnstructuredPlainText(input: string): string {
   }
 
   // 2) Detect and expand bullet lists like: "- item1 • item2 * item3"
-  const bulletMarkerCount = Array.from(candidate.matchAll(/(?:^|\s)[\-•\*]\s+/g)).length;
+  const bulletMarkerCount = Array.from(candidate.matchAll(/(?:^|\s)[-•*]\s+/g)).length;
   if (bulletMarkerCount >= 2) {
-    candidate = candidate.replace(/(?:^|\s)[\-•\*]\s+/g, "\n- ");
+    candidate = candidate.replace(/(?:^|\s)[-•*]\s+/g, "\n- ");
   }
 
   // 3) Detect section headers like "Résumé: ..." or "Conclusion: ..." and turn them into "## Header"

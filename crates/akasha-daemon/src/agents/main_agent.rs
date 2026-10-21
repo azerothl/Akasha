@@ -151,6 +151,7 @@ const SPECIALIST_AGENTS: &[&str] = &[
     "studio_fullstack",
     "studio_planner",
     "studio_reviewer",
+    "studio_auditor",
     "studio_project_manager",
 ];
 
@@ -291,6 +292,19 @@ pub struct MainAgent {
     studio_disk_registry: StudioDiskRootRegistry,
 }
 
+fn initial_task_message(message: &str, display_request: Option<&str>) -> Option<String> {
+    // Persist the original request before truncation, never private LLM wrappers.
+    let request = display_request.unwrap_or(message);
+    const MAX_INITIAL_MESSAGE: usize = 500;
+    if request.trim().is_empty() {
+        None
+    } else if request.chars().count() > MAX_INITIAL_MESSAGE {
+        Some(request.chars().take(MAX_INITIAL_MESSAGE).chain(std::iter::once('…')).collect())
+    } else {
+        Some(request.to_string())
+    }
+}
+
 impl MainAgent {
     pub fn new(
         bus: EventBus,
@@ -390,6 +404,9 @@ User message:\n{}",
             message_capped
         );
         let req = CompletionRequest {
+            require_tool: false,
+            conversation: None,
+            tools: None,
             prompt,
             max_tokens: Some(128),
             temperature: Some(0.0),
@@ -452,6 +469,7 @@ User message:\n{}",
         &self,
         store_path: &Path,
         message: &str,
+        display_request: Option<&str>,
         _correlation_id: Uuid,
         forward_to_orchestrator: bool,
         session_id: &str,
@@ -462,19 +480,33 @@ User message:\n{}",
         studio_evolution_branch: Option<String>,
         incognito: bool,
     ) -> anyhow::Result<Uuid> {
+        self.handle_message_with_execution(store_path, message, display_request, _correlation_id, forward_to_orchestrator, session_id, image_data_urls, priority, studio_disk_root, studio_forced_agent, studio_evolution_branch, incognito, None).await
+    }
+
+    pub(crate) fn validate_studio_execution(&self, body: &serde_json::Value) -> Result<Option<crate::studio_execution::Execution>, String> {
+        crate::studio_execution::validate(body, &self.llm_router)
+    }
+
+    pub(crate) async fn handle_message_with_execution(
+        &self,
+        store_path: &Path,
+        message: &str,
+        display_request: Option<&str>,
+        _correlation_id: Uuid,
+        forward_to_orchestrator: bool,
+        session_id: &str,
+        image_data_urls: Option<Vec<String>>,
+        priority: TaskPriority,
+        studio_disk_root: Option<std::path::PathBuf>,
+        studio_forced_agent: Option<String>,
+        studio_evolution_branch: Option<String>,
+        incognito: bool,
+        studio_execution: Option<crate::studio_execution::Execution>,
+    ) -> anyhow::Result<Uuid> {
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
 
-        const MAX_INITIAL_MESSAGE: usize = 500;
-        let initial_message = if message.is_empty() {
-            None
-        } else {
-            Some(if message.chars().count() > MAX_INITIAL_MESSAGE {
-                message.chars().take(MAX_INITIAL_MESSAGE).chain(std::iter::once('…')).collect::<String>()
-            } else {
-                message.to_string()
-            })
-        };
+        let initial_message = initial_task_message(message, display_request);
 
         // Determine a preliminary assigned_agent (without LLM) so the task can be persisted
         // immediately, satisfying the "ack < 500ms" guarantee and ensuring the task_id is in
@@ -519,6 +551,10 @@ User message:\n{}",
                 studio_project_id,
             };
             store.insert(&task)?;
+            if let Some(options) = &studio_execution {
+                crate::studio_execution::persist(store_path,task_id,options).map_err(anyhow::Error::msg)?;
+                store.insert_event(task_id, "studio_execution", Some(&serde_json::to_value(options)?), &Utc::now().to_rfc3339())?;
+            }
             let _ = store.insert_event(
                 task_id,
                 "session_bound",
@@ -794,6 +830,9 @@ User message:\n{}",
 
     /// Resume a Paused or Interrupted task: set status to Queued and re-inject into conversation worker (Phase 2 AI OS).
     pub fn resume_task(&self, store_path: &Path, task_id: Uuid) -> anyhow::Result<()> {
+        crate::studio_recovery::with_admission(task_id,||self.resume_task_admitted(store_path,task_id)).map_err(anyhow::Error::msg)?
+    }
+    fn resume_task_admitted(&self,store_path:&Path,task_id:Uuid)->anyhow::Result<()> {
         let store = TaskStore::open(store_path)?;
         let task = store.get(task_id)?.ok_or_else(|| anyhow::anyhow!("task not found"))?;
         let resumable = matches!(
@@ -803,8 +842,12 @@ User message:\n{}",
         if !resumable {
             anyhow::bail!("task not resumable (status: {})", task.status.as_str());
         }
+        if crate::studio_recovery::is_active(task_id){anyhow::bail!("task execution is still stopping; retry resume when it is inactive");}
+        let studio=store.lineage_root_studio_project_id(task_id)?.is_some();
+        let checkpoint=if studio {Some(crate::studio_recovery::request_resume(store_path,task_id).map_err(anyhow::Error::msg)?)}else{None};
         // Remember the original status so we can roll back on channel closure.
         let original_status = task.status;
+        let original_outcome = store.get_outcome(task_id)?;
         let message = match store.get_todos(task_id) {
             Ok(todos)
                 if todos
@@ -820,7 +863,7 @@ User message:\n{}",
         };
         // Session and execution mode are not persisted in the task store; use a
         // day-scoped session id and direct conversation mode when resuming.
-        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
+        let session_id = checkpoint.as_ref().map(|checkpoint|checkpoint.session_id.clone()).unwrap_or_else(||format!("day-{}", chrono::Utc::now().format("%Y-%m-%d")));
         let execution_mode = None;
         let tx = self
             .direct_conversation_tx
@@ -832,22 +875,22 @@ User message:\n{}",
             session_id,
             image_data_urls: None,
             execution_mode,
-            preferred_task_type: None,
-            incognito: false,
+            preferred_task_type: checkpoint.as_ref().and_then(|checkpoint|checkpoint.preferred_task_type.clone()),
+            incognito: checkpoint.as_ref().is_some_and(|checkpoint|checkpoint.incognito),
         };
         // Update status to Queued BEFORE enqueuing so the conversation worker won't
         // see a Paused/Interrupted status and silently drop the task.
-        store.update_status(task_id, TaskStatus::Queued)?;
+        if !store.transition_if(task_id,&[TaskStatus::Paused,TaskStatus::Interrupted],TaskStatus::Queued)?{anyhow::bail!("task changed while preparing resume");}
         if let Err(e) = tx.try_send(task_msg) {
             match e {
                 mpsc::error::TrySendError::Full(_) => {
                     // Channel is full: roll back status and return a clear error instead of blocking.
-                    let _ = store.update_status(task_id, original_status);
+                    let _ = store.rollback_queued_resume(task_id, original_status, original_outcome.as_ref());
                     anyhow::bail!("conversation queue full when resuming task")
                 }
                 mpsc::error::TrySendError::Closed(_) => {
                     // Channel is closed: attempt to roll back the status and report a clear error.
-                    let _ = store.update_status(task_id, original_status);
+                    let _ = store.rollback_queued_resume(task_id, original_status, original_outcome.as_ref());
                     anyhow::bail!("conversation channel closed when resuming task")
                 }
             }
@@ -872,6 +915,20 @@ mod tests {
         is_external_info_request, normalize_task_type, parse_selector_decision,
         strip_thinking_tokens, SelectorAnswerMode,
     };
+
+    #[test]
+    fn initial_task_message_preserves_raw_request_before_truncation() {
+        let raw = "Créer le rapport avec été 🦀.";
+        let decorated = format!("[Composer mode: custom]\n{}\n\n[Studio project private context]\n{raw}", "Private instructions.\n\n".repeat(100));
+        let initial = super::initial_task_message(&decorated, Some(raw)).unwrap();
+        assert_eq!(initial, raw);
+        assert_eq!(crate::api_routes_tasks::task_label(Some(&initial), &uuid::Uuid::nil()), raw);
+        let long = "é".repeat(600);
+        let initial = super::initial_task_message(&decorated, Some(&long)).unwrap();
+        assert_eq!(initial, format!("{}…", "é".repeat(500)));
+        assert_eq!(super::initial_task_message(&decorated, Some("")), None);
+        assert_eq!(super::initial_task_message("schedule request", None).as_deref(), Some("schedule request"));
+    }
 
     #[test]
     fn selector_parse_valid_direct() {

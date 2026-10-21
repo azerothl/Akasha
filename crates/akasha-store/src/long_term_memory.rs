@@ -168,18 +168,25 @@ impl LongTermStore {
         )?;
         // Migration: add attribution columns if missing (plan court terme 3).
         let has_col = |name: &str| -> anyhow::Result<bool> {
-            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('memory_entries') WHERE name = ?1")?;
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('memory_entries') WHERE name = ?1")?;
             let exists: bool = stmt.exists(rusqlite::params![name])?;
             Ok(exists)
         };
         for col in ["entity_id", "process_id", "session_id", "title", "tags"] {
             if !has_col(col)? {
-                conn.execute(&format!("ALTER TABLE memory_entries ADD COLUMN {} TEXT", col), [])?;
+                conn.execute(
+                    &format!("ALTER TABLE memory_entries ADD COLUMN {} TEXT", col),
+                    [],
+                )?;
             }
         }
         // Phase 1 — Mémoire 4 couches: importance, scope, expires_at
         if !has_col("importance")? {
-            conn.execute("ALTER TABLE memory_entries ADD COLUMN importance INTEGER", [])?;
+            conn.execute(
+                "ALTER TABLE memory_entries ADD COLUMN importance INTEGER",
+                [],
+            )?;
         }
         if !has_col("scope")? {
             conn.execute("ALTER TABLE memory_entries ADD COLUMN scope TEXT", [])?;
@@ -195,7 +202,10 @@ impl LongTermStore {
             )?;
         }
         if !has_col("last_recalled_at")? {
-            conn.execute("ALTER TABLE memory_entries ADD COLUMN last_recalled_at TEXT", [])?;
+            conn.execute(
+                "ALTER TABLE memory_entries ADD COLUMN last_recalled_at TEXT",
+                [],
+            )?;
         }
         if !has_col("recall_count")? {
             conn.execute(
@@ -227,24 +237,9 @@ impl LongTermStore {
         Ok(Self { conn })
     }
 
-    pub fn insert(
-        &self,
-        content: &str,
-        embedding: &[u8],
-        source: &str,
-    ) -> anyhow::Result<Uuid> {
+    pub fn insert(&self, content: &str, embedding: &[u8], source: &str) -> anyhow::Result<Uuid> {
         self.insert_with_attribution(
-            content,
-            embedding,
-            source,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            content, embedding, source, None, None, None, None, None, None, None, None,
         )
     }
 
@@ -296,7 +291,10 @@ impl LongTermStore {
     pub fn delete_by_id(&self, id: Uuid) -> anyhow::Result<bool> {
         let id_s = id.to_string();
         self.delete_relations_for_entry(&id_s)?;
-        let n = self.conn.execute("DELETE FROM memory_entries WHERE id = ?1", rusqlite::params![id_s])?;
+        let n = self.conn.execute(
+            "DELETE FROM memory_entries WHERE id = ?1",
+            rusqlite::params![id_s],
+        )?;
         Ok(n > 0)
     }
 
@@ -321,18 +319,27 @@ impl LongTermStore {
             let mut stmt = self.conn.prepare(
                 "SELECT to_id FROM memory_relations WHERE from_id = ?1 AND kind = ?2 LIMIT ?3",
             )?;
-            let rows = stmt.query_map(rusqlite::params![from_id, k, limit], |row| row.get::<_, String>(0))?;
+            let rows = stmt.query_map(rusqlite::params![from_id, k, limit], |row| {
+                row.get::<_, String>(0)
+            })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         } else {
-            let mut stmt = self.conn.prepare("SELECT to_id FROM memory_relations WHERE from_id = ?1 LIMIT ?2")?;
-            let rows = stmt.query_map(rusqlite::params![from_id, limit], |row| row.get::<_, String>(0))?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT to_id FROM memory_relations WHERE from_id = ?1 LIMIT ?2")?;
+            let rows = stmt.query_map(rusqlite::params![from_id, limit], |row| {
+                row.get::<_, String>(0)
+            })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         }
     }
 
     /// Remove all relations where the given entry is from_id or to_id.
     pub fn delete_relations_for_entry(&self, entry_id: &str) -> anyhow::Result<()> {
-        self.conn.execute("DELETE FROM memory_relations WHERE from_id = ?1 OR to_id = ?1", rusqlite::params![entry_id])?;
+        self.conn.execute(
+            "DELETE FROM memory_relations WHERE from_id = ?1 OR to_id = ?1",
+            rusqlite::params![entry_id],
+        )?;
         Ok(())
     }
 
@@ -344,14 +351,22 @@ impl LongTermStore {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let placeholders = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(", ");
+        let placeholders = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
             "SELECT id, content FROM memory_entries WHERE id IN ({})",
             placeholders
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -363,17 +378,28 @@ impl LongTermStore {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let placeholders = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(", ");
+        let placeholders = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
             "SELECT from_id, to_id, kind FROM memory_relations WHERE from_id IN ({})",
             placeholders
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
-        let mut out: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+        let mut out: std::collections::HashMap<String, Vec<(String, String)>> =
+            std::collections::HashMap::new();
         for r in rows {
             let (from_id, to_id, kind) = r?;
             out.entry(from_id).or_default().push((to_id, kind));
@@ -442,7 +468,9 @@ impl LongTermStore {
         }
         let pattern = format!(
             "{}%",
-            p.replace('%', "\\%").replace('_', "\\_").replace('\\', "\\\\")
+            p.replace('%', "\\%")
+                .replace('_', "\\_")
+                .replace('\\', "\\\\")
         );
         let n = self.conn.execute(
             "DELETE FROM memory_entries WHERE source LIKE ?1 ESCAPE '\\'",
@@ -474,18 +502,17 @@ impl LongTermStore {
             sql.push_str("content LIKE ? ESCAPE '\\'");
         }
         let patterns: Vec<String> = words.iter().map(|w| format!("%{}%", w)).collect();
-        let param_refs: Vec<&dyn rusqlite::ToSql> = patterns.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            patterns.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
         let n = self.conn.execute(&sql, param_refs.as_slice())?;
         Ok(n as u64)
     }
 
     /// Return (entry_count, approximate_size_bytes) for the memory DB (plan moyen terme 9).
     pub fn stats(&self) -> anyhow::Result<(u64, u64)> {
-        let count: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM memory_entries",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memory_entries", [], |row| row.get(0))?;
         let size: Option<i64> = self.conn.query_row(
             "SELECT SUM(LENGTH(content) + LENGTH(embedding) + LENGTH(created_at) + LENGTH(source)) FROM memory_entries",
             [],
@@ -495,15 +522,30 @@ impl LongTermStore {
     }
 
     /// Delete entries older than retention_days. If protect_sources is Some(list), never delete rows with source in list. Returns deleted count (plan moyen terme 9).
-    pub fn gc(&self, retention_days: u32, protect_sources: Option<&[String]>) -> anyhow::Result<u64> {
+    pub fn gc(
+        &self,
+        retention_days: u32,
+        protect_sources: Option<&[String]>,
+    ) -> anyhow::Result<u64> {
         let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
         let cutoff_s = cutoff.to_rfc3339();
         let n = if let Some(protect) = protect_sources {
             if protect.is_empty() {
-                self.conn.execute("DELETE FROM memory_entries WHERE created_at < ?1", rusqlite::params![cutoff_s])?
+                self.conn.execute(
+                    "DELETE FROM memory_entries WHERE created_at < ?1",
+                    rusqlite::params![cutoff_s],
+                )?
             } else {
-                let placeholders = protect.iter().enumerate().map(|(i, _)| format!("?{}", i + 2)).collect::<Vec<_>>().join(", ");
-                let sql = format!("DELETE FROM memory_entries WHERE created_at < ?1 AND source NOT IN ({})", placeholders);
+                let placeholders = protect
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("?{}", i + 2))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "DELETE FROM memory_entries WHERE created_at < ?1 AND source NOT IN ({})",
+                    placeholders
+                );
                 let mut params: Vec<&dyn rusqlite::ToSql> = vec![&cutoff_s];
                 for s in protect.iter() {
                     params.push(s);
@@ -511,7 +553,10 @@ impl LongTermStore {
                 self.conn.execute(&sql, params.as_slice())?
             }
         } else {
-            self.conn.execute("DELETE FROM memory_entries WHERE created_at < ?1", rusqlite::params![cutoff_s])?
+            self.conn.execute(
+                "DELETE FROM memory_entries WHERE created_at < ?1",
+                rusqlite::params![cutoff_s],
+            )?
         };
         Ok(n as u64)
     }
@@ -543,7 +588,18 @@ impl LongTermStore {
     fn get_all_with_embedding(
         &self,
         filter: Option<&MemorySearchFilter>,
-    ) -> anyhow::Result<Vec<(String, String, Vec<u8>, String, String, Option<i64>, Option<String>, Option<String>)>> {
+    ) -> anyhow::Result<
+        Vec<(
+            String,
+            String,
+            Vec<u8>,
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        )>,
+    > {
         let (where_clause, params) = Self::filter_clause(filter);
         let sql = format!(
             "SELECT id, content, embedding, created_at, source, importance, scope, expires_at FROM memory_entries {} ORDER BY created_at",
@@ -566,7 +622,9 @@ impl LongTermStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    fn filter_clause(filter: Option<&MemorySearchFilter>) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    fn filter_clause(
+        filter: Option<&MemorySearchFilter>,
+    ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         let mut conditions = Vec::new();
         if let Some(f) = filter {
@@ -639,7 +697,11 @@ impl LongTermStore {
 
     /// Total number of long-term memory entries (for pagination).
     pub fn count_entries(&self) -> anyhow::Result<u64> {
-        self.conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |row| row.get::<_, i64>(0).map(|n| n as u64)).map_err(Into::into)
+        self.conn
+            .query_row("SELECT COUNT(*) FROM memory_entries", [], |row| {
+                row.get::<_, i64>(0).map(|n| n as u64)
+            })
+            .map_err(Into::into)
     }
 
     /// Test / migration helper: override `created_at` for an entry.
@@ -664,7 +726,9 @@ impl LongTermStore {
         }
         let pattern = format!(
             "{}%",
-            p.replace('%', "\\%").replace('_', "\\_").replace('\\', "\\\\")
+            p.replace('%', "\\%")
+                .replace('_', "\\_")
+                .replace('\\', "\\\\")
         );
         let mut stmt = self.conn.prepare(
             "SELECT id, content, source FROM memory_entries WHERE source LIKE ?1 ESCAPE '\\' ORDER BY created_at DESC LIMIT ?2",
@@ -849,15 +913,25 @@ impl LongTermStore {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let placeholders = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(", ");
+        let placeholders = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
             "SELECT id, content, embedding FROM memory_entries WHERE id IN ({})",
             placeholders
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -908,7 +982,8 @@ impl LongTermStore {
         let mut stmt = self.conn.prepare(&sql)?;
         let patterns: Vec<String> = words.iter().map(|w| format!("%{}%", w)).collect();
         let limit = top_k as i64;
-        let mut param_refs: Vec<&dyn rusqlite::ToSql> = patterns.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let mut param_refs: Vec<&dyn rusqlite::ToSql> =
+            patterns.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
         for p in &filter_params {
             param_refs.push(p.as_ref());
         }
@@ -946,7 +1021,19 @@ impl LongTermStore {
         filter: Option<&MemorySearchFilter>,
     ) -> anyhow::Result<Vec<(f32, MemoryEntry)>> {
         let rows = self.get_all_with_embedding(filter)?;
-        let mut scored: Vec<(f32, (String, String, Vec<u8>, String, String, Option<i64>, Option<String>, Option<String>))> = rows
+        let mut scored: Vec<(
+            f32,
+            (
+                String,
+                String,
+                Vec<u8>,
+                String,
+                String,
+                Option<i64>,
+                Option<String>,
+                Option<String>,
+            ),
+        )> = rows
             .into_iter()
             .map(|row| {
                 let vec = decode_embedding_bytes(&row.2);
@@ -958,27 +1045,32 @@ impl LongTermStore {
         let out: Vec<(f32, MemoryEntry)> = scored
             .into_iter()
             .take(top_k)
-            .map(|(sim, (id, content, embedding, created_at, source, importance, scope, expires_at_s))| {
-                let created_at = DateTime::parse_from_rfc3339(&created_at)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
-                let expires_at = expires_at_s
-                    .as_ref()
-                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.with_timezone(&Utc));
-                let entry = MemoryEntry {
-                    id: Uuid::parse_str(&id).unwrap_or_else(|_| Uuid::nil()),
-                    content,
-                    embedding,
-                    created_at,
-                    source,
-                    importance,
-                    scope,
-                    expires_at,
-                    confidence: None,
-                };
-                (sim, entry)
-            })
+            .map(
+                |(
+                    sim,
+                    (id, content, embedding, created_at, source, importance, scope, expires_at_s),
+                )| {
+                    let created_at = DateTime::parse_from_rfc3339(&created_at)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now());
+                    let expires_at = expires_at_s
+                        .as_ref()
+                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&Utc));
+                    let entry = MemoryEntry {
+                        id: Uuid::parse_str(&id).unwrap_or_else(|_| Uuid::nil()),
+                        content,
+                        embedding,
+                        created_at,
+                        source,
+                        importance,
+                        scope,
+                        expires_at,
+                        confidence: None,
+                    };
+                    (sim, entry)
+                },
+            )
             .collect();
         Ok(out)
     }
@@ -1024,9 +1116,18 @@ mod tests {
     fn relation_kind_from_embedding_similarity_tiers() {
         assert_eq!(relation_kind_from_embedding_similarity(0.34), None);
         assert_eq!(relation_kind_from_embedding_similarity(0.5), None);
-        assert_eq!(relation_kind_from_embedding_similarity(0.6), Some("relates_to"));
-        assert_eq!(relation_kind_from_embedding_similarity(0.85), Some("similar"));
-        assert_eq!(relation_kind_from_embedding_similarity(1.0), Some("similar"));
+        assert_eq!(
+            relation_kind_from_embedding_similarity(0.6),
+            Some("relates_to")
+        );
+        assert_eq!(
+            relation_kind_from_embedding_similarity(0.85),
+            Some("similar")
+        );
+        assert_eq!(
+            relation_kind_from_embedding_similarity(1.0),
+            Some("similar")
+        );
     }
 
     #[test]
@@ -1038,6 +1139,31 @@ mod tests {
         for (a, b) in v.iter().zip(decoded.iter()) {
             assert!((a - b).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn memory_db_content_readable_without_encryption_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("memory.db");
+        let marker = "akasha-plaintext-audit-marker-issue-190";
+        let store = LongTermStore::open(&db_path).unwrap();
+        store
+            .insert(
+                marker,
+                &embedding_f32_to_bytes(&[1.0, 0.0, 0.0]),
+                "plaintext_audit_test",
+            )
+            .unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM memory_entries WHERE content = ?1",
+                rusqlite::params![marker],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, marker);
     }
 
     #[test]
@@ -1066,16 +1192,42 @@ mod tests {
         let store = LongTermStore::open(f.path()).unwrap();
         let emb = embedding_f32_to_bytes(&[1.0, 0.0, 0.0]);
         store
-            .insert_with_attribution("s1 entry", &emb, "test", None, None, Some("s1"), None, None, None, None, None)
+            .insert_with_attribution(
+                "s1 entry",
+                &emb,
+                "test",
+                None,
+                None,
+                Some("s1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         store
-            .insert_with_attribution("s2 entry", &emb, "test", None, None, Some("s2"), None, None, None, None, None)
+            .insert_with_attribution(
+                "s2 entry",
+                &emb,
+                "test",
+                None,
+                None,
+                Some("s2"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let filter = MemorySearchFilter {
             session_id: Some("s1".to_string()),
             ..Default::default()
         };
-        let results = store.search_by_embedding(&[1.0, 0.0, 0.0], 10, Some(&filter)).unwrap();
+        let results = store
+            .search_by_embedding(&[1.0, 0.0, 0.0], 10, Some(&filter))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "s1 entry");
     }
@@ -1086,13 +1238,25 @@ mod tests {
         let store = LongTermStore::open(f.path()).unwrap();
         // [1,0,0] is closest to query [0.99, 0.01, 0], then [0.5,0.5,0], then [0,1,0]
         store
-            .insert("projet X", &embedding_f32_to_bytes(&[1.0, 0.0, 0.0]), "test")
+            .insert(
+                "projet X",
+                &embedding_f32_to_bytes(&[1.0, 0.0, 0.0]),
+                "test",
+            )
             .unwrap();
         store
-            .insert("météo Paris", &embedding_f32_to_bytes(&[0.0, 1.0, 0.0]), "test")
+            .insert(
+                "météo Paris",
+                &embedding_f32_to_bytes(&[0.0, 1.0, 0.0]),
+                "test",
+            )
             .unwrap();
         store
-            .insert("projet X suite", &embedding_f32_to_bytes(&[0.99, 0.01, 0.0]), "test")
+            .insert(
+                "projet X suite",
+                &embedding_f32_to_bytes(&[0.99, 0.01, 0.0]),
+                "test",
+            )
             .unwrap();
         let query = [0.99f32, 0.01, 0.0];
         let results = store.search_by_embedding(&query, 10, None).unwrap();
@@ -1122,7 +1286,9 @@ mod tests {
         let (c, sz) = store.stats().unwrap();
         assert_eq!(c, 0);
         assert_eq!(sz, 0);
-        store.insert("x", &embedding_f32_to_bytes(&[0.0]), "test").unwrap();
+        store
+            .insert("x", &embedding_f32_to_bytes(&[0.0]), "test")
+            .unwrap();
         let (c2, _) = store.stats().unwrap();
         assert_eq!(c2, 1);
     }
@@ -1131,7 +1297,9 @@ mod tests {
     fn delete_by_id() {
         let f = NamedTempFile::new().unwrap();
         let store = LongTermStore::open(f.path()).unwrap();
-        let id = store.insert("to delete", &embedding_f32_to_bytes(&[0.0]), "test").unwrap();
+        let id = store
+            .insert("to delete", &embedding_f32_to_bytes(&[0.0]), "test")
+            .unwrap();
         assert!(store.delete_by_id(id).unwrap());
         assert!(!store.delete_by_id(id).unwrap());
         assert!(store.list_recent(10, 0).unwrap().is_empty());
@@ -1142,7 +1310,9 @@ mod tests {
         let f = NamedTempFile::new().unwrap();
         let store = LongTermStore::open(f.path()).unwrap();
         assert!(!store.content_exists("unique content").unwrap());
-        store.insert("unique content", &embedding_f32_to_bytes(&[0.0]), "test").unwrap();
+        store
+            .insert("unique content", &embedding_f32_to_bytes(&[0.0]), "test")
+            .unwrap();
         assert!(store.content_exists("unique content").unwrap());
     }
 
@@ -1181,10 +1351,34 @@ mod tests {
         let store = LongTermStore::open(f.path()).unwrap();
         let emb = embedding_f32_to_bytes(&[0.0; 4]);
         store
-            .insert_with_attribution("branch a", &emb, "test", None, None, Some("sess-a"), None, None, None, None, None)
+            .insert_with_attribution(
+                "branch a",
+                &emb,
+                "test",
+                None,
+                None,
+                Some("sess-a"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         store
-            .insert_with_attribution("branch b", &emb, "test", None, None, Some("sess-b"), None, None, None, None, None)
+            .insert_with_attribution(
+                "branch b",
+                &emb,
+                "test",
+                None,
+                None,
+                Some("sess-b"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let rows = store.list_entries_by_session("sess-a", 10).unwrap();
         assert_eq!(rows.len(), 1);
@@ -1210,13 +1404,19 @@ mod tests {
         assert!(related.contains(&b.to_string()));
         assert!(related.contains(&c.to_string()));
 
-        let by_kind = store.get_related_ids(&a.to_string(), Some("related"), 10).unwrap();
+        let by_kind = store
+            .get_related_ids(&a.to_string(), Some("related"), 10)
+            .unwrap();
         assert_eq!(by_kind.len(), 2);
 
-        let contents = store.get_entries_content_by_ids(&[b.to_string(), c.to_string()]).unwrap();
+        let contents = store
+            .get_entries_content_by_ids(&[b.to_string(), c.to_string()])
+            .unwrap();
         assert_eq!(contents.len(), 2);
 
-        let rel_map = store.get_relations_for_entries(&[a.to_string(), b.to_string()]).unwrap();
+        let rel_map = store
+            .get_relations_for_entries(&[a.to_string(), b.to_string()])
+            .unwrap();
         assert_eq!(rel_map.get(&a.to_string()).map(|v| v.len()).unwrap_or(0), 2);
         assert_eq!(rel_map.get(&b.to_string()).map(|v| v.len()).unwrap_or(0), 1);
 

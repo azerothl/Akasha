@@ -26,7 +26,7 @@ Scope: `akasha-embedded-llm`, `akasha-daemon`, `akasha-cli`, releases Windows CU
 | `AKASHA_EMBEDDED_GGUF_PATH` | Chemin `.gguf` (sinon `{data_dir}/models/embedded/default.gguf`) |
 | `AKASHA_EMBEDDED_N_GPU_LAYERS` | Couches GPU llama.cpp (défaut 99 si CUDA compilé) |
 | `AKASHA_EMBEDDED_MODEL` | Inchangé pour Candle (`qwen3_0_6b`, `baguettotron`) |
-| `AKASHA_DATA_DIR` | Répertoire données (défaut `~/akasha`) |
+| `AKASHA_DATA_DIR` | Répertoire données (défaut `~/akasha`) ; shell / `akasha start` — pas `akasha.env` |
 
 ## Build
 
@@ -44,7 +44,7 @@ Prérequis : `clang`, `cmake`, C++17 ; CUDA 11.8+ pour feature CUDA.
 ## Modèle GGUF v1
 
 - **Défaut** : Qwen2.5-1.5B-Instruct Q4_K_M (~1 Go)
-- Manifeste : [`spec/embedded_models.json`](../embedded_models.json)
+- Manifeste : [`spec/embedded_models.json`](../../embedded_models.json)
 - CLI : `akasha config models embedded-download`
 
 ## Non-objectifs v1

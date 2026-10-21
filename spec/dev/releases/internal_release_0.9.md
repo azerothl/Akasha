@@ -1,6 +1,6 @@
 # Notes internes — release 0.9.0 (depuis v0.8.0)
 
-Document à l’usage des **contributeurs** et de l’équipe release. Complète [tests_and_benchmarks.md](../quality/tests_and_benchmarks.md), [AGENTS.md](../../../AGENTS.md) et l’index [README.md](README.md). Le guide utilisateur embarqué est désormais **multi-pages** sous `docs/user/` (plus le monolithe `user_guide_final.md` pour les auteurs).
+Document à l’usage des **contributeurs** et de l’équipe release. Complète [tests_and_benchmarks.md](../quality/tests_and_benchmarks.md), [AGENTS.md](../../../AGENTS.md) et l’index [README.md](../README.md). Le guide utilisateur embarqué est désormais **multi-pages** sous `docs/user/` (plus le monolithe `user_guide_final.md` pour les auteurs).
 
 ---
 

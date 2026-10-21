@@ -252,6 +252,7 @@ struct App {
     /// If true, we have already loaded today's chat history from short-term memory (so we don't refetch every frame).
     chat_history_loaded: bool,
     /// Human in the loop: when the agent asked for user input, (task_id, question, context, choices).
+    pending_human_request_ids: std::collections::HashMap<String, String>,
     pending_human_input: Option<(String, String, String, Option<Vec<String>>)>,
     /// All tasks currently waiting for user input (from GET /api/pending-human-input), so we can show them after relaunch or when user was away.
     pending_human_input_list: Vec<(String, String, String, Option<Vec<String>>)>,
@@ -419,6 +420,7 @@ impl App {
             input_inner_height: 3,
             input_wrapped_lines: 0,
             chat_history_loaded: false,
+            pending_human_request_ids: std::collections::HashMap::new(),
             pending_human_input: None,
             pending_human_input_list: Vec::new(),
             operator_ops_text: String::new(),
@@ -467,14 +469,13 @@ impl App {
             let choices = p.get("choices")
                 .and_then(|c| c.as_array())
                 .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            if let Some(id)=p["request_id"].as_str() {self.pending_human_request_ids.insert(task_id.clone(),id.into());}else{self.pending_human_request_ids.remove(&task_id);}
             list.push((task_id, question, context, choices));
         }
         self.pending_human_input_list = list;
         if let Some(first) = self.pending_human_input_list.first() {
             let current_id = self.pending_human_input.as_ref().map(|t| t.0.as_str());
-            if current_id.is_none() || !self.pending_human_input_list.iter().any(|t| Some(t.0.as_str()) == current_id) {
-                self.pending_human_input = Some(first.clone());
-            }
+            self.pending_human_input=Some(self.pending_human_input_list.iter().find(|t|Some(t.0.as_str())==current_id).unwrap_or(first).clone());
         } else {
             self.pending_human_input = None;
         }
@@ -509,6 +510,7 @@ impl App {
         }
         let context = json.get("context").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let choices = json.get("choices").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+        if let Some(id)=json["request_id"].as_str() {self.pending_human_request_ids.insert(task_id.into(),id.into());}else{self.pending_human_request_ids.remove(task_id);}
         self.pending_human_input = Some((task_id.to_string(), question, context, choices));
     }
 
@@ -522,7 +524,7 @@ impl App {
             Ok(c) => c,
             Err(_) => return false,
         };
-        let body = serde_json::json!({ "response": response });
+        let body = serde_json::json!({ "response": response, "request_id": self.pending_human_request_ids.get(task_id) });
         let resp = match client.post(&url).json(&body).send() {
             Ok(r) => r,
             Err(_) => return false,

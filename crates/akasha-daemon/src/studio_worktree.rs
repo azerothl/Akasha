@@ -71,6 +71,47 @@ fn worktree_path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Compare paths for registry rows that may use Windows separators on disk.
+fn studio_paths_equivalent(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    a.to_string_lossy().replace('\\', "/") == b.to_string_lossy().replace('\\', "/")
+}
+
+/// Re-bind project and worktree paths to the daemon studio layout before any git command.
+/// Rejects absolute or relative paths that escape the allowed studio roots (no mutation on error).
+pub(crate) fn bind_worktree_state_paths(
+    data_dir: &Path,
+    state: &mut StudioWorktreeState,
+) -> Result<(), String> {
+    let expected_project = crate::studio::resolve_studio_project_dir(data_dir, &state.project_id)?;
+    let projects_base = crate::studio::studio_projects_base(data_dir);
+    if !studio_paths_equivalent(&state.project_root, &expected_project) {
+        return Err("invalid_project_root".to_string());
+    }
+    if !crate::studio::is_strictly_under_studio_root(&expected_project, &projects_base) {
+        return Err("invalid_project_root".to_string());
+    }
+
+    let (expected_branch, expected_worktree) =
+        expected_worktree_layout(data_dir, state.root_task_id, state.task_id);
+    if state.worktree_branch != expected_branch {
+        return Err("invalid_worktree_branch".to_string());
+    }
+    if !studio_paths_equivalent(&state.worktree_path, &expected_worktree) {
+        return Err("invalid_worktree_path".to_string());
+    }
+    let worktrees_root = data_dir.join("studio-worktrees");
+    if !crate::studio::is_strictly_under_studio_root(&expected_worktree, &worktrees_root) {
+        return Err("invalid_worktree_path".to_string());
+    }
+
+    state.project_root = expected_project;
+    state.worktree_path = expected_worktree;
+    Ok(())
+}
+
 fn git_command(project_root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     Command::new("git")
         .arg("-C")
@@ -141,13 +182,26 @@ fn abort_merge(project_root: &Path) {
     let _ = git_status_success(project_root, &["merge", "--abort"]);
 }
 
-fn cleanup_stale_worktree(project_root: &Path, worktree_path: &Path) {
+fn cleanup_stale_worktree(
+    data_dir: &Path,
+    project_root: &Path,
+    worktree_path: &Path,
+) -> Result<(), String> {
+    let worktrees_root = data_dir.join("studio-worktrees");
+    if !crate::studio::is_strictly_under_studio_root(worktree_path, &worktrees_root) {
+        return Err("invalid_worktree_path".to_string());
+    }
+    let projects_base = crate::studio::studio_projects_base(data_dir);
+    if !crate::studio::is_strictly_under_studio_root(project_root, &projects_base) {
+        return Err("invalid_project_root".to_string());
+    }
     let worktree_path = worktree_path_string(worktree_path);
     let _ = git_status_success(
         project_root,
         &["worktree", "remove", "--force", &worktree_path],
     );
     let _ = git_status_success(project_root, &["worktree", "prune"]);
+    Ok(())
 }
 
 fn create_worktree_for_child_task_blocking(
@@ -173,10 +227,10 @@ fn create_worktree_for_child_task_blocking(
 
     // Clean stale path from previous crashed run.
     if worktree_path.exists() {
-        cleanup_stale_worktree(&project_root, &worktree_path);
+        let _ = cleanup_stale_worktree(data_dir, &project_root, &worktree_path);
         let _ = fs::remove_dir_all(&worktree_path);
     }
-    cleanup_stale_worktree(&project_root, &worktree_path);
+    let _ = cleanup_stale_worktree(data_dir, &project_root, &worktree_path);
 
     // git worktree add -B <branch> <path> <base_branch>
     let worktree_path_arg = worktree_path_string(&worktree_path);
@@ -234,23 +288,27 @@ pub async fn create_worktree_for_child_task(
     .map_err(|e| format!("worktree_create_join_failed: {e}"))?
 }
 
-pub fn cleanup_worktree_paths(state: &StudioWorktreeState) {
-    let worktree_path = worktree_path_string(&state.worktree_path);
+pub fn cleanup_worktree_paths(data_dir: &Path, state: &StudioWorktreeState) -> Result<(), String> {
+    let mut bound = state.clone();
+    bind_worktree_state_paths(data_dir, &mut bound)?;
+    let worktree_path = worktree_path_string(&bound.worktree_path);
     let _ = git_status_success(
-        &state.project_root,
+        &bound.project_root,
         &["worktree", "remove", "--force", &worktree_path],
     );
-    let _ = git_status_success(&state.project_root, &["worktree", "prune"]);
+    let _ = git_status_success(&bound.project_root, &["worktree", "prune"]);
     let _ = git_status_success(
-        &state.project_root,
-        &["branch", "-D", &state.worktree_branch],
+        &bound.project_root,
+        &["branch", "-D", &bound.worktree_branch],
     );
-    if state.worktree_path.exists() {
-        let _ = fs::remove_dir_all(&state.worktree_path);
+    if bound.worktree_path.exists() {
+        let _ = fs::remove_dir_all(&bound.worktree_path);
     }
+    Ok(())
 }
 
-fn try_integrate_worktree(state: &mut StudioWorktreeState) {
+fn try_integrate_worktree(data_dir: &Path, state: &mut StudioWorktreeState) -> Result<(), String> {
+    bind_worktree_state_paths(data_dir, state)?;
     if !worktree_is_clean(&state.project_root) {
         update_state(
             state,
@@ -258,7 +316,7 @@ fn try_integrate_worktree(state: &mut StudioWorktreeState) {
             Some("base_branch_dirty".to_string()),
             Some("base worktree has local changes".to_string()),
         );
-        return;
+        return Ok(());
     }
 
     if current_branch(&state.project_root) != state.base_branch {
@@ -269,7 +327,7 @@ fn try_integrate_worktree(state: &mut StudioWorktreeState) {
                 Some("base_branch_checkout_failed".to_string()),
                 Some(err),
             );
-            return;
+            return Ok(());
         }
     }
 
@@ -300,7 +358,7 @@ fn try_integrate_worktree(state: &mut StudioWorktreeState) {
             Some("merged".to_string()),
             None,
         );
-        return;
+        return Ok(());
     }
     let conflicts = unresolved_conflicts(&state.project_root);
     if conflicts.is_empty() {
@@ -311,7 +369,7 @@ fn try_integrate_worktree(state: &mut StudioWorktreeState) {
             Some("merge_failed".to_string()),
             Some("unknown".to_string()),
         );
-        return;
+        return Ok(());
     }
     // Auto resolve only for non-critical paths by keeping child(worktree) side.
     let has_critical = conflicts.iter().any(|p| is_critical_conflict_path(p));
@@ -336,7 +394,7 @@ fn try_integrate_worktree(state: &mut StudioWorktreeState) {
                 Some("merged_with_auto_resolution".to_string()),
                 None,
             );
-            return;
+            return Ok(());
         }
     }
     abort_merge(&state.project_root);
@@ -346,6 +404,7 @@ fn try_integrate_worktree(state: &mut StudioWorktreeState) {
         Some("merge_conflict".to_string()),
         Some(conflicts.join(", ")),
     );
+    Ok(())
 }
 
 type ProjectIntegrationLocks = std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>;
@@ -365,10 +424,29 @@ fn project_integration_lock(project_root: &Path) -> Arc<Mutex<()>> {
 fn complete_and_cleanup_worktree_blocking(
     mut state: StudioWorktreeState,
 ) -> (StudioWorktreeState, StudioWorktreeState) {
-    try_integrate_worktree(&mut state);
+    let data_dir = data_dir_of(&state);
+    if let Some(data_dir) = data_dir {
+        if let Err(err) = try_integrate_worktree(&data_dir, &mut state) {
+            update_state(
+                &mut state,
+                WorktreeLifecycleState::Failed,
+                Some("invalid_worktree_paths".to_string()),
+                Some(err),
+            );
+        }
+    } else {
+        update_state(
+            &mut state,
+            WorktreeLifecycleState::Failed,
+            Some("invalid_worktree_paths".to_string()),
+            Some("missing data_dir for worktree".to_string()),
+        );
+    }
     let result_state = state.clone();
     let stored_state = if result_state.lifecycle_state == WorktreeLifecycleState::Integrated {
-        cleanup_worktree_paths(&result_state);
+        if let Some(data_dir) = data_dir_of(&result_state) {
+            let _ = cleanup_worktree_paths(&data_dir, &result_state);
+        }
         let mut cleaned = result_state.clone();
         let integration_status = cleaned.integration_status.clone();
         let conflict_state = cleaned.conflict_state.clone();
@@ -390,6 +468,15 @@ pub async fn register_worktree(registry: &StudioWorktreeRegistry, state: StudioW
         upsert_record(&data_dir, &state);
     }
     registry.write().await.insert(state.task_id, state);
+}
+
+pub(crate) async fn restore_for_resume(data_dir:&Path,registry:&StudioWorktreeRegistry,task:Uuid,project:&str)->Result<Option<StudioWorktreeState>,String>{
+    let record=with_registry_read(data_dir,|records|records.iter().find(|record|record.task_id==task.to_string()).cloned());
+    let Some(record)=record else{return Ok(None);};
+    if record.project_id!=project || !matches!(record.lifecycle_state.as_str(),"active"|"awaiting_review"|"needs_user_resolution"){return Err("persisted worktree is not resumable".into());}
+    let state=state_from_record(data_dir,&record)?;
+    if !state.worktree_path.is_dir(){return Err("persisted worktree no longer exists".into());}
+    registry.write().await.insert(task,state.clone());Ok(Some(state))
 }
 
 pub async fn get_worktree_for_task(
@@ -466,7 +553,7 @@ fn lifecycle_from_str(state: &str) -> WorktreeLifecycleState {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StudioWorktreeRecord {
     pub task_id: String,
     pub root_task_id: String,
@@ -576,7 +663,10 @@ fn expected_worktree_layout(
 }
 
 /// Re-bind persisted paths to the daemon's studio layout (never trust registry.json verbatim).
-fn validate_record_paths(data_dir: &Path, record: &StudioWorktreeRecord) -> Result<(), String> {
+pub(crate) fn validate_record_paths(
+    data_dir: &Path,
+    record: &StudioWorktreeRecord,
+) -> Result<(), String> {
     let project_root = crate::studio::resolve_studio_project_dir(data_dir, &record.project_id)?;
     let recorded_root = PathBuf::from(&record.project_root);
     if recorded_root != project_root {
@@ -588,20 +678,23 @@ fn validate_record_paths(data_dir: &Path, record: &StudioWorktreeRecord) -> Resu
 
     let root_task_id = Uuid::parse_str(&record.root_task_id).map_err(|e| e.to_string())?;
     let child_task_id = Uuid::parse_str(&record.task_id).map_err(|e| e.to_string())?;
-    let (expected_branch, expected_path) =
-        expected_worktree_layout(data_dir, root_task_id, child_task_id);
-    if record.worktree_branch != expected_branch {
-        return Err("invalid_worktree_branch".to_string());
-    }
-    let recorded_path = PathBuf::from(&record.worktree_path);
-    if recorded_path != expected_path {
-        return Err("invalid_worktree_path".to_string());
-    }
-    let worktrees_root = data_dir.join("studio-worktrees");
-    if !crate::studio::is_strictly_under_studio_root(&recorded_path, &worktrees_root) {
-        return Err("invalid_worktree_path".to_string());
-    }
-    Ok(())
+    let lifecycle = lifecycle_from_str(&record.lifecycle_state);
+    let mut probe = StudioWorktreeState {
+        root_task_id,
+        task_id: child_task_id,
+        project_id: record.project_id.clone(),
+        project_root: PathBuf::from(&record.project_root),
+        base_branch: record.base_branch.clone(),
+        base_sha: record.base_sha.clone(),
+        worktree_branch: record.worktree_branch.clone(),
+        worktree_path: PathBuf::from(&record.worktree_path),
+        lifecycle_state: lifecycle,
+        integration_status: record.integration_status.clone(),
+        conflict_state: record.conflict_state.clone(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    bind_worktree_state_paths(data_dir, &mut probe)
 }
 
 fn state_from_record(
@@ -610,11 +703,11 @@ fn state_from_record(
 ) -> Result<StudioWorktreeState, String> {
     validate_record_paths(data_dir, record)?;
     let created_at = now();
-    Ok(StudioWorktreeState {
+    let mut state = StudioWorktreeState {
         root_task_id: Uuid::parse_str(&record.root_task_id).map_err(|e| e.to_string())?,
         task_id: Uuid::parse_str(&record.task_id).map_err(|e| e.to_string())?,
         project_id: record.project_id.clone(),
-        project_root: crate::studio::resolve_studio_project_dir(data_dir, &record.project_id)?,
+        project_root: PathBuf::from(&record.project_root),
         base_branch: record.base_branch.clone(),
         base_sha: record.base_sha.clone(),
         worktree_branch: record.worktree_branch.clone(),
@@ -624,7 +717,9 @@ fn state_from_record(
         conflict_state: record.conflict_state.clone(),
         created_at,
         updated_at: created_at,
-    })
+    };
+    bind_worktree_state_paths(data_dir, &mut state)?;
+    Ok(state)
 }
 
 fn allows_explicit_worktree_action(lifecycle_state: &str) -> bool {
@@ -665,6 +760,16 @@ pub async fn park_for_review(
         upsert_record(&data_dir, &parked);
     }
     Some(parked)
+}
+
+/// Resolve only a validated persisted worktree binding, never a gitfile supplied by an agent.
+pub(crate) fn delivery_project_root(data_dir: &Path, root: &Path) -> Result<PathBuf,String> {
+    with_registry_read(data_dir, |records| {
+        let record=records.iter().find(|record| Path::new(&record.worktree_path).canonicalize().ok().as_deref()==Some(root))
+            .ok_or("delivery workspace is not a registered Studio worktree")?;
+        validate_record_paths(data_dir,record)?;
+        Path::new(&record.project_root).canonicalize().map_err(|e|e.to_string())
+    })
 }
 
 pub fn list_project_worktrees(data_dir: &Path, project_id: &str) -> Vec<StudioWorktreeRecord> {
@@ -726,7 +831,7 @@ pub fn abandon_recorded_worktree(
         return Err("worktree_not_ready_for_review".to_string());
     }
     let state = state_from_record(data_dir, &record)?;
-    cleanup_worktree_paths(&state);
+    cleanup_worktree_paths(data_dir, &state)?;
     let updated = with_registry_write(data_dir, |records| {
         let row = records
             .iter_mut()
@@ -845,7 +950,7 @@ mod tests {
             git_output(&project_root, &["worktree", "list"]).expect("worktree list");
         assert!(path_in_git_output(&second.worktree_path, &worktree_list));
 
-        cleanup_worktree_paths(&second);
+        cleanup_worktree_paths(data_dir.path(), &second).expect("cleanup");
     }
 
     #[tokio::test]
@@ -1047,5 +1152,197 @@ mod tests {
             ),
             "child change\n"
         );
+    }
+
+    #[test]
+    fn registry_rejects_traversal_and_outside_worktree_paths() {
+        let (data_dir, project_id, project_root) = init_studio_git_repo();
+        let root_task_id = Uuid::new_v4();
+        let child_task_id = Uuid::new_v4();
+        let (branch, path) = expected_worktree_layout(data_dir.path(), root_task_id, child_task_id);
+        let outside = StudioWorktreeRecord {
+            task_id: child_task_id.to_string(),
+            root_task_id: root_task_id.to_string(),
+            project_id: project_id.clone(),
+            project_root: project_root.to_string_lossy().into_owned(),
+            base_branch: "main".to_string(),
+            base_sha: "deadbeef".to_string(),
+            worktree_branch: branch,
+            worktree_path: "/tmp/outside-worktree".to_string(),
+            lifecycle_state: "awaiting_review".to_string(),
+            integration_status: None,
+            conflict_state: None,
+        };
+        assert_eq!(
+            state_from_record(data_dir.path(), &outside).unwrap_err(),
+            "invalid_worktree_path"
+        );
+        let traversal = StudioWorktreeRecord {
+            worktree_path: path
+                .join("..")
+                .join("..")
+                .join("escape")
+                .to_string_lossy()
+                .into_owned(),
+            ..outside.clone()
+        };
+        assert_eq!(
+            state_from_record(data_dir.path(), &traversal).unwrap_err(),
+            "invalid_worktree_path"
+        );
+    }
+
+    #[test]
+    fn registry_accepts_windows_style_path_separators() {
+        let (data_dir, project_id, project_root) = init_studio_git_repo();
+        let root_task_id = Uuid::new_v4();
+        let child_task_id = Uuid::new_v4();
+        let (branch, path) = expected_worktree_layout(data_dir.path(), root_task_id, child_task_id);
+        let windows_path = path.to_string_lossy().replace('/', "\\");
+        let record = StudioWorktreeRecord {
+            task_id: child_task_id.to_string(),
+            root_task_id: root_task_id.to_string(),
+            project_id: project_id.clone(),
+            project_root: project_root.to_string_lossy().into_owned(),
+            base_branch: "main".to_string(),
+            base_sha: "deadbeef".to_string(),
+            worktree_branch: branch,
+            worktree_path: windows_path,
+            lifecycle_state: "awaiting_review".to_string(),
+            integration_status: None,
+            conflict_state: None,
+        };
+        let state = state_from_record(data_dir.path(), &record).expect("windows separators");
+        assert_eq!(state.worktree_path, path);
+    }
+
+    #[tokio::test]
+    async fn integrate_unknown_task_is_not_found() {
+        let (data_dir, project_id, _project_root) = init_studio_git_repo();
+        let err = integrate_recorded_worktree(data_dir.path(), &project_id, Uuid::new_v4())
+            .await
+            .expect_err("missing task");
+        assert_eq!(err, "worktree_not_found");
+    }
+
+    #[tokio::test]
+    async fn integrate_and_abandon_reject_active_without_side_effects() {
+        let (data_dir, project_id, project_root) = init_studio_git_repo();
+        let root_task_id = Uuid::new_v4();
+        let child_task_id = Uuid::new_v4();
+        let state = create_worktree_for_child_task_blocking(
+            data_dir.path(),
+            &project_id,
+            root_task_id,
+            child_task_id,
+        )
+        .expect("worktree");
+        commit_file(
+            &state.worktree_path,
+            "README.md",
+            "child only\n",
+            "child update",
+        );
+        let registry = new_studio_worktree_registry();
+        register_worktree(&registry, state.clone()).await;
+        let before = list_project_worktrees(data_dir.path(), &project_id);
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].lifecycle_state, "active");
+
+        let integrate_err =
+            integrate_recorded_worktree(data_dir.path(), &project_id, child_task_id)
+                .await
+                .expect_err("active integrate");
+        assert_eq!(integrate_err, "worktree_not_ready_for_review");
+        let abandon_err =
+            abandon_recorded_worktree(data_dir.path(), &project_id, child_task_id).unwrap_err();
+        assert_eq!(abandon_err, "worktree_not_ready_for_review");
+
+        let after = list_project_worktrees(data_dir.path(), &project_id);
+        assert_eq!(after, before);
+        assert_eq!(
+            normalize_newlines(
+                fs::read_to_string(project_root.join("README.md")).expect("base readme")
+            ),
+            "base\n"
+        );
+        assert!(state.worktree_path.exists());
+        assert_eq!(current_branch(&project_root), state.base_branch);
+    }
+
+    #[tokio::test]
+    async fn child_task_completion_only_parks_without_auto_merge() {
+        let (data_dir, project_id, project_root) = init_studio_git_repo();
+        let root_task_id = Uuid::new_v4();
+        let child_task_id = Uuid::new_v4();
+        let state = create_worktree_for_child_task_blocking(
+            data_dir.path(),
+            &project_id,
+            root_task_id,
+            child_task_id,
+        )
+        .expect("worktree");
+        commit_file(
+            &state.worktree_path,
+            "README.md",
+            "child change\n",
+            "child update",
+        );
+        let registry = new_studio_worktree_registry();
+        register_worktree(&registry, state.clone()).await;
+
+        let parked = park_for_review(&registry, child_task_id)
+            .await
+            .expect("parked like delegation completion");
+        assert_eq!(
+            parked.lifecycle_state,
+            WorktreeLifecycleState::AwaitingReview
+        );
+        assert_eq!(
+            normalize_newlines(
+                fs::read_to_string(project_root.join("README.md")).expect("base file")
+            ),
+            "base\n"
+        );
+        assert!(state.worktree_path.exists());
+        let listed = list_project_worktrees(data_dir.path(), &project_id);
+        assert_eq!(listed[0].lifecycle_state, "awaiting_review");
+
+        let integrated = integrate_recorded_worktree(data_dir.path(), &project_id, child_task_id)
+            .await
+            .expect("explicit integrate");
+        assert_eq!(
+            integrated.lifecycle_state,
+            WorktreeLifecycleState::Integrated
+        );
+        assert_eq!(
+            normalize_newlines(
+                fs::read_to_string(project_root.join("README.md")).expect("merged file")
+            ),
+            "child change\n"
+        );
+    }
+
+    #[test]
+    fn stale_registry_metadata_with_valid_paths_still_loads() {
+        let (data_dir, project_id, project_root) = init_studio_git_repo();
+        let root_task_id = Uuid::new_v4();
+        let child_task_id = Uuid::new_v4();
+        let (branch, path) = expected_worktree_layout(data_dir.path(), root_task_id, child_task_id);
+        let stale = StudioWorktreeRecord {
+            task_id: child_task_id.to_string(),
+            root_task_id: root_task_id.to_string(),
+            project_id: project_id.clone(),
+            project_root: project_root.to_string_lossy().into_owned(),
+            base_branch: "main".to_string(),
+            base_sha: "0000000000000000000000000000000000000000".to_string(),
+            worktree_branch: branch,
+            worktree_path: path.to_string_lossy().into_owned(),
+            lifecycle_state: "awaiting_review".to_string(),
+            integration_status: Some("stale".to_string()),
+            conflict_state: None,
+        };
+        let state = state_from_record(data_dir.path(), &stale).expect("stale sha ok");
+        assert_eq!(state.base_sha, stale.base_sha);
     }
 }

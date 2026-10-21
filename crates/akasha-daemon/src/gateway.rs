@@ -44,6 +44,8 @@ pub struct MessageEnvelope {
     pub workspace_id: Option<String>,
     /// User message text (possibly enriched with attachments or context by the adapter).
     pub raw_message: String,
+    /// Original user request before private prompts or attachments are injected.
+    pub display_request: Option<String>,
     /// Optional image data URLs for vision-capable models.
     pub image_data_urls: Option<Vec<String>>,
     /// Task priority when forwarding to orchestrator.
@@ -56,6 +58,7 @@ pub struct MessageEnvelope {
     pub studio_evolution_branch: Option<String>,
     /// When true, skip long-term memory promotion for this message.
     pub incognito: bool,
+    pub(crate) studio_execution: Option<crate::studio_execution::Execution>,
 }
 
 impl MessageEnvelope {
@@ -77,12 +80,14 @@ impl MessageEnvelope {
             user_id: None,
             workspace_id: None,
             raw_message: raw_message.into(),
+            display_request: None,
             image_data_urls,
             priority,
             studio_disk_root: None,
             studio_forced_agent: None,
             studio_evolution_branch: None,
             incognito,
+            studio_execution: None,
         }
     }
 
@@ -98,12 +103,14 @@ impl MessageEnvelope {
             user_id: None,
             workspace_id: None,
             raw_message: raw_message.into(),
+            display_request: None,
             image_data_urls: None,
             priority: TaskPriority::UserNormal,
             studio_disk_root: None,
             studio_forced_agent: None,
             studio_evolution_branch: None,
             incognito: false,
+            studio_execution: None,
         }
     }
 
@@ -119,12 +126,14 @@ impl MessageEnvelope {
             user_id: None,
             workspace_id: None,
             raw_message: raw_message.into(),
+            display_request: None,
             image_data_urls: None,
             priority: TaskPriority::UserNormal,
             studio_disk_root: None,
             studio_forced_agent: None,
             studio_evolution_branch: None,
             incognito: false,
+            studio_execution: None,
         }
     }
 }
@@ -151,9 +160,10 @@ pub async fn handle_envelope(
         });
     }
     main_agent
-        .handle_message(
+        .handle_message_with_execution(
         store_path,
         &envelope.raw_message,
+        envelope.display_request.as_deref(),
         Uuid::nil(),
         true,
         &envelope.session_id,
@@ -163,6 +173,7 @@ pub async fn handle_envelope(
         envelope.studio_forced_agent.clone(),
         envelope.studio_evolution_branch.clone(),
         envelope.incognito,
+        envelope.studio_execution,
     )
         .await
 }

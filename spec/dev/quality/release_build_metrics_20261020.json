@@ -1,0 +1,290 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-10-20",
+  "comparison": "Consecutive release workflow runs on main, publish=false",
+  "runs": [
+    {
+      "run_id": 39420405894,
+      "url": "https://github.com/azerothl/Akasha/actions/runs/39420405894",
+      "commit": "33fcf0e24db22bacbd70bfbed350e388e5bfc627",
+      "workflow_conclusion": "failure_tauri_version_mismatch",
+      "measurements": [
+        {
+          "target": "windows-clients",
+          "runner_os": "Windows",
+          "runner_image": "20261012.333.1",
+          "cache_hit": false,
+          "elapsed_seconds": 330.884,
+          "target_bytes": 1397041454,
+          "job_status": "success"
+        },
+        {
+          "target": "windows-cpu",
+          "runner_os": "Windows",
+          "runner_image": "20261007.264.1",
+          "cache_hit": false,
+          "elapsed_seconds": 1345.919,
+          "target_bytes": 3027819327,
+          "job_status": "success"
+        },
+        {
+          "target": "windows-cuda",
+          "runner_os": "Windows",
+          "runner_image": "20261012.333.1",
+          "cache_hit": false,
+          "elapsed_seconds": 2801.693,
+          "target_bytes": 3548517065,
+          "job_status": "success"
+        },
+        {
+          "target": "linux-x86_64",
+          "runner_os": "Linux",
+          "runner_image": "20261012.334.1",
+          "cache_hit": false,
+          "elapsed_seconds": 903.165,
+          "target_bytes": 3354321993,
+          "job_status": "success"
+        },
+        {
+          "target": "macos-x86_64",
+          "runner_os": "macOS",
+          "runner_image": "20261013.0424.1",
+          "cache_hit": false,
+          "elapsed_seconds": 1198.807,
+          "target_bytes": 2798805912,
+          "job_status": "success"
+        },
+        {
+          "target": "macos-arm64",
+          "runner_os": "macOS",
+          "runner_image": "20261013.0424.1",
+          "cache_hit": false,
+          "elapsed_seconds": 1287.696,
+          "target_bytes": 2741056507,
+          "job_status": "success"
+        }
+      ],
+      "notes": [
+        "The three Tauri builds failed because tauri 2.11.5 did not match @tauri-apps/api 2.10.1.",
+        "The six measurements above completed successfully and are retained as the cold-cache comparison."
+      ]
+    },
+    {
+      "run_id": 39428283604,
+      "url": "https://github.com/azerothl/Akasha/actions/runs/39428283604",
+      "commit": "58b62734d2bbf0ddfbfaf0d6658153bbd65e8aaa",
+      "workflow_conclusion": "success",
+      "measurements": [
+        {
+          "target": "windows-clients",
+          "runner_os": "Windows",
+          "runner_image": "20261012.333.1",
+          "cache_hit": true,
+          "elapsed_seconds": 145.582,
+          "target_bytes": 1396388801,
+          "job_status": "success"
+        },
+        {
+          "target": "windows-cpu",
+          "runner_os": "Windows",
+          "runner_image": "20261007.264.1",
+          "cache_hit": true,
+          "elapsed_seconds": 361.376,
+          "target_bytes": 3027356629,
+          "job_status": "success"
+        },
+        {
+          "target": "windows-cuda",
+          "runner_os": "Windows",
+          "runner_image": "20261012.333.1",
+          "cache_hit": true,
+          "elapsed_seconds": 1011.442,
+          "target_bytes": 3547782970,
+          "job_status": "success"
+        },
+        {
+          "target": "linux-x86_64",
+          "runner_os": "Linux",
+          "runner_image": "20261012.334.1",
+          "cache_hit": true,
+          "elapsed_seconds": 180.143,
+          "target_bytes": 3353556367,
+          "job_status": "success"
+        },
+        {
+          "target": "macos-x86_64",
+          "runner_os": "macOS",
+          "runner_image": "20261013.0424.1",
+          "cache_hit": true,
+          "elapsed_seconds": 405.672,
+          "target_bytes": 2798407408,
+          "job_status": "success"
+        },
+        {
+          "target": "macos-arm64",
+          "runner_os": "macOS",
+          "runner_image": "20261013.0424.1",
+          "cache_hit": true,
+          "elapsed_seconds": 429.561,
+          "target_bytes": 2740346102,
+          "job_status": "success"
+        }
+      ],
+      "tauri_builds": [
+        {
+          "target": "tauri-linux",
+          "cache_hit": false,
+          "elapsed_seconds": 350.427,
+          "target_bytes": 2112892411,
+          "job_status": "success"
+        },
+        {
+          "target": "tauri-macos",
+          "cache_hit": false,
+          "elapsed_seconds": 192.857,
+          "target_bytes": 1168557372,
+          "job_status": "success"
+        },
+        {
+          "target": "tauri-windows",
+          "cache_hit": false,
+          "elapsed_seconds": 523.055,
+          "target_bytes": 1792977993,
+          "job_status": "success"
+        }
+      ]
+    },
+    {
+      "run_id": 39431939285,
+      "url": "https://github.com/azerothl/Akasha/actions/runs/39431939285",
+      "commit": "705d6981f9be844dd5cb848d2c26e4d0edc4cc8a",
+      "workflow_conclusion": "success_publish_false",
+      "measurements": [
+        {
+          "target": "windows-clients",
+          "runner_os": "Windows",
+          "runner_image": "20261012.333.1",
+          "cache_hit": false,
+          "elapsed_seconds": 513.955,
+          "target_bytes": 1397207242,
+          "job_status": "success"
+        },
+        {
+          "target": "windows-cpu",
+          "runner_os": "Windows",
+          "runner_image": "20261007.264.1",
+          "cache_hit": false,
+          "elapsed_seconds": 1326.375,
+          "target_bytes": 3028800455,
+          "job_status": "success"
+        },
+        {
+          "target": "windows-cuda",
+          "runner_os": "Windows",
+          "runner_image": "20261012.333.1",
+          "cache_hit": false,
+          "elapsed_seconds": 2777.461,
+          "target_bytes": 3549340573,
+          "job_status": "success"
+        },
+        {
+          "target": "linux-x86_64",
+          "runner_os": "Linux",
+          "runner_image": "20261018.339.1",
+          "cache_hit": false,
+          "elapsed_seconds": 833.545,
+          "target_bytes": 3354811029,
+          "job_status": "success"
+        },
+        {
+          "target": "macos-x86_64",
+          "runner_os": "macOS",
+          "runner_image": "20261013.0424.1",
+          "cache_hit": false,
+          "elapsed_seconds": 1230.386,
+          "target_bytes": 2799619599,
+          "job_status": "success"
+        },
+        {
+          "target": "macos-arm64",
+          "runner_os": "macOS",
+          "runner_image": "20261013.0424.1",
+          "cache_hit": false,
+          "elapsed_seconds": 1280.873,
+          "target_bytes": 2741553313,
+          "job_status": "success"
+        },
+        {
+          "target": "tauri-linux",
+          "runner_os": "Linux",
+          "runner_image": "20261012.334.1",
+          "cache_hit": false,
+          "elapsed_seconds": 377.525,
+          "target_bytes": 2112897631,
+          "job_status": "success"
+        },
+        {
+          "target": "tauri-macos",
+          "runner_os": "macOS",
+          "runner_image": "20261013.0424.1",
+          "cache_hit": false,
+          "elapsed_seconds": 279.774,
+          "target_bytes": 1168579815,
+          "job_status": "success"
+        },
+        {
+          "target": "tauri-windows",
+          "runner_os": "Windows",
+          "runner_image": "20261007.264.1",
+          "cache_hit": false,
+          "elapsed_seconds": 445.609,
+          "target_bytes": 1792980279,
+          "job_status": "success"
+        }
+      ],
+      "build_jobs_total_seconds": 9065.503,
+      "package_job_elapsed_seconds": 240,
+      "package_artifact_bytes": 2016258590,
+      "release_published": false,
+      "windows_archive_verification": {
+        "result": "success",
+        "shared_clients_verified_per_archive": 2,
+        "archives": [
+          "akasha-windows-x86_64.zip",
+          "akasha-windows-x86_64-cuda.zip",
+          "akasha-full-windows-x86_64.zip",
+          "akasha-full-windows-x86_64-cuda.zip"
+        ]
+      },
+      "release_archive_sizes_bytes": {
+        "akasha-windows-x86_64.zip": 34036657,
+        "akasha-windows-x86_64-cuda.zip": 612143000,
+        "akasha-full-windows-x86_64.zip": 45413685,
+        "akasha-full-windows-x86_64-cuda.zip": 623520023,
+        "akasha-full-linux-x86_64.zip": 251959961,
+        "akasha-linux-x86_64.zip": 42384520,
+        "akasha-full-macos-aarch64.zip": 50789782,
+        "akasha-macos-aarch64.zip": 34811388,
+        "akasha-full-macos-x86_64.zip": 52858255,
+        "akasha-macos-x86_64.zip": 36879861,
+        "akasha-ui-linux.zip": 209572937,
+        "akasha-ui-macos.zip": 15977924,
+        "akasha-ui-windows.zip": 11376401
+      },
+      "notes": [
+        "All nine measured build jobs completed successfully with cache_hit=false; this run populated the cache partitions after the release build workflow checksum changed.",
+        "The package verifier confirmed the same two shared Windows client hashes in standalone and full CPU/CUDA archives.",
+        "The CUDA loader audit without the NVIDIA driver is retained separately in release_first_boot_candidate_run394319_windows_cuda.json."
+      ]
+    }
+  ],
+  "interpretation": {
+    "cold_jobs_total_seconds": 7868.164,
+    "warm_jobs_total_seconds": 2533.776,
+    "runner_seconds_difference": 5334.388,
+    "runner_seconds_only": true,
+    "controlled_benchmark": false,
+    "target_bytes_are_cached_archive_sizes": false,
+    "workspace_crates_are_cached": false
+  }
+}

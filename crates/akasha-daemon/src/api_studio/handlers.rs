@@ -25,7 +25,10 @@ async fn handle_worktree_api(method: &str, path_only: &str, data_dir: &Path) -> 
         }
     };
     if !root.is_dir() {
-        return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+        return Some(json_response(
+            "404 Not Found",
+            r#"{"error":"project_not_found"}"#,
+        ));
     }
     if method == "GET" && segments.len() == 2 {
         let worktrees = crate::studio_worktree::list_project_worktrees(data_dir, project_id);
@@ -51,7 +54,9 @@ async fn handle_worktree_api(method: &str, path_only: &str, data_dir: &Path) -> 
         };
         let action = segments[3];
         if action == "integrate" {
-            match crate::studio_worktree::integrate_recorded_worktree(data_dir, project_id, task_id).await {
+            match crate::studio_worktree::integrate_recorded_worktree(data_dir, project_id, task_id)
+                .await
+            {
                 Ok(state) => {
                     let integrated = state.lifecycle_state
                         == crate::studio_worktree::WorktreeLifecycleState::Integrated;
@@ -96,7 +101,48 @@ async fn handle_worktree_api(method: &str, path_only: &str, data_dir: &Path) -> 
             }
         }
     }
-    Some(json_response("404 Not Found", r#"{"error":"worktree_route"}"#))
+    Some(json_response(
+        "404 Not Found",
+        r#"{"error":"worktree_route"}"#,
+    ))
+}
+
+#[cfg(test)]
+mod worktree_route_tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[tokio::test]
+    async fn worktree_api_disabled_when_feature_flag_off() {
+        let _guard = env_test_lock();
+        std::env::remove_var("AKASHA_STUDIO_WORKTREE_ENABLED");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let project_id = uuid::Uuid::new_v4();
+        let path = format!("/api/studio/projects/{}/worktrees", project_id);
+        let resp = handle_studio_route("GET", &path, "", None, data_dir.path())
+            .await
+            .expect("handled");
+        assert!(resp.contains("worktree_feature_disabled"));
+    }
+
+    #[tokio::test]
+    async fn non_worktree_studio_routes_ignore_worktree_flag() {
+        let _guard = env_test_lock();
+        std::env::remove_var("AKASHA_STUDIO_WORKTREE_ENABLED");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let resp = handle_studio_route("GET", "/api/studio/projects", "", None, data_dir.path())
+            .await
+            .expect("projects list");
+        assert!(!resp.contains("worktree_feature_disabled"));
+    }
 }
 
 /// Returns HTTP response if handled.
@@ -135,7 +181,8 @@ pub async fn handle_studio_route(
                 })
             })
             .collect();
-        let body = serde_json::to_string(&ProjectsListOut { projects }).unwrap_or_else(|_| "{}".to_string());
+        let body = serde_json::to_string(&ProjectsListOut { projects })
+            .unwrap_or_else(|_| "{}".to_string());
         return Some(json_response("200 OK", &body));
     }
 
@@ -181,7 +228,11 @@ pub async fn handle_studio_route(
                     if t.is_empty() {
                         None
                     } else {
-                        Some(t.chars().take(MAX_PROJECT_SUMMARY_CHARS).collect::<String>())
+                        Some(
+                            t.chars()
+                                .take(MAX_PROJECT_SUMMARY_CHARS)
+                                .collect::<String>(),
+                        )
                     }
                 }),
             };
@@ -219,16 +270,14 @@ pub async fn handle_studio_route(
             let init_main = git_output(&dir, &["init", "-b", "main"]).await;
             let init_ok = match init_main {
                 Ok(o) if o.status.success() => true,
-                _ => {
-                    match git_output(&dir, &["init"]).await {
-                        Ok(o2) if o2.status.success() => true,
-                        Ok(_) => false,
-                        Err(e) => {
-                            tracing::warn!(error = %e, path = %dir.display(), "git init failed for new studio project");
-                            false
-                        }
+                _ => match git_output(&dir, &["init"]).await {
+                    Ok(o2) if o2.status.success() => true,
+                    Ok(_) => false,
+                    Err(e) => {
+                        tracing::warn!(error = %e, path = %dir.display(), "git init failed for new studio project");
+                        false
                     }
-                }
+                },
             };
             if !init_ok {
                 tracing::warn!(path = %dir.display(), "git init did not succeed for new studio project");
@@ -264,7 +313,10 @@ pub async fn handle_studio_route(
                     }
                 };
                 if !root.is_dir() {
-                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                    return Some(json_response(
+                        "404 Not Found",
+                        r#"{"error":"project_not_found"}"#,
+                    ));
                 }
                 let report = studio_delete_precheck(&root).await;
                 let body = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
@@ -282,7 +334,10 @@ pub async fn handle_studio_route(
                     }
                 };
                 if !root.is_dir() {
-                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                    return Some(json_response(
+                        "404 Not Found",
+                        r#"{"error":"project_not_found"}"#,
+                    ));
                 }
                 if let Err(e) = ensure_main_or_master_branch(&root).await {
                     tracing::warn!(error = %e, path = %root.display(), "failed to ensure main/master on project resume");
@@ -301,7 +356,8 @@ pub async fn handle_studio_route(
                     project_summary: None,
                     ticket_enforcement_mode: Some("off".to_string()),
                 });
-                let mut body = serde_json::to_value(&meta).unwrap_or_else(|_| serde_json::json!({}));
+                let mut body =
+                    serde_json::to_value(&meta).unwrap_or_else(|_| serde_json::json!({}));
                 if let Some(obj) = body.as_object_mut() {
                     let (branch, clean, wt_lines) = git_branch_clean_worktree_lines(&root).await;
                     obj.insert("git_branch".into(), serde_json::json!(branch));
@@ -323,7 +379,10 @@ pub async fn handle_studio_route(
                     }
                 };
                 if !root.is_dir() {
-                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                    return Some(json_response(
+                        "404 Not Found",
+                        r#"{"error":"project_not_found"}"#,
+                    ));
                 }
                 let data_dir_owned = data_dir.to_path_buf();
                 let id_owned = id.to_string();
@@ -341,8 +400,7 @@ pub async fn handle_studio_route(
                         r#"{"error":"code_rag_status_failed"}"#,
                     ));
                 };
-                let body = serde_json::to_string(&status)
-                .unwrap_or_else(|_| "{}".to_string());
+                let body = serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string());
                 return Some(json_response("200 OK", &body));
             }
         }
@@ -364,7 +422,10 @@ pub async fn handle_studio_route(
                     }
                 };
                 if !root.is_dir() {
-                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                    return Some(json_response(
+                        "404 Not Found",
+                        r#"{"error":"project_not_found"}"#,
+                    ));
                 }
                 let data_dir_owned = data_dir.to_path_buf();
                 let id_owned = id.to_string();
@@ -386,8 +447,7 @@ pub async fn handle_studio_route(
                         r#"{"error":"code_rag_reindex_failed"}"#,
                     ));
                 };
-                let body = serde_json::to_string(&status)
-                .unwrap_or_else(|_| "{}".to_string());
+                let body = serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string());
                 return Some(json_response("200 OK", &body));
             }
         }
@@ -409,14 +469,21 @@ pub async fn handle_studio_route(
                     }
                 };
                 if !root.is_dir() {
-                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                    return Some(json_response(
+                        "404 Not Found",
+                        r#"{"error":"project_not_found"}"#,
+                    ));
                 }
-                let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
-                    Some(v) => v,
-                    None => {
-                        return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
-                    }
-                };
+                let body_v =
+                    match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                        Some(v) => v,
+                        None => {
+                            return Some(json_response(
+                                "400 Bad Request",
+                                r#"{"error":"json body required"}"#,
+                            ));
+                        }
+                    };
                 let has_name = body_v.get("name").is_some();
                 let has_stack = body_v.get("tech_stack").is_some();
                 let has_verify_skip = body_v.get("verify_skip").is_some();
@@ -456,7 +523,8 @@ pub async fn handle_studio_route(
                     ticket_enforcement_mode: Some("off".to_string()),
                 });
                 if has_name {
-                    let new_name = match body_v.get("name").and_then(|x| x.as_str()).map(str::trim) {
+                    let new_name = match body_v.get("name").and_then(|x| x.as_str()).map(str::trim)
+                    {
                         Some(s) if !s.is_empty() && s.len() <= 200 => s.to_string(),
                         _ => {
                             return Some(json_response(
@@ -650,11 +718,15 @@ pub async fn handle_studio_route(
                 }
                 if has_ticket_enforcement_mode {
                     match body_v.get("ticket_enforcement_mode") {
-                        Some(v) if v.is_null() => meta.ticket_enforcement_mode = Some("off".to_string()),
+                        Some(v) if v.is_null() => {
+                            meta.ticket_enforcement_mode = Some("off".to_string())
+                        }
                         Some(v) => {
                             let mode = v.as_str().map(|s| s.trim().to_ascii_lowercase());
                             match mode.as_deref() {
-                                Some("off" | "soft" | "strict") => meta.ticket_enforcement_mode = mode,
+                                Some("off" | "soft" | "strict") => {
+                                    meta.ticket_enforcement_mode = mode
+                                }
                                 _ => {
                                     return Some(json_response(
                                         "400 Bad Request",
@@ -707,7 +779,10 @@ pub async fn handle_studio_route(
                 }
             };
             if !root.is_dir() {
-                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"project_not_found"}"#,
+                ));
             }
             let mut items = studio_list_tickets(&root);
             if let Some(status) = query_param(query_str, "status") {
@@ -748,20 +823,33 @@ pub async fn handle_studio_route(
                 }
             };
             if !root.is_dir() {
-                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"project_not_found"}"#,
+                ));
             }
-            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
-                Some(v) => v,
-                None => {
-                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
-                }
-            };
+            let body_v =
+                match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                    Some(v) => v,
+                    None => {
+                        return Some(json_response(
+                            "400 Bad Request",
+                            r#"{"error":"json body required"}"#,
+                        ));
+                    }
+                };
             let Some(title_raw) = body_v.get("title").and_then(|x| x.as_str()) else {
-                return Some(json_response("422 Unprocessable Entity", r#"{"error":"title_required"}"#));
+                return Some(json_response(
+                    "422 Unprocessable Entity",
+                    r#"{"error":"title_required"}"#,
+                ));
             };
             let title = title_raw.trim();
             if title.is_empty() || title.chars().count() > 200 {
-                return Some(json_response("422 Unprocessable Entity", r#"{"error":"title_invalid"}"#));
+                return Some(json_response(
+                    "422 Unprocessable Entity",
+                    r#"{"error":"title_invalid"}"#,
+                ));
             }
             let description = body_v
                 .get("description")
@@ -775,7 +863,10 @@ pub async fn handle_studio_route(
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
             let Some(assigned_agent) = assigned_agent else {
-                return Some(json_response("422 Unprocessable Entity", r#"{"error":"assigned_agent_required"}"#));
+                return Some(json_response(
+                    "422 Unprocessable Entity",
+                    r#"{"error":"assigned_agent_required"}"#,
+                ));
             };
             let review_agent = body_v
                 .get("review_agent")
@@ -791,15 +882,18 @@ pub async fn handle_studio_route(
                 .unwrap_or_else(|| "user".to_string());
             let acceptance_criteria = match body_v.get("acceptance_criteria") {
                 None => vec![],
-                Some(v) => match serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v.clone()) {
-                    Ok(criteria) => criteria,
-                    Err(_) => {
-                        return Some(json_response(
-                            "422 Unprocessable Entity",
-                            r#"{"error":"acceptance_criteria_invalid"}"#,
-                        ));
+                Some(v) => {
+                    match serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v.clone())
+                    {
+                        Ok(criteria) => criteria,
+                        Err(_) => {
+                            return Some(json_response(
+                                "422 Unprocessable Entity",
+                                r#"{"error":"acceptance_criteria_invalid"}"#,
+                            ));
+                        }
                     }
-                },
+                }
             };
 
             let mut depends_on_ticket_ids: Vec<String> = Vec::new();
@@ -856,7 +950,11 @@ pub async fn handle_studio_route(
                     ));
                 }
             }
-            if crate::api_studio::studio_ticket_deps_would_cycle(&root, &new_ticket_id, &depends_on_ticket_ids) {
+            if crate::api_studio::studio_ticket_deps_would_cycle(
+                &root,
+                &new_ticket_id,
+                &depends_on_ticket_ids,
+            ) {
                 return Some(json_response(
                     "422 Unprocessable Entity",
                     r#"{"error":"depends_on_ticket_cycle"}"#,
@@ -921,10 +1019,16 @@ pub async fn handle_studio_route(
                 }
             };
             if !root.is_dir() {
-                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"project_not_found"}"#,
+                ));
             }
             let Some(ticket) = studio_get_ticket(&root, ticket_id) else {
-                return Some(json_response("404 Not Found", r#"{"error":"ticket_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"ticket_not_found"}"#,
+                ));
             };
             let timeline = studio_list_ticket_events(&root, ticket_id);
             let body = serde_json::json!({ "ticket": ticket, "timeline": timeline }).to_string();
@@ -945,21 +1049,34 @@ pub async fn handle_studio_route(
                 }
             };
             if !root.is_dir() {
-                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"project_not_found"}"#,
+                ));
             }
-            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
-                Some(v) => v,
-                None => {
-                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
-                }
-            };
+            let body_v =
+                match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                    Some(v) => v,
+                    None => {
+                        return Some(json_response(
+                            "400 Bad Request",
+                            r#"{"error":"json body required"}"#,
+                        ));
+                    }
+                };
             let Some(mut ticket) = studio_get_ticket(&root, ticket_id) else {
-                return Some(json_response("404 Not Found", r#"{"error":"ticket_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"ticket_not_found"}"#,
+                ));
             };
             if let Some(v) = body_v.get("title").and_then(|x| x.as_str()) {
                 let t = v.trim();
                 if t.is_empty() || t.chars().count() > 200 {
-                    return Some(json_response("422 Unprocessable Entity", r#"{"error":"title_invalid"}"#));
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"title_invalid"}"#,
+                    ));
                 }
                 ticket.title = t.to_string();
             }
@@ -969,14 +1086,20 @@ pub async fn handle_studio_route(
             if let Some(v) = body_v.get("assigned_agent").and_then(|x| x.as_str()) {
                 let a = v.trim();
                 if a.is_empty() {
-                    return Some(json_response("422 Unprocessable Entity", r#"{"error":"assigned_agent_required"}"#));
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"assigned_agent_required"}"#,
+                    ));
                 }
                 ticket.assigned_agent = a.to_string();
             }
             if let Some(v) = body_v.get("review_agent").and_then(|x| x.as_str()) {
                 let a = v.trim();
                 if a.is_empty() {
-                    return Some(json_response("422 Unprocessable Entity", r#"{"error":"review_agent_required"}"#));
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"review_agent_required"}"#,
+                    ));
                 }
                 ticket.review_agent = a.to_string();
             }
@@ -992,7 +1115,8 @@ pub async fn handle_studio_route(
                         };
                         let mut out = Vec::new();
                         for v in arr {
-                            let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                            let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty())
+                            else {
                                 return Some(json_response(
                                     "422 Unprocessable Entity",
                                     r#"{"error":"depends_on_ticket_ids_must_be_string_array"}"#,
@@ -1080,7 +1204,11 @@ pub async fn handle_studio_route(
                 }
             }
             let mut recovered_execution: Option<(String, Option<String>)> = None;
-            if body_v.get("recover_stuck_execution").and_then(|x| x.as_bool()) == Some(true) {
+            if body_v
+                .get("recover_stuck_execution")
+                .and_then(|x| x.as_bool())
+                == Some(true)
+            {
                 if ticket.status != "in_progress" && ticket.status != "review" {
                     return Some(json_response(
                         "409 Conflict",
@@ -1097,7 +1225,10 @@ pub async fn handle_studio_route(
                     "todo" | "in_progress" | "review" | "done" | "blocked"
                 );
                 if !valid {
-                    return Some(json_response("422 Unprocessable Entity", r#"{"error":"invalid_status"}"#));
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"invalid_status"}"#,
+                    ));
                 }
                 let cur = ticket.status.as_str();
                 let transition_ok = match (cur, next.as_str()) {
@@ -1111,7 +1242,10 @@ pub async fn handle_studio_route(
                     _ => false,
                 };
                 if !transition_ok {
-                    return Some(json_response("409 Conflict", r#"{"error":"invalid_status_transition"}"#));
+                    return Some(json_response(
+                        "409 Conflict",
+                        r#"{"error":"invalid_status_transition"}"#,
+                    ));
                 }
                 ticket.status = next;
             }
@@ -1151,7 +1285,11 @@ pub async fn handle_studio_route(
         }
 
         // POST /api/studio/projects/:id/tickets/:ticket_id/review
-        if method == "POST" && segments.len() == 4 && segments[1] == "tickets" && segments[3] == "review" {
+        if method == "POST"
+            && segments.len() == 4
+            && segments[1] == "tickets"
+            && segments[3] == "review"
+        {
             let id = segments[0];
             let ticket_id = segments[2];
             let root = match resolve_studio_project_dir(data_dir, id) {
@@ -1164,19 +1302,32 @@ pub async fn handle_studio_route(
                 }
             };
             if !root.is_dir() {
-                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"project_not_found"}"#,
+                ));
             }
-            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
-                Some(v) => v,
-                None => {
-                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
-                }
-            };
+            let body_v =
+                match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                    Some(v) => v,
+                    None => {
+                        return Some(json_response(
+                            "400 Bad Request",
+                            r#"{"error":"json body required"}"#,
+                        ));
+                    }
+                };
             let Some(mut ticket) = studio_get_ticket(&root, ticket_id) else {
-                return Some(json_response("404 Not Found", r#"{"error":"ticket_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"ticket_not_found"}"#,
+                ));
             };
             if ticket.status != "review" {
-                return Some(json_response("409 Conflict", r#"{"error":"ticket_not_in_review"}"#));
+                return Some(json_response(
+                    "409 Conflict",
+                    r#"{"error":"ticket_not_in_review"}"#,
+                ));
             }
             let reviewer = body_v
                 .get("reviewer_agent")
@@ -1185,14 +1336,23 @@ pub async fn handle_studio_route(
                 .filter(|s| !s.is_empty())
                 .unwrap_or_default();
             if reviewer.is_empty() || reviewer != ticket.review_agent {
-                return Some(json_response("403 Forbidden", r#"{"error":"reviewer_not_authorized"}"#));
+                return Some(json_response(
+                    "403 Forbidden",
+                    r#"{"error":"reviewer_not_authorized"}"#,
+                ));
             }
             let Some(outcome_raw) = body_v.get("outcome").and_then(|x| x.as_str()) else {
-                return Some(json_response("422 Unprocessable Entity", r#"{"error":"review_outcome_required"}"#));
+                return Some(json_response(
+                    "422 Unprocessable Entity",
+                    r#"{"error":"review_outcome_required"}"#,
+                ));
             };
             let outcome = outcome_raw.trim().to_ascii_lowercase();
             if !matches!(outcome.as_str(), "approved" | "changes_requested") {
-                return Some(json_response("422 Unprocessable Entity", r#"{"error":"review_outcome_invalid"}"#));
+                return Some(json_response(
+                    "422 Unprocessable Entity",
+                    r#"{"error":"review_outcome_invalid"}"#,
+                ));
             }
             let review_notes = body_v
                 .get("review_notes")
@@ -1265,7 +1425,10 @@ pub async fn handle_studio_route(
                 }
             };
             if !root.is_dir() {
-                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"project_not_found"}"#,
+                ));
             }
             let mut files: Vec<String> = Vec::new();
             collect_files_recursive(&root, Path::new(""), 0, &mut files);
@@ -1288,15 +1451,27 @@ pub async fn handle_studio_route(
                     ));
                 }
             };
-            let Some(rel) = query_param(query_str, "path").map(|c| c.to_string()).filter(|s| !s.is_empty()) else {
-                return Some(json_response("400 Bad Request", r#"{"error":"path query required"}"#));
+            let Some(rel) = query_param(query_str, "path")
+                .map(|c| c.to_string())
+                .filter(|s| !s.is_empty())
+            else {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path query required"}"#,
+                ));
             };
             if rel.contains("..") {
-                return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid path"}"#,
+                ));
             }
             let full = strip_verbatim(&root.join(&rel));
             if !is_strictly_under_studio_root(&full, &root) {
-                return Some(json_response("400 Bad Request", r#"{"error":"path outside project"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path outside project"}"#,
+                ));
             }
             if !full.is_file() {
                 return Some(json_response("404 Not Found", r#"{"error":"not_found"}"#));
@@ -1326,7 +1501,8 @@ pub async fn handle_studio_route(
                 Ok(bytes) => {
                     return Some(json_response(
                         "413 Payload Too Large",
-                        &serde_json::json!({ "error": "file_too_large", "size": bytes.len() }).to_string(),
+                        &serde_json::json!({ "error": "file_too_large", "size": bytes.len() })
+                            .to_string(),
                     ));
                 }
                 Err(e) => {
@@ -1353,30 +1529,52 @@ pub async fn handle_studio_route(
                     ));
                 }
             };
-            let Some(rel) = query_param(query_str, "path").map(|c| c.to_string()).filter(|s| !s.trim().is_empty()) else {
-                return Some(json_response("400 Bad Request", r#"{"error":"path query required"}"#));
+            let Some(rel) = query_param(query_str, "path")
+                .map(|c| c.to_string())
+                .filter(|s| !s.trim().is_empty())
+            else {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path query required"}"#,
+                ));
             };
             if rel.contains("..") {
-                return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid path"}"#,
+                ));
             }
             let full = strip_verbatim(&root.join(&rel));
             if !is_strictly_under_studio_root(&full, &root) {
-                return Some(json_response("400 Bad Request", r#"{"error":"path outside project"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path outside project"}"#,
+                ));
             }
             if full.is_dir() {
-                return Some(json_response("400 Bad Request", r#"{"error":"path is a directory"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path is a directory"}"#,
+                ));
             }
-            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
-                Some(v) => v,
-                None => {
-                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
-                }
-            };
+            let body_v =
+                match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                    Some(v) => v,
+                    None => {
+                        return Some(json_response(
+                            "400 Bad Request",
+                            r#"{"error":"json body required"}"#,
+                        ));
+                    }
+                };
             let content = match body_v.get("content") {
                 Some(serde_json::Value::String(s)) => s.clone(),
                 Some(serde_json::Value::Null) => String::new(),
                 None => {
-                    return Some(json_response("400 Bad Request", r#"{"error":"content field required"}"#));
+                    return Some(json_response(
+                        "400 Bad Request",
+                        r#"{"error":"content field required"}"#,
+                    ));
                 }
                 _ => {
                     return Some(json_response(
@@ -1389,7 +1587,8 @@ pub async fn handle_studio_route(
             if bytes.len() > MAX_RAW_BYTES {
                 return Some(json_response(
                     "413 Payload Too Large",
-                    &serde_json::json!({ "error": "content_too_large", "size": bytes.len() }).to_string(),
+                    &serde_json::json!({ "error": "content_too_large", "size": bytes.len() })
+                        .to_string(),
                 ));
             }
             if let Some(parent) = full.parent() {
@@ -1429,18 +1628,33 @@ pub async fn handle_studio_route(
                     ));
                 }
             };
-            let Some(rel) = query_param(query_str, "path").map(|c| c.to_string()).filter(|s| !s.trim().is_empty()) else {
-                return Some(json_response("400 Bad Request", r#"{"error":"path query required"}"#));
+            let Some(rel) = query_param(query_str, "path")
+                .map(|c| c.to_string())
+                .filter(|s| !s.trim().is_empty())
+            else {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path query required"}"#,
+                ));
             };
             if rel.contains("..") {
-                return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid path"}"#,
+                ));
             }
             let full = strip_verbatim(&root.join(&rel));
             if !is_strictly_under_studio_root(&full, &root) {
-                return Some(json_response("400 Bad Request", r#"{"error":"path outside project"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path outside project"}"#,
+                ));
             }
             if full.is_dir() {
-                return Some(json_response("400 Bad Request", r#"{"error":"path is a directory"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path is a directory"}"#,
+                ));
             }
             match fs::remove_file(&full) {
                 Ok(()) => {
@@ -1464,7 +1678,10 @@ pub async fn handle_studio_route(
     // POST /api/studio/projects/:id/fs/rename — renomme ou déplace un fichier ou un répertoire (rename atomique).
     if method == "POST" && path_only.ends_with("/fs/rename") {
         if let Some(rest) = strip_studio_projects_prefix(path_only) {
-            let id = rest.strip_suffix("/fs/rename").unwrap_or(rest).trim_end_matches('/');
+            let id = rest
+                .strip_suffix("/fs/rename")
+                .unwrap_or(rest)
+                .trim_end_matches('/');
             let root = match resolve_studio_project_dir(data_dir, id) {
                 Ok(d) => d,
                 Err(e) => {
@@ -1475,28 +1692,44 @@ pub async fn handle_studio_route(
                 }
             };
             if !root.is_dir() {
-                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"project_not_found"}"#,
+                ));
             }
-            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
-                Some(v) => v,
-                None => {
-                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
-                }
-            };
+            let body_v =
+                match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                    Some(v) => v,
+                    None => {
+                        return Some(json_response(
+                            "400 Bad Request",
+                            r#"{"error":"json body required"}"#,
+                        ));
+                    }
+                };
             let from_rel = match body_v.get("from").and_then(|x| x.as_str()) {
                 Some(s) if !s.trim().is_empty() => s.trim().replace('\\', "/"),
                 _ => {
-                    return Some(json_response("400 Bad Request", r#"{"error":"from required"}"#));
+                    return Some(json_response(
+                        "400 Bad Request",
+                        r#"{"error":"from required"}"#,
+                    ));
                 }
             };
             let to_rel = match body_v.get("to").and_then(|x| x.as_str()) {
                 Some(s) if !s.trim().is_empty() => s.trim().replace('\\', "/"),
                 _ => {
-                    return Some(json_response("400 Bad Request", r#"{"error":"to required"}"#));
+                    return Some(json_response(
+                        "400 Bad Request",
+                        r#"{"error":"to required"}"#,
+                    ));
                 }
             };
             if from_rel.contains("..") || to_rel.contains("..") {
-                return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid path"}"#,
+                ));
             }
             if from_rel == to_rel {
                 return Some(json_response("400 Bad Request", r#"{"error":"same_path"}"#));
@@ -1514,8 +1747,13 @@ pub async fn handle_studio_route(
             }
             let from_full = strip_verbatim(&root.join(&from_rel));
             let to_full = strip_verbatim(&root.join(&to_rel));
-            if !is_strictly_under_studio_root(&from_full, &root) || !is_strictly_under_studio_root(&to_full, &root) {
-                return Some(json_response("400 Bad Request", r#"{"error":"path outside project"}"#));
+            if !is_strictly_under_studio_root(&from_full, &root)
+                || !is_strictly_under_studio_root(&to_full, &root)
+            {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path outside project"}"#,
+                ));
             }
             if !from_full.exists() {
                 return Some(json_response("404 Not Found", r#"{"error":"not_found"}"#));
@@ -1545,7 +1783,8 @@ pub async fn handle_studio_route(
             match fs::rename(&from_full, &to_full) {
                 Ok(()) => {
                     schedule_studio_code_rag_index(data_dir, id, &root, false);
-                    let body = serde_json::json!({ "ok": true, "from": from_rel, "to": to_rel }).to_string();
+                    let body = serde_json::json!({ "ok": true, "from": from_rel, "to": to_rel })
+                        .to_string();
                     return Some(json_response("200 OK", &body));
                 }
                 Err(e) => {
@@ -1559,11 +1798,17 @@ pub async fn handle_studio_route(
     }
 
     // POST /api/studio/projects/:id/git/clone
-    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/clone") {
+    if method == "POST"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/git/clone")
+    {
         let rest = path_only
             .strip_prefix("/api/studio/projects/")
             .unwrap_or("");
-        let id = rest.strip_suffix("/git/clone").unwrap_or(rest).trim_end_matches('/');
+        let id = rest
+            .strip_suffix("/git/clone")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
         let id = id.split('/').next().unwrap_or("");
         let root = match resolve_studio_project_dir(data_dir, id) {
             Ok(d) => d,
@@ -1578,7 +1823,10 @@ pub async fn handle_studio_route(
         let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
             Some(v) => v,
             None => {
-                return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"json body required"}"#,
+                ));
             }
         };
         let url = match body_v
@@ -1588,7 +1836,10 @@ pub async fn handle_studio_route(
         {
             Some(u) => u,
             None => {
-                return Some(json_response("400 Bad Request", r#"{"error":"repo_url required"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"repo_url required"}"#,
+                ));
             }
         };
         if !url.starts_with("https://") {
@@ -1599,8 +1850,12 @@ pub async fn handle_studio_route(
         }
         // Studio-managed entries that are created at project-creation time and can be safely
         // cleared before cloning (git clone requires an empty target directory).
-        const STUDIO_METADATA_ENTRIES: &[&str] =
-            &[".akasha-studio.json", "CODE_STUDIO_PLAN.md", "specs", ".git"];
+        const STUDIO_METADATA_ENTRIES: &[&str] = &[
+            ".akasha-studio.json",
+            "CODE_STUDIO_PLAN.md",
+            "specs",
+            ".git",
+        ];
         let mut has_user_content = false;
         if let Ok(rd) = fs::read_dir(&root) {
             for e in rd.flatten() {
@@ -1639,7 +1894,11 @@ pub async fn handle_studio_route(
         let _permit = studio_ops_semaphore().acquire().await.ok();
         let mut cmd = Command::new("git");
         cmd.arg("clone").arg("--depth").arg("1");
-        if let Some(b) = body_v.get("branch").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(b) = body_v
+            .get("branch")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        {
             cmd.arg("--branch").arg(b);
         }
         cmd.arg(url).arg(&root);
@@ -1668,8 +1927,13 @@ pub async fn handle_studio_route(
     }
 
     // GET /api/studio/projects/:id/git/branches
-    if method == "GET" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/branches") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+    if method == "GET"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/git/branches")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
         let id = rest
             .strip_suffix("/git/branches")
             .unwrap_or(rest)
@@ -1685,17 +1949,24 @@ pub async fn handle_studio_route(
             }
         };
         if !root.is_dir() {
-            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            return Some(json_response(
+                "404 Not Found",
+                r#"{"error":"project_not_found"}"#,
+            ));
         }
         if !is_git_repo(&root).await {
-            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+            return Some(json_response(
+                "409 Conflict",
+                r#"{"error":"not_a_git_repository"}"#,
+            ));
         }
         match git_list_branches(&root).await {
             Ok(branches) => {
                 let current = branches.iter().find(|b| b.current).map(|b| b.name.clone());
                 return Some(json_response(
                     "200 OK",
-                    &serde_json::json!({ "current_branch": current, "branches": branches }).to_string(),
+                    &serde_json::json!({ "current_branch": current, "branches": branches })
+                        .to_string(),
                 ));
             }
             Err(e) => {
@@ -1708,8 +1979,13 @@ pub async fn handle_studio_route(
     }
 
     // POST /api/studio/projects/:id/git/checkout
-    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/checkout") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+    if method == "POST"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/git/checkout")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
         let id = rest
             .strip_suffix("/git/checkout")
             .unwrap_or(rest)
@@ -1725,14 +2001,25 @@ pub async fn handle_studio_route(
             }
         };
         if !root.is_dir() {
-            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            return Some(json_response(
+                "404 Not Found",
+                r#"{"error":"project_not_found"}"#,
+            ));
         }
         if !is_git_repo(&root).await {
-            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+            return Some(json_response(
+                "409 Conflict",
+                r#"{"error":"not_a_git_repository"}"#,
+            ));
         }
         let req = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
             Some(v) => v,
-            None => return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#)),
+            None => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid_json"}"#,
+                ))
+            }
         };
         let branch = req
             .get("branch")
@@ -1740,7 +2027,10 @@ pub async fn handle_studio_route(
             .map(str::trim)
             .unwrap_or("");
         if branch.is_empty() {
-            return Some(json_response("400 Bad Request", r#"{"error":"branch_required"}"#));
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"branch_required"}"#,
+            ));
         }
         match git_checkout_branch(&root, branch).await {
             Ok(()) => return Some(json_response("200 OK", r#"{"ok":true}"#)),
@@ -1754,8 +2044,13 @@ pub async fn handle_studio_route(
     }
 
     // POST /api/studio/projects/:id/git/compare
-    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/compare") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+    if method == "POST"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/git/compare")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
         let id = rest
             .strip_suffix("/git/compare")
             .unwrap_or(rest)
@@ -1771,23 +2066,41 @@ pub async fn handle_studio_route(
             }
         };
         if !root.is_dir() {
-            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            return Some(json_response(
+                "404 Not Found",
+                r#"{"error":"project_not_found"}"#,
+            ));
         }
         if !is_git_repo(&root).await {
-            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+            return Some(json_response(
+                "409 Conflict",
+                r#"{"error":"not_a_git_repository"}"#,
+            ));
         }
         let req = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
             Some(v) => v,
-            None => return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#)),
+            None => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid_json"}"#,
+                ))
+            }
         };
-        let base = req.get("base").and_then(|v| v.as_str()).map(str::trim).unwrap_or("");
+        let base = req
+            .get("base")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("");
         let target = req
             .get("target")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .unwrap_or("");
         if base.is_empty() || target.is_empty() {
-            return Some(json_response("400 Bad Request", r#"{"error":"base_target_required"}"#));
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"base_target_required"}"#,
+            ));
         }
         match git_compare_branches(&root, base, target).await {
             Ok(payload) => {
@@ -1806,8 +2119,13 @@ pub async fn handle_studio_route(
     }
 
     // POST /api/studio/projects/:id/git/merge
-    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/merge") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+    if method == "POST"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/git/merge")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
         let id = rest
             .strip_suffix("/git/merge")
             .unwrap_or(rest)
@@ -1823,14 +2141,25 @@ pub async fn handle_studio_route(
             }
         };
         if !root.is_dir() {
-            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            return Some(json_response(
+                "404 Not Found",
+                r#"{"error":"project_not_found"}"#,
+            ));
         }
         if !is_git_repo(&root).await {
-            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+            return Some(json_response(
+                "409 Conflict",
+                r#"{"error":"not_a_git_repository"}"#,
+            ));
         }
         let req = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
             Some(v) => v,
-            None => return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#)),
+            None => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid_json"}"#,
+                ))
+            }
         };
         let source = req
             .get("source")
@@ -1843,7 +2172,10 @@ pub async fn handle_studio_route(
             .map(str::trim)
             .unwrap_or("");
         if source.is_empty() || target.is_empty() {
-            return Some(json_response("400 Bad Request", r#"{"error":"source_target_required"}"#));
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"source_target_required"}"#,
+            ));
         }
         let _permit = studio_ops_semaphore().acquire().await.ok();
         if let Err(e) = git_checkout_branch(&root, target).await {
@@ -1854,7 +2186,13 @@ pub async fn handle_studio_route(
         }
         match git_output(
             &root,
-            &["merge", "--no-ff", source, "-m", "Akasha Code Studio: merge branch"],
+            &[
+                "merge",
+                "--no-ff",
+                source,
+                "-m",
+                "Akasha Code Studio: merge branch",
+            ],
         )
         .await
         {
@@ -1878,8 +2216,13 @@ pub async fn handle_studio_route(
     }
 
     // GET /api/studio/projects/:id/git/conflicts
-    if method == "GET" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/conflicts") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+    if method == "GET"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/git/conflicts")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
         let id = rest
             .strip_suffix("/git/conflicts")
             .unwrap_or(rest)
@@ -1895,14 +2238,21 @@ pub async fn handle_studio_route(
             }
         };
         if !root.is_dir() {
-            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            return Some(json_response(
+                "404 Not Found",
+                r#"{"error":"project_not_found"}"#,
+            ));
         }
         if !is_git_repo(&root).await {
-            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+            return Some(json_response(
+                "409 Conflict",
+                r#"{"error":"not_a_git_repository"}"#,
+            ));
         }
         match git_conflict_files(&root).await {
             Ok(files) => {
-                let merge_in_progress = !files.is_empty() || root.join(".git").join("MERGE_HEAD").exists();
+                let merge_in_progress =
+                    !files.is_empty() || root.join(".git").join("MERGE_HEAD").exists();
                 return Some(json_response(
                     "200 OK",
                     &serde_json::json!({ "merge_in_progress": merge_in_progress, "conflict_files": files })
@@ -1923,7 +2273,9 @@ pub async fn handle_studio_route(
         && path_only.contains("/api/studio/projects/")
         && path_only.ends_with("/git/merge/abort")
     {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
         let id = rest
             .strip_suffix("/git/merge/abort")
             .unwrap_or(rest)
@@ -1939,10 +2291,16 @@ pub async fn handle_studio_route(
             }
         };
         if !root.is_dir() {
-            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            return Some(json_response(
+                "404 Not Found",
+                r#"{"error":"project_not_found"}"#,
+            ));
         }
         if !is_git_repo(&root).await {
-            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+            return Some(json_response(
+                "409 Conflict",
+                r#"{"error":"not_a_git_repository"}"#,
+            ));
         }
         match git_merge_abort(&root).await {
             Ok(()) => return Some(json_response("200 OK", r#"{"ok":true}"#)),
@@ -1956,15 +2314,23 @@ pub async fn handle_studio_route(
     }
 
     // POST /api/studio/projects/:id/preview/stop — kill dev server started for this project.
-    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/stop") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+    if method == "POST"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/preview/stop")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
         let id = rest
             .strip_suffix("/preview/stop")
             .unwrap_or(rest)
             .trim_end_matches('/');
         let id = id.split('/').next().unwrap_or("");
         if id.is_empty() {
-            return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid path"}"#,
+            ));
         }
         let mut map = studio_preview_registry().lock().await;
         if let Some(mut prev) = map.remove(id) {
@@ -1975,15 +2341,23 @@ pub async fn handle_studio_route(
     }
 
     // GET /api/studio/projects/:id/preview/logs — stdout/stderr du serveur dev (tampon borné).
-    if method == "GET" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/logs") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+    if method == "GET"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/preview/logs")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
         let id = rest
             .strip_suffix("/preview/logs")
             .unwrap_or(rest)
             .trim_end_matches('/');
         let id = id.split('/').next().unwrap_or("");
         if id.is_empty() {
-            return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid path"}"#,
+            ));
         }
         if resolve_studio_project_dir(data_dir, id).is_err() {
             return Some(json_response(
@@ -2012,18 +2386,32 @@ pub async fn handle_studio_route(
     }
 
     // GET /api/studio/projects/:id/preview/proxy?token=... — signed short-lived redirect to dev preview.
-    if method == "GET" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/proxy") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
-        let id = rest.strip_suffix("/preview/proxy").unwrap_or(rest).trim_end_matches('/');
+    if method == "GET"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/preview/proxy")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
+        let id = rest
+            .strip_suffix("/preview/proxy")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
         let id = id.split('/').next().unwrap_or("");
         if id.is_empty() {
-            return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid path"}"#,
+            ));
         }
         let token = query_param(query_str, "token")
             .map(|v| v.to_string())
             .unwrap_or_default();
         if token.trim().is_empty() {
-            return Some(json_response("401 Unauthorized", r#"{"error":"token_required"}"#));
+            return Some(json_response(
+                "401 Unauthorized",
+                r#"{"error":"token_required"}"#,
+            ));
         }
         let port = match validate_preview_proxy_token(id, token.trim()).await {
             Ok(p) => p,
@@ -2050,15 +2438,23 @@ pub async fn handle_studio_route(
 
     // POST /api/studio/projects/:id/preview/install — installation seule (pas de serveur dev).
     // Détecte la stack et lance la commande adaptée (`npm install`, `uv sync`, …).
-    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/install") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+    if method == "POST"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/preview/install")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
         let id = rest
             .strip_suffix("/preview/install")
             .unwrap_or(rest)
             .trim_end_matches('/');
         let id = id.split('/').next().unwrap_or("");
         if id.is_empty() {
-            return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid path"}"#,
+            ));
         }
         let root = match resolve_studio_project_dir(data_dir, id) {
             Ok(d) => d,
@@ -2070,7 +2466,10 @@ pub async fn handle_studio_route(
             }
         };
         if !root.is_dir() {
-            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            return Some(json_response(
+                "404 Not Found",
+                r#"{"error":"project_not_found"}"#,
+            ));
         }
         // Le port n’a pas d’incidence sur `install_argv`, on en passe un fictif valide.
         let plan = match detect_studio_preview_plan(&root, 0) {
@@ -2150,7 +2549,11 @@ pub async fn handle_studio_route(
                         "argv": install_argv,
                     }
                 });
-                let status = if ok { "200 OK" } else { "500 Internal Server Error" };
+                let status = if ok {
+                    "200 OK"
+                } else {
+                    "500 Internal Server Error"
+                };
                 return Some(json_response(status, &body.to_string()));
             }
             Err(e) => {
@@ -2164,15 +2567,23 @@ pub async fn handle_studio_route(
 
     // POST /api/studio/projects/:id/preview/start — détecte la stack (Node, Python uv …),
     // installe les dépendances si nécessaire, puis lance le serveur de dev en arrière-plan.
-    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/start") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+    if method == "POST"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/preview/start")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
         let id = rest
             .strip_suffix("/preview/start")
             .unwrap_or(rest)
             .trim_end_matches('/');
         let id = id.split('/').next().unwrap_or("");
         if id.is_empty() {
-            return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid path"}"#,
+            ));
         }
         let root = match resolve_studio_project_dir(data_dir, id) {
             Ok(d) => d,
@@ -2184,7 +2595,10 @@ pub async fn handle_studio_route(
             }
         };
         if !root.is_dir() {
-            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            return Some(json_response(
+                "404 Not Found",
+                r#"{"error":"project_not_found"}"#,
+            ));
         }
         let body_v = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
         let force_install = body_v
@@ -2237,7 +2651,8 @@ pub async fn handle_studio_route(
                         r#"{"error":"invalid preview install argv"}"#,
                     ));
                 }
-                match studio_run_command_capture(&root, install_argv, NPM_INSTALL_TIMEOUT_SEC).await {
+                match studio_run_command_capture(&root, install_argv, NPM_INSTALL_TIMEOUT_SEC).await
+                {
                     Ok((code, stdout, stderr)) => {
                         let ok = code == Some(0);
                         install_block = Some(serde_json::json!({
@@ -2330,9 +2745,17 @@ pub async fn handle_studio_route(
     }
 
     // POST /api/studio/projects/:id/build
-    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/build") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
-        let id = rest.strip_suffix("/build").unwrap_or(rest).trim_end_matches('/');
+    if method == "POST"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/build")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
+        let id = rest
+            .strip_suffix("/build")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
         let id = id.split('/').next().unwrap_or("");
         let root = match resolve_studio_project_dir(data_dir, id) {
             Ok(d) => d,
@@ -2344,12 +2767,18 @@ pub async fn handle_studio_route(
             }
         };
         if !root.is_dir() {
-            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            return Some(json_response(
+                "404 Not Found",
+                r#"{"error":"project_not_found"}"#,
+            ));
         }
         let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
             Some(v) => v,
             None => {
-                return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"json body required"}"#,
+                ));
             }
         };
         let argv: Vec<String> = body_v
@@ -2379,7 +2808,10 @@ pub async fn handle_studio_route(
             .unwrap_or(DEFAULT_BUILD_TIMEOUT_SEC)
             .min(3600);
         if argv.first().is_none() {
-            return Some(json_response("400 Bad Request", r#"{"error":"argv required"}"#));
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"argv required"}"#,
+            ));
         }
         let _permit = match studio_ops_semaphore().acquire().await {
             Ok(p) => p,
@@ -2405,7 +2837,9 @@ pub async fn handle_studio_route(
                     if allow_host_fallback {
                         match studio_run_command_capture(&root, &argv, timeout_sec).await {
                             Ok((code, out, err)) => Ok((code, out, err, "host_fallback")),
-                            Err(host_err) => Err(format!("container: {container_err}; host_fallback: {host_err}")),
+                            Err(host_err) => Err(format!(
+                                "container: {container_err}; host_fallback: {host_err}"
+                            )),
                         }
                     } else {
                         Err(format!("containerized_build_failed: {container_err}"))
@@ -2428,7 +2862,11 @@ pub async fn handle_studio_route(
                 })
                 .to_string();
                 let ok = exit_code == Some(0);
-                let http_status = if ok { "200 OK" } else { "500 Internal Server Error" };
+                let http_status = if ok {
+                    "200 OK"
+                } else {
+                    "500 Internal Server Error"
+                };
                 (http_status, body)
             }
             Err(e) => (
@@ -2440,9 +2878,17 @@ pub async fn handle_studio_route(
     }
 
     // POST /api/studio/projects/:id/patch/hunks — apply selected unified-diff hunks under studio root.
-    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/patch/hunks") {
-        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
-        let id = rest.strip_suffix("/patch/hunks").unwrap_or(rest).trim_end_matches('/');
+    if method == "POST"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/patch/hunks")
+    {
+        let rest = path_only
+            .strip_prefix("/api/studio/projects/")
+            .unwrap_or("");
+        let id = rest
+            .strip_suffix("/patch/hunks")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
         let id = id.split('/').next().unwrap_or("");
         let root = match resolve_studio_project_dir(data_dir, id) {
             Ok(d) => d,
@@ -2454,7 +2900,10 @@ pub async fn handle_studio_route(
             }
         };
         if !root.is_dir() {
-            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            return Some(json_response(
+                "404 Not Found",
+                r#"{"error":"project_not_found"}"#,
+            ));
         }
         let _permit = match studio_ops_semaphore().acquire().await {
             Ok(p) => p,
@@ -2467,16 +2916,31 @@ pub async fn handle_studio_route(
         };
         let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
             Some(v) => v,
-            None => return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#)),
+            None => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"json body required"}"#,
+                ))
+            }
         };
-        let dry_run = body_v.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+        let dry_run = body_v
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let patches: Vec<String> = body_v
             .get("patches")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
         if patches.is_empty() {
-            return Some(json_response("400 Bad Request", r#"{"error":"patches_required"}"#));
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"patches_required"}"#,
+            ));
         }
         fn invalid_patch_path(path: &str) -> bool {
             if path.is_empty() || path == "/dev/null" {
@@ -2541,8 +3005,15 @@ pub async fn handle_studio_route(
             false
         }
         for p in &patches {
-            if !p.contains("diff --git a/") || p.contains("..\\") || p.contains("../") || patch_has_invalid_paths(p) {
-                return Some(json_response("400 Bad Request", r#"{"error":"invalid_patch_content"}"#));
+            if !p.contains("diff --git a/")
+                || p.contains("..\\")
+                || p.contains("../")
+                || patch_has_invalid_paths(p)
+            {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid_patch_content"}"#,
+                ));
             }
         }
         let mut applied = 0usize;
@@ -2554,22 +3025,38 @@ pub async fn handle_studio_route(
                 continue;
             }
             let argv = if dry_run {
-                vec!["git".to_string(), "apply".to_string(), "--check".to_string(), patch_file.display().to_string()]
+                vec![
+                    "git".to_string(),
+                    "apply".to_string(),
+                    "--check".to_string(),
+                    patch_file.display().to_string(),
+                ]
             } else {
-                vec!["git".to_string(), "apply".to_string(), "--whitespace=nowarn".to_string(), patch_file.display().to_string()]
+                vec![
+                    "git".to_string(),
+                    "apply".to_string(),
+                    "--whitespace=nowarn".to_string(),
+                    patch_file.display().to_string(),
+                ]
             };
             match studio_run_command_capture(&root, &argv, 90).await {
                 Ok((Some(0), _, _)) => {
                     applied += 1;
                 }
                 Ok((code, out, err)) => {
-                    errors.push(format!("patch_{idx}_failed code={code:?} stdout={out} stderr={err}"));
+                    errors.push(format!(
+                        "patch_{idx}_failed code={code:?} stdout={out} stderr={err}"
+                    ));
                 }
                 Err(e) => errors.push(format!("patch_{idx}_error: {e}")),
             }
             let _ = fs::remove_file(&patch_file);
         }
-        let status = if errors.is_empty() { "200 OK" } else { "207 Multi-Status" };
+        let status = if errors.is_empty() {
+            "200 OK"
+        } else {
+            "207 Multi-Status"
+        };
         let body = serde_json::json!({
             "ok": errors.is_empty(),
             "dry_run": dry_run,
@@ -2595,7 +3082,10 @@ pub async fn handle_studio_route(
                 }
             };
             if !root.is_dir() {
-                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"project_not_found"}"#,
+                ));
             }
             let meta = load_studio_meta(&root).unwrap_or(StudioMeta {
                 id: id.to_string(),
@@ -2617,7 +3107,8 @@ pub async fn handle_studio_route(
     }
 
     // POST /api/studio/projects/:id/evolutions
-    if method == "POST" && path_only.ends_with("/evolutions") && !path_only.contains("/evolutions/") {
+    if method == "POST" && path_only.ends_with("/evolutions") && !path_only.contains("/evolutions/")
+    {
         if let Some(rest) = strip_studio_projects_prefix(path_only) {
             let id = rest.strip_suffix("/evolutions").unwrap_or(rest);
             let root = match resolve_studio_project_dir(data_dir, id) {
@@ -2630,7 +3121,10 @@ pub async fn handle_studio_route(
                 }
             };
             if !root.is_dir() {
-                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"project_not_found"}"#,
+                ));
             }
             if !is_git_repo(&root).await {
                 return Some(json_response(
@@ -2638,10 +3132,11 @@ pub async fn handle_studio_route(
                     r#"{"error":"not_a_git_repository"}"#,
                 ));
             }
-            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
-                Some(v) => v,
-                None => serde_json::json!({}),
-            };
+            let body_v =
+                match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                    Some(v) => v,
+                    None => serde_json::json!({}),
+                };
             let label = body_v
                 .get("label")
                 .and_then(|x| x.as_str())
@@ -2672,7 +3167,8 @@ pub async fn handle_studio_route(
                     let msg = String::from_utf8_lossy(&o.stderr);
                     return Some(json_response(
                         "500 Internal Server Error",
-                        &serde_json::json!({ "error": format!("git checkout -b failed: {}", msg) }).to_string(),
+                        &serde_json::json!({ "error": format!("git checkout -b failed: {}", msg) })
+                            .to_string(),
                     ));
                 }
                 Err(e) => {
@@ -2739,7 +3235,10 @@ pub async fn handle_studio_route(
                 let mut meta = match load_studio_meta(&root) {
                     Some(m) => m,
                     None => {
-                        return Some(json_response("404 Not Found", r#"{"error":"meta_not_found"}"#));
+                        return Some(json_response(
+                            "404 Not Found",
+                            r#"{"error":"meta_not_found"}"#,
+                        ));
                     }
                 };
                 let branch = meta
@@ -2748,7 +3247,10 @@ pub async fn handle_studio_route(
                     .find(|e| e.id == eid)
                     .map(|e| e.branch.clone());
                 let Some(branch) = branch else {
-                    return Some(json_response("404 Not Found", r#"{"error":"evolution_not_found"}"#));
+                    return Some(json_response(
+                        "404 Not Found",
+                        r#"{"error":"evolution_not_found"}"#,
+                    ));
                 };
                 if !is_git_repo(&root).await {
                     return Some(json_response(
@@ -2762,7 +3264,8 @@ pub async fn handle_studio_route(
                     Err(e) => {
                         return Some(json_response(
                             "409 Conflict",
-                            &serde_json::json!({ "error": "pre_merge_commit_failed", "detail": e }).to_string(),
+                            &serde_json::json!({ "error": "pre_merge_commit_failed", "detail": e })
+                                .to_string(),
                         ));
                     }
                 }
@@ -2818,8 +3321,17 @@ pub async fn handle_studio_route(
                         ));
                     }
                 }
-                let o = git_output(&root, &["merge", "--no-ff", &branch, "-m", "Akasha Code Studio: merge evolution"])
-                    .await;
+                let o = git_output(
+                    &root,
+                    &[
+                        "merge",
+                        "--no-ff",
+                        &branch,
+                        "-m",
+                        "Akasha Code Studio: merge evolution",
+                    ],
+                )
+                .await;
                 match o {
                     Ok(o) if o.status.success() => {
                         for e in meta.evolutions.iter_mut() {
@@ -2865,7 +3377,10 @@ pub async fn handle_studio_route(
                 }
             };
             if !root.is_dir() {
-                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                return Some(json_response(
+                    "404 Not Found",
+                    r#"{"error":"project_not_found"}"#,
+                ));
             }
             let req = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
             let raw = req
@@ -2899,12 +3414,22 @@ pub async fn handle_studio_route(
                 let mut meta = match load_studio_meta(&root) {
                     Some(m) => m,
                     None => {
-                        return Some(json_response("404 Not Found", r#"{"error":"meta_not_found"}"#));
+                        return Some(json_response(
+                            "404 Not Found",
+                            r#"{"error":"meta_not_found"}"#,
+                        ));
                     }
                 };
-                let branch = meta.evolutions.iter().find(|e| e.id == eid).map(|e| e.branch.clone());
+                let branch = meta
+                    .evolutions
+                    .iter()
+                    .find(|e| e.id == eid)
+                    .map(|e| e.branch.clone());
                 let Some(branch) = branch else {
-                    return Some(json_response("404 Not Found", r#"{"error":"evolution_not_found"}"#));
+                    return Some(json_response(
+                        "404 Not Found",
+                        r#"{"error":"evolution_not_found"}"#,
+                    ));
                 };
                 let _permit = studio_ops_semaphore().acquire().await.ok();
                 let _ = ensure_main_or_master_branch(&root).await;
@@ -2915,7 +3440,10 @@ pub async fn handle_studio_route(
                     }
                 }
                 let _ = save_studio_meta(&root, &meta);
-                return Some(json_response("200 OK", r#"{"ok":true,"message":"abandoned"}"#));
+                return Some(json_response(
+                    "200 OK",
+                    r#"{"ok":true,"message":"abandoned"}"#,
+                ));
             }
         }
     }
@@ -2936,7 +3464,10 @@ pub async fn handle_studio_route(
                     }
                 };
                 if !root.is_dir() {
-                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                    return Some(json_response(
+                        "404 Not Found",
+                        r#"{"error":"project_not_found"}"#,
+                    ));
                 }
                 let force_query = query_param(query_str, "force")
                     .map(|c| c == "1" || c.eq_ignore_ascii_case("true"))
@@ -2963,6 +3494,8 @@ pub async fn handle_studio_route(
                         let _ = prev.child.kill().await;
                     }
                 }
+                crate::studio_observation::close_project(id).await;
+                crate::studio_lsp::close(&root.canonicalize().unwrap_or_else(|_|root.clone())).await;
                 let id_owned = id.to_string();
                 let data_dir_owned = data_dir.to_path_buf();
                 let root_owned = root.clone();
@@ -2987,10 +3520,7 @@ pub async fn handle_studio_route(
                 .await;
                 match rm {
                     Ok(Ok(())) => {
-                        return Some(json_response(
-                            "200 OK",
-                            r#"{"ok":true,"deleted":true}"#,
-                        ));
+                        return Some(json_response("200 OK", r#"{"ok":true,"deleted":true}"#));
                     }
                     Ok(Err(e)) => {
                         return Some(json_response(

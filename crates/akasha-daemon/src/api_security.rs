@@ -67,11 +67,19 @@ pub fn csrf_reject_response(
     path: &str,
     headers: &HashMap<String, String>,
 ) -> Option<String> {
-    if !matches!(method, "POST" | "PUT" | "DELETE" | "PATCH") {
-        return None;
+    let normalized=format!("/{}",split_path_query(path).0.trim_matches('/'));
+    let path=normalized.as_str();
+    // Delivery reads use the operator's GitHub identity, so browser origin checks
+    // apply to them as well as mutations (including opaque sandbox origins).
+    let delivery_read = method == "GET" && (path.starts_with("/api/studio/projects/") && path.contains("/delivery/") || path=="/api/tasks" || path.starts_with("/api/tasks/") || path=="/api/pending-human-input" || path=="/api/permissions/queue" || path.starts_with("/api/permissions/queue/") || path=="/api/events" || path.starts_with("/api/events/"));
+    if !delivery_read && !matches!(method, "POST" | "PUT" | "DELETE" | "PATCH") {return None;}
+    // Local webviews/proxies can legitimately be cross-site across loopback hosts.
+    if headers.get("origin").is_some_and(|origin|origin_is_local(origin.trim()) && !(delivery_read && origin.trim()=="null")) {return None;}
+    if delivery_read && headers.get("sec-fetch-site").is_some_and(|site|site=="cross-site") {
+        return Some(json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#));
     }
     let origin = headers.get("origin")?.trim();
-    if origin_is_local(origin) {
+    if origin_is_local(origin) && !(delivery_read && origin=="null") {
         return None;
     }
     tracing::warn!(
@@ -151,5 +159,18 @@ mod tests {
     fn csrf_no_origin_header_means_no_block() {
         let m = HashMap::new();
         assert!(csrf_reject_response("POST", "/api/foo", &m).is_none());
+    }
+}
+
+#[cfg(test)]
+mod delivery_origin_regressions {
+    use super::*;
+    #[test] fn authenticated_delivery_reads_reject_remote_and_opaque_origins() {
+        for path in ["/api/studio/projects/id/delivery/status","/api/studio/projects/id/delivery/pr","/api/tasks/id/delivery","/api/pending-human-input","/api/permissions/queue","/api/events","/api/tasks/id/events","//api/tasks/id/delivery/","//api/studio/projects/id/delivery/status/","/api/permissions/queue/id"] {
+            for origin in ["https://evil.example","null"] {assert!(csrf_reject_response("GET",path,&HashMap::from([("origin".into(),origin.into())])).is_some());}
+            assert!(csrf_reject_response("GET",path,&HashMap::from([("origin".into(),"http://127.0.0.1:5178".into())])).is_none());
+            assert!(csrf_reject_response("GET",path,&HashMap::from([("origin".into(),"http://localhost:5178".into()),("sec-fetch-site".into(),"cross-site".into())])).is_none());
+
+        }
     }
 }

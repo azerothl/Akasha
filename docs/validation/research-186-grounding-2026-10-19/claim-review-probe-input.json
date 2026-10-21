@@ -1,0 +1,52 @@
+{
+  "claims": [
+    {
+      "id": "C1",
+      "text": "Vec garantit une performance optimale lors de l’accès séquentiel.",
+      "evidence": [
+        "P1"
+      ]
+    },
+    {
+      "id": "C2",
+      "text": "VecDeque réutilise la mémoire en masquant les éléments supprimés et évite ainsi les allocations fréquentes.",
+      "evidence": [
+        "P2"
+      ]
+    },
+    {
+      "id": "C3",
+      "text": "Vec offre un coût amorti O(1) pour push et pop à la fin.",
+      "evidence": [
+        "P1",
+        "P3"
+      ]
+    },
+    {
+      "id": "C4",
+      "text": "Vec devient O(n) lors des insertions au début uniquement si la capacité doit être réallouée.",
+      "evidence": [
+        "P3"
+      ]
+    },
+    {
+      "id": "C5",
+      "text": "Vec est un tableau dynamique contigu dont le contenu est alloué sur le tas.",
+      "evidence": [
+        "P1"
+      ]
+    },
+    {
+      "id": "C6",
+      "text": "Vec a une indexation O(1), un ajout final amorti O(1) et un retrait final O(1).",
+      "evidence": [
+        "P1"
+      ]
+    }
+  ],
+  "quotes": {
+    "P1": "A contiguous growable array type with heap-allocated contents, written Vec<T>.\nVectors have O(1) indexing, amortized O(1) push (to the end) and O(1) pop (from the end).\nWhen the type is non-zero-sized and the capacity is nonzero, Vec uses the Global allocator for its allocation. It is valid to convert both ways between such a Vec and a raw pointer allocated with the Global allocator, provided that the Layout used with the allocator is correct for a sequence of capacity elements of the type, and the first len values pointed to by the raw pointer are valid. More precisely, a ptr: *mut T that has been allocated with the Global allocator with Layout::array::<T>(capacity) may be converted into a vec using Vec::<T>::from_raw_parts(ptr, len, capacity). Conversely, the memory backing a value: *mut T obtained from Vec::<T>::as_mut_ptr may be deallocated using the Global allocator with the same layout.",
+    "P2": "A double-ended queue (deque) implemented with a growable ring buffer.\nThis queue has O(1) amortized inserts and removals from both ends of the container. It also has O(1) indexing like a vector. The contained elements are not required to be copyable, and the queue will be sendable if the contained type is sendable.",
+    "P3": "Sequences: Vec, VecDeque, LinkedList\n§Use a VecDeque when:\nThroughout the documentation, we will adhere to the following conventions for operation notation:\nOperations which have an amortized cost are suffixed with a *.\nCalling operations that add to a collection will occasionally require a collection to be resized - an extra operation that takes O(n) time.\nRust’s collections never automatically shrink, so removal operations aren’t amortized.\n| | get(i) | insert(i) | remove(i) | append(Vec(m)) | split_off(i) | range | append\n| Vec | O(1) | O(n-i)* | O(n-i) | O(m)* | O(n-i) | N/A | N/A\n| VecDeque | O(1) | O(min(i, n-i))* | O(min(i, n-i)) | O(m)* | O(min(i, n-i)) | N/A | N/A\nNote that where ties occur, Vec is generally going to be faster than VecDeque, and VecDeque is generally going to be faster than LinkedList."
+  }
+}

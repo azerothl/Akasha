@@ -160,7 +160,7 @@ Fichiers créés dans le data_dir (ex. `%USERPROFILE%\akasha` (Windows) ou `~/ak
 | `AKASHA_MAX_CONCURRENT_DELEGATIONS` | Nombre max de délégations (sous-tâches) traitées en parallèle ; au-delà, « système surchargé » | 15 |
 | `AKASHA_MAX_COST_PER_SESSION_USD` | Plafond de coût LLM (USD) par session ; au-delà, la tâche s'arrête avec « Budget dépassé » | — |
 | `AKASHA_MAX_TOKENS_PER_SESSION` | Plafond de tokens par session ; au-delà, la tâche s'arrête avec « Quota dépassé » | — |
-| `AKASHA_DATA_DIR` | Répertoire de données (vault, plugins, llm_router.yaml, etc.) | %USERPROFILE%\akasha (Windows) / ~/akasha (Linux/macOS) |
+| `AKASHA_DATA_DIR` | Répertoire de données (vault, plugins, llm_router.yaml, etc.) — shell ou `akasha start` uniquement ; ignorée dans `akasha.env` | %USERPROFILE%\akasha (Windows) / ~/akasha (Linux/macOS) |
 | `AKASHA_SLACK_ENABLED` | `1` pour activer l'adaptateur Slack | — |
 | `AKASHA_DISCORD_ENABLED` | `1` pour activer le bot Discord | — |
 | `AKASHA_TELEGRAM_ENABLED` | `1` pour activer le bot Telegram | — |
@@ -182,7 +182,7 @@ Fichiers créés dans le data_dir (ex. `%USERPROFILE%\akasha` (Windows) ou `~/ak
 **PowerShell** : `$env:AKASHA_TELEGRAM_ENABLED="1"` (et non `set`).  
 **CMD** : `set AKASHA_TELEGRAM_ENABLED=1`.
 
-Les variables définies via `akasha config env set` sont enregistrées dans `data_dir/akasha.env` et chargées au démarrage du daemon.
+Les variables définies via `akasha config env set` sont enregistrées dans `data_dir/akasha.env` et chargées au démarrage du daemon. Exception : **`AKASHA_DATA_DIR`** doit être définie dans le shell (ou l’environnement de `akasha start`) ; une entrée dans `akasha.env` est ignorée.
 
 *Variables optionnelles (debug / avancé)* : `AKASHA_LOG_LLM_RESPONSE=1` (log détaillé des réponses LLM) ; `AKASHA_SPEC_DIR` (chemin vers le dossier `spec` pour la suite d’évals) ; `AKASHA_VAULT_MASTER_KEY` (clé maître pour le vault fichier, si utilisé) ; `AKASHA_LLM_TIMEOUT_SECS` (timeout en secondes pour les appels LLM, défaut 300) ; `AKASHA_LLM_STREAM_IDLE_SECS` (timeout d’inactivité en secondes entre deux chunks, défaut 60) ; `AKASHA_LLM_FIRST_CHUNK_SECS` (délai max pour recevoir le **premier** chunk du modèle embarqué, défaut min(300, AKASHA_LLM_TIMEOUT_SECS) — le premier token peut être lent : chargement modèle, inférence CPU) ; `AKASHA_EMBEDDED_BACKEND` (`auto`, `llama_cpp`, `candle`, `baguettotron`) ; `AKASHA_EMBEDDED_GGUF_PATH` (chemin `.gguf` pour llama-cpp) ; `AKASHA_EMBEDDED_N_GPU_LAYERS` (offload GPU llama-cpp, défaut 99) ; `AKASHA_EMBEDDED_MODEL` (modèle Candle : `qwen3_0_6b` par défaut, `baguettotron` si compilé avec la feature `embedded-baguettotron`). Pour tenter d’accélérer les modèles Candle **sans CUDA** : **`--features embedded-mkl`** (Intel MKL). Si le link échoue avec `undefined symbol: hgemm_`, retirer `embedded-mkl` et utiliser le build par défaut (CPU), l’artifact **`akasha-windows-x86_64-cuda`**, ou Ollama.
 

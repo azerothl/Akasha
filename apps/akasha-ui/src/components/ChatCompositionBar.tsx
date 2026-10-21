@@ -19,7 +19,7 @@ const MODES: { id: ComposerMode; en: string; fr: string; tipEn: string; tipFr: s
   {
     id: "ask",
     en: "Ask",
-    fr: "Ask",
+    fr: "Question",
     tipEn: "Q&A only — read tools, no file writes",
     tipFr: "Q&R seulement — lecture seule, pas d’écriture",
   },
@@ -85,6 +85,7 @@ export function ChatCompositionBar({
           type="button"
           className={`btn-group-item ${webSearchEnabled ? "active" : ""}`}
           onClick={() => onWebSearchChange(!webSearchEnabled)}
+          aria-pressed={webSearchEnabled}
           disabled={disabled}
         >
           {en ? "Web" : "Web"}
@@ -95,6 +96,7 @@ export function ChatCompositionBar({
           type="button"
           className={`btn-group-item ${incognito ? "active" : ""}`}
           onClick={() => onIncognitoChange(!incognito)}
+          aria-pressed={incognito}
           disabled={disabled}
         >
           {en ? "Incognito" : "Incognito"}

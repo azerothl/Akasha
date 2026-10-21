@@ -49,7 +49,7 @@ if (-not (Test-Path $Daemon)) {
     exit 1
 }
 
-foreach ($rel in @("docs\user\index.json", "docs\user_guide.md", "scripts", "spec\tools_policy.example.yaml")) {
+foreach ($rel in @("docs\user\index.json", "docs\user_guide.md", "scripts", "spec\09_event_model.yaml", "spec\10_data_model.yaml", "spec\tools_policy.example.yaml")) {
     if (-not (Test-Path (Join-Path $Staging $rel))) {
         Write-Host "::error::Expected $Staging\$rel missing"
         exit 1
@@ -139,5 +139,7 @@ finally {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -Recurse -Force $DataDir -ErrorAction SilentlyContinue
-    Remove-Item $outFile, $errFile -ErrorAction SilentlyContinue
+    @($outFile, $errFile) | Where-Object { $_ } | ForEach-Object {
+        Remove-Item -LiteralPath $_ -ErrorAction SilentlyContinue
+    }
 }
