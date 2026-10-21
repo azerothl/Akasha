@@ -9,9 +9,9 @@ name = "akasha-tui"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = "0.28"
+ratatui = "0.30"
 crossterm = "0.28"
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
