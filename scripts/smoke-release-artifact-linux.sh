@@ -253,7 +253,7 @@ smoke_desktop_ui() {
 
 # Exercise one explicitly routed specialist request, not the multi-agent orchestrator.
 # provider/max_tokens are not accepted by /api/message in this published release.
-BODY='{"message":"Output exactly this code word and no other text: AKASHA_OK","composer_mode":"technical_writer"}'
+BODY='{"message":"Return only the exact text AKASHA_OK. Do not inspect, read, or write files. Do not use or call any tools.","composer_mode":"technical_writer"}'
 INF_START=$(date +%s)
 TASK_JSON=$(curl -sf -X POST -H "Content-Type: application/json" -d "$BODY" "${BASE}/api/message")
 TASK_ID=$(echo "$TASK_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('task_id',''))")

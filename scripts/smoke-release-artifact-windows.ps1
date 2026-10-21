@@ -147,7 +147,7 @@ try {
         }
 
         $started = [DateTime]::UtcNow
-        $body = @{ message = "Output exactly this code word and no other text: AKASHA_OK"; composer_mode = "technical_writer" } | ConvertTo-Json -Compress
+        $body = @{ message = "Return only the exact text AKASHA_OK. Do not inspect, read, or write files. Do not use or call any tools."; composer_mode = "technical_writer" } | ConvertTo-Json -Compress
         $created = Invoke-RestMethod -Uri "$base/api/message" -Method Post -ContentType "application/json" -Body $body -TimeoutSec 30
         $taskId = [string]$created.task_id
         if ([string]::IsNullOrWhiteSpace($taskId)) {
