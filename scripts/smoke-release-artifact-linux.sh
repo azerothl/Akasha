@@ -113,6 +113,21 @@ if ! grep -Eq '^[[:space:]]*provider:[[:space:]]*akasha_embedded[[:space:]]*$' "
 fi
 log "embedded_primary_route=passed"
 
+# Candle's small first-run model can echo the default tool catalog into a
+# deterministic health reply. Keep this smoke focused on inference only.
+cat >"$HOME/akasha/tools_policy.yaml" <<'POLICY'
+default_profile: release_smoke_no_tools
+tool_profiles:
+  release_smoke_no_tools: []
+allowed_read_paths: []
+allowed_write_paths: []
+allowed_commands: []
+web_search_enabled: false
+web_crawl_enabled: false
+browser_enabled: false
+POLICY
+log "smoke_tool_policy=restricted"
+
 DAEMON_START=$(date +%s)
 env -u GH_TOKEN -u GITHUB_TOKEN ./akasha-daemon >>"$LOG" 2>&1 &
 DPID=$!

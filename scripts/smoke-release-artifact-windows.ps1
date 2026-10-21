@@ -106,6 +106,21 @@ try {
         Write-SmokeLog "embedded_primary_route=passed"
         Write-SmokeLog "init=passed"
 
+        # Candle's small first-run model can echo the default tool catalog into a
+        # deterministic health reply. Keep this smoke focused on inference only.
+        @'
+default_profile: release_smoke_no_tools
+tool_profiles:
+  release_smoke_no_tools: []
+allowed_read_paths: []
+allowed_write_paths: []
+allowed_commands: []
+web_search_enabled: false
+web_crawl_enabled: false
+browser_enabled: false
+'@ | Set-Content -LiteralPath (Join-Path $DataDir "tools_policy.yaml") -Encoding utf8NoBOM
+        Write-SmokeLog "smoke_tool_policy=restricted"
+
         $Daemon = Start-Process -FilePath $DaemonPath -WorkingDirectory $Root -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput $DaemonOut -RedirectStandardError $DaemonErr
         $base = "http://127.0.0.1:$port"
