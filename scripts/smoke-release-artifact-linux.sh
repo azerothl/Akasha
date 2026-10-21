@@ -82,6 +82,7 @@ chmod +x "$ROOT/akasha" "$ROOT/akasha-daemon" "$ROOT/akasha-tui"
 export HOME="$FAKE_HOME"
 unset AKASHA_DATA_DIR || true
 export AKASHA_PORT="$PORT"
+export AKASHA_LANG="en"
 cd "$ROOT"
 
 log "HOME=$HOME AKASHA_PORT=$PORT extract=$ROOT"
@@ -124,7 +125,12 @@ log "daemon_ready_duration_s=$((DAEMON_END - DAEMON_START))"
 
 DOCTOR_OK=1
 if ./akasha doctor 2>&1 | tee "$WORK/doctor.log" | tee -a "$LOG"; then
-  log "doctor_ok=true"
+  if grep -Fq 'All checks passed.' "$WORK/doctor.log"; then
+    log "doctor_ok=true"
+  else
+    DOCTOR_OK=0
+    log "::error::doctor exited successfully but did not report all checks passed"
+  fi
 else
   DOCTOR_OK=0
   log "::error::doctor failed; diagnostics retained"

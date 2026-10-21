@@ -78,6 +78,7 @@ try {
 
     $env:AKASHA_DATA_DIR = $DataDir
     $env:AKASHA_BIND = "127.0.0.1"
+    $env:AKASHA_LANG = "en"
     $env:OLLAMA_HOST = "http://127.0.0.1:1"
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $listener.Start()
@@ -123,6 +124,9 @@ try {
         Add-Content -LiteralPath $Log -Value $doctorOutput -Encoding utf8
         if ($LASTEXITCODE -ne 0) {
             throw "akasha doctor failed with exit code $LASTEXITCODE"
+        }
+        if ($doctorOutput -notmatch '(?m)^\s*All checks passed\.\s*$') {
+            throw "akasha doctor exited successfully but did not report all checks passed"
         }
         Write-SmokeLog "doctor=passed"
 
