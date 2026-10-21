@@ -21,9 +21,12 @@ $Log = Join-Path $Work "smoke.log"
 $DoctorLog = Join-Path $Work "doctor.log"
 $TaskLog = Join-Path $Work "task.json"
 $EmbeddedLog = Join-Path $Work "embedded-status.json"
+$UiLog = Join-Path $Work "ui.log"
+$UiInstallerLog = Join-Path $Work "ui-msi-extract.log"
 $DaemonOut = Join-Path $Work "daemon.stdout.log"
 $DaemonErr = Join-Path $Work "daemon.stderr.log"
 $Daemon = $null
+$UiProcess = $null
 
 New-Item -ItemType Directory -Path $Work, $Extract, $DataDir -Force | Out-Null
 
@@ -39,7 +42,7 @@ function Copy-Evidence {
         return
     }
     New-Item -ItemType Directory -Path $EvidenceDir -Force | Out-Null
-    foreach ($path in @($Log, $DoctorLog, $TaskLog, $EmbeddedLog, $DaemonOut, $DaemonErr)) {
+    foreach ($path in @($Log, $DoctorLog, $TaskLog, $EmbeddedLog, $UiLog, $UiInstallerLog, $DaemonOut, $DaemonErr)) {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             Copy-Item -LiteralPath $path -Destination $EvidenceDir -Force
         }
@@ -180,6 +183,53 @@ try {
         }
         $elapsed = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 2)
         Write-SmokeLog "first_inference=passed model=embedded elapsed_seconds=$elapsed reply=OK"
+
+        $uiMsiDir = Join-Path $Root "ui\msi"
+        $uiMsi = Get-ChildItem -LiteralPath $uiMsiDir -Filter "Akasha_*.msi" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $uiMsi) {
+            throw "Windows desktop UI MSI is missing from $uiMsiDir"
+        }
+        $uiExtract = Join-Path $Work "ui-extract"
+        New-Item -ItemType Directory -Path $uiExtract -Force | Out-Null
+        $msiArguments = @(
+            "/a", "`"$($uiMsi.FullName)`"", "/qn", "TARGETDIR=`"$uiExtract`"", "/norestart", "/l*v", "`"$UiInstallerLog`""
+        )
+        $installer = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArguments -PassThru -Wait -WindowStyle Hidden
+        if ($installer.ExitCode -ne 0) {
+            throw "Windows desktop UI MSI administrative extraction failed with code $($installer.ExitCode)"
+        }
+        $uiExe = Get-ChildItem -LiteralPath $uiExtract -Filter "akasha-ui.exe" -File -Recurse | Select-Object -First 1
+        if ($null -eq $uiExe) {
+            throw "akasha-ui.exe is missing from the extracted Windows UI MSI"
+        }
+        $uiStarted = [DateTime]::UtcNow
+        $UiProcess = Start-Process -FilePath $uiExe.FullName -WorkingDirectory $uiExe.DirectoryName -PassThru
+        $uiDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        $uiTitle = ""
+        $uiHandle = [IntPtr]::Zero
+        while ([DateTime]::UtcNow -lt $uiDeadline) {
+            $UiProcess.Refresh()
+            if ($UiProcess.HasExited) {
+                throw "Windows desktop UI exited before creating a window (code $($UiProcess.ExitCode))"
+            }
+            $uiTitle = $UiProcess.MainWindowTitle
+            $uiHandle = $UiProcess.MainWindowHandle
+            if ($uiHandle -ne [IntPtr]::Zero -and $uiTitle -match "Akasha") {
+                break
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        if ($uiHandle -eq [IntPtr]::Zero -or $uiTitle -notmatch "Akasha") {
+            throw "Windows desktop UI did not create an Akasha window (title='$uiTitle')"
+        }
+        $uiElapsed = [Math]::Round(([DateTime]::UtcNow - $uiStarted).TotalSeconds, 2)
+        Set-Content -LiteralPath $UiLog -Value "window_title=$uiTitle`nlaunch_seconds=$uiElapsed`nexecutable=$($uiExe.FullName)" -Encoding utf8
+        Write-SmokeLog "ui_launch=passed platform=Windows title=$uiTitle elapsed_seconds=$uiElapsed"
+        $null = $UiProcess.CloseMainWindow()
+        if (-not $UiProcess.WaitForExit(5000)) {
+            Stop-Process -Id $UiProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        $UiProcess = $null
         Write-SmokeLog "smoke=passed os=$([Environment]::OSVersion.VersionString)"
     }
     finally {
@@ -196,6 +246,9 @@ catch {
     exit 1
 }
 finally {
+    if ($null -ne $UiProcess -and -not $UiProcess.HasExited) {
+        Stop-Process -Id $UiProcess.Id -Force -ErrorAction SilentlyContinue
+    }
     if ($null -ne $Daemon -and -not $Daemon.HasExited) {
         Stop-Process -Id $Daemon.Id -Force -ErrorAction SilentlyContinue
     }

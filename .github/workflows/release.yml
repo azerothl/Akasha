@@ -171,8 +171,10 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_name: akasha-ui-linux
+          - os: macos-15-intel
+            artifact_name: akasha-ui-macos-x86_64
           - os: macos-latest
-            artifact_name: akasha-ui-macos
+            artifact_name: akasha-ui-macos-aarch64
           - os: windows-latest
             artifact_name: akasha-ui-windows
 
@@ -301,7 +303,8 @@ jobs:
             case "$suffix" in
               windows-x86_64) ui_name=akasha-ui-windows ;;
               linux-x86_64)   ui_name=akasha-ui-linux ;;
-              macos-*)        ui_name=akasha-ui-macos ;;
+              macos-x86_64)   ui_name=akasha-ui-macos-x86_64 ;;
+              macos-aarch64)  ui_name=akasha-ui-macos-aarch64 ;;
             esac
             full_name="akasha-full-${suffix}"
             mkdir -p "$RELEASE_DIR/${full_name}"
@@ -387,11 +390,18 @@ jobs:
           name: release-archives
           path: release
 
+      - name: Install Linux desktop smoke dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-0 libayatana-appindicator3-1 xvfb xdotool
+
       - name: Validate Linux / macOS archive first boot and response
         if: runner.os != 'Windows'
         env:
           ARTIFACT_ZIP: release/${{ matrix.artifact }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          ARTIFACT_NAME: ${{ matrix.artifact }}
           EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
           INFERENCE_TIMEOUT_SECS: "360"
           SMOKE_EVIDENCE_DIR: ${{ runner.temp }}/release-first-boot

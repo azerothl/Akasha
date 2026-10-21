@@ -32,9 +32,13 @@ PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); p
 cleanup() {
   if [[ -n "${SMOKE_EVIDENCE_DIR:-}" ]]; then
     mkdir -p "$SMOKE_EVIDENCE_DIR"
-    for evidence in "$LOG" "$WORK/task.json" "$WORK/doctor.log" "$WORK/embedded-status.json"; do
+    for evidence in "$LOG" "$WORK/task.json" "$WORK/doctor.log" "$WORK/embedded-status.json" "$WORK/ui.log"; do
       [[ ! -f "$evidence" ]] || cp -- "$evidence" "$SMOKE_EVIDENCE_DIR/"
     done
+  fi
+  if [[ -n "${UIPID:-}" ]]; then
+    kill "$UIPID" 2>/dev/null || true
+    wait "$UIPID" 2>/dev/null || true
   fi
   if [[ -n "${DPID:-}" ]]; then
     kill "$DPID" 2>/dev/null || true
@@ -152,6 +156,94 @@ if [[ "$SKIP_INFERENCE" == 1 ]]; then
   exit 0
 fi
 
+smoke_desktop_ui() {
+  case "$(uname -s)" in
+    Linux)
+      local appdir="$ROOT/ui/appimage/Akasha.AppDir"
+      local app="$appdir/AppRun"
+      [[ -f "$app" ]] || { log "::error::Linux desktop UI AppRun is missing from the full archive"; return 1; }
+      command -v xvfb-run >/dev/null || { log "::error::xvfb-run is required for the Linux desktop UI smoke"; return 1; }
+      command -v xdotool >/dev/null || { log "::error::xdotool is required for the Linux desktop UI smoke"; return 1; }
+      chmod +x "$app" "$appdir/usr/bin/akasha-ui" 2>/dev/null || true
+      if ! xvfb-run -a bash -c '
+        set -euo pipefail
+        app="$1"
+        log_file="$2"
+        cd "$(dirname "$app")"
+        ./AppRun >"$log_file" 2>&1 &
+        pid=$!
+        cleanup_ui() { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
+        trap cleanup_ui EXIT
+        for _ in $(seq 1 60); do
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "Akasha UI exited before creating a window" >&2
+            cat "$log_file" >&2 || true
+            exit 1
+          fi
+          if xdotool search --onlyvisible --name "^Akasha$" >/dev/null 2>&1; then
+            echo "ui_window=Akasha"
+            exit 0
+          fi
+          sleep 0.5
+        done
+        echo "Akasha UI did not create a visible window" >&2
+        cat "$log_file" >&2 || true
+        exit 1
+      ' _ "$app" "$WORK/ui.log"; then
+        log "::error::Linux desktop UI launch failed"
+        return 1
+      fi
+      log "ui_launch=passed platform=Linux window=Akasha"
+      ;;
+    Darwin)
+      local app="$ROOT/ui/macos/Akasha.app"
+      local binary="$app/Contents/MacOS/akasha-ui"
+      [[ -x "$binary" ]] || { log "::error::macOS desktop UI executable is missing from the full archive"; return 1; }
+      local file_description
+      local ui_arch
+      file_description="$(file "$binary")"
+      if [[ "$ARTIFACT_NAME" == *"macos-x86_64"* ]] && [[ "$file_description" != *"x86_64"* ]]; then
+        log "::error::Intel macOS archive contains an incompatible UI binary: $file_description"
+        return 1
+      fi
+      if [[ "$ARTIFACT_NAME" == *"macos-aarch64"* ]] && [[ "$file_description" != *"arm64"* ]]; then
+        log "::error::ARM64 macOS archive contains an incompatible UI binary: $file_description"
+        return 1
+      fi
+      if [[ "$file_description" == *"arm64"* ]]; then
+        ui_arch="arm64"
+      elif [[ "$file_description" == *"x86_64"* ]]; then
+        ui_arch="x86_64"
+      else
+        log "::error::unsupported macOS UI binary architecture: $file_description"
+        return 1
+      fi
+      if ! /usr/bin/open -n "$app" >"$WORK/ui.log" 2>&1; then
+        log "::error::macOS desktop UI launch command failed"
+        cat "$WORK/ui.log" >&2 || true
+        return 1
+      fi
+      for _ in $(seq 1 60); do
+        UIPID="$(pgrep -f 'Akasha.app/Contents/MacOS/akasha-ui' | head -n 1 || true)"
+        [[ -z "$UIPID" ]] || break
+        sleep 0.5
+      done
+      if [[ -z "${UIPID:-}" ]]; then
+        log "::error::macOS desktop UI process did not start"
+        cat "$WORK/ui.log" >&2 || true
+        return 1
+      fi
+      log "ui_launch=passed platform=macOS binary_arch=$ui_arch"
+      kill "$UIPID" 2>/dev/null || true
+      UIPID=""
+      ;;
+    *)
+      log "::error::unsupported UI smoke platform: $(uname -s)"
+      return 1
+      ;;
+  esac
+}
+
 # Exercise one explicitly routed specialist request, not the multi-agent orchestrator.
 # provider/max_tokens are not accepted by /api/message in this published release.
 BODY='{"message":"Réponds uniquement par le mot OK.","composer_mode":"technical_writer"}'
@@ -214,6 +306,7 @@ PY
       log "::error::doctor failed; artifact is not validated"
       exit 1
     fi
+    smoke_desktop_ui
     log "smoke OK: $RELEASE_TAG $ARTIFACT_NAME on $(uname -s)/$(uname -m)"
     exit 0
   fi
