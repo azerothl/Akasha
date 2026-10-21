@@ -11,22 +11,34 @@ pub enum PdfExtractFailure {
     EmptyText,
 }
 
-/// Same locale rules as TUI / CLI: `AKASHA_LANG`, then `LANG` / `LC_ALL` / `LC_MESSAGES`.
-pub fn daemon_locale_is_en() -> bool {
-    if let Ok(lang) = std::env::var("AKASHA_LANG") {
-        if lang.trim().to_lowercase().starts_with("en") {
-            return true;
-        }
-        return false;
-    }
-    for key in ["LANG", "LC_ALL", "LC_MESSAGES"] {
-        if let Ok(lang) = std::env::var(key) {
-            return lang.trim().to_lowercase().starts_with("en");
+/// Resolve application locale first, then POSIX override precedence: `LC_ALL`, `LC_MESSAGES`, `LANG`.
+fn locale_is_en(
+    akasha_lang: Option<&str>,
+    lc_all: Option<&str>,
+    lc_messages: Option<&str>,
+    lang: Option<&str>,
+) -> bool {
+    for locale in [akasha_lang, lc_all, lc_messages, lang].into_iter().flatten() {
+        let locale = locale.trim();
+        if !locale.is_empty() {
+            return locale.to_ascii_lowercase().starts_with("en");
         }
     }
     false
 }
 
+pub fn daemon_locale_is_en() -> bool {
+    let akasha_lang = std::env::var("AKASHA_LANG").ok();
+    let lc_all = std::env::var("LC_ALL").ok();
+    let lc_messages = std::env::var("LC_MESSAGES").ok();
+    let lang = std::env::var("LANG").ok();
+    locale_is_en(
+        akasha_lang.as_deref(),
+        lc_all.as_deref(),
+        lc_messages.as_deref(),
+        lang.as_deref(),
+    )
+}
 /// Localized user-facing message for a PDF extraction failure (exact copy; do not reword).
 pub fn pdf_extract_user_message(failure: PdfExtractFailure, is_en: bool) -> &'static str {
     match (failure, is_en) {
@@ -155,11 +167,11 @@ mod tests {
     }
 
     #[test]
-    fn daemon_locale_is_en_respects_akasha_lang() {
-        std::env::set_var("AKASHA_LANG", "en_US");
-        assert!(daemon_locale_is_en());
-        std::env::set_var("AKASHA_LANG", "fr_FR");
-        assert!(!daemon_locale_is_en());
-        std::env::remove_var("AKASHA_LANG");
-    }
-}
+    fn daemon_locale_precedence_honors_overrides_before_lang() {
+        assert!(!locale_is_en(Some("fr_FR"), Some("en_US.UTF-8"), None, Some("en_US")));
+        assert!(locale_is_en(None, Some("en_US.UTF-8"), None, Some("C.UTF-8")));
+        assert!(locale_is_en(None, None, Some("en_US.UTF-8"), Some("C.UTF-8")));
+        assert!(!locale_is_en(None, Some("fr_FR.UTF-8"), Some("en_US"), Some("en_US")));
+        assert!(locale_is_en(None, Some(""), None, Some("en_US.UTF-8")));
+        assert!(!locale_is_en(None, None, None, Some("C.UTF-8")));
+    }}
