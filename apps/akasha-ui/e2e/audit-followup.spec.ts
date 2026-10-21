@@ -157,6 +157,34 @@ test('failed deferred chunk keeps chat draft and offers keyboard recovery',async
   await expect(page.locator('#chat-input')).toHaveValue('Brouillon protégé');
 });
 
+test('unconsulted citation diagnostic survives reload without exposing a report',async({page})=>{
+  const diagnostic='research_report_unconsulted_citations: https://example.invalid/not-consulted';
+  await fixture(page);let polls=0;
+  await page.route('**/__e2e_daemon/api/research/deep/start',route=>route.fulfill(
+    route.request().postDataJSON().topic?{json:{run_id:'dr_unconsulted'}}:{status:400,json:{error:'missing_topic'}}));
+  await page.route('**/__e2e_daemon/api/research/deep/runs/dr_unconsulted',route=>{
+    polls++;
+    return route.fulfill({json:{id:'dr_unconsulted',topic:'Citation validation',phase:polls===1?'searching':'error',
+      round:1,max_rounds:1,branches:[],evolving_report:'',search_degraded:false,
+      report_markdown:null,report_meta:null,error:polls===1?null:diagnostic}});
+  });
+  await page.goto('/#/research');
+  await page.locator('.research-content textarea').fill('Citation validation');
+  await page.getByRole('button',{name:'Lancer la recherche',exact:true}).click();
+  await expect(page.locator('.research-result-notice[role="alert"]')).toContainText(diagnostic);
+  await expect(page.locator('.research-report-toolbar')).toHaveCount(0);
+  await expect(page.getByRole('region',{name:'Rapport de recherche'})).toHaveCount(0);
+  expect(await page.evaluate(()=>{
+    const row=JSON.parse(localStorage.getItem('akasha_deep_research_v2')??'[]')[0];
+    return {status:row?.status,report:row?.reportMarkdown??null,meta:row?.reportMeta??null};
+  })).toEqual({status:'error',report:null,meta:null});
+  expect(page.context().pages()).toHaveLength(1);
+  await page.reload();
+  await expect(page.locator('.research-result-notice[role="alert"]')).toContainText(diagnostic);
+  await expect(page.locator('.research-report-toolbar')).toHaveCount(0);
+  await expect(page.getByRole('region',{name:'Rapport de recherche'})).toHaveCount(0);
+});
+
 for (const mode of ['simple','expert']) {
   test(`task sidebar respects ${mode} mode`, async ({page}) => {
     await page.setViewportSize({width:1280,height:720});
