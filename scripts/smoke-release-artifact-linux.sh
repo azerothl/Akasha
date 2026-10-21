@@ -192,6 +192,27 @@ smoke_desktop_ui() {
         set -euo pipefail
         app="$1"
         log_file="$2"
+        find_akasha_window() {
+          while IFS= read -r window; do
+            local title class
+            title="$(xdotool getwindowname "$window" 2>/dev/null || true)"
+            class="$(xdotool getwindowclassname "$window" 2>/dev/null || true)"
+            if [[ "${title,,} ${class,,}" == *akasha* ]]; then
+              printf "%s|%s|%s\n" "$window" "$title" "$class"
+              return 0
+            fi
+          done < <(xdotool search --onlyvisible --name ".*" 2>/dev/null || true)
+          return 1
+        }
+        list_visible_windows() {
+          while IFS= read -r window; do
+            printf "window=%s pid=%s title=%q class=%q\n" \
+              "$window" \
+              "$(xdotool getwindowpid "$window" 2>/dev/null || echo unknown)" \
+              "$(xdotool getwindowname "$window" 2>/dev/null || true)" \
+              "$(xdotool getwindowclassname "$window" 2>/dev/null || true)"
+          done < <(xdotool search --onlyvisible --name ".*" 2>/dev/null || true)
+        }
         cd "$(dirname "$app")"
         ./AppRun >"$log_file" 2>&1 &
         pid=$!
@@ -203,13 +224,14 @@ smoke_desktop_ui() {
             cat "$log_file" >&2 || true
             exit 1
           fi
-          if xdotool search --onlyvisible --name "^Akasha$" >/dev/null 2>&1; then
-            echo "ui_window=Akasha"
+          if window="$(find_akasha_window)"; then
+            echo "ui_window=$window"
             exit 0
           fi
           sleep 0.5
         done
         echo "Akasha UI did not create a visible window" >&2
+        list_visible_windows >&2 || true
         cat "$log_file" >&2 || true
         exit 1
       ' _ "$app" "$WORK/ui.log"; then
