@@ -102,7 +102,7 @@ fn queued_resume_clears_and_conditionally_restores_outcome() {
 
 #[test]
 fn an_earlier_failure_outcome_wins_over_another_failed_finalization() {
-    use akasha_store::{Task,TaskStatus,TaskStore};
+    use akasha_store::{TaskStatus,TaskStore};
     let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let id=Uuid::new_v4();running_task(&db,id);let store=TaskStore::open(&db).unwrap();
     let (_,first)=store.finalize_outcome(id,TaskStatus::Failed,json!({"termination_reason":"watchdog","reason":"original timeout","result":"failed","acceptance_verified":false})).unwrap();
     let (_,second)=store.finalize_outcome(id,TaskStatus::Failed,json!({"termination_reason":"provider_error","reason":"late provider failure","result":"failed"})).unwrap();

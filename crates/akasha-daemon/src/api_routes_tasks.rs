@@ -16,7 +16,7 @@ use akasha_store::{
     TaskStore,
 };
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;

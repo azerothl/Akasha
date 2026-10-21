@@ -66,6 +66,7 @@ pub(super) fn user_request(message: &str) -> &str {
         .unwrap_or(message)
         .trim()
 }
+#[cfg(test)]
 pub(super) fn requires_file_effect(message:&str,agent:&str)->bool {
     explicit_file_request(message) && matches!(agent,"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code"|"studio_project_manager")
 }
