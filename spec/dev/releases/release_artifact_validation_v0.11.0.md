@@ -51,8 +51,11 @@ Le rapport expurgé de ce contrôle est [`release_first_boot_windows_cpu_v0.11.0
 
 ### Candidate de release non publiée
 
-Le run manuel [39590849411](https://github.com/azerothl/Akasha/actions/runs/39590849411) est lancé avec `publish=false`. Il teste la chaîne de build et le staging corrigé, pas les archives publiques de v0.11.0. Même si le staging réussit, il ne suffit pas pour fermer #141 : chaque archive publique CPU doit passer `doctor` et produire une première réponse réelle ; les bundles desktop disponibles doivent être lancés.
+Le run manuel [39590849411](https://github.com/azerothl/Akasha/actions/runs/39590849411), lancé avec `publish=false` sur le code ensuite fusionné dans `main`, teste la chaîne de build et le staging corrigé ; il ne modifie pas les archives publiques de v0.11.0.
 
+L'artefact candidat `akasha-windows-x86_64` a été téléchargé depuis ce run et vérifié dans un répertoire de données temporaire neuf sur Windows 11 Pro Insider Preview 10.0.26220 : les deux YAML sont présents ; `akasha init --defaults` réussit ; le daemon démarre sur un port isolé et `/api/status` renvoie `ok` ; `akasha doctor` affiche `All checks passed.` et retourne 0. Cela confirme le packaging Windows CPU candidat. La première réponse modèle n'a pas encore été testée sur cette candidate ; les artefacts UI ne sont pas lancés dans cette validation.
+
+Cette candidate n'est pas une release publique. Elle ne suffit pas pour fermer #141 : chaque archive publique CPU doit passer `doctor` et produire une première réponse réelle ; les bundles desktop disponibles doivent être lancés.
 ---
 
 ## Écarts et statut
