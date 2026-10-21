@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-calendar"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "serde",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-cli"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "akasha-core",
  "akasha-embedded-llm",
@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-cluster"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-daemon"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "akasha-calendar",
  "akasha-cluster",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-embedded-llm"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-embeddings"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "fastembed",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-evals"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "akasha-core",
  "akasha-llm",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-llm"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "akasha-core",
  "akasha-embedded-llm",
@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-plugin-api"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-plugin-host"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "akasha-plugin-api",
  "anyhow",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-rag"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-store"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-tools"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "csv",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-tui"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-vault"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "akasha-workspace-graph"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "akasha-store",
  "anyhow",

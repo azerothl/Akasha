@@ -3163,8 +3163,13 @@ pub(crate) const EMBEDDED_APP_CONTEXT: &str = concat!(
 
 pub(crate) fn embedded_tools_instruction_hint(allowed_tools: Option<&[String]>) -> String {
     let names = match allowed_tools {
-        Some(list) if !list.is_empty() => list.join(", "),
-        _ => "read_file, web_search, run_command, write_file, ask_user, …".to_string(),
+        Some(list) if list.is_empty() => {
+            return "[Outils — modèle local] Aucun outil n'est disponible pour cette tâche. \
+                    Réponds directement à l'utilisateur et n'émets aucune ligne TOOL.\n\n"
+                .to_string();
+        }
+        Some(list) => list.join(", "),
+        None => "read_file, web_search, run_command, write_file, ask_user, …".to_string(),
     };
     format!(
         "[Outils — modèle local] Disposables : {names}. \
@@ -5980,7 +5985,7 @@ mod tests {
     use super::{
         agent_role_system_prompt, build_image_markdown, build_session_recap_reply,
         canonicalize_tool_name, classify_small_talk_message, detect_session_recall_intent,
-        should_use_compact_local_prompt,
+        embedded_tools_instruction_hint, should_use_compact_local_prompt,
         ensure_no_open_code_block, extract_how_to_call_from_message,
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, packaged_spec_check_ok, parse_content_length,
@@ -5995,6 +6000,22 @@ mod tests {
     };
     use akasha_store::TaskStatus;
     use uuid::Uuid;
+
+    #[test]
+    fn empty_embedded_tool_profile_does_not_advertise_the_default_catalog() {
+        let hint = embedded_tools_instruction_hint(Some(&[]));
+        assert!(hint.contains("Aucun outil n'est disponible"));
+        assert!(hint.contains("n'émets aucune ligne TOOL"));
+        assert!(!hint.contains("read_file"));
+        assert!(!hint.contains("web_search"));
+    }
+
+    #[test]
+    fn absent_embedded_tool_profile_keeps_the_default_catalog() {
+        let hint = embedded_tools_instruction_hint(None);
+        assert!(hint.contains("read_file"));
+        assert!(hint.contains("web_search"));
+    }
 
     #[test]
     fn parse_sse_event_filter_task_id_and_types() {

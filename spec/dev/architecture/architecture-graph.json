@@ -1,8 +1,8 @@
 {
   "meta": {
     "product": "Akasha",
-    "version": "0.11.0",
-    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, MCP stdio, GET /api/capabilities evidence flags, and Tauri/TUI clients (v0.11).",
+    "version": "0.12.0",
+    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, MCP stdio, Companion LAN pairing, GET /api/capabilities evidence flags, and Tauri/TUI clients (v0.12.0).",
     "defaultPort": 3876,
     "dataDir": "~/akasha (or AKASHA_DATA_DIR)",
     "sources": [
@@ -18,7 +18,11 @@
       "spec/dev/quality/REFACTOR_MONOREPO_TRACKING.md",
       "crates/akasha-daemon/src/api_llm_loop/",
       "crates/akasha-daemon/src/api_tool_dispatch/",
-      "spec/dev/integrations/mcp-runtime.md"
+      "spec/dev/integrations/mcp-runtime.md",
+      "docs/COMPANION_SPEC.md",
+      "docs/user/companion-lan.md",
+      "crates/akasha-daemon/src/api_routes_companion.rs",
+      "crates/akasha-daemon/src/companion_discovery.rs"
     ]
   },
   "nodes": [
@@ -95,11 +99,23 @@
       "description": "Optional local voice path via speech_synthesize / speech_transcribe tools and voice_router.yaml."
     },
     {
+      "id": "ch-companion-lan",
+      "label": "Companion LAN",
+      "layer": "channels",
+      "crate": "akasha-daemon",
+      "description": "Companion software client discovered over UDP :3877; ESP32 firmware remains planned. Pairing is disabled unless AKASHA_COMPANION_PAIR_SECRET is set; data routes require a paired-device Bearer token.",
+      "apis": [
+        "UDP discovery :3877",
+        "POST /api/companion/pair",
+        "GET /api/companion/snapshot"
+      ]
+    },
+    {
       "id": "http-api",
       "label": "HTTP API :3876",
       "layer": "ingress",
       "crate": "akasha-daemon",
-      "description": "HTTP surface: health, message, tasks, memory, router, plugins, MCP, calendar, workspace graph, capabilities. CSRF on mutating routes. Routes split across api_routes_*; LLM tool loop in api_llm_loop.",
+      "description": "HTTP surface: health, message, tasks, memory, router, plugins, MCP, calendar, workspace graph, Companion LAN pairing, capabilities. CSRF on mutating routes. Routes split across api_routes_*; LLM tool loop in api_llm_loop.",
       "apis": [
         "GET /",
         "GET /api/status",
@@ -107,7 +123,9 @@
         "GET /api/tasks/:id",
         "GET /api/docs",
         "GET /api/capabilities",
-        "GET /api/router/embedded-status"
+        "GET /api/router/embedded-status",
+        "POST /api/companion/pair",
+        "GET /api/companion/snapshot"
       ]
     },
     {
@@ -646,6 +664,18 @@
       "from": "gateway",
       "to": "core",
       "label": "types"
+    },
+    {
+      "id": "e53",
+      "from": "ch-companion-lan",
+      "to": "http-api",
+      "label": "UDP probe / HTTP requests"
+    },
+    {
+      "id": "e54",
+      "from": "http-api",
+      "to": "ch-companion-lan",
+      "label": "discovery JSON / paired token / snapshot"
     }
   ],
   "flows": [
@@ -866,13 +896,23 @@
     },
     {
       "id": "flow-capabilities",
-      "label": "Capabilities / evidence (v0.11)",
+      "label": "Capabilities / evidence",
       "description": "UI or doctor queries GET /api/capabilities and embedded-status before marking GGUF/vision ready.",
       "steps": [
         "ui-tauri",
         "http-api",
         "llm-embedded",
         "llm-router"
+      ]
+    },
+    {
+      "id": "flow-companion-lan",
+      "name": "Companion LAN discovery and pairing",
+      "description": "The client discovers the daemon over UDP :3877. Pairing checks a dedicated secret and returns a device token; subsequent Companion data routes require that paired Bearer token.",
+      "steps": [
+        "ch-companion-lan",
+        "http-api",
+        "ch-companion-lan"
       ]
     }
   ]

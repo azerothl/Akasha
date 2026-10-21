@@ -56,7 +56,7 @@ Le client envoie un datagramme UDP contenant la chaîne **`AKASHA_DISCOVER`** (p
 Réponse JSON unicast du daemon (exemple) :
 
 ```json
-{"service":"akasha","port":3876,"version":"0.11.0"}
+{"service":"akasha","port":3876,"version":"0.12.0"}
 ```
 
 Le champ `port` est le port HTTP API actuel ; `version` est la version du package daemon.

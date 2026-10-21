@@ -76,7 +76,13 @@ jobs:
           $ReleaseDir = "target\x86_64-pc-windows-msvc\release"
           New-Item -ItemType Directory -Force -Path $env:AKASHA_DATA_DIR | Out-Null
           & "$ReleaseDir\akasha.exe" init --defaults
+          if ($LASTEXITCODE -ne 0) { throw "Akasha data initialization failed with exit code $LASTEXITCODE" }
+          # init --defaults may select Ollama when one is installed on the runner.
+          # This job measures the bundled CUDA model, so force the embedded route.
+          Copy-Item -LiteralPath "spec\llm_router.example.yaml" `
+            -Destination (Join-Path $env:AKASHA_DATA_DIR "llm_router.yaml") -Force
           & "$ReleaseDir\akasha.exe" config models embedded-download
+          if ($LASTEXITCODE -ne 0) { throw "Embedded GGUF download failed with exit code $LASTEXITCODE" }
 
       - name: Run live CUDA inference protocol
         shell: pwsh

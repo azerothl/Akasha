@@ -171,8 +171,10 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_name: akasha-ui-linux
+          - os: macos-15-intel
+            artifact_name: akasha-ui-macos-x86_64
           - os: macos-latest
-            artifact_name: akasha-ui-macos
+            artifact_name: akasha-ui-macos-aarch64
           - os: windows-latest
             artifact_name: akasha-ui-windows
 
@@ -289,6 +291,34 @@ jobs:
           for dir in "$ARTIFACTS_ROOT"/akasha-ui-*; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
+            # actions/upload-artifact stores files without their Unix mode bits.
+            # Restore the Tauri launchers before creating the standalone UI zip.
+            case "$name" in
+              akasha-ui-linux)
+                appdir="$dir/appimage/Akasha.AppDir"
+                appimage=$(find "$dir/appimage" -maxdepth 1 -type f -iname '*.AppImage' -print -quit)
+                if [ -z "$appimage" ]; then
+                  echo "::error::Required Linux AppImage is missing from $dir/appimage"
+                  exit 1
+                fi
+                for path in "$appimage" "$appdir/AppRun" "$appdir/AppRun.wrapped" "$appdir/usr/bin/akasha-ui"; do
+                  if [ ! -f "$path" ]; then
+                    echo "::error::Required Linux UI file is missing: $path"
+                    exit 1
+                  fi
+                  chmod +x "$path"
+                done
+                ;;
+              akasha-ui-macos-*)
+                binary="$dir/macos/Akasha.app/Contents/MacOS/akasha-ui"
+                if [ ! -f "$binary" ]; then
+                  echo "::error::Required macOS UI executable is missing: $binary"
+                  find "$dir" -maxdepth 5 -print || true
+                  exit 1
+                fi
+                chmod +x "$binary"
+                ;;
+            esac
             (cd "$dir" && zip -r "$RELEASE_DIR/${name}.zip" .)
           done
 
@@ -301,15 +331,45 @@ jobs:
             case "$suffix" in
               windows-x86_64) ui_name=akasha-ui-windows ;;
               linux-x86_64)   ui_name=akasha-ui-linux ;;
-              macos-*)        ui_name=akasha-ui-macos ;;
+              macos-x86_64)   ui_name=akasha-ui-macos-x86_64 ;;
+              macos-aarch64)  ui_name=akasha-ui-macos-aarch64 ;;
             esac
             full_name="akasha-full-${suffix}"
             mkdir -p "$RELEASE_DIR/${full_name}"
             cp -r "$cli_dir"/* "$RELEASE_DIR/${full_name}/"
-            if [ -d "$ARTIFACTS_ROOT/${ui_name}" ]; then
-              mkdir -p "$RELEASE_DIR/${full_name}/ui"
-              cp -r "$ARTIFACTS_ROOT/${ui_name}"/* "$RELEASE_DIR/${full_name}/ui/"
+            if [ ! -d "$ARTIFACTS_ROOT/${ui_name}" ]; then
+              echo "::error::Required UI artifact is missing: $ARTIFACTS_ROOT/${ui_name}"
+              exit 1
             fi
+            mkdir -p "$RELEASE_DIR/${full_name}/ui"
+            cp -r "$ARTIFACTS_ROOT/${ui_name}"/* "$RELEASE_DIR/${full_name}/ui/"
+            # Restore entry-point modes after download-artifact strips them.
+            case "$suffix" in
+              linux-x86_64)
+                appdir="$RELEASE_DIR/${full_name}/ui/appimage/Akasha.AppDir"
+                appimage=$(find "$RELEASE_DIR/${full_name}/ui/appimage" -maxdepth 1 -type f -iname '*.AppImage' -print -quit)
+                if [ -z "$appimage" ]; then
+                  echo "::error::Required Linux AppImage is missing from ${full_name}/ui/appimage"
+                  exit 1
+                fi
+                for path in "$appimage" "$appdir/AppRun" "$appdir/AppRun.wrapped" "$appdir/usr/bin/akasha-ui"; do
+                  if [ ! -f "$path" ]; then
+                    echo "::error::Required Linux UI file is missing from ${full_name}: $path"
+                    exit 1
+                  fi
+                  chmod +x "$path"
+                done
+                ;;
+              macos-x86_64|macos-aarch64)
+                binary="$RELEASE_DIR/${full_name}/ui/macos/Akasha.app/Contents/MacOS/akasha-ui"
+                if [ ! -f "$binary" ]; then
+                  echo "::error::Required macOS UI executable is missing from ${full_name}: $binary"
+                  find "$RELEASE_DIR/${full_name}/ui" -maxdepth 6 -print || true
+                  exit 1
+                fi
+                chmod +x "$binary"
+                ;;
+            esac
             # README at root of full zip (all platforms)
             printf 'To install: Windows: double-click INSTALL.cmd. Linux/macOS: in a terminal, run: chmod +x scripts/setup.sh && ./scripts/setup.sh\n' > "$RELEASE_DIR/${full_name}/README.txt"
             # Windows full zip: entry point that bypasses ExecutionPolicy for setup.ps1
@@ -358,9 +418,74 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  validate-release-archives:
+    needs: [verify-release-version, package]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: akasha-full-linux-x86_64.zip
+          - os: macos-15-intel
+            artifact: akasha-full-macos-x86_64.zip
+          - os: macos-latest
+            artifact: akasha-full-macos-aarch64.zip
+          - os: windows-latest
+            artifact: akasha-full-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download packaged release archives
+        uses: actions/download-artifact@v4
+        with:
+          name: release-archives
+          path: release
+
+      - name: Install Linux desktop smoke dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-0 libayatana-appindicator3-1 xvfb xdotool x11-utils openbox
+
+      - name: Validate Linux / macOS archive first boot and response
+        if: runner.os != 'Windows'
+        env:
+          ARTIFACT_ZIP: release/${{ matrix.artifact }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          ARTIFACT_NAME: ${{ matrix.artifact }}
+          EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          INFERENCE_TIMEOUT_SECS: "360"
+          SMOKE_EVIDENCE_DIR: ${{ runner.temp }}/release-first-boot
+        run: bash scripts/smoke-release-artifact-linux.sh
+
+      - name: Validate Windows archive first boot and response
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          ./scripts/smoke-release-artifact-windows.ps1
+          -ArtifactZip "release\${{ matrix.artifact }}"
+          -ExpectedVersion "${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}"
+          -InferenceTimeoutSecs 360
+          -EvidenceDir "${{ runner.temp }}\release-first-boot"
+
+      - name: Preserve first-boot diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-boot-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/release-first-boot
+          if-no-files-found: warn
+          retention-days: 14
+
   release:
     if: github.event_name != 'workflow_dispatch' || inputs.publish
-    needs: [package]
+    needs: [package, validate-release-archives]
     runs-on: ubuntu-latest
     permissions:
       contents: write
