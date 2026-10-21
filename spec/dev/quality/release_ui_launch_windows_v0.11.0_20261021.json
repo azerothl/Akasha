@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "artifact": "akasha-ui-windows.zip",
+  "asset_source": "public release v0.11.0",
+  "architecture": "x86_64",
+  "os": "Microsoft Windows 11 Professionnel Insider Preview 10.0.26220 (64 bits)",
+  "package_contents": [
+    "nsis/Akasha_0.11.0_x64-setup.exe",
+    "msi/Akasha_0.11.0_x64_en-US.msi"
+  ],
+  "extraction": {"method": "MSI administrative extraction", "system_install_performed": false},
+  "launch": {
+    "executable": "PFiles/Akasha/akasha-ui.exe",
+    "process_started": true,
+    "main_window_created": true,
+    "window_title": "Akasha",
+    "process_stopped_after_test": true
+  },
+  "interaction_tested": false,
+  "result": "launch_passed_interaction_not_tested"
+}
