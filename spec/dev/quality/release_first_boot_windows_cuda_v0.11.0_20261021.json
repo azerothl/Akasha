@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "release_tag": "v0.11.0",
+  "artifact": "akasha-windows-x86_64-cuda.zip",
+  "artifact_sha256": "56369172A98E3109247BDC6631E2B347A05517C8A163FB66E243D456F24D2A75",
+  "validated_at": "2026-10-21",
+  "environment": {
+    "os": "Windows 11 10.0.26220",
+    "architecture": "x86_64",
+    "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+    "gpu_memory_mib": 16376,
+    "driver": "610.88",
+    "cuda_toolkit": "13.3"
+  },
+  "setup": {
+    "fresh_data_directory": true,
+    "isolated_http_port": true,
+    "init_defaults": "passed",
+    "daemon_health": "passed",
+    "doctor": "failed_missing_spec_files",
+    "missing_files": ["spec/09_event_model.yaml", "spec/10_data_model.yaml"]
+  },
+  "cuda_inference": {
+    "backend": "llama_cpp_cuda",
+    "model": "qwen2.5-1.5b-instruct-q4",
+    "model_file": "default.gguf",
+    "model_sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+    "first_boot_prompt_expected": "OK",
+    "first_boot_reply": "OK",
+    "first_boot_tokens_out": 31,
+    "first_boot_elapsed_seconds_approx": 20,
+    "cuda_device_logged": "CUDA0",
+    "ar_fr_v1_nonempty_responses": 5,
+    "ar_fr_v1_expected_model_matches": 5,
+    "gpu_samples": 48,
+    "gpu_utilization_max_percent": 99,
+    "gpu_memory_used_min_mib": 1505,
+    "gpu_memory_used_max_mib": 9581,
+    "strict_benchmark_passed_rows": 0,
+    "strict_benchmark_total_rows": 5,
+    "strict_benchmark_missing_fields": ["provider_used", "ttft_ns", "generation_duration_ns"]
+  },
+  "result": "partial_cuda_inference_validated_first_boot_not_validated",
+  "limitations": [
+    "The published v0.11.0 artifact predates packaging and doctor fixes merged in PRs #241 and #242.",
+    "The strict AR report cannot certify provider routing or latency fields from this daemon version.",
+    "This generation benchmark does not exercise agentic tool choice or execution."
+  ]
+}

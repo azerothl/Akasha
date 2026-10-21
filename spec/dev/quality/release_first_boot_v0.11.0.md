@@ -121,3 +121,37 @@ pour CPU ; les archives complètes font respectivement 623 520 023 et 45 413 685
 octets. La conclusion est NO-GO pour fusionner les distributions actuelles ;
 les artefacts CPU et CUDA restent séparés. Le rapport expurgé est dans
 [`release_first_boot_candidate_run394319_windows_cuda.json`](release_first_boot_candidate_run394319_windows_cuda.json).
+
+## Inférence CUDA locale — archive publique v0.11.0
+
+Le 21 octobre 2026, l'archive publique `akasha-windows-x86_64-cuda.zip` a été
+extraite sur Windows 11 Professionnel Insider Preview 10.0.26220. L'essai a
+utilisé un répertoire de données temporaire neuf et un port HTTP isolé sur une
+RTX 4080 SUPER de 16 376 MiB (pilote 610.88, toolkit CUDA 13.3). Cette recette
+a été exécutée sur le poste NVIDIA local ; aucun runner GPU GitHub n'était
+nécessaire.
+
+- `akasha init --defaults` réussit et le daemon répond à `/api/status`.
+- `doctor` signale encore l'absence de `spec/09_event_model.yaml` et
+  `spec/10_data_model.yaml` dans l'archive publiée.
+- Le modèle Qwen2.5 1.5B Instruct Q4 (`default.gguf`, SHA-256
+  `6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e`) a
+  produit la réponse exacte `OK` (tâche terminée, 31 tokens, environ 20 s).
+  Les journaux du daemon indiquent `CUDA0`; les échantillons GPU ont atteint
+  99 % d'utilisation et 9 581 MiB de mémoire utilisée.
+- Le benchmark `ar_fr_v1` a obtenu 5 réponses non vides sur 5 et le modèle
+  observé correspond au modèle demandé. Le rapport strict reste à 0/5, car
+  cette version du daemon n'expose pas `provider_used`, `ttft_ns` ni
+  `generation_duration_ns`; le protocole ne peut donc pas certifier le routage
+  et les latences.
+
+Ce résultat valide une inférence CUDA réelle sur l'archive v0.11.0, mais ne
+valide pas son premier démarrage complet : `doctor` échoue encore sur les deux
+fichiers de spécification. Les corrections de packaging et de diagnostic des
+PR #241 et #242 sont intégrées à `main`, mais cette archive publique a été
+construite avant ces corrections. Il faut retester un nouvel artefact publié.
+Cette mesure de génération n'est pas une évaluation agentique et ne remplace
+pas la matrice CPU ou le lancement de l'UI.
+
+Rapport expurgé :
+[`release_first_boot_windows_cuda_v0.11.0_20261021.json`](release_first_boot_windows_cuda_v0.11.0_20261021.json).
