@@ -509,3 +509,44 @@ fn map_wasm_run_error(err: wasmtime::Error) -> PluginError {
         PluginError::Crashed
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::WasmPlugin;
+
+    fn load_wat(source: &str) -> (tempfile::NamedTempFile, WasmPlugin) {
+        let wasm = wat::parse_str(source).expect("valid WAT fixture");
+        let file = tempfile::NamedTempFile::new().expect("temporary wasm file");
+        std::fs::write(file.path(), wasm).expect("write wasm fixture");
+        let plugin = WasmPlugin::load(file.path()).expect("load wasm module");
+        (file, plugin)
+    }
+
+    #[test]
+    fn runs_guest_with_the_documented_memory_abi() {
+        let (_file, plugin) = load_wat(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "run") (param $input_len i32) (result i32)
+                    local.get $input_len))"#,
+        );
+
+        assert_eq!(plugin.run("hello").expect("run guest"), "hello");
+    }
+
+    #[test]
+    fn guest_cannot_import_ungranted_wasi_host_functions() {
+        let (_file, plugin) = load_wat(
+            r#"(module
+                (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+                (memory (export "memory") 1)
+                (func (export "run") (param $input_len i32) (result i32)
+                    local.get $input_len))"#,
+        );
+
+        assert!(matches!(
+            plugin.run("hello"),
+            Err(akasha_plugin_api::PluginError::Crashed)
+        ));
+    }
+}
