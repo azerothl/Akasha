@@ -29,6 +29,11 @@ Comparez des réponses de plusieurs modèles sur la même consigne. Mode **aveug
 
 Workflow de recherche web structurée : découverte, lecture, validation, synthèse avec sources.
 
+Pour imposer une source, indiquez son URL HTTP(S) dans la question. La ponctuation
+finale de la phrase (`.,;:!?`) est séparée de l’URL. Si un chemin se termine par
+l’un de ces caractères, délimitez le lien avec `<...>` ou un lien Markdown. Les
+parenthèses équilibrées du chemin sont conservées et le fragment `#...` est ignoré.
+
 ## Notes
 
 Éditeur de notes (TipTap) synchronisé avec le daemon. Utile pour brouillons, comptes-rendus et contexte projet.
