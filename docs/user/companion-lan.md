@@ -114,7 +114,7 @@ curl -sS -H "Authorization: Bearer cmp_…" "$DAEMON/api/companion/snapshot"
 Toutes les routes de données `/api/companion/*` exigent le Bearer d’un appareil appairé :
 
 - Sans en-tête `Authorization` → **401** `{"error":"invalid_token"}`.
-- Avec un token inconnu, révoqué ou un token API global → **401** `{"error":"invalid_token"}`. `AKASHA_API_TOKEN` et `AKASHA_TOKEN` ne remplacent pas le token Companion.
+- Avec un token inconnu ou révoqué → **401** `{"error":"invalid_token"}`. `AKASHA_API_TOKEN` et `AKASHA_TOKEN`, s’ils sont définis, ne sont pas acceptés comme token Companion.
 - `POST /api/companion/pair` est la seule exception d’amorçage : il vérifie le secret dédié et retourne `503 pairing_disabled` si celui-ci n’est pas configuré.
 
 ### 5. (Optionnel) Présence / VAD côté daemon
@@ -154,7 +154,7 @@ Commandes utiles : `akasha doctor`, page **Dépannage** de cette documentation.
 - Avec **`AKASHA_BIND=0.0.0.0`**, les routes de données Companion restent protégées par le token d’appareil ; le pare-feu doit également limiter les hôtes autorisés.
 - Sans **`AKASHA_COMPANION_PAIR_SECRET`**, l’appairage est désactivé.
 - Les jetons dans `companion_devices.json` sont des secrets : ne les commitez pas, ne les affichez pas dans des captures d’écran.
-- Pour durcir l’ensemble du daemon, configurez aussi **`AKASHA_API_TOKEN`** / **`AKASHA_TOKEN`** et une politique `tools_policy.yaml` adaptée. Ces tokens globaux ne remplacent pas le token d’appareil Companion.
+- Pour limiter les autres endpoints du daemon, restreignez les connexions entrantes au niveau du pare-feu ou d’un reverse proxy ; l’authentification Companion ne couvre que les routes `/api/companion/*`.
 - Réseau Wi‑Fi invité ou coworking : évitez le bind `0.0.0.0` ou isolez le VLAN.
 
 ## Limites connues (état du code)

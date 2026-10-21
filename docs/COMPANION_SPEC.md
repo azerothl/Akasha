@@ -91,7 +91,7 @@ Toutes les routes dont le chemin commence par `/api/companion` passent par `comp
 | `Bearer <token>` ou `bearer <token>` | Les routes de données acceptent uniquement un token enregistré dans `companion_devices.json` |
 | Bearer présent mais token absent du fichier | **401** `{"error":"invalid_token"}` |
 
-Le token d’API global (`AKASHA_API_TOKEN` / `AKASHA_TOKEN`) n’est pas un token Companion. Le secret de pairage autorise uniquement l’amorçage de `POST /pair` ; les autres routes nécessitent le token de l’appareil obtenu après un appairage valide.
+Les valeurs `AKASHA_API_TOKEN` / `AKASHA_TOKEN` ne sont pas reconnues comme tokens Companion. Le secret de pairage autorise uniquement l’amorçage de `POST /pair` ; les autres routes nécessitent le token de l’appareil obtenu après un appairage valide.
 
 ---
 
@@ -345,7 +345,7 @@ Schéma `PresencePolicy` (valeurs par défaut si fichier absent) :
 |----------|--------|
 | `AKASHA_BIND` / `AKASHA_PORT` | Écoute HTTP |
 | `AKASHA_COMPANION_PAIR_SECRET` | Secret obligatoire de `POST /pair` ; vide ou absent désactive l’appairage |
-| `AKASHA_API_TOKEN` / `AKASHA_TOKEN` | Protègent l’API générale ; ne remplacent pas le token d’appareil sur Companion |
+| `AKASHA_API_TOKEN` / `AKASHA_TOKEN` | Non acceptés comme tokens Companion |
 | `AKASHA_COMPANION_VAD_ENABLED` | Override `enabled` au chargement de `companion_presence.json` |
 
 ---
