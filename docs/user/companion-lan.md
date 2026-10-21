@@ -20,13 +20,13 @@ Les routes voix (`/api/voice/*`) existent séparément pour STT/TTS ; le snapsho
 | Bind LAN | Par défaut le daemon écoute sur **`127.0.0.1`** : définir **`AKASHA_BIND=0.0.0.0`** pour accepter les connexions LAN |
 | Port API | **`3876`** par défaut (`AKASHA_PORT`) — le même port doit être utilisé côté client |
 | Data dir | Fichiers sous `~/akasha` (ou votre `AKASHA_DATA_DIR`) : `companion_devices.json`, `companion_presence.json` |
-| Pairing (recommandé) | Variable **`AKASHA_COMPANION_PAIR_SECRET`** : secret partagé pour **`POST /api/companion/pair` uniquement** — il protège l’appairage, **pas** l’accès aux autres routes `/api/companion/*` |
+| Pairing | Variable **`AKASHA_COMPANION_PAIR_SECRET`** obligatoire pour autoriser `POST /api/companion/pair` ; sans elle, l’appairage est désactivé |
 
 Découverte UDP : le daemon écoute **`0.0.0.0:3877`** dès le démarrage (indépendamment de `AKASHA_BIND` pour l’HTTP).
 
 ## Étapes
 
-> **Avertissement** — Sans en-tête `Authorization`, toutes les routes `/api/companion/*` sont accessibles depuis le LAN ([#172](https://github.com/azerothl/Akasha/issues/172)).
+> **Authentification** — Les routes de données Companion exigent le Bearer obtenu après appairage. Sans `AKASHA_COMPANION_PAIR_SECRET`, l’appairage est désactivé.
 
 ### 1. Activer l’écoute LAN
 
@@ -75,7 +75,7 @@ echo -n 'AKASHA_DISCOVER' | nc -u -w1 IP_DU_PC 3877
 |-------|-------------|-------------|
 | `device_id` | oui | Identifiant stable (ex. adresse MAC, UUID matériel) |
 | `name` | non | Libellé affiché (défaut : `companion`) |
-| `secret` | si secret configuré | Doit égaler `AKASHA_COMPANION_PAIR_SECRET` |
+| `secret` | oui | Doit égaler `AKASHA_COMPANION_PAIR_SECRET` |
 
 Exemple avec `curl` (depuis le LAN, `DAEMON=http://IP_DU_PC:3876`) :
 
@@ -93,7 +93,7 @@ Réponse attendue (`200 OK`) :
 
 Le jeton est enregistré dans **`~/akasha/companion_devices.json`** (avec `name`, `paired_at`). Un nouvel appairage pour le même `device_id` **remplace** le jeton.
 
-Si `AKASHA_COMPANION_PAIR_SECRET` est **vide**, l’appairage est **ouvert** sur le LAN (le daemon journalise un avertissement). En production domestique ou bureau, définissez toujours un secret.
+Si `AKASHA_COMPANION_PAIR_SECRET` est **absent ou vide**, le daemon répond **503 `pairing_disabled`** et n’enregistre aucun appareil. Une valeur incorrecte renvoie **403 `pair_secret_invalid`**.
 
 ### 4. Vérifier le snapshot et l’auth
 
@@ -108,15 +108,14 @@ Si `AKASHA_COMPANION_PAIR_SECRET` est **vide**, l’appairage est **ouvert** sur
 - bloc `notify` : `available` (même stockage que `/api/notifications`), `unread` (nombre de notifications daemon non lues), `headline` (`null` si `unread` = 0, sinon le **titre** de la plus récente non lue — jamais le corps — tronqué à 120 caractères, ellipse comprise) ; `avatar_hint` (`idle`, ou `notify` dès qu’il y a au moins une notification non lue)
 
 ```bash
-curl -sS "$DAEMON/api/companion/snapshot"
-# Optionnel : Authorization: Bearer <token> après appairage
 curl -sS -H "Authorization: Bearer cmp_…" "$DAEMON/api/companion/snapshot"
 ```
 
-**Authentification « souple »** sur toutes les routes `/api/companion/*` :
+Toutes les routes de données `/api/companion/*` exigent le Bearer d’un appareil appairé :
 
-- Pas d’en-tête `Authorization` → **accepté** (accès LAN implicite).
-- `Authorization: Bearer …` présent → le jeton doit correspondre à un appareil appairé, ou à **`AKASHA_API_TOKEN`** / **`AKASHA_TOKEN`** s’ils sont définis ; sinon **`401`** `{"error":"invalid_token"}`.
+- Sans en-tête `Authorization` → **401** `{"error":"invalid_token"}`.
+- Avec un token inconnu ou révoqué → **401** `{"error":"invalid_token"}`. `AKASHA_API_TOKEN` et `AKASHA_TOKEN`, s’ils sont définis, ne sont pas acceptés comme token Companion.
+- `POST /api/companion/pair` est la seule exception d’amorçage : il vérifie le secret dédié et retourne `503 pairing_disabled` si celui-ci n’est pas configuré.
 
 ### 5. (Optionnel) Présence / VAD côté daemon
 
@@ -142,8 +141,9 @@ Override au démarrage : **`AKASHA_COMPANION_VAD_ENABLED=1`** ou `true` force `e
 
 - **`Connection refused` sur le port 3876** : daemon non démarré, mauvais `AKASHA_PORT`, ou bind `127.0.0.1` uniquement → `AKASHA_BIND=0.0.0.0`.
 - **Découverte UDP sans réponse** : ouvrir le port **3877/udp** sur l’hôte ; vérifier que le probe contient bien `AKASHA_DISCOVER` (sous-chaîne suffisante).
+- **`503 pairing_disabled`** : définir `AKASHA_COMPANION_PAIR_SECRET` et redémarrer le daemon avant l’appairage.
 - **`403 pair_secret_invalid`** : aligner le champ JSON `secret` avec `AKASHA_COMPANION_PAIR_SECRET`.
-- **`401 invalid_token`** : jeton révoqué par ré-appairage, ou utilisation de `AKASHA_API_TOKEN` / `AKASHA_TOKEN` qui ne correspond pas.
+- **`401 invalid_token`** : fournir le Bearer d’un appareil appairé ; un token API global ne suffit pas.
 - **`400 event_unknown` / `event_required`** sur `/presence/event` : respecter la liste d’événements autorisés.
 - **Bind discovery échoue au démarrage** : un autre processus occupe peut-être le port 3877 (log « companion UDP discovery bind failed ») — l’API HTTP reste disponible, mais la découverte automatique ne fonctionnera pas.
 
@@ -151,10 +151,10 @@ Commandes utiles : `akasha doctor`, page **Dépannage** de cette documentation.
 
 ## Sécurité (exposition LAN)
 
-- Avec **`AKASHA_BIND=0.0.0.0`**, toute machine du LAN peut appeler l’API Companion (et, sans Bearer, les routes `/api/companion/*` sont accessibles).
-- Sans **`AKASHA_COMPANION_PAIR_SECRET`**, n’importe qui sur le LAN peut appairer un `device_id` et obtenir un jeton.
+- Avec **`AKASHA_BIND=0.0.0.0`**, les routes de données Companion restent protégées par le token d’appareil ; le pare-feu doit également limiter les hôtes autorisés.
+- Sans **`AKASHA_COMPANION_PAIR_SECRET`**, l’appairage est désactivé.
 - Les jetons dans `companion_devices.json` sont des secrets : ne les commitez pas, ne les affichez pas dans des captures d’écran.
-- Pour durcir l’ensemble du daemon (pas seulement Companion), utilisez aussi **`AKASHA_API_TOKEN`** / **`AKASHA_TOKEN`** et une politique `tools_policy.yaml` adaptée.
+- Pour limiter les autres endpoints du daemon, restreignez les connexions entrantes au niveau du pare-feu ou d’un reverse proxy ; l’authentification Companion ne couvre que les routes `/api/companion/*`.
 - Réseau Wi‑Fi invité ou coworking : évitez le bind `0.0.0.0` ou isolez le VLAN.
 
 ## Limites connues (état du code)
