@@ -9,12 +9,12 @@ function escapeHtmlAttr(s: string): string {
 
 /** Validates that a data URL is a safe image data URL (data:image/<type>;base64,<payload>). */
 function isValidDataImageUrl(url: string): boolean {
-  return /^data:image\/[a-zA-Z0-9+\-]+(?:;[a-zA-Z0-9\-=]+)*;base64,[A-Za-z0-9+/]+=*$/.test(url);
+  return /^data:image\/[a-zA-Z0-9+.-]+(?:;[a-zA-Z0-9=-]+)*;base64,[A-Za-z0-9+/]+=*$/.test(url);
 }
 
 /** Validates that a data URL is a safe audio data URL (data:audio/<type>;base64,<payload>). */
 function isValidDataAudioUrl(url: string): boolean {
-  return /^data:audio\/[a-zA-Z0-9+\-]+(?:;[a-zA-Z0-9\-=]+)*;base64,[A-Za-z0-9+/]+=*$/.test(url);
+  return /^data:audio\/[a-zA-Z0-9+.-]+(?:;[a-zA-Z0-9=-]+)*;base64,[A-Za-z0-9+/]+=*$/.test(url);
 }
 
 /**
