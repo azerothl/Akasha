@@ -413,6 +413,7 @@ mod large_index_tests {
         assert_eq!(super::index_hash(&dir.path().join("missing")).unwrap(),"missing");assert!(super::index_hash(dir.path()).is_err());
     }
 }
+#[cfg(test)]
 fn file_hash(path: &Path) -> Result<String, String> {
     if std::fs::symlink_metadata(path).ok().is_some_and(|metadata|metadata.file_type().is_symlink()) {return Err("symlink selections are unsupported for delivery".into());}
     match std::fs::File::open(path) {

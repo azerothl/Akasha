@@ -4,28 +4,23 @@ pub use crate::agent_profile::{
     get_or_load_agent_profile, new_agent_profile_cache, set_agent_profile_cache, AgentProfile,
     AgentProfileCache,
 };
-use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
+use crate::agents::{EventBus, OrchestratorTask};
 use crate::latency::{
-    clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric,
+    env_duration_ms,
     resolve_root_task_id,
 };
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
-use crate::protocol_adapter::unknown_external_message_count;
-use crate::autonomous_mission_config::{AutonomousMissionConfig, MissionStatusYaml};
-use crate::user_profile::UserProfile;
+use crate::autonomous_mission_config::AutonomousMissionConfig;
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
-use akasha_plugin_api::{PluginKind, PluginManifest};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use akasha_store::{
-    format_todos_plan_block, parse_todos_from_payload, Schedule,
-    ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus,
-    TaskStore, TodoStatus, WorkspaceGraphStore,
+    Task, TaskStatus,
+    TaskStore,
 };
 use akasha_vault::Vault;
 use sha2::{Digest, Sha256};
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -631,7 +626,7 @@ pub(crate) fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -
     }
 }
 
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -3359,11 +3354,15 @@ pub(crate) async fn log_tool_journal_if_write(tool: &str, args: &[String], resul
 
 pub(crate) use crate::api_tool_parser::parse_tool_calls;
 
+#[cfg(test)]
 pub(crate) use crate::api_tool_dispatch::process_ops::{parse_run_command_args, resolve_run_command_working_dir};
-
+#[cfg(test)]
 pub(crate) use crate::api_tool_dispatch::web_device_memory_ops::parse_device_invoke_params;
+#[cfg(test)]
+pub(crate) use crate::api_tool_dispatch::fs_ops::{rewrite_workspace_plan_key_to_lineage_root, rewrite_workspace_plan_path_str};
 
-pub(crate) use crate::api_tool_dispatch::fs_ops::{rewrite_workspace_plan_key_to_lineage_root, rewrite_workspace_plan_path_str, sync_workspace_store_from_disk, workspace_lineage_root_task_id};
+
+pub(crate) use crate::api_tool_dispatch::fs_ops::workspace_lineage_root_task_id;
 
 pub(crate) fn parse_plugin_tool_invocation(
     plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
