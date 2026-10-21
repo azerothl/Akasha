@@ -46,7 +46,7 @@ Exemple : `tracing::error!(task_id = %id, error_kind = "timeout", "Delegation ti
 - **Percentiles de latence** : P50, P95, P99 par provider/model (échantillon récent des latences).
 - **Endpoint** : `GET /api/metrics/summary` (ou intégré à l'existant) : taux d'erreur par provider, coût par période, P95 latence.
 
-Voir [crates/akasha-llm/src/metrics.rs](../../crates/akasha-llm/src/metrics.rs) et l'API daemon pour les routes exposées.
+Voir [crates/akasha-llm/src/metrics.rs](../crates/akasha-llm/src/metrics.rs) et l'API daemon pour les routes exposées.
 
 ---
 

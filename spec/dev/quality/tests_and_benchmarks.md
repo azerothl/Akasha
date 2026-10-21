@@ -194,7 +194,7 @@ Prérequis : daemon `--features embedded-llama-cpp-cuda`, `akasha config models 
 
 | Domaine | Fichier | Ce qui est testé |
 |--------|---------|-------------------|
-| **Prétraitement images data URL** | `preprocessDataUrlImages.test.ts` | Conversion markdown `![label](<data:image/...>)` → `<div class="markdown-data-image-wrap">` + `<img src="...">` avec `alt` échappé ; chaîne vide, pas de correspondance, plusieurs images |
+| **Prétraitement images data URL** | `preprocessDataUrlImages.test.ts` | Conversion markdown `![label]` + lien data-URL (`<data:image/...>`) → `<div class="markdown-data-image-wrap">` + `<img src="...">` avec `alt` échappé ; chaîne vide, pas de correspondance, plusieurs images |
 
 **Lancer les tests** (depuis la racine du dépôt ou depuis `apps/akasha-ui`) :
 
