@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "artifact": "akasha-windows-x86_64.zip",
+  "release_tag": "v0.11.0",
+  "release_url": "https://github.com/azerothl/Akasha/releases/tag/v0.11.0",
+  "sha256": "EF49BA83085851E1DA8E2889B249964993EEF64C6DA19B639FED1D3B8535998D",
+  "architecture": "x86_64",
+  "os": "Microsoft Windows 11 Professionnel Insider Preview 10.0.26220 (64 bits)",
+  "fresh_data_directory": true,
+  "init": {"command": "akasha init --defaults", "passed": true},
+  "daemon": {"passed": true, "port_isolated": true, "health": {"status": "ok"}},
+  "doctor": {
+    "process_exit_code": 0,
+    "acceptance_passed": false,
+    "missing_files": ["spec/09_event_model.yaml", "spec/10_data_model.yaml"],
+    "diagnostic": "Some checks failed. Fix the issues above."
+  },
+  "model_configuration": {"provider": "ollama", "model": "tinyllama", "fallback_provider": "akasha_core"},
+  "first_real_message": {"tested": false, "reason": "doctor reported required release spec files missing"},
+  "desktop_ui": {"package_available": true, "launch_tested": false},
+  "result": "not_accepted"
+}

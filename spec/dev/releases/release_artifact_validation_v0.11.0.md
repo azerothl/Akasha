@@ -2,22 +2,26 @@
 
 Document de test d'installation **fraîche** (hors build CI du workspace). Complète l'issue [#141](https://github.com/azerothl/Akasha/issues/141), `spec/distribution.md` et `docs/user/installation.md`.
 
-**Dernière mise à jour** : 2026-10-18 (agent cloud, Ubuntu x86_64).
+**Dernière mise à jour** : 2026-10-21. Les tests manuels publics ci-dessous sont distincts du build de candidate `publish=false`.
 
 ---
 
-## Matrice
+## Matrice des artefacts publics
 
-| Artefact | Version | Arch | OS de test | Init | Daemon | `doctor` | Modèle embarqué (chemin / backend) | Premier message | UI desktop | Statut |
-|----------|---------|------|------------|------|--------|----------|-------------------------------------|-----------------|------------|--------|
-| `akasha-linux-x86_64.zip` | v0.11.0 | x86_64 | Linux (Ubuntu, VM cloud, **sans GPU**) | OK (~1 s) | OK (~1 s jusqu'à `/api/status`) | Partiel (voir notes) | Candle CPU, `akasha_embedded` dans `llm_router.yaml` | OK (~101 s, 101 tokens out) | Non testé | **Validé CPU Linux** |
-| `akasha-full-linux-x86_64.zip` | v0.11.0 | x86_64 | — | — | — | — | — | — | — | **Non testé** |
-| `akasha-ui-linux.zip` | v0.11.0 | x86_64 | — | — | — | — | — | — | — | **Non testé** |
-| `akasha-macos-*.zip` / `akasha-full-macos-*.zip` | v0.11.0 | x86_64 / aarch64 | — | — | — | — | — | — | — | **Non testé** |
-| `akasha-windows-x86_64.zip` / full | v0.11.0 | x86_64 | — | — | — | — | — | — | — | **Non testé** |
-| `akasha-windows-x86_64-cuda.zip` / full CUDA | v0.11.0 | x86_64 + NVIDIA | — | — | — | — | — | — | — | **Non testé** (smoke GPU : workflow `gpu-smoke` séparé) |
+| Artefact | Version | Architecture | OS essayé | Init | Daemon | `doctor` | Modèle / premier message | UI desktop | Statut d'acceptation |
+|---|---|---|---|---|---|---|---|---|---|
+| `akasha-linux-x86_64.zip` | v0.11.0 | x86_64 | Ubuntu, VM cloud sans GPU (18 oct.) | OK (~0,9 s) | OK (~1 s) | Partiel : les specs YAML manquent | Candle CPU ; réponse historique réussie en ~101 s | non testée | **Non validé** : re-smoke GitHub #39585465251 bloqué par les specs manquantes |
+| `akasha-full-linux-x86_64.zip` | v0.11.0 | x86_64 | non testé | — | — | — | — | — | Non testé |
+| `akasha-windows-x86_64.zip` | v0.11.0 | x86_64 | Windows 11 Pro Insider Preview 10.0.26220, 21 oct. | OK | OK, `/api/status` renvoie `status=ok` sur port isolé | **Échec** : `spec/09_event_model.yaml` et `spec/10_data_model.yaml` absents | Configuration `ollama/tinyllama`; premier message non testé | sans objet | **Non validé** |
+| `akasha-full-windows-x86_64.zip` | v0.11.0 | x86_64 | non testé | — | — | — | — | — | Non testé |
+| `akasha-macos-x86_64.zip`, `akasha-full-macos-x86_64.zip` | v0.11.0 | x86_64 | non testé | — | — | — | — | — | Non testé |
+| `akasha-macos-aarch64.zip`, `akasha-full-macos-aarch64.zip` | v0.11.0 | aarch64 | non testé | — | — | — | — | — | Non testé |
+| `akasha-ui-linux.zip` | v0.11.0 | x86_64 | non testé | — | — | — | sans objet | non testée | Non testé |
+| `akasha-ui-macos.zip` | v0.11.0 | x86_64 / aarch64 | non testé | — | — | — | sans objet | non testée | Non testé |
+| `akasha-ui-windows.zip` | v0.11.0 | x86_64 | Windows 11 Pro Insider Preview 10.0.26220, 21 oct. | sans objet | — | — | sans objet | Archive MSI/NSIS inventoriée et MSI extrait en temporaire ; application non lancée | Non testé |
+| `akasha-windows-x86_64-cuda.zip` / `akasha-full-windows-x86_64-cuda.zip` | v0.11.0 | x86_64 + NVIDIA | Windows 11 Pro Insider Preview 10.0.26220, RTX 4080 SUPER, 21 oct. | OK | OK | **Échec** : mêmes specs absentes | Inférence CUDA réelle Qwen2.5 1.5B ; réponse exacte `OK` en ~20 s | sans objet | Inférence validée, installation non validée ; validation CUDA suivie séparément par #142 |
 
-Les cibles **non testées** ne doivent pas être présentées comme validées pour le premier démarrage.
+Aucune cible non testée n'est comptée comme validée. Une réponse réelle ne compense pas l'échec du diagnostic requis.
 
 ---
 
@@ -26,57 +30,40 @@ Les cibles **non testées** ne doivent pas être présentées comme validées po
 Script : `scripts/smoke-release-artifact-linux.sh`
 
 ```bash
-# Depuis la racine du dépôt (gh CLI requis pour le téléchargement)
 RELEASE_TAG=v0.11.0 bash scripts/smoke-release-artifact-linux.sh
 ```
 
-Variables utiles : `ARTIFACT_ZIP` (zip local), `SKIP_INFERENCE=1` (sans appel LLM), `INFERENCE_TIMEOUT_SECS` (défaut 240).
-
-**CI** : job `release-artifact-first-boot-linux` dans `.github/workflows/ci.yml` (même script, tag `v0.11.0` par défaut).
+`ARTIFACT_ZIP` sélectionne une archive locale, `SKIP_INFERENCE=1` saute l'appel LLM et `INFERENCE_TIMEOUT_SECS` règle le délai (240 s par défaut). Le job correspondant est `release-artifact-first-boot-linux` dans `.github/workflows/ci.yml`.
 
 ---
 
-## Résultat manuel — `akasha-linux-x86_64.zip` (2026-10-18)
+## Détails des constats
 
-Environnement : `HOME` temporaire vide, pas de `AKASHA_DATA_DIR` préexistant, extraction dans `/tmp/akasha-firstboot-test`.
+### Linux x86_64 — archive publique v0.11.0
 
-| Étape | Commande | Résultat |
-|-------|----------|----------|
-| Version | `./akasha --version` | `akasha 0.11.0` |
-| Init | `./akasha init --defaults` | data_dir `~/akasha`, `llm_router.yaml` avec `akasha_embedded` — **~0,9 s** |
-| Daemon | `./akasha-daemon` (port éphémère) | `/api/status` OK — **~1 s** |
-| Doctor | `./akasha doctor` | Santé daemon OK, `embedded_llm` OK (Candle, premier appel lent). **Attendu KO** : Ollama, Rbitnet. **Avertissement** : fichiers spec `09_event_model.yaml` / `10_data_model.yaml` absents du zip CLI (check local au répertoire d'extraction). |
-| Message | `POST /api/message` + poll `GET /api/tasks/:id` | `status=completed`, `last_turn_model_used=embedded`, **~101 s** |
+L'essai manuel du 18 octobre a démarré le daemon et obtenu une réponse Candle CPU en environ 101 s. `doctor` était seulement partiel : il signalait l'absence de `09_event_model.yaml` et `10_data_model.yaml`. Le 21 octobre, le smoke GitHub du zip public (#39585465251) a échoué avant `init` sur ces deux fichiers. La réponse historique reste une observation valide, mais le parcours complet ne satisfait pas le critère `doctor`.
 
-Extrait init :
+### Windows x86_64 — archive publique v0.11.0
 
-```
-Répertoire de données : /tmp/.../akasha
-Mode --defaults : configuration minimale (Ollama uniquement).
-  Fichier écrit : .../llm_router.yaml
-```
+Archive identifiée par SHA-256 `EF49BA83085851E1DA8E2889B249964993EEF64C6DA19B639FED1D3B8535998D`. Depuis un répertoire de données neuf, `akasha init --defaults` réussit. Le daemon de l'archive démarre sur un port HTTP isolé et `/api/status` répond `{"status":"ok"}`. `doctor` signale les deux specs manquantes. Le binaire v0.11.0 retourne malgré cela le code processus 0 ; le texte de diagnostic dit bien que certains contrôles ont échoué. Le premier message réel n'a pas été essayé sur cet artefact.
 
-Extrait doctor (daemon actif) :
+Le rapport expurgé de ce contrôle est [`release_first_boot_windows_cpu_v0.11.0_20261021.json`](../quality/release_first_boot_windows_cpu_v0.11.0_20261021.json). Le commentaire de suivi est [lié à #141](https://github.com/azerothl/Akasha/issues/141#issuecomment-6315016258).
 
-```
-  [OK] embedded_llm — Embedded model will load on first use (Candle CPU: first call may take 1–3 min)
-  [KO] ollama — Ollama unreachable
-```
+### Candidate de release non publiée
+
+Le run manuel [39590849411](https://github.com/azerothl/Akasha/actions/runs/39590849411) est lancé avec `publish=false`. Il teste la chaîne de build et le staging corrigé, pas les archives publiques de v0.11.0. Même si le staging réussit, il ne suffit pas pour fermer #141 : chaque archive publique CPU doit passer `doctor` et produire une première réponse réelle ; les bundles desktop disponibles doivent être lancés.
 
 ---
 
-## Bugs / écarts (non bloquants pour ce smoke)
+## Écarts et statut
 
-Aucun **bloquant** identifié pour le parcours Linux CPU CLI : init, daemon, inférence embarquée et première réponse aboutissent.
+Les archives publiques Linux et Windows testées ne contiennent pas `spec/09_event_model.yaml` et `spec/10_data_model.yaml`. Le diagnostic actuel le détecte ; le vieux binaire Windows v0.11.0 affiche l'échec mais conserve un code retour 0. Les contrôles du staging de la pipeline actuelle vérifient les fichiers de l'artefact construit ; ils ne modifient pas les assets déjà publiés.
 
-Écarts documentés (pas corrigés dans la PR #141) :
-
-1. **`akasha doctor` exit code ≠ 0** alors que le parcours embarqué est utilisable (Ollama / Rbitnet optionnels, spec YAML incomplets dans le zip CLI).
-2. **Message d'init `--defaults`** indique « Ollama uniquement » alors que `llm_router.yaml` généré pointe sur `akasha_embedded` pour les tâches conversation — confusion doc/texte uniquement.
-
----
+Le smoke `publish=false` ne crée pas de release publique. #141 reste donc ouvert jusqu'à la publication et à la validation d'une nouvelle release complète avec sa matrice CPU/desktop. Les cibles CUDA sont documentées séparément et ne remplacent pas les contrôles CPU.
 
 ## Références
 
-- Issue : [#141 — Valider le premier démarrage des artefacts publiés](https://github.com/azerothl/Akasha/issues/141)
-- Smoke staging (build release, pas artefact GitHub) : `scripts/smoke-release-staging.sh`
+- [Issue #141 — Valider le premier démarrage des artefacts publiés](https://github.com/azerothl/Akasha/issues/141)
+- [`spec/distribution.md`](../../distribution.md)
+- [`docs/user/installation.md`](../../../docs/user/installation.md)
+- Staging release : `scripts/smoke-release-staging.sh`
