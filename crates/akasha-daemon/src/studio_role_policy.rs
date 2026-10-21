@@ -2,10 +2,45 @@
 use std::path::{Path, PathBuf};
 
 pub(crate) fn restricted_role(role: &str) -> bool {
-    role.eq_ignore_ascii_case("studio_planner") || role.eq_ignore_ascii_case("studio_reviewer") || role.eq_ignore_ascii_case("studio_auditor")
+    role.eq_ignore_ascii_case("studio_planner")
+        || role.eq_ignore_ascii_case("studio_reviewer")
+        || role.eq_ignore_ascii_case("studio_auditor")
+        || role.eq_ignore_ascii_case("studio_project_manager")
 }
 
 pub(crate) fn allows_tool(role: &str, tool: &str) -> bool {
+    if role.eq_ignore_ascii_case("studio_project_manager") {
+        // The project manager owns Kanban state and dispatch, not application
+        // implementation. Keep verification commands available while forcing
+        // source changes through a specialist child task.
+        return matches!(
+            tool,
+            "read_file"
+                | "list_tools"
+                | "search_files"
+                | "grep_content"
+                | "file_diff"
+                | "diff_unified"
+                | "dir_compare"
+                | "git_status"
+                | "git_diff"
+                | "git_log"
+                | "git_rev_parse"
+                | "run_command"
+                | "run_terminal"
+                | "ask_user"
+                | "list_skills"
+                | "read_skill"
+                | "write_todos"
+                | "merge_todos"
+                | "read_todos"
+                | "update_todo"
+                | "studio_list_tickets"
+                | "studio_create_ticket"
+                | "studio_update_ticket"
+                | "delegate_to_agent"
+        );
+    }
     if !restricted_role(role) {
         return true;
     }
@@ -32,7 +67,7 @@ pub(crate) fn allows_tool(role: &str, tool: &str) -> bool {
             | "studio_list_tickets"
     );
     read || (role.eq_ignore_ascii_case("studio_planner") && tool == "write_file")
-        || (role.eq_ignore_ascii_case("studio_reviewer") && tool == "studio_update_ticket")
+        || (role.eq_ignore_ascii_case("studio_reviewer") && tool == "studio_review_ticket")
 }
 
 pub(crate) fn check(
@@ -42,7 +77,7 @@ pub(crate) fn check(
     root: Option<&Path>,
 ) -> Result<(), String> {
     if !allows_tool(role, tool) {
-        return Err(format!("[{tool}] forbidden for `{role}`: use repository read tools; shell, processes, containers, external tools and delegation are disabled for this role."));
+        return Err(format!("[{tool}] forbidden for `{role}` by the Studio role policy; use the tools assigned to this role."));
     }
     if role.eq_ignore_ascii_case("studio_planner") && tool == "write_file" {
         planner_plan_path(args, root)?;
@@ -77,6 +112,44 @@ pub(crate) fn check(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod project_manager_policy_tests {
+    #[test]
+    fn project_manager_can_manage_tickets_and_delegate_but_cannot_edit_project_files() {
+        assert!(super::restricted_role("studio_project_manager"));
+        for allowed in [
+            "read_file",
+            "run_command",
+            "studio_list_tickets",
+            "studio_create_ticket",
+            "studio_update_ticket",
+            "delegate_to_agent",
+        ] {
+            assert!(super::allows_tool("studio_project_manager", allowed), "missing {allowed}");
+        }
+        for denied in [
+            "write_file",
+            "write_code",
+            "edit_file",
+            "apply_patch",
+            "search_replace",
+            "delete_file",
+            "rename_path",
+            "move_tree",
+        ] {
+            assert!(!super::allows_tool("studio_project_manager", denied), "unexpected {denied}");
+        }
+    }
+
+    #[test]
+    fn reviewer_can_submit_a_bound_review_but_cannot_patch_arbitrary_ticket_fields() {
+        assert!(super::allows_tool("studio_reviewer", "studio_list_tickets"));
+        assert!(super::allows_tool("studio_reviewer", "studio_review_ticket"));
+        assert!(!super::allows_tool("studio_reviewer", "studio_update_ticket"));
+        assert!(!super::allows_tool("studio_reviewer", "studio_create_ticket"));
+    }
 }
 
 fn planner_plan_path(args: &[String], root: Option<&Path>) -> Result<PathBuf, String> {

@@ -37,7 +37,9 @@ fn agent_task_type_and_fallbacks(agent: &str) -> (&'static str, &'static [&'stat
             &["code_generation", "system_diagnostic", "conversation"][..],
         ),
         "creative" => ("creative", &["creative_writing", "conversation"][..]),
-        "code" => ("code_generation", &["conversation"][..]),
+        "code" | "studio_scaffold" | "studio_fullstack" | "studio_frontend" | "studio_backend"
+        | "studio_architect" | "studio_integration" | "studio_qa"
+        | "studio_project_manager" => ("code_generation", &["conversation"][..]),
         "search" => ("conversation", &[]),
         "conversation" => ("conversation", &[]),
         "analyst" => ("conversation", &["creative_writing"][..]),
@@ -769,6 +771,14 @@ mod tests {
     use crate::provider::{ProviderError, TokenUsage};
     use async_trait::async_trait;
     use std::time::Duration;
+
+    #[test]
+    fn studio_roles_use_code_route() {
+        for role in ["studio_fullstack", "studio_frontend", "studio_backend", "studio_architect", "studio_integration", "studio_qa", "studio_project_manager"] {
+            assert_eq!(agent_task_type_and_fallbacks(role).0, "code_generation");
+        }
+        assert_eq!(agent_task_type_and_fallbacks("conversation").0, "conversation");
+    }
 
     /// Mock local provider for tests: returns a fixed response without calling any real model.
     struct MockLocalProvider {

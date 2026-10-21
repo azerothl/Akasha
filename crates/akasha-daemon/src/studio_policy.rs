@@ -19,6 +19,7 @@ pub(crate) fn decode(value: Value, data_dir: &Path) -> anyhow::Result<ToolsPolic
 /// Global conversations retain the original deny-by-default policy.
 pub(crate) fn for_workspace(policy: &ToolsPolicy, root: &Path) -> ToolsPolicy {
     let mut scoped = policy.clone();
+    scoped.studio_manifest_root = Some(root.to_path_buf());
     for field in &policy.studio_default_fields {
         match field.as_str() {
             "allowed_read_paths" => scoped.allowed_read_paths = vec![root.to_string_lossy().into_owned()],
@@ -72,6 +73,7 @@ mod tests {
         )
         .unwrap();
         let global = load(&path, dir.path()).unwrap();
+        assert!(global.studio_manifest_root.is_none());
         assert!(global.allowed_read_paths.is_empty());
         assert!(global.allowed_write_paths.is_empty());
         assert!(!global.can_run_command("npm"));
@@ -96,6 +98,7 @@ mod tests {
             assert!(!policy.can_read(&file));
             assert!(!policy.can_write(&file));
         }
+        assert!(policy.studio_manifest_root.is_some());
         assert!(policy.can_run_command("npm"));
         assert!(policy.can_run_command("git"));
         assert!(!policy.can_run_command("powershell"));

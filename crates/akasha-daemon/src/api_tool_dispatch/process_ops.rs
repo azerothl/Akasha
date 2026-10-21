@@ -30,6 +30,62 @@ pub(crate) fn parse_run_command_args(
     (vault_specs, cwd_flag, command, cmd_args)
 }
 
+/// Recover from a common agent argument-shape mistake: the executable is
+/// already supplied separately as `program`, but is repeated as args[0]. The
+/// executor may safely remove this exact duplicate and report the correction
+/// back so the agent uses the documented shape next time.
+pub(crate) fn remove_repeated_executable_arg(command: &str, args: &mut Vec<String>) -> bool {
+    fn executable_stem(value: &str) -> Option<String> {
+        std::path::Path::new(value)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| stem.to_ascii_lowercase())
+    }
+
+    let Some(first) = args.first() else {
+        return false;
+    };
+    if executable_stem(command).is_some() && executable_stem(command) == executable_stem(first) {
+        args.remove(0);
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_run_command_args, remove_repeated_executable_arg};
+
+    #[test]
+    fn removes_only_an_exact_duplicate_of_the_executable() {
+        let (_, _, program, mut args) = parse_run_command_args(&[
+            "--cwd".into(),
+            "workspace:/".into(),
+            "npm".into(),
+            "npm".into(),
+            "run".into(),
+            "build".into(),
+        ]);
+
+        assert_eq!(program, "npm");
+        assert!(remove_repeated_executable_arg(&program, &mut args));
+        assert_eq!(args, ["run", "build"]);
+        assert!(!remove_repeated_executable_arg(&program, &mut args));
+    }
+
+    #[test]
+    fn matches_windows_executable_extensions_without_dropping_other_args() {
+        let mut args = vec!["npm.cmd".to_string(), "install".to_string()];
+        assert!(remove_repeated_executable_arg("npm", &mut args));
+        assert_eq!(args, ["install"]);
+
+        let mut normal_args = vec!["run".to_string(), "build".to_string()];
+        assert!(!remove_repeated_executable_arg("npm", &mut normal_args));
+        assert_eq!(normal_args, ["run", "build"]);
+    }
+}
+
 /// Resolve working directory for `run_command` / `run_terminal` / `run_command_background`.
 /// Returns `None` for legacy behavior (daemon process cwd). Returns `Some(path)` when `--cwd` was set
 /// or `run_command_default_cwd_workspace` applies.

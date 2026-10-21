@@ -13,6 +13,8 @@ pub enum MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationMessage {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_control: bool,
     pub role: MessageRole,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -92,14 +94,21 @@ mod tests {
 impl ConversationMessage {
     pub fn user(content: String) -> Self {
         Self {
+            runtime_control: false,
             role: MessageRole::User,
             content,
             tool_calls: vec![],
             tool_call_id: None,
         }
     }
+    pub fn runtime_control(content: String) -> Self {
+        let mut message = Self::user(content);
+        message.runtime_control = true;
+        message
+    }
     pub fn assistant(content: String) -> Self {
         Self {
+            runtime_control: false,
             role: MessageRole::Assistant,
             content,
             tool_calls: vec![],
@@ -108,6 +117,7 @@ impl ConversationMessage {
     }
     pub fn tool(id: String, content: String) -> Self {
         Self {
+            runtime_control: false,
             role: MessageRole::Tool,
             content,
             tool_calls: vec![],
@@ -231,7 +241,11 @@ impl crate::CompletionRequest {
             messages.extend(
                 history
                     .iter()
-                    .map(|m| serde_json::to_value(m).expect("message serialization")),
+                    .map(|m| {
+                        let mut value = serde_json::to_value(m).expect("message serialization");
+                        value.as_object_mut().unwrap().remove("runtime_control");
+                        value
+                    }),
             );
         }
         // Native tool continuations end with a tool result. An extra "continue"
@@ -259,10 +273,30 @@ impl crate::CompletionRequest {
         prompt
     }
     pub(crate) fn ollama_native_messages(&self) -> Value {
-        let mut messages = self.chat_messages(json!(self.prompt));
+        let mut messages = self.native_chat_messages(json!(self.prompt));
+        if self.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
+            // Transport-specific guidance wins over legacy syntax in generic
+            // tool descriptions. Never execute a tutorial as file contents.
+            let guidance = "\n[Active Ollama native tool transport]\nUse the advertised tool function names through native tool_calls (read_file, write_file, run_command, etc.). Do not print TOOL:, TOOL_JSON:, code fences or tutorials describing calls in assistant content. Request the next actual operation, observe its result, then continue. Pass only the tool-specific keyword arguments; do not use studio_call, schema_version or tool wrapper fields. For new files expected_version is the string missing; existing files require the SHA-256 returned by read_file. Never copy an error object into a call. A final summary is allowed only when all requested operations and verifications have actually succeeded.\n";
+            let list = messages.as_array_mut().unwrap();
+            if list.first().is_some_and(|message| message["role"] == "system") {
+                list[0]["content"] = json!(format!("{}{}", list[0]["content"].as_str().unwrap_or(""), guidance));
+            } else {
+                list.insert(0, json!({"role":"system", "content":guidance}));
+            }
+        }
+        let mut call_names = std::collections::HashMap::<String,String>::new();
         for message in messages.as_array_mut().unwrap() {
+            if message["role"]=="tool" {
+                if let Some(name)=message["tool_call_id"].as_str().and_then(|id|call_names.get(id)).cloned() {
+                    message["tool_name"]=json!(name);
+                }
+            }
             if let Some(calls) = message.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
                 for call in calls {
+                    if let (Some(id),Some(name))=(call["id"].as_str(),call["function"]["name"].as_str()) {
+                        call_names.insert(id.to_owned(),name.to_owned());
+                    }
                     if let Some(arguments) = call["function"]["arguments"].as_str() {
                         if let Ok(value) = serde_json::from_str::<Value>(arguments) {
                             call["function"]["arguments"] = value;
@@ -270,6 +304,33 @@ impl crate::CompletionRequest {
                     }
                 }
             }
+        }
+        messages
+    }
+    /// Mistral-style Ollama templates interpolate .Content as a JSON value in
+    /// [TOOL_RESULTS]. Host receipt markers are not valid JSON values there.
+    /// Normalize only the wire representation; durable receipts remain exact.
+    pub(crate) fn ollama_native_json_result_messages(&self) -> Value {
+        let mut messages=self.ollama_native_messages();
+        for message in messages.as_array_mut().unwrap() {
+            if message["role"]!="tool" {continue;}
+            let content=message["content"].as_str().unwrap_or("");
+            let mut value=serde_json::from_str::<Value>(content).ok();
+            if value.is_none() && content.starts_with("[Recorded execution result") {
+                if let Some((_,body))=content.split_once('\n') {
+                    let body=body.trim_start();
+                    let mut parser=serde_json::Deserializer::from_str(body).into_iter::<Value>();
+                    if let Some(Ok(mut receipt))=parser.next() {
+                        let tail=body[parser.byte_offset()..].trim();
+                        if !tail.is_empty() {
+                            if let Some(object)=receipt.as_object_mut() {object.insert("_recorded_context".into(),json!(tail));}
+                            else {receipt=json!({"result":receipt,"_recorded_context":tail});}
+                        }
+                        value=Some(receipt);
+                    }
+                }
+            }
+            message["content"]=json!(value.unwrap_or_else(||json!(content)).to_string());
         }
         messages
     }
@@ -315,5 +376,45 @@ mod native_schema_ref_tests {
         let functions=request.native_functions();
         assert_eq!(functions[0]["parameters"]["properties"]["text"]["$ref"],"#/$defs/text");
         assert_eq!(functions[0]["parameters"]["$defs"]["text"]["type"],"string");
+    }
+}
+
+#[cfg(test)]
+mod json_tool_result_template_tests {
+    #[test]
+    fn raw_json_template_receives_valid_json_without_losing_output_or_context() {
+        let output="source exact\né🙂";
+        let content=format!("[Recorded execution result]\n{}\n\n[Original task] exact requirements",serde_json::json!({"success":true,"file_version":"actual-sha","output":output}));
+        let request:crate::CompletionRequest=serde_json::from_value(serde_json::json!({"prompt":"","conversation":[{"role":"tool","content":content,"tool_call_id":"stable"}]})).unwrap();
+        let messages=request.ollama_native_json_result_messages();
+        let content=messages[0]["content"].as_str().unwrap();
+        let rendered=format!("{{\"content\":{content}}}");
+        let value:serde_json::Value=serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["content"]["output"],output);
+        assert_eq!(value["content"]["file_version"],"actual-sha");
+        assert!(value["content"]["_recorded_context"].as_str().unwrap().contains("exact requirements"));
+        assert_eq!(messages[0]["tool_call_id"],"stable");
+    }
+}
+
+#[cfg(test)]
+mod ollama_result_identity_tests {
+    use super::*;
+    #[test]
+    fn result_names_follow_flattened_call_ids_without_guessing() {
+        let request:crate::CompletionRequest=serde_json::from_value(json!({"prompt":"","conversation":[
+            {"role":"assistant","content":"","tool_calls":[
+                {"id":"read","function":{"name":"studio_call","arguments":json!({"schema_version":1,"tool":"read_file","arguments":{"path":"workspace:/a.ts"}}).to_string()}},
+                {"id":"build","function":{"name":"run_command","arguments":"{}"}}
+            ]},
+            {"role":"tool","content":"build output","tool_call_id":"build"},
+            {"role":"tool","content":"source output","tool_call_id":"read"},
+            {"role":"tool","content":"uncertain","tool_call_id":"unknown"}
+        ]})).unwrap();
+        let messages=request.ollama_native_messages();
+        assert_eq!(messages[1]["tool_name"],"run_command");
+        assert_eq!(messages[2]["tool_name"],"read_file");
+        assert!(messages[3].get("tool_name").is_none());
+        assert_eq!(request.conversation.unwrap()[1].content,"build output");
     }
 }

@@ -47,6 +47,46 @@ fn decode_url_component(s: &str) -> String {
         .into_owned()
 }
 
+fn code_studio_root_agent(action: Option<&str>, _code_mode: Option<&str>) -> &'static str {
+    // A bounded goal is already an explicit implementation workflow with
+    // mechanical acceptance criteria. Run it on the implementation agent so
+    // its goal loop has the write tools it needs; other root workflows start
+    // with the Kanban coordinator and delegate to specialists.
+    if action == Some("goal") {
+        return "studio_fullstack";
+    }
+    "studio_project_manager"
+}
+
+fn should_create_studio_chat_ticket(
+    has_project: bool,
+    has_explicit_ticket: bool,
+    has_active_queued_target: bool,
+    requested_queue_mode: Option<crate::steering_queue::QueueMode>,
+    message: &str,
+) -> bool {
+    if !has_project {
+        return false;
+    }
+    if has_active_queued_target
+        && requested_queue_mode == Some(crate::steering_queue::QueueMode::FollowUp)
+    {
+        // Follow-up is an explicit request for distinct work, even if the composer still
+        // carries the ticket that launched the active task. Steering stays on that task.
+        return true;
+    }
+    !has_explicit_ticket
+        && !has_active_queued_target
+        && crate::api_studio::studio_user_message_suggests_evolution(message)
+}
+
+fn queue_delivery_requires_running_target(
+    requested_mode: Option<crate::steering_queue::QueueMode>,
+    resolved_target: Option<Uuid>,
+) -> bool {
+    requested_mode.is_some() && resolved_target.is_none()
+}
+
 pub(crate) async fn get_task_list(store_path: &Path, status_filter: Option<String>) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
@@ -2044,6 +2084,7 @@ if method == "POST" && path == "/api/message" {
         .and_then(|v| v.get("studio_ticket_id").and_then(|x| x.as_str()))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let mut studio_ticket_auto_created = false;
     let fork_from_task_id: Option<Uuid> = {
         let raw = body_json
             .as_ref()
@@ -2100,6 +2141,27 @@ if method == "POST" && path == "/api/message" {
         }
         session_id = fork_session_id;
     }
+    // Resolve queue delivery before Kanban registration. Steering continues the active
+    // ticket; an explicit follow-up is separate work and receives its own ticket.
+    let requested_queue_mode = message_delivery_mode
+        .as_deref()
+        .and_then(crate::steering_queue::QueueMode::parse);
+    let queued_target_task_id = match (
+        requested_queue_mode,
+        steering_queue.as_ref(),
+    ) {
+        (Some(_), Some(queue)) => queue
+            .resolve_running_task(&session_id, target_task_id)
+            .await,
+        _ => None,
+    };
+    if queue_delivery_requires_running_target(requested_queue_mode, queued_target_task_id) {
+        let body = serde_json::json!({
+            "error": "queue_target_not_running",
+            "detail": "Le message n'a pas été envoyé : la tâche cible n'est plus active. Rechargez la conversation avant de créer une nouvelle demande."
+        });
+        return Some(json_response("409 Conflict", &body.to_string()));
+    }
     let studio_disk_root = if let Some(pid) = studio_project_id.as_deref()
     {
         match crate::studio::resolve_studio_project_dir(data_dir, pid.trim()) {
@@ -2115,30 +2177,39 @@ if method == "POST" && path == "/api/message" {
     } else {
         None
     };
-    if let (Some(ref root), Some(_pid)) = (studio_disk_root.as_ref(), studio_project_id.as_ref())
-    {
-        if studio_ticket_id.is_none() {
-            let mode = crate::api_studio::studio_ticket_enforcement_mode(root);
-            if mode != "off"
-                && crate::api_studio::studio_user_message_suggests_evolution(&message)
-            {
-                match crate::api_studio::studio_create_evolution_ticket_from_chat(root, &message)
-                {
-                    Ok(id) => {
-                        tracing::info!(
-                            ticket_id = %id,
-                            "auto-created Code Studio evolution ticket from chat"
-                        );
-                        studio_ticket_id = Some(id);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "studio evolution auto-ticket skipped");
-                    }
-                }
+    if let Some(root) = studio_disk_root.as_ref().filter(|_| {
+        should_create_studio_chat_ticket(
+            studio_project_id.is_some(),
+            studio_ticket_id.is_some(),
+            queued_target_task_id.is_some(),
+            requested_queue_mode,
+            &message,
+        )
+    }) {
+        match crate::api_studio::studio_create_evolution_ticket_from_chat(root, &message) {
+            Ok(id) => {
+                tracing::info!(
+                    ticket_id = %id,
+                    "auto-created Code Studio evolution ticket from chat"
+                );
+                studio_ticket_id = Some(id);
+                studio_ticket_auto_created = true;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Code Studio actionable request could not be registered on Kanban");
+                let body = serde_json::json!({
+                    "error": "studio_ticket_creation_failed",
+                    "detail": "La demande n'a pas été lancée car son ticket Kanban n'a pas pu être créé.",
+                    "cause": e
+                });
+                return Some(json_response("500 Internal Server Error", &body.to_string()));
             }
         }
     }
-    if let Some(ref root) = studio_disk_root {
+    if let Some(root) = studio_disk_root
+        .as_ref()
+        .filter(|_| queued_target_task_id.is_none())
+    {
         let studio_ticket_enforcement_mode = crate::api_studio::studio_ticket_enforcement_mode(root);
         if studio_ticket_enforcement_mode == "strict" && studio_ticket_id.is_none() {
             let body = serde_json::json!({
@@ -2173,6 +2244,36 @@ if method == "POST" && path == "/api/message" {
             tracing::warn!("Code Studio soft ticket enforcement: run started without studio_ticket_id");
         }
     }
+    if let (Some(root), Some(ticket_id), Some(model)) = (
+        studio_disk_root.as_ref(),
+        studio_ticket_id.as_deref(),
+        studio_execution
+            .as_ref()
+            .and_then(|execution| execution.model.as_ref()),
+    ) {
+        if let Err(error) = crate::api_studio::studio_append_ticket_event(
+            root,
+            ticket_id,
+            "studio_model_selected",
+            "user_chat",
+            Some(serde_json::json!({
+                "provider": model.provider,
+                "model": model.model,
+            })),
+        ) {
+            tracing::error!(
+                ticket_id,
+                error = %error,
+                "Could not persist the selected model for Code Studio Kanban dispatch"
+            );
+            let body = serde_json::json!({
+                "error": "studio_model_preference_save_failed",
+                "detail": "Le modèle choisi n'a pas pu être mémorisé pour les prochains tickets.",
+                "cause": error
+            });
+            return Some(json_response("500 Internal Server Error", &body.to_string()));
+        }
+    }
     let studio_ui_agent_preference = body_json
         .as_ref()
         .and_then(|v| v.get("studio_assigned_agent").and_then(|x| x.as_str()))
@@ -2181,7 +2282,15 @@ if method == "POST" && path == "/api/message" {
     // Plan mode uses the technically restricted planner. Other Studio modes use the manager.
     // Chat composer modes: architect/code force the matching specialist when not in Studio.
     let studio_forced_agent = if studio_disk_root.is_some() {
-        Some(if studio_execution.as_ref().and_then(|value|value.action.as_deref())==Some("audit") { "studio_auditor" } else if studio_execution.as_ref().and_then(|value|value.action.as_deref()).is_some() { "studio_fullstack" } else if studio_code_mode.as_deref() == Some("plan") { "studio_planner" } else { "studio_project_manager" }.to_string())
+        Some(
+            code_studio_root_agent(
+                studio_execution
+                    .as_ref()
+                    .and_then(|value| value.action.as_deref()),
+                studio_code_mode.as_deref(),
+            )
+            .to_string(),
+        )
     } else if let Some(ref mode) = composer_mode {
         match mode.as_str() {
             "architect" | "code" => Some(mode.clone()),
@@ -2212,11 +2321,47 @@ if method == "POST" && path == "/api/message" {
     if let (Some(ref mode_s), Some(ref sq)) = (message_delivery_mode.as_deref(), steering_queue.as_ref())
     {
         if let Some(qmode) = crate::steering_queue::QueueMode::parse(mode_s) {
-            if let Some(tid) = sq
-                .resolve_running_task(&session_id, target_task_id)
-                .await
-            {
-                let queued = sq.enqueue(tid, qmode, message.clone()).await;
+            if let Some(tid) = queued_target_task_id {
+                let queued_message = if qmode
+                    == crate::steering_queue::QueueMode::FollowUp
+                {
+                    studio_ticket_id
+                        .as_deref()
+                        .and_then(|ticket_id| {
+                            studio_disk_root.as_ref().and_then(|root| {
+                                crate::api_studio::studio_get_ticket(root, ticket_id)
+                            })
+                        })
+                        .map(|ticket| {
+                            format!(
+                                "{}\n\n[Ticket Kanban obligatoire]\n- ticket_id: {}\n- titre: {}\n- assigned_agent: {}\n- acceptance_criteria: {}\nTraite ce ticket comme un élément de travail distinct de la tâche active, sans dupliquer son code ni son suivi.",
+                                message,
+                                ticket.id,
+                                ticket.title,
+                                ticket.assigned_agent,
+                                serde_json::to_string(&ticket.acceptance_criteria)
+                                    .unwrap_or_else(|_| "[]".to_string())
+                            )
+                        })
+                        .unwrap_or_else(|| message.clone())
+                } else {
+                    message.clone()
+                };
+                let queued = sq.enqueue(tid, qmode, queued_message).await;
+                if qmode == crate::steering_queue::QueueMode::FollowUp
+                    && studio_ticket_auto_created
+                {
+                    if let (Some(root), Some(ticket_id)) =
+                        (studio_disk_root.as_ref(), studio_ticket_id.as_deref())
+                    {
+                        let _ = crate::api_studio::studio_attach_task_to_ticket(
+                            root,
+                            ticket_id,
+                            &tid.to_string(),
+                            "system_follow_up",
+                        );
+                    }
+                }
                 let event_type = match qmode {
                     crate::steering_queue::QueueMode::Steering => "user_steering_queued",
                     crate::steering_queue::QueueMode::FollowUp => "user_follow_up_queued",
@@ -2241,6 +2386,7 @@ if method == "POST" && path == "/api/message" {
                     "queue_id": queued.id,
                     "task_id": tid.to_string(),
                     "session_id": session_id,
+                    "studio_ticket_id": studio_ticket_id,
                     "message": "Message mis en file pour la tâche en cours."
                 });
                 return Some(json_response("200 OK", &body.to_string()));
@@ -2273,6 +2419,37 @@ if method == "POST" && path == "/api/message" {
         );
     }
     if let Some(ref root) = studio_disk_root {
+        // Give the project manager a fresh, deterministic view of all unfinished work on
+        // every Code Studio run. This makes Kanban review part of task routing instead of
+        // relying on a one-time, best-effort bootstrap message.
+        let tickets = crate::api_studio::studio_list_tickets(root);
+        let open: Vec<_> = tickets
+            .iter()
+            .filter(|ticket| !ticket.status.eq_ignore_ascii_case("done"))
+            .take(40)
+            .map(|ticket| {
+                serde_json::json!({
+                    "id": ticket.id,
+                    "title": ticket.title,
+                    "status": ticket.status,
+                    "assigned_agent": ticket.assigned_agent,
+                    "depends_on_ticket_ids": ticket.depends_on_ticket_ids,
+                    "acceptance_criteria": ticket.acceptance_criteria,
+                    "description": ticket.description.chars().take(360).collect::<String>(),
+                })
+            })
+            .collect();
+        let kanban_snapshot = serde_json::json!({
+            "unfinished_total": tickets.iter().filter(|ticket| !ticket.status.eq_ignore_ascii_case("done")).count(),
+            "included": open.len(),
+            "tickets": open,
+        });
+        message_for_llm = format!(
+            "[Kanban — instantané des tickets non terminés du projet; vérifie les prérequis et réconcilie les statuts avant toute délégation.\n{}\n]\n\n{}",
+            kanban_snapshot,
+            message_for_llm
+        );
+
         let direct_files=studio_delegate_single_level && studio_code_mode.as_deref()!=Some("plan")
             && !matches!(composer_mode.as_deref(),Some("ask"|"architect")) && studio_ticket_id.is_none()
             && studio_evolution_branch.is_none()
@@ -2377,6 +2554,15 @@ if method == "POST" && path == "/api/message" {
         }
         if studio_code_mode.as_deref() == Some("plan") {
             message_for_llm = format!("[Planification bornée : utiliser les outils de lecture et uniquement CODE_STUDIO_PLAN.md pour l’écriture. Aucune délégation ni commande système.]\n\n{}", message_for_llm);
+        } else if studio_execution
+            .as_ref()
+            .and_then(|value| value.action.as_deref())
+            == Some("goal")
+        {
+            message_for_llm = format!(
+                "[Exécution directe du goal Code Studio : tu es l’agent `studio_fullstack`. Le contrat de goal et ses critères mécaniques sont actifs. Implémente directement la demande sur le dépôt, vérifie chaque critère dans l’ordre, corrige les diagnostics avant de continuer, puis consigne les preuves et les fichiers sur le ticket Kanban. Ne tente pas de délégation : ce workflow possède les outils d’édition et de vérification nécessaires.]\n\n{}",
+                message_for_llm
+            );
         } else if studio_delegate_single_level {
             message_for_llm = format!(
                 "[Délégation : privilégier une seule passe agent — éviter les sous-agents ou tâches parallèles implicites sans accord utilisateur.]\n\n{}",
@@ -2430,7 +2616,7 @@ if method == "POST" && path == "/api/message" {
     if let Some(action)=studio_execution.as_ref().and_then(|value|value.action.as_deref()) {
         let instruction=match action {
             "debug"=>"Reproduce the reported failure, identify its cause from observed evidence, apply a focused fix and verify it. Report unverified assumptions explicitly.",
-            "audit"=>"Audit using read-only repository tools. Report prioritized findings with file references and evidence. Do not modify files, run shell commands or delegate work.",
+            "audit"=>"Delegate repository inspection to studio_auditor, which is read-only. Do not modify application source in this workflow. You may read and update the Kanban: create one actionable ticket per confirmed finding, include inspected paths and evidence, then summarize the findings and their ticket IDs.",
             "test"=>"Inspect the project scripts and choose relevant checks for the request. Run them, preserve real exit codes and report failures. Do not modify source files unless the user requested fixes.",
             _=>"Pursue the explicit objective. Mechanical checks and hard budgets are enforced by the daemon; do not claim verification without tool evidence.",
         };
@@ -2485,6 +2671,7 @@ if method == "POST" && path == "/api/message" {
                 "ack": true,
                 "task_id": task_id.to_string(),
                 "session_id": session_id,
+                "studio_ticket_id": studio_ticket_id,
                 "message": ack_message
             });
             return Some(json_response("200 OK", &body.to_string()));
@@ -2736,6 +2923,73 @@ mod tests {
     use akasha_store::Task;
     use chrono::Utc;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn bounded_goals_run_on_the_implementation_agent_and_other_workflows_keep_the_manager() {
+        assert_eq!(code_studio_root_agent(Some("goal"), None), "studio_fullstack");
+        assert_eq!(code_studio_root_agent(Some("debug"), None), "studio_project_manager");
+        assert_eq!(code_studio_root_agent(Some("test"), None), "studio_project_manager");
+        assert_eq!(code_studio_root_agent(Some("audit"), None), "studio_project_manager");
+        assert_eq!(code_studio_root_agent(None, Some("plan")), "studio_project_manager");
+    }
+
+    #[test]
+    fn steering_reuses_active_work_but_actionable_follow_up_gets_a_ticket() {
+        let request = "Ajoute un test pour vérifier la sauvegarde des préférences.";
+        assert!(should_create_studio_chat_ticket(
+            true, false, false, None, request
+        ));
+        assert!(!should_create_studio_chat_ticket(
+            true,
+            false,
+            true,
+            Some(crate::steering_queue::QueueMode::Steering),
+            request
+        ));
+        assert!(should_create_studio_chat_ticket(
+            true,
+            false,
+            true,
+            Some(crate::steering_queue::QueueMode::FollowUp),
+            request
+        ));
+        assert!(should_create_studio_chat_ticket(
+            true,
+            true,
+            true,
+            Some(crate::steering_queue::QueueMode::FollowUp),
+            "Un mode nuit indépendant pour les captures serait utile."
+        ));
+        assert!(!should_create_studio_chat_ticket(
+            true,
+            true,
+            true,
+            Some(crate::steering_queue::QueueMode::Steering),
+            request
+        ));
+        assert!(!should_create_studio_chat_ticket(
+            true,
+            true,
+            false,
+            None,
+            request
+        ));
+        assert!(!should_create_studio_chat_ticket(
+            false, false, false, None, request
+        ));
+    }
+
+    #[test]
+    fn recognized_queue_delivery_cannot_fall_back_to_a_new_task() {
+        use crate::steering_queue::QueueMode;
+        assert!(queue_delivery_requires_running_target(Some(QueueMode::Steering), None));
+        assert!(queue_delivery_requires_running_target(Some(QueueMode::FollowUp), None));
+        assert!(!queue_delivery_requires_running_target(
+            Some(QueueMode::Steering),
+            Some(Uuid::nil())
+        ));
+        assert!(!queue_delivery_requires_running_target(None, None));
+    }
 
     #[test]
     fn task_label_unwraps_private_instructions_before_truncation() {

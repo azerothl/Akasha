@@ -125,6 +125,28 @@ pub async fn run_mechanical_acceptance_checks(
     payload: &StudioAcceptancePayload,
     timeout_sec: u64,
 ) -> Vec<String> {
+    run_checks_with_limit(project_root,payload,timeout_sec,800).await
+}
+
+/// Agent repair needs compiler diagnostics, not only the first few log lines.
+pub(crate) async fn run_goal_acceptance_checks(
+    project_root: &Path,
+    payload: &StudioAcceptancePayload,
+    timeout_sec: u64,
+) -> Vec<String> {
+    run_checks_with_limit(project_root,payload,timeout_sec,8000).await
+}
+
+fn bounded_diagnostics(out: &str, err: &str, limit: usize) -> String {
+    format!("{out}\n{err}").chars().take(limit).collect()
+}
+
+async fn run_checks_with_limit(
+    project_root: &Path,
+    payload: &StudioAcceptancePayload,
+    timeout_sec: u64,
+    diagnostic_chars: usize,
+) -> Vec<String> {
     let mut errs = Vec::new();
     let cap = timeout_sec.max(1).min(3600);
     for c in &payload.criteria {
@@ -174,10 +196,7 @@ pub async fn run_mechanical_acceptance_checks(
                 match super::studio_run_command_capture(project_root, argv, cap).await {
                     Ok((Some(0), _, _)) => {}
                     Ok((code, out, err)) => {
-                        let tail: String = format!("{}\n{}", out, err)
-                            .chars()
-                            .take(800)
-                            .collect();
+                        let tail = bounded_diagnostics(&out,&err,diagnostic_chars);
                         errs.push(format!(
                             "[{}] command_ok échoue (code {:?}): {}\n{}",
                             if c.id.is_empty() { "?" } else { &c.id },
@@ -272,5 +291,16 @@ mod tests {
     #[test]
     fn rejects_dotdot_path() {
         assert!(join_rel_under_project_root(Path::new("/tmp"), "a/../b").is_err());
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_limit_tests {
+    #[test]
+    fn agent_diagnostics_keep_later_compiler_errors_without_unbounded_output() {
+        let output=format!("{}actual compiler failure é🙂", "header ".repeat(200));
+        assert!(!super::bounded_diagnostics(&output,"",800).contains("actual compiler failure"));
+        assert!(super::bounded_diagnostics(&output,"",8000).contains("actual compiler failure é🙂"));
+        assert_eq!(super::bounded_diagnostics(&"é".repeat(9000),"",8000).chars().count(),8000);
     }
 }

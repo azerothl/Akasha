@@ -81,6 +81,149 @@ async fn studio_round_limit_choice(store: &Option<HumanInputStore>, bus: &EventB
     answer
 }
 
+fn should_recover_duplicate_read(
+    tool: &str,
+    repeated_three_times: bool,
+    recovery_count: u8,
+    recovery_limit: u8,
+) -> bool {
+    repeated_three_times
+        && tool.eq_ignore_ascii_case("read_file")
+        && recovery_count < recovery_limit
+}
+
+fn should_suppress_repeated_goal_read(
+    tool: &str,
+    goal_failure_seen: bool,
+    successful_reads_for_request: u8,
+) -> bool {
+    goal_failure_seen
+        && tool.eq_ignore_ascii_case("read_file")
+        && successful_reads_for_request >= 2
+}
+
+fn is_provider_tool_call_parse_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("error parsing tool call")
+        || (lower.contains("tool call")
+            && lower.contains("invalid character")
+            && lower.contains("string literal"))
+}
+
+fn sanitized_tool_transport_error(error: &str, provider_parse_error: bool) -> String {
+    if provider_parse_error {
+        "Provider rejected malformed tool-call JSON before execution".to_string()
+    } else {
+        error.chars().take(800).collect()
+    }
+}
+
+fn goal_read_request_key(path: &str, args: &[String]) -> String {
+    let (_, window, full) = parse_read_file_args(args);
+    let read_shape = if full {
+        "full".to_string()
+    } else if let Some((offset, limit)) = window {
+        format!("window:{offset}:{limit}")
+    } else {
+        "default".to_string()
+    };
+    format!("{}|{read_shape}", path.to_ascii_lowercase())
+}
+
+fn is_retryable_failed_mutation(tool: &str, result: &str) -> bool {
+    let tool = tool.to_ascii_lowercase();
+    let result = result.to_ascii_lowercase();
+    matches!(
+        tool.as_str(),
+        "search_replace" | "edit_file" | "apply_patch" | "write_file" | "write_code"
+    ) && (result.contains("edit_no_change") || result.contains("stale_file_version"))
+}
+
+#[cfg(test)]
+mod duplicate_read_loop_tests {
+    use super::{
+        goal_read_request_key, is_retryable_failed_mutation, should_recover_duplicate_read,
+        should_suppress_repeated_goal_read,
+    };
+
+    #[test]
+    fn gives_bounded_recoveries_for_a_repeated_file_read() {
+        assert!(should_recover_duplicate_read("read_file", true, 0, 4));
+        assert!(should_recover_duplicate_read("read_file", true, 3, 4));
+        assert!(!should_recover_duplicate_read("read_file", true, 4, 4));
+        assert!(!should_recover_duplicate_read("read_file", false, 0, 4));
+    }
+
+    #[test]
+    fn non_read_tool_loops_remain_terminal() {
+        assert!(!should_recover_duplicate_read("write_file", true, 0, 4));
+        assert!(!should_recover_duplicate_read("run_command", true, 0, 4));
+    }
+
+    #[test]
+    fn recognizes_failed_edit_retries_even_when_other_tools_intervene() {
+        assert!(is_retryable_failed_mutation(
+            "search_replace",
+            "edit_no_change: the replacement did not change file content"
+        ));
+        assert!(is_retryable_failed_mutation(
+            "edit_file",
+            "stale_file_version: expected version is outdated"
+        ));
+        assert!(!is_retryable_failed_mutation(
+            "run_command",
+            "edit_no_change"
+        ));
+        assert!(!is_retryable_failed_mutation("search_replace", "success"));
+    }
+
+    #[test]
+    fn suppresses_repeated_goal_reads_only_after_two_successful_reads_and_a_failure() {
+        assert!(!should_suppress_repeated_goal_read("read_file", false, 3));
+        assert!(!should_suppress_repeated_goal_read("read_file", true, 1));
+        assert!(should_suppress_repeated_goal_read("read_file", true, 2));
+        assert!(!should_suppress_repeated_goal_read("search_files", true, 5));
+    }
+
+    #[test]
+    fn different_goal_read_windows_are_not_treated_as_duplicate_requests() {
+        let first = goal_read_request_key(
+            "workspace:/src/game.ts",
+            &[
+                "workspace:/src/game.ts".to_string(),
+                "200".to_string(),
+                "40".to_string(),
+            ],
+        );
+        let second = goal_read_request_key(
+            "workspace:/src/game.ts",
+            &[
+                "workspace:/src/game.ts".to_string(),
+                "240".to_string(),
+                "40".to_string(),
+            ],
+        );
+        let full = goal_read_request_key(
+            "workspace:/src/game.ts",
+            &["workspace:/src/game.ts".to_string(), "--full".to_string()],
+        );
+
+        assert_ne!(first, second);
+        assert_ne!(first, full);
+        assert_eq!(
+            first,
+            goal_read_request_key(
+                "WORKSPACE:/SRC/GAME.TS",
+                &[
+                    "workspace:/src/game.ts".to_string(),
+                    "200".to_string(),
+                    "40".to_string(),
+                ],
+            )
+        );
+    }
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 /// preferred_task_type_override: when set (e.g. system selector task_type), overrides routing/reminders vs. assigned_agent alone.
@@ -254,6 +397,22 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
+    if code_studio_disk_task && assigned_agent.eq_ignore_ascii_case("studio_project_manager") {
+        studio_disk_system_append.push_str(
+            "\n\n[Kanban workflow — required]\n\
+            Before implementation delegation, read the whole Kanban. When the linked ticket has the initial-kanban-backlog criterion, refine the seeded work tickets before creating missing ones. Ensure at least three focused work tickets with non-empty, verifiable acceptance criteria cover the foundation, requested features, integration, and validation, with at least one real dependency between work tickets. Each work ticket uses parent_ticket_id for the global tracker and a stable creation_key; parent-child tracking does not block dispatch. Use depends_on_ticket_ids only for real execution prerequisites, never for the global tracker. Before creating work, reread the Kanban and reuse the existing canonical ticket ID; repeated requests must not create duplicates. Do not delegate implementation until this backlog exists. Every user evolution has an automatically linked global ticket; do not duplicate it. Before editing source, create or reuse at least one actionable child ticket under that tracker: exactly one for a small change, multiple for independent or sequential work. Give each child observable acceptance criteria, an owner, and a reviewer. A queued follow-up has its own linked tracker and follows the same rule. After every worker result and on every scheduled Kanban pass, compare open tickets with task states, update blockers and dispatch one ready ticket per pass in dependency order. If verification finds a confirmed bug outside the current ticket, create a distinct bug ticket with expected result, observed result, and a reproducible check; do not duplicate a bug already covered by the current ticket. Never mark a ticket done without observed validation evidence."
+        );
+    } else if code_studio_disk_task
+        && matches!(
+            assigned_agent.to_ascii_lowercase().as_str(),
+            "studio_fullstack" | "studio_frontend" | "studio_backend" | "studio_scaffold" | "code"
+        )
+    {
+        studio_disk_system_append.push_str(
+            "\n\n[Kanban bug handoff]\n\
+            Stay within the assigned ticket. If inspection or verification confirms a separate out-of-scope bug, report its expected result, observed result, and reproducible check to the project manager so it can be recorded as a separate Kanban ticket. Do not silently fold unrelated work into this ticket or claim the bug is tracked until the manager confirms the ticket."
+        );
+    }
     let context_message=recovery_checkpoint.as_ref().map(|checkpoint|super::studio_conversation::initial_user_context(&checkpoint.conversation,
         if checkpoint.prompt.contains("[Current user request — task scope]"){&checkpoint.prompt}else{&message})).unwrap_or(&message);
     let focused_file_task=code_studio_disk_task && assigned_agent=="studio_project_manager"
@@ -534,7 +693,7 @@ pub(crate) async fn run_message_via_llm(
     let max_tokens = std::env::var("AKASHA_MAX_RESPONSE_TOKENS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(4096);
+        .unwrap_or(if code_studio_disk_task { 8192 } else { 4096 });
     let mut completion_max_tokens = if is_small_talk_fast_lane {
         max_tokens.min(256).max(64)
     } else {
@@ -655,6 +814,12 @@ pub(crate) async fn run_message_via_llm(
                  Si aucun outil n’est nécessaire, répondre en texte.",
                 base, skills_part_studio, run_command_os_rule
             );
+            if std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
+                code_studio_system_tools_block = tools_executor_snapshot.as_ref()
+                    .map(|executor| crate::studio_capabilities::native_prompt(&executor.policy,&assigned_agent))
+                    .unwrap_or_default();
+                code_studio_system_tools_block.push_str(&skills_part_studio);
+            }
             format!(
                 "\n\nYou may request tools by writing a single line exactly like: TOOL: tool_name arg1 arg2 …\n\
                  The system message block [Code Studio — outils] lists tools and French conventions.\n\
@@ -829,7 +994,7 @@ pub(crate) async fn run_message_via_llm(
         if studio_impl_writes_expected {
             system_prompt.push_str(
                 "\n\n[Code Studio — application des corrections]\n\
-                - Tu dois appliquer les modifications toi-même via des lignes `TOOL:` (`search_replace`, `edit_file`, `write_file`, `apply_patch`) sur `workspace:/…` lorsque ces outils sont autorisés.\n\
+                - Tu dois exécuter les modifications toi-même avec les outils réels sur `workspace:/…`. Utilise le transport natif annoncé par le fournisseur ; les lignes TOOL: sont uniquement un repli pour un fournisseur sans outils natifs.\n\
                 - Ne remplace pas une exécution d’outil par un long « contenu corrigé à mettre dans le fichier » dans le chat : le livrable attendu est l’écriture sur disque.\n\
                 - Si un outil d’écriture échoue ou est refusé par la politique : explique **pourquoi** tu ne peux pas l’appliquer toi-même (message d’erreur ou règle), puis seulement propose une alternative manuelle.\n",
             );
@@ -877,7 +1042,7 @@ pub(crate) async fn run_message_via_llm(
         system_prompt.push_str(&repository_rules_prompt);
     }
     if code_studio_disk_task {
-        system_prompt.push_str("\n[Studio execution protocol — file contents are structured data]\nFollow the provider native function transport when available (studio_call or the provider adapter). For text fallback, use one TOOL_JSON: object per line with schema_version:1, tool and arguments. For write_file/write_code, arguments MUST contain path (the exact requested workspace:/ path), content (a JSON string containing ONLY the requested file bytes) and expected_version (the string missing for creation, or SHA-256 from read_file for an existing file). Never put call syntax inside file content. Square-bracket/function notation is valid only when the provider adapter explicitly requires its native format; it is not a legacy TOOL format. Do not add a summary to a legacy write_file body: it would become file contents. Prefer TOOL_JSON for file writes. Wait for the execution result before summarizing in a separate assistant turn. Retain the original user request until ALL requested operations and checks are done. Project templates and maintenance examples never authorize additional files outside the user's explicit task scope.\n");
+        system_prompt.push_str("\n[Studio execution protocol — file contents are structured data]\nFollow the provider native function transport when available (studio_call or the provider adapter). For text fallback, use one TOOL_JSON: object per line with schema_version:1, tool and arguments. File mutations must target the exact requested workspace:/ path and contain only the requested content. Read an existing file successfully before editing it. Include expected_version from that read when available; if omitted, the runtime binds the mutation to this task's latest successful read and still rejects stale edits. For a new file, pass expected_version: missing. Never put call syntax inside file content. Square-bracket/function notation is valid only when the provider adapter explicitly requires its native format; it is not a legacy TOOL format. Do not add a summary to a legacy write_file body: it would become file contents. Wait for the execution result before summarizing in a separate assistant turn. Retain the original user request until ALL requested operations and checks are done. Project templates and maintenance examples never authorize additional files outside the user's explicit task scope.\n");
     }
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
@@ -1527,6 +1692,16 @@ pub(crate) async fn run_message_via_llm(
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(10);
+        // Code Studio implementation tasks need enough bounded iterations to inspect,
+        // change, and verify a real project instead of stopping at the chat default.
+        if code_studio_disk_task {
+            let floor = std::env::var("AKASHA_MAX_TOOL_ROUNDS_STUDIO")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(32)
+                .clamp(12, 64);
+            max_tool_rounds = max_tool_rounds.max(floor);
+        }
         // Orchestrated subtasks / remediation: extra tool rounds (models often read/search first).
         if orch_disk_deliverables {
             let floor = std::env::var("AKASHA_MAX_TOOL_ROUNDS_ORCH_DELIVERABLES")
@@ -1537,10 +1712,15 @@ pub(crate) async fn run_message_via_llm(
                 max_tool_rounds = floor;
             }
         }
+        // An explicitly budgeted goal already authorizes bounded continuation.
+        // Do not interrupt it at the unrelated conversational ten-round default.
+        if let Some(goal) = goal_tracker.as_ref() {
+            max_tool_rounds = crate::studio_execution::goal_tool_round_budget(max_tool_rounds, &goal.goal);
+        }
         let mut conversation = recovery_checkpoint.as_ref().map(|c|c.conversation.clone()).unwrap_or_default();
         let mut resume_overlay=String::new();
         if let Some(checkpoint)=recovery_checkpoint.as_ref(){
-            let ledger=match crate::studio_tool_contract::recovery_summary(&store_path,task_id){Ok(value)=>value,Err(error)=>{abort_recovery!(error);}};
+            let ledger=match crate::studio_tool_contract::recovery_summary(&store_path,task_id){Ok(value)=>crate::studio_tool_contract::recovery_prompt_summary(value),Err(error)=>{abort_recovery!(error);}};
             resume_overlay=format!("[Resumed execution — apply CURRENT system/rules/permissions; do not replay operations]\n[Recorded operation results; unknown effects require operator resolution]\n{}\n[Pending human input at interruption: {}. Ask again; no old approval is restored.]\n[CURRENT task instructions]\n{}\n[Saved execution state]\n",ledger,checkpoint.waiting.as_ref().map(|v|v.to_string()).unwrap_or_else(||"none".into()),current_prompt);
             current_prompt=checkpoint.prompt.clone();
             run_outcome=checkpoint.outcome.clone();run_outcome.termination=TerminationReason::Success;
@@ -1550,6 +1730,8 @@ pub(crate) async fn run_message_via_llm(
         let mut round = recovery_checkpoint.as_ref().map(|checkpoint|checkpoint.round).unwrap_or(0);
         // Tours d'affilée avec uniquement des outils d'exploration (Code Studio).
         let mut studio_read_only_streak_rounds: u32 = 0;
+        let mut studio_goal_failure_seen = goal_tracker.as_ref().is_some_and(|goal|goal.state.cycles>0);
+        let mut studio_repair_focus_next_turn = recovery_checkpoint.is_some() && studio_goal_failure_seen;
         let mut social_snapshot_seen = false;
         // Loop detection history is tracked per "agent key".
         // For now, agent key = current task_id (sub-agent tasks each have their own task_id).
@@ -1557,6 +1739,16 @@ pub(crate) async fn run_message_via_llm(
             String,
             Vec<(String, String)>,
         > = std::collections::HashMap::new();
+        let mut duplicate_read_recovery_by_agent =
+            std::collections::HashMap::<(String, String), u8>::new();
+        // A failed goal may need a second source read, but repeated successful
+        // reads of the same unchanged path must eventually yield to a repair.
+        let mut successful_goal_reads_by_path = std::collections::HashMap::<String, u8>::new();
+        // Models sometimes reread between retries, which defeats a consecutive
+        // tool-call loop detector. Remember exact file mutations rejected as
+        // unchanged/stale and suppress the same retry before executing it.
+        let mut failed_mutation_retries_by_agent =
+            std::collections::HashMap::<(String, String), (u8, String)>::new();
         let loop_agent_key = task_id.to_string();
         let mut last_tool_results_blob: Option<String> = None;
         let mut force_synthesis_attempted = false;
@@ -1597,6 +1789,10 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_else(|| {
                 if embedded_compact {
                     llm_timeout_secs.max(600)
+                } else if code_studio_disk_task {
+                    // Native function arguments may be buffered until the call
+                    // is complete; honor the configured overall model deadline.
+                    llm_timeout_secs
                 } else {
                     llm_timeout_secs.min(300)
                 }
@@ -1608,7 +1804,7 @@ pub(crate) async fn run_message_via_llm(
         });
         'tool_rounds: loop {
             if let Some(goal)=goal_tracker.as_mut() {
-                if goal.exhausted() { run_outcome.termination=TerminationReason::BudgetExhausted;reply_text="Limite de cycles ou de durée de l’objectif atteinte; réussite non confirmée.".into();let _=goal.save(&store_path,task_id,"budget_exhausted",&reply_text);break 'tool_rounds; }
+                if goal.exhausted() { run_outcome.termination=TerminationReason::BudgetExhausted;reply_text="Limite de cycles, de durée ou de tokens de l’objectif atteinte ; réussite non confirmée.".into();let _=goal.save(&store_path,task_id,"budget_exhausted",&reply_text);break 'tool_rounds; }
                 if let Err(error)=goal.save(&store_path,task_id,"active","Exécution ou vérification en cours") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
             }
             if code_studio_disk_task {if let Some(exec)=tools_executor.as_ref(){let policy=crate::studio_policy::for_workspace(&exec.read().await.policy, &tool_disk_workspace_root);if let Err(error)=crate::studio_file_effects::refresh(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}}
@@ -1764,9 +1960,19 @@ pub(crate) async fn run_message_via_llm(
             }
             if round>=max_tool_rounds {run_outcome.termination=TerminationReason::ToolRoundLimit;reply_text="Tool round budget already exhausted at checkpoint; start a new scoped task to continue.".into();break 'tool_rounds;}
             let literal_only=focused_file_task && scope_unchanged && active_repository_rules.is_empty() && super::studio_completion::literal_file_operations_only(&task_scope);
+            let repair_focus_this_turn = studio_repair_focus_next_turn;
+            if repair_focus_this_turn {
+                current_prompt.push_str("\n[Stalled goal repair phase] Repeated surveys or failed checks have not changed the project. This turn prioritizes already permitted repair functions and retains source reads and verification commands needed for the repair. Read an implicated file when needed, then prefer one small targeted correction with search_replace, edit_file or apply_patch using the inspected current version. Preserve unrelated code and avoid a whole-file rewrite when a patch suffices, unless the original request explicitly requires a full rewrite. Do not repeat the failed command. No completed write is implied by a plan. If the recorded blocker is truly irreparable with these permissions, report that precise blocker.\n");
+            }
             let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
                 tools_executor_snapshot.as_ref().and_then(|exec| {
                     let mut names:Vec<String>=crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect();
+                    names=crate::studio_capabilities::select_native_names(names,
+                        run_outcome.checks.iter().any(|check|check["kind"]=="native_catalogue_discovery"));
+                    if repair_focus_this_turn && !literal_only {
+                        names=crate::studio_capabilities::select_repair_names(names);
+                        insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"stalled_goal_repair","tools":names}));
+                    }
                     if literal_only {
                         names.retain(|name|matches!(name.as_str(),"read_file"|"write_file"|"write_code"));
                         insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"literal_file_only","literal_values_bound":true,"tools":names}));
@@ -1783,7 +1989,7 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
             let request = CompletionRequest {
-                require_tool: code_studio_disk_task && ((run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation())
+                require_tool: code_studio_disk_task && (goal_tracker.is_some() || (run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation())
                     || (!explicit_file_goals.is_empty() && super::studio_completion::requires_tool_retry(&current_prompt,&run_outcome.checks)))
                     && (matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code")
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
@@ -1813,6 +2019,14 @@ pub(crate) async fn run_message_via_llm(
             };
             // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
             // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
+            // Native providers may buffer a whole file-write argument before
+            // yielding a chunk. The request has its own configured deadline;
+            // handing off to that bounded wait is real worker activity, not a
+            // claim that files changed or the goal succeeded.
+            if code_studio_disk_task && request.tools.as_ref().is_some_and(|tools|!tools.is_empty()) {
+                crate::studio_execution::mark_bounded_native_wait(&meaningful_progress_flag,llm_timeout_secs);
+                insert_task_tracking_event(&store_path,task_id,"bounded_native_model_wait",serde_json::json!({"round":round+1,"timeout_secs":llm_timeout_secs,"files_changed":false}));
+            }
             let delivered_prompt = request.prompt.clone();
             let estimated_request_tokens=serde_json::to_vec(&request).map(|bytes|bytes.len() as u64).unwrap_or(request.prompt.len() as u64);
             let (stream_tx, std_rx) = std::sync::mpsc::channel::<String>();
@@ -2030,7 +2244,10 @@ pub(crate) async fn run_message_via_llm(
                         resp.text.trim().to_string()
                     }
                     Ok(Ok(Err(e))) => {
-                        tracing::warn!(error = %e, "LLM completion failed");
+                        let error_text = e.to_string();
+                        let provider_parse_error = is_provider_tool_call_parse_error(&error_text);
+                        let safe_error = sanitized_tool_transport_error(&error_text, provider_parse_error);
+                        tracing::warn!(error = %safe_error, "LLM completion failed");
                         insert_task_tracking_event(
                             store_path.as_path(),
                             task_id,
@@ -2038,11 +2255,51 @@ pub(crate) async fn run_message_via_llm(
                             serde_json::json!({
                                 "round": round + 1,
                                 "success": false,
-                                "error": e.to_string(),
+                                "error": safe_error.clone(),
                             }),
                         );
+                        let local_protocol_error = error_text.contains("tool_protocol_error:");
+                        let protocol_retry_count = run_outcome.checks.iter()
+                            .filter(|check| check["kind"] == "tool_protocol_retry")
+                            .count();
+                        let provider_parse_retry_count = run_outcome.checks.iter()
+                            .filter(|check| check["kind"] == "tool_protocol_retry"
+                                && check["failure_kind"] == "provider_json_parse")
+                            .count();
+                        let retry_allowed = if provider_parse_error {
+                            provider_parse_retry_count < 1
+                        } else {
+                            local_protocol_error && protocol_retry_count < 3
+                        };
+                        if code_studio_disk_task && retry_allowed {
+                            let failure_kind = if provider_parse_error { "provider_json_parse" } else { "native_tool_protocol" };
+                            let retry_detail = if provider_parse_error {
+                                "Le fournisseur a rejeté le JSON d'appel d'outil avant son exécution."
+                            } else {
+                                "Le protocole natif a rejeté l'appel avant son exécution."
+                            };
+                            run_outcome.checks.push(serde_json::json!({
+                                "kind":"tool_protocol_retry",
+                                "failure_kind":failure_kind,
+                                "status":"retried",
+                                "detail":retry_detail
+                            }));
+                            if let Some(goal)=goal_tracker.as_mut() {
+                                // Failed transport has no usage receipt; conservatively
+                                // charge the configured completion allowance as estimated.
+                                goal.state.tokens_used=goal.state.tokens_used.saturating_add(completion_max_tokens as u64);
+                                if let Err(error)=goal.save(&store_path,task_id,"active","Malformed tool transport rejected; bounded corrective retry") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
+                            }
+                            current_prompt.push_str(&format!("\n[Current advertised functions] {}. Choose only from these names.\n",turn_tool_names.as_deref().unwrap_or(&[]).join(", ")));
+                            current_prompt.push_str(&format!("\n[Transport rejection — no tool call from this response was executed] {retry_detail} Regenerate one complete operation using an advertised function and its literal keyword arguments. Do not mix formats or use legacy TOOL lines. Keep the arguments small and valid JSON. Re-read current ticket and file state before making any assumptions about earlier operations. Continue the requested implementation only after the repaired call succeeds.\n"));
+                            continue 'tool_rounds;
+                        }
                         run_outcome.termination = TerminationReason::ProviderError;
-                        reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
+                        reply_text = if provider_parse_error {
+                            "Le fournisseur LLM a rejeté le JSON d’un appel d’outil. La tâche s’est arrêtée et cet appel n’a pas été exécuté. Des opérations précédentes peuvent avoir abouti : vérifiez l’état du projet avant de relancer ou choisissez un autre modèle.".to_string()
+                        } else {
+                            format!("Sorry, I couldn't get a response (error: {}).", safe_error)
+                        };
                         break;
                     }
                     Ok(Err(join_err)) => {
@@ -2170,7 +2427,7 @@ pub(crate) async fn run_message_via_llm(
                     if !pending.is_empty() {
                         if physical_completion_retries>=3 {run_outcome.termination=TerminationReason::VerificationFailed;reply_text=format!("Explicitly requested files are still missing: {}",pending.join(", "));break 'tool_rounds;}
                         physical_completion_retries+=1;
-                        if !delivered_prompt.is_empty(){conversation.push(akasha_llm::ConversationMessage::user(delivered_prompt.clone()));}
+                        if !delivered_prompt.is_empty(){conversation.push(if !conversation.is_empty() && (delivered_prompt.trim_start().starts_with("[Active goal") || delivered_prompt.trim_start().starts_with("[Repair the FIRST") || delivered_prompt.trim_start().starts_with("[STUDIO_READ_ONLY_STREAK]")) {akasha_llm::ConversationMessage::runtime_control(delivered_prompt.clone())} else {akasha_llm::ConversationMessage::user(delivered_prompt.clone())});}
                         conversation.push(akasha_llm::ConversationMessage::assistant(response.clone()));
                         current_prompt=format!("[Pending physical deliverables] The final response is premature: these explicitly requested files are missing or do not match their required literal content: {}. Complete the ORIGINAL user request with the available tools and current permissions. Do not repeat confirmed operations on other files. Presence alone does not validate file contents or other requested checks.\nOriginal user request:\n{}",pending.join(", "),super::studio_conversation::user_request(&task_scope));
                         continue;
@@ -2188,7 +2445,7 @@ pub(crate) async fn run_message_via_llm(
                     break 'tool_rounds;
                 }
                 studio_zero_tool_promise_nags += 1;
-                current_prompt.push_str("\n[Execution still missing] No successful file mutation has been confirmed. Reads and failed edits do not implement the requested change. Execute the original requested file operation now with native studio_call or the structured JSON tool branch (schema_version, tool, arguments including path/content/expected_version). Do not return a final response until the actual tool result confirms the requested effects.\n");
+                current_prompt.push_str("\n[Execution still missing] No successful file mutation has been confirmed. Reads and failed edits do not implement the requested change. Execute the original requested file operation now with native studio_call or the structured JSON tool branch (schema_version, tool, arguments including the exact path and content). Read existing files first; the runtime uses this task's latest successful read when expected_version is omitted and rejects stale edits. Use expected_version: missing for file creation. Do not return a final response until the actual tool result confirms the requested effects.\n");
                 continue;
             }
             let response_plain = response
@@ -2390,6 +2647,8 @@ pub(crate) async fn run_message_via_llm(
             {
                 round += 1;
                 let mut tool_results = Vec::new();
+                let mut goal_boundary_attempt = false;
+                let mut round_non_survey_progress = false;
                 let mut tool_result_starts = Vec::new();
                 // Validate explicit byte constraints before any dependent batch effect.
                 // Rejected calls and deferred siblings remain visible, without fake results.
@@ -2410,7 +2669,7 @@ pub(crate) async fn run_message_via_llm(
                     let path=value.as_ref().and_then(|v|v["arguments"]["path"].as_str()).or_else(||args.first().filter(|_|name!="studio_call").map(String::as_str)).unwrap_or("");
                     serde_json::json!({"tool":&tool[..tool.floor_char_boundary(64.min(tool.len()))],"path":&path[..path.floor_char_boundary(256.min(path.len()))],"status":"not_executed"})
                 }).collect();
-                let rejected_batch = serde_json::json!({"calls":rejected_calls,"omitted_calls":calls.len().saturating_sub(16),"retry_hint":"No call in this batch was executed. Resubmit from the FIRST unexecuted operation, not just the last call. Every write_file/write_code requires expected_version: use the string missing for creation, or the SHA-256 from read_file for an existing file. A deferred creation did NOT create its file."});
+                let rejected_batch = serde_json::json!({"calls":rejected_calls,"omitted_calls":calls.len().saturating_sub(16),"retry_hint":"No call in this batch was executed. Resubmit from the FIRST unexecuted operation, not just the last call. Read existing files before mutation; expected_version may be omitted when this task has a successful read, in which case the runtime binds to that snapshot and rejects stale edits. Use expected_version: missing for creation. A deferred creation did NOT create its file."});
                 let mut previous_batch_call_succeeded = true;
                 let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
@@ -2454,6 +2713,10 @@ pub(crate) async fn run_message_via_llm(
                         let native_envelope_args=args;
                         let name=typed_call.as_ref().map(|call|&call.envelope.tool).unwrap_or(name);
                         let args=typed_call.as_ref().map(|call|&call.argv).unwrap_or(args);
+                        if name=="list_tools" && !run_outcome.checks.iter().any(|check|check["kind"]=="native_catalogue_discovery") {
+                            run_outcome.checks.push(serde_json::json!({"kind":"native_catalogue_discovery","status":"expanded","detail":"Subsequent turns advertise the full currently permitted native catalogue; permissions are still checked at invocation."}));
+                        }
+
 
                         // Hot-reloaded permissions must constrain the next invocation of an active task.
                         let current_executor = if let Some(registry) = tools_executor.as_ref() {
@@ -2566,10 +2829,7 @@ pub(crate) async fn run_message_via_llm(
                                     .unwrap_or(false);
                                 if previously_truncated {
                                     let blocked = format!(
-                                        "[read_file] blocked repeated default read after partial output for path={}. Use TOOL: read_file {} --full, or a line window (e.g. TOOL: read_file {} 1 200 then 201 200), or narrow with grep_content/search_files.",
-                                        path_str,
-                                        if path_str.is_empty() { "<path>" } else { &path_str },
-                                        if path_str.is_empty() { "<path>" } else { &path_str }
+                                        "[read_file] The default read of {path_str} was partial. This is not an access denial: retry the native read_file function with full=true, or use offset_line and limit_lines for successive windows. Do not repeat the default read or ask the user for another path."
                                     );
                                     let payload = serde_json::json!({
                                         "tool": "read_file",
@@ -2587,21 +2847,120 @@ pub(crate) async fn run_message_via_llm(
                                 }
                             }
                         }
+                        let goal_read_key = if code_studio_disk_task
+                            && goal_tracker.is_some()
+                            && actual_tool.eq_ignore_ascii_case("read_file")
+                        {
+                            let (path_tokens, _, _) = parse_read_file_args(&tool_args);
+                            let path = normalize_tool_path_hint(&path_tokens.join(" "));
+                            (!path.trim().is_empty())
+                                .then(|| goal_read_request_key(&path, &tool_args))
+                        } else {
+                            None
+                        };
+                        if let Some(key) = goal_read_key.as_ref() {
+                            let successful_reads = successful_goal_reads_by_path
+                                .get(key)
+                                .copied()
+                                .unwrap_or_default();
+                            if should_suppress_repeated_goal_read(
+                                &actual_tool,
+                                studio_goal_failure_seen,
+                                successful_reads,
+                            ) {
+                                let suppressed = format!(
+                                    "[read_file] Suppressed this exact repeated request for {key}: it already succeeded twice during a failed goal. A different line window or a full read is still allowed. Use the recorded content and diagnostic to edit, or request the specific missing window. No file access failed and no change is implied."
+                                );
+                                let payload = serde_json::json!({
+                                    "tool": "read_file",
+                                    "args": tool_args,
+                                    "result_preview": suppressed,
+                                    "success": false,
+                                    "reason": "repeated_goal_read_suppressed"
+                                });
+                                let _ = bus.send(
+                                    EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                        .with_correlation(timeline_correlation),
+                                );
+                                tool_results.push(suppressed);
+                                continue;
+                            }
+                        }
                         let args_str = tool_args.join(" ");
                         let history = tool_loop_history_by_agent
                             .entry(loop_agent_key.clone())
                             .or_default();
                         history.push((actual_tool.clone(), args_str.clone()));
+                        if code_studio_disk_task {
+                            let retry_key = (actual_tool.to_ascii_lowercase(), args_str.clone());
+                            if let Some((retry_count, previous_error)) =
+                                failed_mutation_retries_by_agent.get_mut(&retry_key)
+                            {
+                                if *retry_count >= 3 {
+                                    run_outcome.termination = TerminationReason::ToolLoop;
+                                    reply_text = format!(
+                                        "Repeated unchanged or stale edit blocked after three retries: {}. Choose a different edit with current file content.",
+                                        actual_tool
+                                    );
+                                    break 'tool_rounds;
+                                }
+                                *retry_count = retry_count.saturating_add(1);
+                                history.pop();
+                                let error = previous_error.chars().take(320).collect::<String>();
+                                tool_results.push(format!(
+                                    "[{actual_tool}] This exact edit was not executed again because the previous attempt failed: {error}. Do not repeat these arguments. Use the current file contents to choose a different edit, then rerun the failed check. Suppressed retry {retry_count}/3."
+                                ));
+                                continue;
+                            }
+                        }
                         // Phase 4: loop detection — same tool+args repeated 3 times
-                        // for the same agent key (agent = sub-agent task_id).
-                        if history.len() >= 3 {
+                        // for the same agent key (agent = sub-agent task_id). A repeated
+                        // read is recoverable once: the model may have ignored a successful
+                        // file result, so feed it a direct instruction to use that result
+                        // before treating the loop as terminal.
+                        let repeated_three_times = if history.len() >= 3 {
                             let last = history.last().unwrap();
-                            if history
+                            history
                                 .iter()
                                 .rev()
                                 .take(3)
-                                .all(|e| e.0 == last.0 && e.1 == last.1)
-                            {
+                                .all(|entry| entry.0 == last.0 && entry.1 == last.1)
+                        } else {
+                            false
+                        };
+                        if repeated_three_times {
+                            let recovery_key = (loop_agent_key.clone(), args_str.clone());
+                            let recovery_count = duplicate_read_recovery_by_agent
+                                .get(&recovery_key)
+                                .copied()
+                                .unwrap_or_default();
+                            let recovery_limit = if code_studio_disk_task && goal_tracker.is_some() {
+                                4
+                            } else {
+                                1
+                            };
+                            if should_recover_duplicate_read(
+                                &actual_tool,
+                                repeated_three_times,
+                                recovery_count,
+                                recovery_limit,
+                            ) {
+                                duplicate_read_recovery_by_agent
+                                    .insert(recovery_key, recovery_count.saturating_add(1));
+                                history.pop();
+                                if code_studio_disk_task {
+                                    studio_read_only_streak_rounds = 0;
+                                    studio_repair_focus_next_turn =
+                                        goal_tracker.is_some() && studio_goal_failure_seen;
+                                }
+                                let recovery = format!(
+                                    "[read_file] Suppressed repeated identical read #{}/{}. The latest successful contents and tool results are already in this task. Do not call read_file again with these arguments. Use the recorded build/acceptance diagnostic and make a focused source edit with search_replace, edit_file, or apply_patch; then rerun only the failed check. If more context is truly needed, use a different narrow line window. No file change is implied by this message.",
+                                    recovery_count + 1,
+                                    recovery_limit
+                                );
+                                tool_results.push(recovery);
+                                continue;
+                            } else {
                                 run_outcome.termination = TerminationReason::ToolLoop;
                                 reply_text =
                                     "Loop detected: same tool and arguments repeated. Stopping."
@@ -3083,6 +3442,29 @@ pub(crate) async fn run_message_via_llm(
                                         None,
                                     )
                                 } else {
+                                    let initial_backlog_preflight = if code_studio_disk_task
+                                        && assigned_agent
+                                            .eq_ignore_ascii_case("studio_project_manager")
+                                    {
+                                        let task_message = task_snapshot
+                                            .as_ref()
+                                            .and_then(|task| task.initial_message.as_deref())
+                                            .unwrap_or("");
+                                        crate::api_studio::studio_initial_backlog_preflight(
+                                            &tool_disk_workspace_root,
+                                            &task_id.to_string(),
+                                            task_message,
+                                        )
+                                    } else {
+                                        Ok(())
+                                    };
+                                    if let Err(error) = initial_backlog_preflight {
+                                        (
+                                            false,
+                                            format!("[delegate_to_agent] {error}"),
+                                            None,
+                                        )
+                                    } else {
                                     match &delegation_tx {
                                         Some(tx) => {
                                             let (reply_tx, reply_rx) = oneshot::channel();
@@ -3140,6 +3522,7 @@ pub(crate) async fn run_message_via_llm(
                                             "[delegate_to_agent] not available".to_string(),
                                             None,
                                         ),
+                                    }
                                     }
                                 }
                             } else if actual_tool == "install_skill" {
@@ -3452,6 +3835,15 @@ pub(crate) async fn run_message_via_llm(
                         previous_batch_call_succeeded = success;
                         if success {
                             run_outcome.successful_tool_calls += 1;
+                            if let Some(key) = goal_read_key.as_ref() {
+                                let reads = successful_goal_reads_by_path.entry(key.clone()).or_default();
+                                *reads = reads.saturating_add(1);
+                            } else if matches!(
+                                actual_tool.as_str(),
+                                "search_replace" | "edit_file" | "apply_patch" | "write_file" | "write_code"
+                            ) {
+                                successful_goal_reads_by_path.clear();
+                            }
                         } else { run_outcome.failed_tool_calls += 1; }
                         if serde_json::from_str::<serde_json::Value>(&res).ok().is_some_and(|value|value["result_unknown"]==true){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Operation result unknown; inspect effects and use explicit recovery before continuing. {res}");break 'tool_rounds;}
 
@@ -3598,6 +3990,29 @@ pub(crate) async fn run_message_via_llm(
                             }
                             log_tool_journal_if_write(&actual_tool, tool_args, &res).await;
                         }
+                        goal_boundary_attempt |= crate::studio_execution::goal_verification_after_tool(&actual_tool, success);
+                        round_non_survey_progress |= success && !crate::api_studio::studio_survey_tool(&actual_tool);
+                        if actual_tool=="run_command" && !success {studio_goal_failure_seen=true;}
+                        if !success && (res.contains("stale_file_version") || res.contains("edit_no_change")) {
+                            studio_repair_focus_next_turn=false;
+                            studio_read_only_streak_rounds=0;
+                            if code_studio_disk_task && is_retryable_failed_mutation(&actual_tool, &res) {
+                                failed_mutation_retries_by_agent
+                                    .entry((actual_tool.to_ascii_lowercase(), args_str.clone()))
+                                    .and_modify(|(count, previous_error)| {
+                                        *count = count.saturating_add(1);
+                                        *previous_error = res.clone();
+                                    })
+                                    .or_insert((1, res.clone()));
+                            }
+                        } else if success && code_studio_disk_task && crate::studio_tool_contract::is_file_mutation(&actual_tool) {
+                            if let Some(path) = tool_args.first() {
+                                let prefix = format!("{path} ");
+                                failed_mutation_retries_by_agent.retain(|(_, args), _| {
+                                    args != path && !args.starts_with(&prefix)
+                                });
+                            }
+                        }
                         tool_results.push(res);
                     }
                 }
@@ -3608,22 +4023,23 @@ pub(crate) async fn run_message_via_llm(
                         let recorded=tool_results[*start..end].join("\n");
                         if recorded.is_empty(){"No execution result recorded; do not assume success.".into()}else{recorded}
                     }).collect();
-                    if !delivered_prompt.trim().is_empty() {conversation.push(akasha_llm::ConversationMessage::user(delivered_prompt.clone()));}
-                    conversation.extend(super::studio_conversation::tool_turn_with_results(&response, &results_blob, &per_call, round, if scope_unchanged {&task_scope}else{""}));
+                    if !delivered_prompt.trim().is_empty() {conversation.push(if !conversation.is_empty() && (delivered_prompt.trim_start().starts_with("[Active goal") || delivered_prompt.trim_start().starts_with("[Repair the FIRST") || delivered_prompt.trim_start().starts_with("[STUDIO_READ_ONLY_STREAK]")) {akasha_llm::ConversationMessage::runtime_control(delivered_prompt.clone())} else {akasha_llm::ConversationMessage::user(delivered_prompt.clone())});}
+                    conversation.extend(super::studio_conversation::tool_turn_with_results(&response, &results_blob, &per_call, round, if scope_unchanged && goal_tracker.is_none() {&task_scope}else{""}));
                     // Current policy/context is reloaded on resume, then kept once in the transcript.
                     resume_overlay.clear();
                 }
                 let mut studio_readonly_nudge: Option<String> = None;
-                if code_studio_disk_task && !calls.is_empty() {
-                    let only_survey = calls.iter().all(|(name, args)| {
-                        let c = if name=="studio_call" {crate::studio_tool_contract::decode(&args.join(" ")).ok().map(|call|call.envelope.tool).unwrap_or_default()} else {canonicalize_tool_name(&name.trim().to_string())};
-                        crate::api_studio::studio_survey_tool(&c)
-                    });
+                if code_studio_disk_task && (goal_tracker.is_some() || run_outcome.requires_file_effect()) && !calls.is_empty() {
+                    let only_survey = !round_non_survey_progress;
                     if only_survey {
                         studio_read_only_streak_rounds =
                             studio_read_only_streak_rounds.saturating_add(1);
                     } else {
                         studio_read_only_streak_rounds = 0;
+                        studio_repair_focus_next_turn = false;
+                    }
+                    if goal_tracker.is_some() {
+                        insert_task_tracking_event(&store_path,task_id,"studio_goal_progress_guard",serde_json::json!({"round":round,"no_progress":only_survey,"streak":studio_read_only_streak_rounds,"non_survey_progress":round_non_survey_progress,"failure_seen":studio_goal_failure_seen,"repair_focus":studio_repair_focus_next_turn,"call_names":calls.iter().map(|(name,_)|name).collect::<Vec<_>>()}));
                     }
                     let max_streak = std::env::var("AKASHA_STUDIO_READ_ONLY_STREAK_MAX")
                         .ok()
@@ -3633,6 +4049,7 @@ pub(crate) async fn run_message_via_llm(
                         .min(20);
                     if studio_read_only_streak_rounds >= max_streak {
                         studio_read_only_streak_rounds = 0;
+                        studio_repair_focus_next_turn = goal_tracker.is_some() && studio_goal_failure_seen;
                         let _ = bus.send(
                             EventEnvelope::new(
                                 EventType::ProgressUpdate,
@@ -3645,7 +4062,7 @@ pub(crate) async fn run_message_via_llm(
                             .with_correlation(timeline_correlation),
                         );
                         studio_readonly_nudge = Some(format!(
-                            "[STUDIO_READ_ONLY_STREAK]\nThe last {} model rounds only invoked read-only survey tools (read_file, list_dir, grep_content, search_files, file_diff, git status/log/diff). The user request requires repository changes. Emit at least one write-like TOOL line in this turn (write_code, write_file, search_replace, edit_file, apply_patch) OR answer in plain text with the precise blocking reason (e.g. tool policy forbids writes). Do not repeat another exploratory-only round.",
+                            "[STUDIO_READ_ONLY_STREAK]\nThe last {} model rounds made no successful non-survey progress (read-only inspection or failed commands). The user request requires repository changes. Use the currently advertised native functions when available. Repair the already inspected faulty file or address a documented environment blocker with write_code, write_file, search_replace, edit_file or apply_patch. Never invent an access denial. If truly blocked, give the precise recorded blocking reason. Do not repeat another unchanged exploratory-only round.",
                             max_streak
                         ));
                     }
@@ -3744,13 +4161,22 @@ pub(crate) async fn run_message_via_llm(
                 if code_studio_disk_task {
                     if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.round=round;checkpoint.prompt=current_prompt.clone();checkpoint.conversation=conversation.clone();checkpoint.phase="after_tools".into();checkpoint.waiting=None;checkpoint.outcome=run_outcome.clone();if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                 }
-                if let Some(goal)=goal_tracker.as_mut() {
+                if let Some(goal)=goal_tracker.as_mut().filter(|goal| goal_boundary_attempt && goal.ready_for_tool_boundary(&tool_disk_workspace_root)) {
                     if !matches!(store.get(task_id).ok().flatten().map(|task|task.status),Some(TaskStatus::Running)) {break 'tool_rounds;}
                     match goal.verify_boundary(&store_path,task_id,&tool_disk_workspace_root,&mut run_outcome).await {
                         Ok(crate::studio_execution::GoalBoundary::Verified)=>{reply_text=format!("Les critères mécaniques configurés de l’objectif sont vérifiés : {}. Cette validation porte uniquement sur les propriétés définies dans les critères.",goal.goal.criteria.criteria.iter().map(|criterion|criterion.text.as_str()).collect::<Vec<_>>().join("; "));break 'tool_rounds;},
                         Ok(crate::studio_execution::GoalBoundary::Budget)=>{run_outcome.termination=TerminationReason::BudgetExhausted;reply_text=format!("Objectif non atteint dans les limites configurées : {}",goal.state.detail);break 'tool_rounds;},
-                        Ok(crate::studio_execution::GoalBoundary::Pending(errors))=>{current_prompt.push_str(&format!("\n[Goal verification still failed] {}",errors.join("; ")));},
+                        Ok(crate::studio_execution::GoalBoundary::Pending(errors))=>{studio_goal_failure_seen=true;current_prompt.push_str(&format!("\n[Repair the FIRST failing goal dependency] {}\nThese are fresh mechanical diagnostics from a command that has already executed. Read the implicated files and repair all related errors coherently. Do not rerun an unchanged failing check or reinstall already present dependencies. Use a further command only when additional diagnostics or a documented environment repair is needed; repeated inspection alone cannot satisfy this criterion. Correcting a faulty file with changed content is required and is not replaying an identical write. Keep the original functionality and protected acceptance tests unchanged. Retry this dependency before working on later criteria.\n",errors.join("; ")));},
                         Err(error)=>{run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;},
+                    }
+                }
+                // This is actual persisted goal state, not an unconditional
+                // synthetic "continue" after a completed native operation.
+                // It also keeps tools advertised by templates that attach their
+                // catalogue only to the most recent user instruction.
+                if current_prompt.is_empty() {
+                    if let Some(goal)=goal_tracker.as_ref() {
+                        current_prompt=goal.continuation_hint_for_workspace(&tool_disk_workspace_root);
                     }
                 }
                 if round >= max_tool_rounds {

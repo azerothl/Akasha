@@ -870,6 +870,11 @@ impl Daemon {
                 studio_disk_registry.clone(),
             )
                 .with_direct_conversation_tx(conv_tx.clone());
+            crate::studio_kanban_dispatch::spawn(
+                self.data_dir.clone(),
+                db_path.clone(),
+                main_agent.clone(),
+            );
             let orchestrator = Arc::new(Orchestrator::new(
                 bus.clone(),
                 db_path.clone(),

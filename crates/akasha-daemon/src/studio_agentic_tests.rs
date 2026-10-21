@@ -37,14 +37,17 @@ fn outcome_does_not_invent_acceptance() {
 }
 
 #[test]
-fn native_schema_teaches_file_versions_and_filters_tool_variants() {
+fn native_schema_supports_task_scoped_file_versions_and_filters_tool_variants() {
     let definition=contracts::native_definition(vec!["write_file".into(),"read_file".into(),"git_status".into()]);
     let schema=&definition["function"]["parameters"];
     let compiled=jsonschema::JSONSchema::compile(schema).unwrap();
     let valid=json!({"schema_version":1,"tool":"write_file","arguments":{"path":"workspace:/a.md","content":"exact","expected_version":"missing"}});
     assert!(compiled.is_valid(&valid));
     let mut missing=valid.clone();missing["arguments"].as_object_mut().unwrap().remove("expected_version");
-    assert!(!compiled.is_valid(&missing));
+    assert!(compiled.is_valid(&missing));
+    assert_eq!(contracts::decode(&missing.to_string()).unwrap().expected,None);
+    let mut invalid=valid.clone();invalid["arguments"]["expected_version"]=json!("bad");
+    assert!(!compiled.is_valid(&invalid));
     assert!(compiled.is_valid(&json!({"schema_version":1,"tool":"git_status","arguments":{"argv":["workspace:/"]}})));
     assert!(!compiled.is_valid(&json!({"schema_version":1,"tool":"run_command","arguments":{"program":"node","args":[]}})));
     let decoded=contracts::decode(&valid.to_string()).unwrap();
@@ -207,7 +210,7 @@ fn malformed_contracts_are_rejected_before_effects() {
     let id = Uuid::new_v4();
     for value in [
         json!({"schema_version":2,"operation_id":id,"tool":"read_file","arguments":{"path":"a"}}),
-        json!({"schema_version":1,"operation_id":id,"tool":"write_file","arguments":{"path":"a","content":"b"}}),
+        json!({"schema_version":1,"operation_id":id,"tool":"write_file","arguments":{"path":"a","content":"b","expected_version":"not-a-hash"}}),
         json!({"schema_version":1,"operation_id":id,"tool":"run_command","arguments":{"program":"node","args":[],"surprise":true}}),
         json!({"schema_version":1,"operation_id":id,"tool":"run_command","arguments":{"program":"node\ncmd"}}),
         json!({"schema_version":1,"operation_id":id,"tool":"read_file","arguments":{"path":"a","content":"b"}}),
@@ -506,4 +509,73 @@ fn worker_admission_waits_until_resume_has_enqueued_and_released_admission() {
         worker
     }).unwrap();
     let guard=admitted_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();assert!(crate::studio_recovery::is_active(id));drop(guard);worker.join().unwrap();
+}
+
+#[tokio::test]
+async fn studio_replacements_without_content_changes_are_failed_not_progress() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("test.db");let p=policy(dir.path());let task=Uuid::new_v4();running_task(&db,task);
+    let path=dir.path().join("a.txt");std::fs::write(&path,"before").unwrap();
+    let read=call("read_file",json!({"path":"a.txt"}),Uuid::new_v4());
+    let op=contracts::Operation::begin(&db,task,"read_file",&read.argv,dir.path(),&p,Some(&read)).await.unwrap();
+    let receipt:Value=serde_json::from_str(&op.finish(true,"before").unwrap()).unwrap();
+    for (search,replacement) in [("absent","after"),("before","before")] {
+        let edit=call("search_replace",json!({"path":"a.txt","search":search,"replacement":replacement,"expected_version":receipt["file_version"]}),Uuid::new_v4());
+        let op=contracts::Operation::begin(&db,task,"search_replace",&edit.argv,dir.path(),&p,Some(&edit)).await.unwrap();
+        let result:Value=serde_json::from_str(&op.finish(true,"replaced 0 occurrence(s)").unwrap()).unwrap();
+        assert_eq!(result["success"],false);assert_eq!(result["error_code"],"edit_no_change");assert_eq!(result["file_version"],receipt["file_version"]);
+        assert!(result["output"].as_str().unwrap().contains("No change was applied"));
+        assert!(!result["output"].as_str().unwrap().contains("occurrence(s)"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),"before");
+    }
+    let edit=call("search_replace",json!({"path":"a.txt","search":"before","replacement":"after","expected_version":receipt["file_version"]}),Uuid::new_v4());
+    let op=contracts::Operation::begin(&db,task,"search_replace",&edit.argv,dir.path(),&p,Some(&edit)).await.unwrap();std::fs::write(&path,"after").unwrap();
+    let result:Value=serde_json::from_str(&op.finish(true,"replaced 1 occurrence(s)").unwrap()).unwrap();assert_eq!(result["success"],true);
+}
+
+#[tokio::test]
+async fn studio_native_edit_reuses_read_version_and_rejects_stale_snapshot() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("test.db");let p=policy(dir.path());let task=Uuid::new_v4();running_task(&db,task);
+    let path=dir.path().join("a.txt");std::fs::write(&path,"before").unwrap();
+    let read=call("read_file",json!({"path":"a.txt"}),Uuid::new_v4());
+    let op=contracts::Operation::begin(&db,task,"read_file",&read.argv,dir.path(),&p,Some(&read)).await.unwrap();
+    let read_result:Value=serde_json::from_str(&op.finish(true,"before").unwrap()).unwrap();
+
+    let edit=contracts::decode(&json!({"schema_version":1,"tool":"edit_file","arguments":{"path":"a.txt","start_line":1,"end_line":1,"content":"after"}}).to_string()).unwrap();
+    assert_eq!(edit.expected,None);
+    let op=contracts::Operation::begin(&db,task,&edit.envelope.tool,&edit.argv,dir.path(),&p,Some(&edit)).await.unwrap();
+    std::fs::write(&path,"after").unwrap();
+    let result:Value=serde_json::from_str(&op.finish(true,"updated").unwrap()).unwrap();
+    assert_eq!(result["success"],true);
+    assert_ne!(result["file_version"],read_result["file_version"]);
+
+    let stale_path=dir.path().join("stale.txt");std::fs::write(&stale_path,"original").unwrap();
+    let stale_read=call("read_file",json!({"path":"stale.txt"}),Uuid::new_v4());
+    let op=contracts::Operation::begin(&db,task,"read_file",&stale_read.argv,dir.path(),&p,Some(&stale_read)).await.unwrap();
+    op.finish(true,"original").unwrap();
+    std::fs::write(&stale_path,"changed outside the task").unwrap();
+    let stale_edit=contracts::decode(&json!({"schema_version":1,"tool":"edit_file","arguments":{"path":"stale.txt","start_line":1,"end_line":1,"content":"overwrite"}}).to_string()).unwrap();
+    let error=contracts::Operation::begin(&db,task,&stale_edit.envelope.tool,&stale_edit.argv,dir.path(),&p,Some(&stale_edit)).await.err().unwrap();
+    assert!(error.contains("stale_file_version"));
+    assert_eq!(std::fs::read_to_string(stale_path).unwrap(),"changed outside the task");
+}
+
+#[tokio::test]
+async fn studio_search_replace_requires_explicit_intent_for_multiple_matches() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("test.db");let p=policy(dir.path());let task=Uuid::new_v4();running_task(&db,task);
+    let path=dir.path().join("a.txt");std::fs::write(&path,"cell cell").unwrap();
+    let read=call("read_file",json!({"path":"a.txt"}),Uuid::new_v4());
+    let op=contracts::Operation::begin(&db,task,"read_file",&read.argv,dir.path(),&p,Some(&read)).await.unwrap();
+    let receipt:Value=serde_json::from_str(&op.finish(true,"cell cell").unwrap()).unwrap();
+    let args=json!({"path":"a.txt","search":"cell","replacement":"tile","expected_version":receipt["file_version"]});
+    let broad=call("search_replace",args.clone(),Uuid::new_v4());
+    let error=contracts::Operation::begin(&db,task,"search_replace",&broad.argv,dir.path(),&p,Some(&broad)).await.err().unwrap();
+    assert!(error.contains("ambiguous_search_replace"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(),"cell cell");
+    let mut all_args=args;all_args["replace_all"]=json!(true);
+    let all=call("search_replace",all_args,Uuid::new_v4());
+    let op=contracts::Operation::begin(&db,task,"search_replace",&all.argv,dir.path(),&p,Some(&all)).await.unwrap();
+    std::fs::write(&path,"tile tile").unwrap();
+    let result:Value=serde_json::from_str(&op.finish(true,"replaced 2 occurrence(s)").unwrap()).unwrap();
+    assert_eq!(result["success"],true);
+    assert_eq!(std::fs::read_to_string(path).unwrap(),"tile tile");
 }
