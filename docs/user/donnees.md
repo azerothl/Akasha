@@ -10,6 +10,14 @@ API : `/api/user-rag/...`
 
 Onglet **Mémoire** : mémoire **court terme** (session en cours) et **long terme** (persistante dans `memory.db` sous le data_dir).
 
+### Protection au repos
+
+La base `memory.db` est stockée **en clair** : le texte des souvenirs et leurs embeddings sont lisibles en ouvrant directement le fichier SQLite. Le paramètre `AKASHA_MEMORY_ENCRYPT` n’active pas de chiffrement ; `akasha doctor` affiche un avertissement s’il est défini.
+
+L’export `GET /api/memory/export` est aussi un JSON lisible : il contient le texte des souvenirs, les faits et les événements épisodiques. Les copies de `memory.db`, les sauvegardes et les fichiers d’export restent en clair.
+
+Protégez le `data_dir` et chaque copie avec les permissions de votre compte et le chiffrement complet du disque fourni par le système (BitLocker, FileVault ou LUKS). Ce chiffrement protège surtout l’appareil éteint ou verrouillé ; lorsque votre session est ouverte, un processus exécuté avec vos droits peut lire la base. Appliquez la même protection aux sauvegardes et exports, évitez de les déposer dans un partage non maîtrisé et supprimez les exports devenus inutiles.
+
 ### Court terme et compaction
 
 Lorsque le contexte de session approche la limite (`AKASHA_MAX_CONTEXT_TOKENS`, défaut 8192), le daemon **compacte** l'historique : résumé LLM des messages anciens, conservation des messages récents. Vous n'avez en général rien à configurer ; en cas de réponses qui « oublient » le début d'une longue conversation, augmentez la limite via `akasha config env set` ou réduisez la taille des pièces jointes dans le chat.

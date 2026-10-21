@@ -5,7 +5,7 @@
 **Statut :** Non livré — `memory.db` en clair ; SQLCipher MVP deferred  
 **Owner :** Akasha core team  
 **Référence matrice :** [memory_landscape_roadmap_matrix.md](./memory_landscape_roadmap_matrix.md) — ligne **A4**  
-**Exigence spec :** [spec/06_memory_model.md](../../06_memory_model.md) (long terme « persistant chiffré »)
+**Exigence spec :** [spec/06_memory_model.md](../../06_memory_model.md) (cible de chiffrement, explicitement non livrée)
 
 ## 1. Contexte
 
@@ -16,6 +16,12 @@ Aujourd’hui :
 - **Embeddings** : blobs f32 dans `memory_entries.embedding` — lisibles si accès fichier.
 
 KinBot et le rapport « mémoire agents 2026 » positionnent le chiffrement mémoire comme **attendu** en self-hosted. Akasha couvre la souveraineté (A5) mais pas encore A4.
+
+### Vérification reproductible de l’état actuel
+
+Le test `memory_db_content_readable_without_encryption_key` écrit un marqueur et le relit avec une connexion SQLite indépendante, sans fournir de clé. Il vérifie également les octets de l’embedding et relit la copie du fichier. Un test de `memory_export` sérialise le bundle JSON et confirme que le texte du souvenir y apparaît. Le test CLI existant vérifie que `doctor` avertit lorsque `AKASHA_MEMORY_ENCRYPT` est défini ; le store n’utilise pas ce paramètre.
+
+Résultat : le fichier, sa copie et l’export sont lisibles sans clé. Il n’existe pas de chiffrement applicatif au repos. Les permissions du système et son chiffrement complet du disque sont les protections recommandées actuellement ; elles ne couvrent pas un processus ayant accès au compte dans une session déverrouillée.
 
 ## 2. Objectifs (wave 6)
 
@@ -96,4 +102,4 @@ Master secret (vault ou AKASHA_MEMORY_KEY env)
 - [kinbot-akasha-parity-matrix.md](./kinbot-akasha-parity-matrix.md)
 - KinBot README — Vault AES-256-GCM
 
-**Dernière mise à jour :** 2026-10-18 — `akasha doctor` ne prétend plus activer le chiffrement ; `AKASHA_MEMORY_ENCRYPT` documenté comme sans effet ; SQLCipher / per-row AES spike via `scripts/bench-memory-encryption.ps1`.
+**Dernière mise à jour :** 2026-10-21 — vérification directe de la lisibilité SQLite, de la copie et de l’export JSON ; documentation alignée sur l’absence de chiffrement applicatif et les limites du chiffrement disque. `AKASHA_MEMORY_ENCRYPT` reste sans effet ; SQLCipher / per-row AES restent différés.
