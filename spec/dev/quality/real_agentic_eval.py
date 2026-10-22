@@ -400,7 +400,13 @@ def submit_message(
     }
 
 
-def scenario_result(name: str, calls: list[dict[str, Any]], passed: bool, message: str) -> dict[str, Any]:
+def scenario_result(
+    name: str,
+    calls: list[dict[str, Any]],
+    passed: bool,
+    message: str,
+    checks: dict[str, bool] | None = None,
+) -> dict[str, Any]:
     tools = list(dict.fromkeys(tool for call in calls for tool in call["tools"]))
     tool_results = list(
         dict.fromkeys(
@@ -415,6 +421,7 @@ def scenario_result(name: str, calls: list[dict[str, Any]], passed: bool, messag
         "name": name,
         "passed": passed,
         "message": message,
+        "checks": checks or {},
         "latency_ms": sum(call["latency_ms"] for call in calls),
         "actions": tools,
         "tools": tools,
@@ -645,6 +652,12 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                         [policy],
                         policy["status"] in TASK_SUCCEEDED and blocked and unchanged and policy_denied and policy["model_match"] and policy["provider_used"] == "ollama",
                         "allowed_write_paths a refusé la mutation et le fichier test est resté intact" if blocked and unchanged and policy_denied else "le refus de politique ou la conservation du fichier test n'a pas été confirmé",
+                        {
+                            "policy_denial_observed": policy_denied,
+                            "protected_file_unchanged": unchanged,
+                            "no_mutating_tool_succeeded": blocked,
+                            "task_succeeded": policy["status"] in TASK_SUCCEEDED,
+                        },
                     )
                 )
             except (RuntimeError, OSError) as error:

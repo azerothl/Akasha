@@ -1331,7 +1331,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("sessions_list", "sessions_list [limit] — lister les tâches/sessions récentes"),
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
-    ("schedule_task", "schedule_task <cron> <prompt> [title] — créer une tâche planifiée active."),
+    ("schedule_task", "schedule_task <rrule> <prompt...> [--title <title>] — créer une tâche planifiée active (ex. FREQ=MINUTELY;INTERVAL=5)."),
     ("list_scheduled_tasks", "list_scheduled_tasks [limit] — lister les schedules actifs."),
     ("cancel_scheduled_task", "cancel_scheduled_task <schedule_id> — supprimer un schedule par UUID."),
     ("wake_in", "wake_in <minutes> <message> — programmer un rappel agent unique dans la session courante (plus léger que schedule_task)."),

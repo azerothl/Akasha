@@ -80,10 +80,20 @@ class RealAgenticEvalTests(unittest.TestCase):
             "device_match": True,
             "model_vram_bytes": 1024,
         }
-        result = eval_runner.scenario_result("policy_refusal", [call], True, "denied")
+        result = eval_runner.scenario_result(
+            "policy_refusal",
+            [call],
+            True,
+            "denied",
+            {"policy_denial_observed": True, "protected_file_unchanged": True},
+        )
         self.assertEqual(result["tool_results"], [{"tool": "write_file", "success": False}])
         self.assertEqual(result["task_statuses"], ["done"])
         self.assertEqual(result["response_chars"], 12)
+        self.assertEqual(
+            result["checks"],
+            {"policy_denial_observed": True, "protected_file_unchanged": True},
+        )
         self.assertNotIn("result_preview", json.dumps(result))
 
     def test_fallback_uses_known_provider_and_unavailable_model(self):

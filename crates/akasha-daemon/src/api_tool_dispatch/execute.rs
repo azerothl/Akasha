@@ -2527,6 +2527,19 @@ pub(crate) async fn execute_tool_call_impl(
                         let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
                         let (key, _) =
                             rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+                        let rel_path = Path::new(&key);
+                        let disk_path_opt = workspace_root
+                            .map(|root| root.join(&key))
+                            .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                            .map(strip_verbatim_prefix);
+                        let policy_path = disk_path_opt.as_deref().unwrap_or(rel_path);
+                        if !executor.policy.can_write(policy_path) {
+                            return (
+                                false,
+                                format!("[{usage_tag}] path not allowed by tools policy"),
+                                None,
+                            );
+                        }
                         let mut guard = ws.write().await;
                         let per_task = guard.entry(lineage_task_id).or_default();
                         let previous_mem = per_task.get(&key).cloned().unwrap_or_default();
@@ -2546,38 +2559,32 @@ pub(crate) async fn execute_tool_call_impl(
                         per_task.insert(key.clone(), effective_content.clone());
                         drop(guard);
                         // Also write to disk under data_dir (workspace root = store_path.parent())
-                        let rel_path = Path::new(&key);
-                        if executor.policy.can_write(rel_path) {
-                            let disk_path_opt = workspace_root.map(|root| root.join(&key))
-                                .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
-                                .map(strip_verbatim_prefix);
-                            if let Some(disk_path) = disk_path_opt {
-                                if let Some(parent) = disk_path.parent() {
-                                    let _ = tokio::fs::create_dir_all(parent).await;
+                        if let Some(disk_path) = disk_path_opt {
+                            if let Some(parent) = disk_path.parent() {
+                                let _ = tokio::fs::create_dir_all(parent).await;
+                            }
+                            let run_pollution_check = code_only
+                                || workspace_root
+                                    .map(|r| {
+                                        crate::studio::is_strictly_under_studio_root(&disk_path, r)
+                                    })
+                                    .unwrap_or(false);
+                            if run_pollution_check {
+                                if let Some(msg) =
+                                    crate::api_studio::studio_reject_polluted_code_content(
+                                        &disk_path,
+                                        &effective_content,
+                                    )
+                                {
+                                    return (false, format!("[{usage_tag}] {}", msg), None);
                                 }
-                                let run_pollution_check = code_only
-                                    || workspace_root
-                                        .map(|r| {
-                                            crate::studio::is_strictly_under_studio_root(&disk_path, r)
-                                        })
-                                        .unwrap_or(false);
-                                if run_pollution_check {
-                                    if let Some(msg) =
-                                        crate::api_studio::studio_reject_polluted_code_content(
-                                            &disk_path,
-                                            &effective_content,
-                                        )
-                                    {
-                                        return (false, format!("[{usage_tag}] {}", msg), None);
-                                    }
-                                }
-                                if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
-                                    return (
-                                        true,
-                                        format!("[{usage_tag} workspace:{}] saved (disk).", key),
-                                        None,
-                                    );
-                                }
+                            }
+                            if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
+                                return (
+                                    true,
+                                    format!("[{usage_tag} workspace:{}] saved (disk).", key),
+                                    None,
+                                );
                             }
                         }
                         return (
@@ -3789,4 +3796,52 @@ pub(crate) async fn execute_tool_call_impl(
         }
     };
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::execute_tool_call_impl;
+    use crate::api::new_task_workspace_store;
+    use akasha_tools::{ToolExecutor, ToolsPolicy};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn denied_workspace_write_does_not_mutate_virtual_workspace() {
+        let cwd = std::env::current_dir().expect("current directory");
+        let allowed_dir = cwd.join("policy-allowed");
+        let policy = ToolsPolicy {
+            allowed_write_paths: vec![allowed_dir.to_string_lossy().into_owned()],
+            ..ToolsPolicy::default()
+        };
+        let executor = Arc::new(ToolExecutor::new(policy));
+        let task_id = Uuid::new_v4();
+        let workspace_store = new_task_workspace_store();
+        let args = vec!["workspace:/denied.txt".to_string(), "changed".to_string()];
+
+        let (success, message, _) = execute_tool_call_impl(
+            &executor,
+            "write_file",
+            &args,
+            None,
+            None,
+            task_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&workspace_store),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(!success);
+        assert!(message.contains("policy"));
+        let workspace = workspace_store.read().await;
+        assert!(workspace.get(&task_id).map_or(true, |files| files.is_empty()));
+    }
 }
