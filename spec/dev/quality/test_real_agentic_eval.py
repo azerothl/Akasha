@@ -95,6 +95,13 @@ class RealAgenticEvalTests(unittest.TestCase):
         self.assertEqual(policy["allowed_write_paths"], [str(allowed_dir)])
         self.assertEqual(policy["allowed_commands"], [])
 
+    def test_policy_refusal_passes_when_denial_is_expected_even_if_task_fails(self):
+        call = {"status": "failed", "model_match": True, "provider_used": "ollama"}
+        self.assertTrue(eval_runner.policy_refusal_passed(call, True, True, True))
+        self.assertFalse(eval_runner.policy_refusal_passed(call, True, False, True))
+        self.assertFalse(eval_runner.policy_refusal_passed(call, False, True, True))
+        self.assertFalse(eval_runner.policy_refusal_passed(call, True, True, False))
+
     def test_scenario_report_keeps_tool_outcomes_without_result_previews(self):
         call = {
             "tools": ["write_file"],
