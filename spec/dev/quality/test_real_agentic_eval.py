@@ -22,6 +22,16 @@ class RealAgenticEvalTests(unittest.TestCase):
         )
         self.assertEqual(eval_runner.classify_llm_failure("task timed out"), "timeout")
 
+    def test_provider_and_model_are_verified_from_success_event_and_provider_key(self):
+        matched, provider = eval_runner.provider_model_evidence(
+            "qwen3.5:9b",
+            "qwen3.5:9b",
+            ["qwen3.5:9b"],
+            [{"provider": "ollama", "model": "qwen3.5:9b", "total_requests": 3, "successful_requests": 0}],
+        )
+        self.assertTrue(matched)
+        self.assertEqual(provider, "ollama")
+
     def test_task_completion_status_aliases_are_supported(self):
         self.assertEqual(eval_runner.TASK_SUCCEEDED, {"done", "completed"})
         self.assertTrue(eval_runner.TASK_SUCCEEDED <= eval_runner.TERMINAL)

@@ -308,6 +308,35 @@ def classify_llm_failure(error: Any) -> str:
     return "other"
 
 
+def provider_model_evidence(
+    expected_model: str,
+    task_model: Any,
+    successful_call_models: list[str],
+    provider_metrics: list[dict[str, Any]],
+) -> tuple[bool, str | None]:
+    normalize = lambda value: re.sub(r"[^a-z0-9]", "", str(value).lower())
+    expected = normalize(expected_model)
+    event_match = any(expected and expected in normalize(model) for model in successful_call_models)
+    successful_metric_match = any(
+        item.get("provider") == "ollama"
+        and item.get("successful_requests", 0) > 0
+        and expected
+        and expected in normalize(item.get("model", ""))
+        for item in provider_metrics
+    )
+    model_match = event_match or (
+        successful_metric_match and expected and expected in normalize(task_model)
+    )
+    provider_observed = any(
+        item.get("provider") == "ollama"
+        and item.get("total_requests", 0) > 0
+        and expected
+        and expected in normalize(item.get("model", ""))
+        for item in provider_metrics
+    )
+    return bool(model_match), "ollama" if model_match and provider_observed else None
+
+
 def poll_task(base: str, task_id: str, timeout_secs: int) -> tuple[dict[str, Any], dict[str, Any]]:
     deadline = time.monotonic() + timeout_secs
     task: dict[str, Any] = {}
@@ -385,15 +414,12 @@ def submit_message(
         providers.append({"provider": provider, "model": model, **metrics})
         fallback_triggered = fallback_triggered or metrics.get("fallback_triggered", 0) > 0
         fallback_success = fallback_success or metrics.get("fallback_success", 0) > 0
-    actual_provider_model = [
-        item for item in providers
-        if item.get("provider") == "ollama" and item.get("successful_requests", 0) > 0
-    ]
-    normalize = lambda value: re.sub(r"[^a-z0-9]", "", str(value).lower())
-    normalized_expected = normalize(expected_model)
-    model_match = bool(normalized_expected and normalized_expected in normalize(model_used))
-    if not model_match:
-        model_match = any(normalized_expected and normalized_expected in normalize(item.get("model", "")) for item in actual_provider_model)
+    model_match, provider_used = provider_model_evidence(
+        expected_model,
+        model_used,
+        llm_success_models,
+        providers,
+    )
     device_match, vram_bytes = model_device_match(ollama_url, expected_model, device)
     return {
         "task_id": task_id,
@@ -401,7 +427,7 @@ def submit_message(
         "assigned_agent": task.get("assigned_agent"),
         "model_used": model_used,
         "model_match": model_match,
-        "provider_used": "ollama" if actual_provider_model else None,
+        "provider_used": provider_used,
         "model_vram_bytes": vram_bytes,
         "device_match": device_match,
         "provider_model_deltas": providers,
@@ -900,7 +926,10 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     "num_gpu": 99 if args.device == "cuda" else 0 if args.device == "cpu" else None,
                 },
                 "provider_observed": sorted({item["provider"] for scenario in scenarios for item in scenario["provider_model_deltas"]}),
-                "models_observed": sorted({item["model"] for scenario in scenarios for item in scenario["provider_model_deltas"] if item["successful_requests"] > 0}),
+                "models_observed": sorted(
+                    {item["model"] for scenario in scenarios for item in scenario["provider_model_deltas"] if item["successful_requests"] > 0}
+                    | {model for scenario in scenarios for model in scenario["llm_success_models"]}
+                ),
                 "execution_device_requested": args.device,
                 "gpu_devices": gpu_devices(),
             },
