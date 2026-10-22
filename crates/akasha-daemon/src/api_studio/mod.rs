@@ -1180,7 +1180,8 @@ pub fn studio_find_duplicate_ticket(
         if ticket.parent_ticket_id.as_deref() != parent_ticket_id {
             return false;
         }
-        let same_key = creation_key.is_some()
+        let same_key = ticket.status != "done"
+            && creation_key.is_some()
             && ticket.creation_key.as_deref() == creation_key;
         if same_key {
             return true;
@@ -2037,9 +2038,6 @@ pub(crate) fn studio_complete_initial_backlog_if_ready(
             .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
     }) {
         let mut root = root.clone();
-        if root.status == "done" {
-            continue;
-        }
         if !studio_initial_backlog_is_ready_for_project(project_root, &root, &tickets) {
             if root.status == "done" {
                 root.status = "in_progress".to_string();
@@ -2058,6 +2056,9 @@ pub(crate) fn studio_complete_initial_backlog_if_ready(
                     Some(json!({ "reason": "initial_backlog_not_refined" })),
                 )?;
             }
+            continue;
+        }
+        if root.status == "done" {
             continue;
         }
         let child_ids: Vec<String> = studio_list_ticket_events(project_root, &root.id)
@@ -2772,7 +2773,11 @@ pub fn studio_tool_apply_ticket_review_json(
     ticket.evidence.summary = review_notes.clone().or(ticket.evidence.summary.take());
     let child_tickets = studio_list_tickets(project_root)
         .into_iter()
-        .filter(|child| child.id != ticket.id && ticket_dependency_ids(child).iter().any(|id| id == &ticket.id))
+        .filter(|child| {
+            child.id != ticket.id
+                && (child.parent_ticket_id.as_deref() == Some(ticket.id.as_str())
+                    || ticket_dependency_ids(child).iter().any(|id| id == &ticket.id))
+        })
         .collect::<Vec<_>>();
     for child in child_tickets {
         for file in child.evidence.files {
@@ -4591,6 +4596,60 @@ mod tests {
     }
 
     #[test]
+    fn completed_ticket_creation_key_does_not_block_a_corrective_ticket() {
+        use super::{save_studio_meta, studio_tool_create_ticket_json, StudioMeta};
+
+        let dir = tempfile::tempdir().expect("temporary Code Studio project");
+        save_studio_meta(
+            dir.path(),
+            &StudioMeta {
+                id: "ticket-dedupe-done".to_string(),
+                name: "Ticket dedupe done".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
+                project_summary: None,
+                ticket_enforcement_mode: Some("off".to_string()),
+            },
+        )
+        .expect("save project metadata");
+        let parent = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({"title":"Todo app request"}),
+        )
+        .expect("create parent");
+        let first = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title":"Implement todo filters",
+                "parent_ticket_id":parent.id,
+                "creation_key":"filters"
+            }),
+        )
+        .expect("create first attempt");
+        let mut completed = first.clone();
+        completed.status = "done".to_string();
+        super::studio_upsert_ticket(dir.path(), completed).expect("complete first attempt");
+
+        let correction = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title":"Implement todo filters",
+                "parent_ticket_id":parent.id,
+                "creation_key":"filters"
+            }),
+        )
+        .expect("allow corrective attempt with the same stable key");
+        assert_ne!(correction.id, first.id);
+        assert_eq!(correction.status, "todo");
+    }
+
+    #[test]
     fn scoped_file_context_retains_constraints_without_copying_maintenance_examples() {
         let dir=tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("CODE_STUDIO_PLAN.md"),"# Title\nPREAMBLE_CONSTRAINT\n## Scope\nPRODUCT_SCOPE\n## Stack\nSTACK_CONSTRAINT\n## Fichiers hors scope\nKEEP.txt must remain unchanged\n## Demandes d'évolutions utilisateur par phase\nMAINTENANCE_EXAMPLE_BAIT\n## Recommandations\nSTYLE_CONSTRAINT\n## Todos\nUNRELATED_BACKLOG").unwrap();
@@ -5036,9 +5095,10 @@ Try `npm i --save-dev @types/jest`";
         let mut child = backlog_ticket(
             "review-child",
             "done",
-            &["review-ticket"],
+            &[],
             &[("changed", "The feature behaves as requested")],
         );
+        child.parent_ticket_id = Some("review-ticket".to_string());
         child.evidence.files.push("src/feature.ts".to_string());
         child.evidence.task_ids.push("worker-task".to_string());
         super::studio_upsert_ticket(dir.path(), child).expect("save completed child evidence");
@@ -5336,6 +5396,53 @@ Try `npm i --save-dev @types/jest`";
             studio_get_ticket(dir.path(), &id).unwrap().status,
             "done"
         );
+    }
+
+    #[test]
+    fn completed_initial_summary_reopens_when_its_seeded_backlog_is_still_generic() {
+        use super::{
+            studio_create_evolution_ticket_from_chat, studio_get_ticket,
+            studio_list_ticket_events, studio_upsert_ticket,
+        };
+
+        let dir = tempfile::tempdir().expect("temporary project");
+        super::save_studio_meta(
+            dir.path(),
+            &super::StudioMeta {
+                id: "reopen-generic-backlog".to_string(),
+                name: "Reopen generic backlog".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
+                project_summary: None,
+                ticket_enforcement_mode: Some("off".to_string()),
+            },
+        )
+        .expect("save project metadata");
+        let id = studio_create_evolution_ticket_from_chat(
+            dir.path(),
+            "Créer une application Todo avec filtres et sauvegarde.",
+        )
+        .expect("create project request and generic backlog");
+        let mut summary = studio_get_ticket(dir.path(), &id).expect("request summary");
+        summary.status = "done".to_string();
+        studio_upsert_ticket(dir.path(), summary).expect("simulate premature completion");
+
+        assert!(super::studio_complete_initial_backlog_if_ready(dir.path())
+            .expect("reconcile premature completion")
+            .is_empty());
+        assert_eq!(
+            studio_get_ticket(dir.path(), &id).expect("reopened summary").status,
+            "in_progress"
+        );
+        assert!(studio_list_ticket_events(dir.path(), &id)
+            .iter()
+            .any(|event| event.event_type == "initial_backlog_reopened"));
     }
 
     #[test]

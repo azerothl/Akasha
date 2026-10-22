@@ -47,13 +47,16 @@ fn decode_url_component(s: &str) -> String {
         .into_owned()
 }
 
-fn code_studio_root_agent(action: Option<&str>, _code_mode: Option<&str>) -> &'static str {
+fn code_studio_root_agent(action: Option<&str>, code_mode: Option<&str>) -> &'static str {
     // A bounded goal is already an explicit implementation workflow with
     // mechanical acceptance criteria. Run it on the implementation agent so
     // its goal loop has the write tools it needs; other root workflows start
     // with the Kanban coordinator and delegate to specialists.
     if action == Some("goal") {
         return "studio_fullstack";
+    }
+    if code_mode == Some("plan") {
+        return "studio_planner";
     }
     "studio_project_manager"
 }
@@ -71,9 +74,9 @@ fn should_create_studio_chat_ticket(
     if has_active_queued_target
         && requested_queue_mode == Some(crate::steering_queue::QueueMode::FollowUp)
     {
-        // Follow-up is an explicit request for distinct work, even if the composer still
-        // carries the ticket that launched the active task. Steering stays on that task.
-        return true;
+        // A queued follow-up is a distinct ticket only when its message asks for
+        // actionable work. Courtesy messages should remain ordinary queue text.
+        return crate::api_studio::studio_user_message_suggests_evolution(message);
     }
     !has_explicit_ticket
         && !has_active_queued_target
@@ -2102,7 +2105,6 @@ if method == "POST" && path == "/api/message" {
         .and_then(|v| v.get("studio_ticket_id").and_then(|x| x.as_str()))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let mut studio_ticket_auto_created = false;
     let fork_from_task_id: Option<Uuid> = {
         let raw = body_json
             .as_ref()
@@ -2195,6 +2197,29 @@ if method == "POST" && path == "/api/message" {
     } else {
         None
     };
+    // Serialize user task creation with the Kanban scheduler. Both paths hold
+    // this reservation through handle_envelope, then observe the task row that
+    // the winner inserted before another writer can start in this project.
+    let _studio_project_reservation = if let Some(project_id) = studio_project_id.as_deref() {
+        Some(
+            crate::studio_kanban_dispatch::project_dispatch_lock(project_id)
+                .lock_owned()
+                .await,
+        )
+    } else {
+        None
+    };
+    if queued_target_task_id.is_none()
+        && studio_project_id.as_deref().is_some_and(|project_id| {
+            crate::studio_kanban_dispatch::project_has_active_task(store_path, project_id)
+        })
+    {
+        let body = serde_json::json!({
+            "error": "studio_project_busy",
+            "detail": "Une tâche Code Studio est déjà active pour ce projet. Attendez sa fin ou mettez le message en file comme suivi."
+        });
+        return Some(json_response("409 Conflict", &body.to_string()));
+    }
     if let Some(root) = studio_disk_root.as_ref().filter(|_| {
         should_create_studio_chat_ticket(
             studio_project_id.is_some(),
@@ -2211,7 +2236,6 @@ if method == "POST" && path == "/api/message" {
                     "auto-created Code Studio evolution ticket from chat"
                 );
                 studio_ticket_id = Some(id);
-                studio_ticket_auto_created = true;
             }
             Err(e) => {
                 tracing::error!(error = %e, "Code Studio actionable request could not be registered on Kanban");
@@ -2366,20 +2390,6 @@ if method == "POST" && path == "/api/message" {
                     message.clone()
                 };
                 let queued = sq.enqueue(tid, qmode, queued_message).await;
-                if qmode == crate::steering_queue::QueueMode::FollowUp
-                    && studio_ticket_auto_created
-                {
-                    if let (Some(root), Some(ticket_id)) =
-                        (studio_disk_root.as_ref(), studio_ticket_id.as_deref())
-                    {
-                        let _ = crate::api_studio::studio_attach_task_to_ticket(
-                            root,
-                            ticket_id,
-                            &tid.to_string(),
-                            "system_follow_up",
-                        );
-                    }
-                }
                 let event_type = match qmode {
                     crate::steering_queue::QueueMode::Steering => "user_steering_queued",
                     crate::steering_queue::QueueMode::FollowUp => "user_follow_up_queued",
@@ -2985,7 +2995,7 @@ mod tests {
         assert_eq!(code_studio_root_agent(Some("debug"), None), "studio_project_manager");
         assert_eq!(code_studio_root_agent(Some("test"), None), "studio_project_manager");
         assert_eq!(code_studio_root_agent(Some("audit"), None), "studio_project_manager");
-        assert_eq!(code_studio_root_agent(None, Some("plan")), "studio_project_manager");
+        assert_eq!(code_studio_root_agent(None, Some("plan")), "studio_planner");
     }
 
     #[test]
@@ -3001,6 +3011,13 @@ mod tests {
             Some(crate::steering_queue::QueueMode::Steering),
             request
         ));
+        assert!(!should_create_studio_chat_ticket(
+            true,
+            false,
+            true,
+            Some(crate::steering_queue::QueueMode::FollowUp),
+            "Merci !"
+        ));
         assert!(should_create_studio_chat_ticket(
             true,
             false,
@@ -3013,7 +3030,7 @@ mod tests {
             true,
             true,
             Some(crate::steering_queue::QueueMode::FollowUp),
-            "Un mode nuit indépendant pour les captures serait utile."
+            "Ajoute un mode nuit indépendant pour les captures."
         ));
         assert!(!should_create_studio_chat_ticket(
             true,

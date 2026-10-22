@@ -26,8 +26,6 @@ pub(crate) fn allows_tool(role: &str, tool: &str) -> bool {
                 | "git_diff"
                 | "git_log"
                 | "git_rev_parse"
-                | "run_command"
-                | "run_terminal"
                 | "ask_user"
                 | "list_skills"
                 | "read_skill"
@@ -121,7 +119,6 @@ mod project_manager_policy_tests {
         assert!(super::restricted_role("studio_project_manager"));
         for allowed in [
             "read_file",
-            "run_command",
             "studio_list_tickets",
             "studio_create_ticket",
             "studio_update_ticket",
@@ -131,6 +128,8 @@ mod project_manager_policy_tests {
         }
         for denied in [
             "write_file",
+            "run_command",
+            "run_terminal",
             "write_code",
             "edit_file",
             "apply_patch",

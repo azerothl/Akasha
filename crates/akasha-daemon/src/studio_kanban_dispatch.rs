@@ -8,11 +8,27 @@ use crate::gateway::{handle_envelope, MessageEnvelope};
 use akasha_store::{TaskStatus, TaskStore};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 const DEFAULT_INTERVAL_SECS: u64 = 60;
 const DEFAULT_RETRY_COOLDOWN_SECS: i64 = 300;
 const MAX_AUTOMATIC_FAILURE_ATTEMPTS: usize = 3;
+
+type ProjectDispatchLocks = std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>;
+
+/// Shared reservation used by user-created and scheduled Code Studio tasks.
+pub(crate) fn project_dispatch_lock(project_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<ProjectDispatchLocks> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(lock) = locks.get(project_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(project_id.to_string(), Arc::downgrade(&lock));
+    lock
+}
 
 pub fn spawn(data_dir: PathBuf, store_path: PathBuf, main_agent: MainAgent) {
     if std::env::var("AKASHA_STUDIO_KANBAN_DISPATCH_ENABLED").as_deref() == Ok("0") {
@@ -98,7 +114,14 @@ async fn dispatch_idle_projects(
         else {
             continue;
         };
+        let project_lock = project_dispatch_lock(&project_id);
+        let _project_reservation = project_lock.lock().await;
         if active_projects.contains(&project_id) {
+            continue;
+        }
+        // Recheck after taking the same reservation used by user requests;
+        // an earlier task-store snapshot alone leaves a dispatch race.
+        if project_has_active_task(store_path, &project_id) {
             continue;
         }
 
@@ -209,6 +232,17 @@ async fn dispatch_idle_projects(
         });
         if !should_dispatch_pass(ready.len()) {
             continue;
+        }
+        if let Some(ticket) = ready.first_mut() {
+            if let Err(error) = transition_ready_request_parent_to_review(&root, ticket, &tickets) {
+                tracing::warn!(
+                    project_id,
+                    ticket_id = %ticket.id,
+                    error = %error,
+                    "Could not move completed Kanban parent into review"
+                );
+                continue;
+            }
         }
         let selected_ticket = ready.first();
         let selected_ticket_json = selected_ticket.map(|ticket| {
@@ -352,6 +386,22 @@ fn ticket_agent_for_dispatch<'a>(
     }
 }
 
+fn transition_ready_request_parent_to_review(
+    project_root: &Path,
+    ticket: &mut StudioTicket,
+    tickets: &[StudioTicket],
+) -> Result<(), String> {
+    let review_ready_parent = is_user_request_tracker(ticket, tickets)
+        && user_request_children_done(ticket, tickets)
+        && ticket.review_outcome.as_deref() != Some("changes_requested");
+    if review_ready_parent && ticket.status != "review" {
+        ticket.status = "review".to_string();
+        ticket.updated_at = chrono::Utc::now().to_rfc3339();
+        api_studio::studio_upsert_ticket(project_root, ticket.clone())?;
+    }
+    Ok(())
+}
+
 fn is_user_request_tracker(ticket: &StudioTicket, tickets: &[StudioTicket]) -> bool {
     ticket.requested_by == "user_chat"
         && tickets.iter().any(|candidate| {
@@ -407,7 +457,7 @@ fn initial_backlog_needs_planning(
         && !api_studio::studio_initial_backlog_is_ready_for_project(project_root, summary, tickets)
 }
 
-fn project_has_active_task(store_path: &Path, project_id: &str) -> bool {
+pub(crate) fn project_has_active_task(store_path: &Path, project_id: &str) -> bool {
     let Ok(store) = TaskStore::open(store_path) else {
         // Fail closed: never dispatch when project activity cannot be checked.
         return true;
@@ -740,7 +790,7 @@ fn record_completed_task_without_review(
     {
         return;
     }
-    if ticket.status == "in_progress" || ticket.status == "review" {
+    if ticket.status == "in_progress" {
         let mut blocked = ticket.clone();
         blocked.status = "blocked".to_string();
         blocked.evidence.summary = Some(format!("Vérification incomplète : {context}"));
@@ -808,7 +858,7 @@ fn record_terminal_task_failure(
         return;
     }
     let context = terminal_failure_context(ticket, task_statuses, store_path);
-    if ticket.status == "in_progress" || ticket.status == "review" {
+    if ticket.status == "in_progress" {
         let mut blocked = ticket.clone();
         blocked.status = "blocked".to_string();
         blocked.evidence.summary = Some(context.clone().unwrap_or_else(|| {
@@ -1164,6 +1214,36 @@ mod tests {
     }
 
     #[test]
+    fn project_dispatch_reservation_is_shared_by_project_id() {
+        let first = project_dispatch_lock("same-project");
+        let second = project_dispatch_lock("same-project");
+        let other = project_dispatch_lock("other-project");
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert!(!std::sync::Arc::ptr_eq(&first, &other));
+    }
+
+    #[test]
+    fn completed_user_request_parent_enters_review_before_reviewer_dispatch() {
+        let dir = tempfile::tempdir().expect("project root");
+        let mut parent = ticket("in_progress", None);
+        parent.id = "request-parent".to_string();
+        let mut child = ticket("done", None);
+        child.id = "request-child".to_string();
+        child.parent_ticket_id = Some(parent.id.clone());
+        let tickets = vec![parent.clone(), child];
+
+        transition_ready_request_parent_to_review(dir.path(), &mut parent, &tickets)
+            .expect("persist review transition");
+        assert_eq!(parent.status, "review");
+        let saved = studio_list_tickets(dir.path())
+            .into_iter()
+            .find(|candidate| candidate.id == parent.id)
+            .expect("saved parent");
+        assert_eq!(saved.status, "review");
+        assert_eq!(ticket_agent_for_dispatch(&saved, &tickets), "studio_reviewer");
+    }
+
+    #[test]
     fn activity_check_fails_closed_when_task_store_is_unavailable() {
         let dir = tempfile::tempdir().expect("directory");
         let missing_store = dir.path().join("missing").join("tasks.db");
@@ -1255,6 +1335,36 @@ mod tests {
             &statuses,
             &task_store_path,
             future
+        ));
+    }
+
+    #[test]
+    fn failed_reviewer_attempt_keeps_the_ticket_in_review_for_the_next_review() {
+        let dir = tempfile::tempdir().expect("project root");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).expect("create project root");
+        let store_path = dir.path().join("tasks.db");
+        let _store = TaskStore::open(&store_path).expect("create task store");
+        let failed_task = "00000000-0000-0000-0000-000000000004";
+        let mut review = ticket("review", Some(failed_task));
+        review.id = "review-retry".to_string();
+        review.requested_by = "studio_fullstack".to_string();
+        api_studio::studio_upsert_ticket(&root, review.clone()).expect("save review ticket");
+        let statuses = HashMap::from([(failed_task.to_string(), TaskStatus::Failed)]);
+
+        record_terminal_task_failure(&root, &review, &statuses, &store_path);
+        let saved = studio_list_tickets(&root)
+            .into_iter()
+            .find(|candidate| candidate.id == review.id)
+            .expect("review ticket remains available");
+        assert_eq!(saved.status, "review");
+        assert_eq!(ticket_agent_for_dispatch(&saved, &[]), "studio_reviewer");
+        assert!(ticket_can_be_retried(
+            &saved,
+            &root,
+            &statuses,
+            &store_path,
+            chrono::Utc::now() + chrono::Duration::hours(1)
         ));
     }
 

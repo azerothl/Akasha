@@ -5,6 +5,32 @@ use serde_json::{json, Map, Value};
 fn safe(text: &str) -> String {
     text.replace("<|", "\\u003c|")
 }
+fn encode_parameter_value(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace("</parameter>", "\\</parameter>")
+}
+fn split_parameter_value<'a>(raw: &'a str) -> Option<(String, &'a str)> {
+    const CLOSING: &str = "</parameter>";
+    let mut value = String::new();
+    let mut cursor = 0;
+    while cursor < raw.len() {
+        let tail = &raw[cursor..];
+        if let Some(after_escape) = tail.strip_prefix("\\\\") {
+            value.push('\\');
+            cursor = raw.len() - after_escape.len();
+        } else if let Some(after_marker) = tail.strip_prefix("\\</parameter>") {
+            value.push_str(CLOSING);
+            cursor = raw.len() - after_marker.len();
+        } else if let Some(after_close) = tail.strip_prefix(CLOSING) {
+            return Some((value, after_close));
+        } else {
+            let ch = tail.chars().next()?;
+            value.push(ch);
+            cursor += ch.len_utf8();
+        }
+    }
+    None
+}
 fn render_call(name: &str, args: &Value) -> String {
     let mut out = format!("<tool_call>\n<function={name}>\n");
     if let Some(args) = args.as_object() {
@@ -15,7 +41,7 @@ fn render_call(name: &str, args: &Value) -> String {
                 .unwrap_or_else(|| value.to_string());
             out.push_str(&format!(
                 "<parameter={key}>\n{}\n</parameter>\n",
-                safe(&value)
+                safe(&encode_parameter_value(&value))
             ));
         }
     }
@@ -37,7 +63,7 @@ pub(crate) fn prompt(request: &CompletionRequest) -> String {
         .unwrap_or("")
         .to_owned();
     if !definitions.is_empty() {
-        system.push_str(&format!("\n# Tools\n<tools>\n{}\n</tools>\n[Active Qwen 3.5 transport]\nCall the listed function names with their keyword arguments using this exact format, never TOOL: or TOOL_JSON: or a tutorial:\n<tool_call>\n<function=FUNCTION_NAME>\n<parameter=ARGUMENT_NAME>\nARGUMENT_VALUE\n</parameter>\n</function>\n</tool_call>\nInclude required parameters. For an existing file, read it successfully before editing; expected_version may be omitted when this task has read the file, because the runtime binds to that snapshot and rejects stale edits. For a new file use expected_version string missing. Strings are literal parameter bodies; objects and arrays use valid JSON. For an array of command arguments, write a JSON array of individual strings, for example <parameter=args>\\n[\"run\",\"build\"]\\n</parameter>; never put a whole command line in args. An intentionally empty argument list is []. Wait for tool results before continuing; never repeat identical confirmed operations. When checks fail, repair the faulty files after reading their current versions.\n",serde_json::to_string(&definitions).unwrap()));
+        system.push_str(&format!("\n# Tools\n<tools>\n{}\n</tools>\n[Active Qwen 3.5 transport]\nCall the listed function names with their keyword arguments using this exact format, never TOOL: or TOOL_JSON: or a tutorial:\n<tool_call>\n<function=FUNCTION_NAME>\n<parameter=ARGUMENT_NAME>\nARGUMENT_VALUE\n</parameter>\n</function>\n</tool_call>\nInclude required parameters. For an existing file, read it successfully before editing; expected_version may be omitted when this task has read the file, because the runtime binds to that snapshot and rejects stale edits. For a new file use expected_version string missing. String values encode each literal backslash as \\\\ and encode a literal </parameter> as \\</parameter>; objects and arrays use valid JSON with the same escaping for these delimiters. For an array of command arguments, write a JSON array of individual strings, for example <parameter=args>\\n[\"run\",\"build\"]\\n</parameter>; never put a whole command line in args. An intentionally empty argument list is []. Wait for tool results before continuing; never repeat identical confirmed operations. When checks fail, repair the faulty files after reading their current versions.\n",serde_json::to_string(&definitions).unwrap()));
     }
     let mut out = format!("<|im_start|>system\n{}<|im_end|>\n", safe(&system));
     for message in messages
@@ -216,13 +242,18 @@ pub(crate) fn reply(
                 }
                 (key, format!("</{key}>"), true)
             };
-            let (value, tail) = after
-                .split_once(closing.as_str())
-                .ok_or("Qwen parameter body incomplete")?;
-            let value = if direct && !value.starts_with('\n') {
-                value
+            let (value, tail) = if closing == "</parameter>" {
+                split_parameter_value(after).ok_or("Qwen parameter body incomplete")?
             } else {
-                framed_value(value)
+                let (value, tail) = after
+                    .split_once(closing.as_str())
+                    .ok_or("Qwen parameter body incomplete")?;
+                (value.to_string(), tail)
+            };
+            let value = if direct && !value.starts_with('\n') {
+                value.as_str()
+            } else {
+                framed_value(&value)
             };
             let schema = &function["parameters"]["properties"][key];
             if schema.is_null() || args.contains_key(key) {
@@ -255,6 +286,9 @@ pub(crate) fn reply(
         if calls.len() > 128 {
             return Err("Qwen call batch too large".into());
         }
+    }
+    if rest.contains("<tool_call") {
+        return Err("Incomplete Qwen tool-call marker; no calls executed".into());
     }
     if calls.is_empty() {
         if request.require_tool || public.contains("<tool_call") {
@@ -358,5 +392,19 @@ mod tests {
         );
         assert!(reply(&req, &format!("{good}<tool_call>"), true).is_err());
         assert!(reply(&req,"<tool_call><function=write_file><parameter=path>\na\n</parameter><parameter=path>\nb\n</parameter></function></tool_call>",true).is_err());
+        assert!(reply(&req, &format!("{good}<tool_call"), true).is_err());
+    }
+
+    #[test]
+    fn parameter_delimiter_is_escaped_losslessly_inside_string_values() {
+        let req = request();
+        let content = "literal </parameter> and \\</parameter> plus \\\"quotes\\\"";
+        let call = render_call(
+            "write_file",
+            &json!({"path":"workspace:/a.txt","content":content,"expected_version":"missing"}),
+        );
+        let output = reply(&req, &call, true).unwrap();
+        let decoded: Value = serde_json::from_str(output.strip_prefix("TOOL_JSON: ").unwrap()).unwrap();
+        assert_eq!(decoded["arguments"]["content"], content);
     }
 }

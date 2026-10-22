@@ -35,17 +35,28 @@ pub(crate) fn parse_run_command_args(
 /// executor may safely remove this exact duplicate and report the correction
 /// back so the agent uses the documented shape next time.
 pub(crate) fn remove_repeated_executable_arg(command: &str, args: &mut Vec<String>) -> bool {
-    fn executable_stem(value: &str) -> Option<String> {
-        std::path::Path::new(value)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(|stem| stem.to_ascii_lowercase())
+    fn normalized_executable(value: &str) -> Option<(String, bool)> {
+        let mut normalized = value.replace('\\', "/").to_ascii_lowercase();
+        let filename = normalized.rsplit('/').next()?;
+        let has_windows_suffix = filename
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| matches!(extension, "exe" | "cmd" | "bat" | "com"));
+        if has_windows_suffix {
+            normalized.truncate(normalized.len() - filename.rsplit_once('.')?.1.len() - 1);
+        }
+        Some((normalized, has_windows_suffix))
     }
 
     let Some(first) = args.first() else {
         return false;
     };
-    if executable_stem(command).is_some() && executable_stem(command) == executable_stem(first) {
+    let exact_match = command.eq_ignore_ascii_case(first);
+    let windows_command_alias = normalized_executable(command)
+        .zip(normalized_executable(first))
+        .is_some_and(|((left, left_had_suffix), (right, right_had_suffix))| {
+            left == right && left_had_suffix != right_had_suffix
+        });
+    if exact_match || windows_command_alias {
         args.remove(0);
         true
     } else {
@@ -83,6 +94,15 @@ mod tests {
         let mut normal_args = vec!["run".to_string(), "build".to_string()];
         assert!(!remove_repeated_executable_arg("npm", &mut normal_args));
         assert_eq!(normal_args, ["run", "build"]);
+    }
+
+    #[test]
+    fn does_not_drop_a_script_that_shares_the_executable_stem() {
+        for (command, script) in [("node", "node.js"), ("python", "python.py")] {
+            let mut args = vec![script.to_string(), "--version".to_string()];
+            assert!(!remove_repeated_executable_arg(command, &mut args));
+            assert_eq!(args[0], script);
+        }
     }
 }
 
