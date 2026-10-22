@@ -953,8 +953,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     run_now = http_json(base, "POST", f"/api/schedules/{schedule_id}/run_now", {})
                     run_task_id = run_now.get("task_id")
                     run_task: dict[str, Any] = {}
+                    run_event_data: dict[str, Any] = {"events": []}
                     if isinstance(run_task_id, str):
-                        run_task, _ = poll_task(base, run_task_id, args.timeout_secs)
+                        run_task, run_event_data = poll_task(base, run_task_id, args.timeout_secs)
                     run_after = metric_snapshot(base)
                     run_deltas = metric_delta(run_before, run_after)
                     run_providers = [
@@ -971,6 +972,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     run_progress = run_task.get("progress") or []
                     run_text = next((item.get("message", "") for item in reversed(run_progress) if isinstance(item, dict) and item.get("message")), "")
                     run_text = re.sub(r"<think>.*?</think>", "", run_text, flags=re.DOTALL).strip()
+                    run_llm_diagnostics = llm_call_diagnostics(run_event_data.get("events", []), run_task, run_text)
                     schedule_device_match, schedule_vram_bytes = model_device_match(args.ollama_url, model, args.device)
                     schedule_run = {
                         "latency_ms": round((time.monotonic() - run_started) * 1000),
@@ -982,6 +984,10 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                         "device_match": schedule_device_match,
                         "model_vram_bytes": schedule_vram_bytes,
                         "tokens_out": run_task.get("last_turn_tokens_out", 0),
+                        "llm_call_count": run_llm_diagnostics["call_count"],
+                        "llm_unfinished_call_count": run_llm_diagnostics["unfinished_count"],
+                        "llm_success_models": run_llm_diagnostics["success_models"],
+                        "llm_failure_kinds": run_llm_diagnostics["failure_kinds"],
                         "fallback_triggered": False,
                         "fallback_success": False,
                     }
