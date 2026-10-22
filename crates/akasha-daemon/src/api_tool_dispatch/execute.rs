@@ -23,10 +23,86 @@ use crate::api_tool_dispatch::web_device_memory_ops::parse_device_invoke_params;
 use crate::memory_actor::LongTermMemoryClient;
 use akasha_store::{Schedule, ScheduleStore, Task, TaskStatus, TaskStore, WorkspaceGraphStore};
 use akasha_vault::Vault;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
+
+async fn canonicalize_with_missing_suffix(path: &Path) -> Result<PathBuf, String> {
+    let mut current = path.to_path_buf();
+    let mut missing = Vec::<std::ffi::OsString>::new();
+    loop {
+        match tokio::fs::canonicalize(&current).await {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(strip_verbatim_prefix(resolved));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(file_name) = current.file_name() else {
+                    return Err(format!(
+                        "cannot resolve workspace write path {}",
+                        path.display()
+                    ));
+                };
+                missing.push(file_name.to_os_string());
+                let Some(parent) = current.parent() else {
+                    return Err(format!(
+                        "cannot resolve workspace write path {}",
+                        path.display()
+                    ));
+                };
+                current = parent.to_path_buf();
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot resolve workspace write path {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+}
+
+async fn resolve_workspace_write_target(
+    policy: &akasha_tools::ToolsPolicy,
+    path: &Path,
+    workspace_root: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let workspace_base = workspace_root
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| "workspace root is unavailable".to_string())?;
+    let canonical_base = canonicalize_with_missing_suffix(&workspace_base).await?;
+    let canonical_target = canonicalize_with_missing_suffix(path).await?;
+
+    // `ToolsPolicy::can_write` historically accepts relative allowlist prefixes.
+    // Rebase those prefixes on the workspace root before comparing canonical paths.
+    let mut resolved_policy = policy.clone();
+    resolved_policy.allowed_write_paths = Vec::with_capacity(policy.allowed_write_paths.len());
+    for prefix in &policy.allowed_write_paths {
+        if prefix.trim().is_empty() {
+            resolved_policy.allowed_write_paths.push(prefix.clone());
+            continue;
+        }
+        let prefix_path = Path::new(prefix);
+        let resolved_prefix = if prefix_path.is_absolute() {
+            prefix_path.to_path_buf()
+        } else {
+            canonical_base.join(prefix_path)
+        };
+        let canonical_prefix = canonicalize_with_missing_suffix(&resolved_prefix).await?;
+        resolved_policy
+            .allowed_write_paths
+            .push(canonical_prefix.to_string_lossy().into_owned());
+    }
+    resolved_policy.workspace_root = Some(canonical_base);
+    if !resolved_policy.can_write(&canonical_target) {
+        return Err("path not allowed by tools policy".to_string());
+    }
+    Ok(canonical_target)
+}
 
 pub(crate) async fn execute_tool_call_impl(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
@@ -2528,21 +2604,47 @@ pub(crate) async fn execute_tool_call_impl(
                         let (key, _) =
                             rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
                         let rel_path = Path::new(&key);
-                        let disk_path_opt = workspace_root
-                            .map(|root| root.join(&key))
-                            .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
-                            .map(strip_verbatim_prefix);
-                        let policy_path = disk_path_opt.as_deref().unwrap_or(rel_path);
-                        if !executor.policy.can_write(policy_path) {
+                        if rel_path.is_absolute()
+                            || rel_path
+                                .components()
+                                .any(|component| component == std::path::Component::ParentDir)
+                        {
                             return (
                                 false,
-                                format!("[{usage_tag}] path not allowed by tools policy"),
+                                format!("[{usage_tag}] workspace path escapes its root"),
                                 None,
                             );
                         }
-                        let mut guard = ws.write().await;
-                        let per_task = guard.entry(lineage_task_id).or_default();
-                        let previous_mem = per_task.get(&key).cloned().unwrap_or_default();
+                        let requested_disk_path = workspace_root
+                            .map(|root| root.join(&key))
+                            .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                            .map(strip_verbatim_prefix);
+                        let Some(requested_disk_path) = requested_disk_path else {
+                            return (
+                                false,
+                                format!("[{usage_tag}] workspace root is unavailable"),
+                                None,
+                            );
+                        };
+                        let disk_path = match resolve_workspace_write_target(
+                            &executor.policy,
+                            &requested_disk_path,
+                            workspace_root,
+                        )
+                        .await
+                        {
+                            Ok(path) => path,
+                            Err(reason) => {
+                                return (false, format!("[{usage_tag}] {reason}"), None)
+                            }
+                        };
+                        let previous_mem = ws
+                            .read()
+                            .await
+                            .get(&lineage_task_id)
+                            .and_then(|files| files.get(&key))
+                            .cloned()
+                            .unwrap_or_default();
                         // Only prefer the longer previous content for plan-trace files
                         // (.akasha/plan_*.md) where provider truncation is a known risk.
                         // For all other files, always use the new content so legitimate
@@ -2556,40 +2658,56 @@ pub(crate) async fn execute_tool_call_impl(
                         } else {
                             content.clone()
                         };
-                        per_task.insert(key.clone(), effective_content.clone());
-                        drop(guard);
-                        // Also write to disk under data_dir (workspace root = store_path.parent())
-                        if let Some(disk_path) = disk_path_opt {
-                            if let Some(parent) = disk_path.parent() {
-                                let _ = tokio::fs::create_dir_all(parent).await;
-                            }
-                            let run_pollution_check = code_only
-                                || workspace_root
-                                    .map(|r| {
-                                        crate::studio::is_strictly_under_studio_root(&disk_path, r)
-                                    })
-                                    .unwrap_or(false);
-                            if run_pollution_check {
-                                if let Some(msg) =
-                                    crate::api_studio::studio_reject_polluted_code_content(
-                                        &disk_path,
-                                        &effective_content,
-                                    )
-                                {
-                                    return (false, format!("[{usage_tag}] {}", msg), None);
-                                }
-                            }
-                            if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
+                        if let Some(parent) = disk_path.parent() {
+                            if let Err(error) = tokio::fs::create_dir_all(parent).await {
                                 return (
-                                    true,
-                                    format!("[{usage_tag} workspace:{}] saved (disk).", key),
+                                    false,
+                                    format!("[{usage_tag}] disk directory creation failed: {error}"),
                                     None,
                                 );
                             }
                         }
+                        // Re-resolve after creating parents so a symlinked ancestor cannot
+                        // redirect the final write outside the authorized path.
+                        let disk_path = match resolve_workspace_write_target(
+                            &executor.policy,
+                            &disk_path,
+                            workspace_root,
+                        )
+                        .await
+                        {
+                            Ok(path) => path,
+                            Err(reason) => {
+                                return (false, format!("[{usage_tag}] {reason}"), None)
+                            }
+                        };
+                        let run_pollution_check = code_only
+                            || workspace_root
+                                .map(|r| crate::studio::is_strictly_under_studio_root(&disk_path, r))
+                                .unwrap_or(false);
+                        if run_pollution_check {
+                            if let Some(msg) = crate::api_studio::studio_reject_polluted_code_content(
+                                &disk_path,
+                                &effective_content,
+                            ) {
+                                return (false, format!("[{usage_tag}] {}", msg), None);
+                            }
+                        }
+                        if let Err(error) = tokio::fs::write(&disk_path, &effective_content).await {
+                            return (
+                                false,
+                                format!("[{usage_tag}] disk write failed: {error}"),
+                                None,
+                            );
+                        }
+                        ws.write()
+                            .await
+                            .entry(lineage_task_id)
+                            .or_default()
+                            .insert(key.clone(), effective_content);
                         return (
                             true,
-                            format!("[{usage_tag} workspace:{}] saved.", key),
+                            format!("[{usage_tag} workspace:{}] saved (disk).", key),
                             None,
                         );
                     }
@@ -3843,5 +3961,116 @@ mod tests {
         assert!(message.contains("policy"));
         let workspace = workspace_store.read().await;
         assert!(workspace.get(&task_id).map_or(true, |files| files.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn workspace_write_resolves_relative_allowlist_from_workspace_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = temp.path().join("output");
+        tokio::fs::create_dir_all(&output).await.expect("output directory");
+        let executor = Arc::new(ToolExecutor::new(ToolsPolicy {
+            allowed_write_paths: vec!["output".to_string()],
+            ..ToolsPolicy::default()
+        }));
+        let task_id = Uuid::new_v4();
+        let workspace_store = new_task_workspace_store();
+        let args = vec![
+            "workspace:/output/result.txt".to_string(),
+            "written".to_string(),
+        ];
+
+        let (success, message, _) = execute_tool_call_impl(
+            &executor,
+            "write_file",
+            &args,
+            None,
+            None,
+            task_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&workspace_store),
+            None,
+            Some(temp.path()),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(success, "{message}");
+        assert_eq!(
+            tokio::fs::read_to_string(output.join("result.txt"))
+                .await
+                .unwrap(),
+            "written"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_write_cannot_escape_allowlist_through_symlink() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let allowed = temp.path().join("allowed");
+        let outside = temp.path().join("outside");
+        tokio::fs::create_dir_all(&allowed)
+            .await
+            .expect("allowed directory");
+        tokio::fs::create_dir_all(&outside)
+            .await
+            .expect("outside directory");
+        let protected = outside.join("protected.txt");
+        tokio::fs::write(&protected, "unchanged")
+            .await
+            .expect("protected file");
+        let link = allowed.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).expect("directory symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, &link).expect("directory symlink");
+
+        let executor = Arc::new(ToolExecutor::new(ToolsPolicy {
+            allowed_write_paths: vec![allowed.to_string_lossy().into_owned()],
+            ..ToolsPolicy::default()
+        }));
+        let task_id = Uuid::new_v4();
+        let workspace_store = new_task_workspace_store();
+        let args = vec![
+            "workspace:/allowed/link/protected.txt".to_string(),
+            "changed".to_string(),
+        ];
+
+        let (success, message, _) = execute_tool_call_impl(
+            &executor,
+            "write_file",
+            &args,
+            None,
+            None,
+            task_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&workspace_store),
+            None,
+            Some(temp.path()),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(!success, "{message}");
+        assert!(message.contains("policy"), "{message}");
+        assert_eq!(
+            tokio::fs::read_to_string(&protected).await.unwrap(),
+            "unchanged"
+        );
+        let workspace = workspace_store.read().await;
+        assert!(
+            workspace
+                .get(&task_id)
+                .map_or(true, |files| files.is_empty())
+        );
     }
 }
