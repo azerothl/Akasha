@@ -492,7 +492,7 @@ def submit_message(
     model_match, provider_used = provider_model_evidence(
         expected_model,
         model_used,
-        llm_success_models,
+        llm_diagnostics["success_models"],
         providers,
     )
     device_match, vram_bytes = model_device_match(ollama_url, expected_model, device)

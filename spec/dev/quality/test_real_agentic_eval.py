@@ -41,6 +41,47 @@ class RealAgenticEvalTests(unittest.TestCase):
         self.assertEqual(diagnostics["failure_kinds"], ["context_window"])
         self.assertEqual(diagnostics["success_models"], [])
 
+    def test_submit_message_passes_collected_models_to_provider_verification(self):
+        events = [
+            {"event_type": "llm_call_started", "payload": {"round": 1}},
+            {
+                "event_type": "llm_call_finished",
+                "payload": {"round": 1, "success": True, "model_used": "qwen2.5-coder:14b"},
+            },
+        ]
+        after = {
+            "ollama::qwen2.5-coder:14b": {
+                "total_requests": 1,
+                "successful_requests": 1,
+                "failed_requests": 0,
+                "fallback_triggered": 0,
+                "fallback_success": 0,
+            }
+        }
+        with (
+            patch.object(eval_runner, "metric_snapshot", side_effect=[{}, after]),
+            patch.object(eval_runner, "http_json", return_value={"task_id": "task-1"}),
+            patch.object(
+                eval_runner,
+                "poll_task",
+                return_value=({"status": "done", "progress": [{"message": "ok"}]}, {"events": events}),
+            ),
+            patch.object(eval_runner, "model_device_match", return_value=(True, 1024)),
+        ):
+            result = eval_runner.submit_message(
+                "http://daemon",
+                "prompt",
+                "ask",
+                True,
+                5,
+                "qwen2.5-coder:14b",
+                "http://ollama",
+                "cuda",
+            )
+        self.assertTrue(result["model_match"])
+        self.assertEqual(result["provider_used"], "ollama")
+        self.assertEqual(result["llm_success_models"], ["qwen2.5-coder:14b"])
+
     def test_schedule_response_marker_is_exact_after_whitespace_normalization(self):
         self.assertEqual(eval_runner.normalized_marker_response("  SCHEDULE_OK\n"), "schedule_ok")
         self.assertEqual(eval_runner.normalized_marker_response("The task says SCHEDULE_OK"), "thetasksaysschedule_ok")
