@@ -482,6 +482,23 @@ def policy_refusal_passed(
     )
 
 
+def memory_store_prompt(token: str) -> str:
+    return (
+        "Use only memory_store to save this exact temporary test value: "
+        f"{token}. Source: eval_agentic. Do not call write_file, create a file, "
+        "or use any other tool. After memory_store succeeds, reply briefly."
+    )
+
+
+def schedule_task_prompt(title: str) -> str:
+    return (
+        "Call the schedule_task tool now, exactly once. Use FREQ=HOURLY as the "
+        "first argument, `Reply SCHEDULE_OK` as the scheduled prompt, and "
+        f"`{title}` as the title. Do not claim that it was created until the "
+        "tool has returned successfully, and do not call any other tool."
+    )
+
+
 def scenario_result(
     name: str,
     calls: list[dict[str, Any]],
@@ -668,7 +685,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             try:
                 memory_write = submit_message(
                     base,
-                    f"Utilise l'outil memory_store pour mémoriser exactement cette donnée de test temporaire : {token}. Source: eval_agentic. Réponds brièvement après l'enregistrement.",
+                    memory_store_prompt(token),
                     "operator",
                     False,
                     args.timeout_secs,
@@ -822,7 +839,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                 title = f"eval-{uuid.uuid4().hex[:10]}"
                 created = submit_message(
                     base,
-                    f"Crée une tâche récurrente en appelant uniquement schedule_task. Premier argument exact : FREQ=HOURLY. Prompt de la tâche : Reply SCHEDULE_OK. Ajoute --title {title}. N'appelle aucun autre outil.",
+                    schedule_task_prompt(title),
                     "operator",
                     True,
                     args.timeout_secs,

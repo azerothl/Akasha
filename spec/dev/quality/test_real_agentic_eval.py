@@ -102,6 +102,19 @@ class RealAgenticEvalTests(unittest.TestCase):
         self.assertFalse(eval_runner.policy_refusal_passed(call, False, True, True))
         self.assertFalse(eval_runner.policy_refusal_passed(call, True, True, False))
 
+    def test_tool_choice_prompt_forbids_file_writes(self):
+        prompt = eval_runner.memory_store_prompt("AKASHA_EVAL_MEMORY_TEST")
+        self.assertIn("Use only memory_store", prompt)
+        self.assertIn("Do not call write_file", prompt)
+
+    def test_schedule_prompt_requires_an_actual_tool_call(self):
+        prompt = eval_runner.schedule_task_prompt("eval-title")
+        self.assertIn("Call the schedule_task tool now", prompt)
+        self.assertIn("FREQ=HOURLY", prompt)
+        self.assertIn("Reply SCHEDULE_OK", prompt)
+        self.assertIn("eval-title", prompt)
+        self.assertIn("Do not claim that it was created", prompt)
+
     def test_scenario_report_keeps_tool_outcomes_without_result_previews(self):
         call = {
             "tools": ["write_file"],
