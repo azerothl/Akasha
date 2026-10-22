@@ -250,7 +250,7 @@ pub(crate) async fn complete_stream(
                 );
                 metrics.record_failure(&entry.provider, &entry.model);
                 failures.push(detail);
-                let semantic_protocol_error=error.to_string().contains("tool_protocol_error") || error.to_string().contains("LFM2 tool generation incomplete");
+                let semantic_protocol_error=error.to_string().contains("tool_protocol_error") || error.to_string().contains("LFM2 tool generation incomplete") || error.to_string().contains("error parsing tool call");
                 if has_tools && !semantic_protocol_error {
                     health.quarantine(entry,model_options,format_provider_error(&entry.provider,&error));
                 }
@@ -339,6 +339,9 @@ mod tests {
             }
             if model == "semantic" {
                 return Err(ProviderError::Api("tool_protocol_error: unadvertised function in this role".into()));
+            }
+            if model == "semantic-json" {
+                return Err(ProviderError::Api("Ollama streaming error: error parsing tool call: unexpected end of JSON input".into()));
             }
             if model == "empty" {
                 return Ok(serde_json::from_value(
@@ -430,14 +433,16 @@ mod tests {
     }
     #[tokio::test]
     async fn role_protocol_errors_do_not_quarantine_a_working_transport_before_semantic_repair() {
-        let (router,calls,_)=setup("semantic",Some("ok"),true);
+        for model in ["semantic","semantic-json"] {
+        let (router,calls,_)=setup(model,Some("ok"),true);
         let mut request=request();request.tools=Some(vec![serde_json::json!({"type":"function","function":{"name":"read_file"}})]);
         for _ in 0..2 {
             let (tx,_)=std::sync::mpsc::channel();
             router.complete_stream_bounded(&request,None,None,tx,Duration::from_secs(2),Arc::new(|_|{})).await.unwrap();
         }
-        assert_eq!(router.studio_model_qualification("mock","semantic").unwrap().status,"qualified");
-        assert_eq!(*calls.lock().unwrap(),vec!["probe:semantic","semantic","probe:ok","ok","semantic","ok"]);
+        assert_eq!(router.studio_model_qualification("mock",model).unwrap().status,"qualified");
+        assert_eq!(*calls.lock().unwrap(),vec![format!("probe:{model}"),model.into(),"probe:ok".into(),"ok".into(),model.into(),"ok".into()]);
+        }
     }
     #[tokio::test]
     async fn bounded_fallback_discards_partial_tool_text_and_cancels_the_attempt() {

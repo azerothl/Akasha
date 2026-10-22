@@ -110,6 +110,30 @@ pub(crate) fn bind_arguments(
                 "workaround":"Use studio_update_ticket on these IDs before creating additional work. Preserve dependencies and add specific acceptance criteria."}).to_string());
         }
     }
+    if let Some(ticket) = body
+        .get("ticket_id")
+        .and_then(Value::as_str)
+        .and_then(|id| tickets.iter().find(|t| t.id == id))
+    {
+        if ticket.requested_by == "system_initial_backlog" {
+            let expected_prefix = format!("initial:{}:", parent.id);
+            if let Some(phase) = ticket
+                .creation_key
+                .as_deref()
+                .and_then(|key| key.strip_prefix(&expected_prefix))
+            {
+                let owner = match phase {
+                    "foundation" => Some("studio_scaffold"),
+                    "features" | "integration" | "validation" => Some("studio_fullstack"),
+                    _ => None,
+                };
+                if let Some(owner) = owner {
+                    body["assigned_agent"] = json!(owner);
+                    body["review_agent"] = json!("studio_reviewer");
+                }
+            }
+        }
+    }
     Ok(body)
 }
 
@@ -122,7 +146,7 @@ pub(crate) fn validate(root: &Path, parent: &StudioTicket) -> Result<Vec<String>
         .collect();
     let mut problems = Vec::new();
     if !api_studio::studio_initial_backlog_is_ready_for_project(root, parent, &children) {
-        problems.push("Refine all seeded phase titles and add non-empty specific criteria; keep at least three work tickets and a real dependency.".to_string());
+        problems.push("Add specific acceptance criteria to every seeded phase; keep at least three work tickets and a real dependency. Existing phase titles may be retained.".to_string());
     }
     let roles = [
         "studio_scaffold",
@@ -258,6 +282,10 @@ mod tests {
         let body=bind_arguments(dir.path(),"planner","studio_project_manager","studio_create_ticket",&json!({"title":"Socle Todo","parent_ticket_id":"invented","creation_key":"foundation","acceptance_criteria":[{"text":"Vite React TS démarre depuis workspace:/"}]})).unwrap();
         assert_eq!(body["parent_ticket_id"], id);
         assert!(body["ticket_id"].is_string());
+        assert_eq!(body["assigned_agent"], "studio_scaffold");
+        let poisoned=bind_arguments(dir.path(),"planner","studio_project_manager","studio_update_ticket",&json!({"ticket_id":body["ticket_id"],"assigned_agent":"studio_project_manager","review_agent":"unknown"})).unwrap();
+        assert_eq!(poisoned["assigned_agent"], "studio_scaffold");
+        assert_eq!(poisoned["review_agent"], "studio_reviewer");
         api_studio::studio_tool_apply_ticket_patch_json(dir.path(), &body).unwrap();
         assert_eq!(api_studio::studio_list_tickets(dir.path()).len(), 5);
         assert!(bind_arguments(
@@ -289,15 +317,7 @@ mod tests {
             .into_iter()
             .filter(|t| t.id != id)
         {
-            t.title = format!(
-                "Todo : {}",
-                t.creation_key
-                    .as_deref()
-                    .unwrap()
-                    .rsplit(':')
-                    .next()
-                    .unwrap()
-            );
+            // Keeping a usable phase title must not require a cosmetic rename.
             t.acceptance_criteria.push(serde_json::from_value(json!({"id":"todo-specific","text":"Le titre Todo obligatoire et les filtres sont vérifiés dans cette phase"})).unwrap());
             api_studio::studio_upsert_ticket(dir.path(), t).unwrap();
         }

@@ -1388,13 +1388,6 @@ pub(crate) fn studio_initial_backlog_is_ready(
 }
 
 pub(crate) fn is_initial_backlog_template_ticket(ticket: &StudioTicket) -> bool {
-    const TEMPLATE_TITLES: &[&str] = &[
-        "Établir le socle du projet",
-        "Implémenter les fonctionnalités demandées",
-        "Intégrer les fonctionnalités dans l'application",
-        "Valider le projet et le parcours utilisateur",
-    ];
-    let title = ticket.title.trim();
     let has_specific_criterion = ticket.acceptance_criteria.iter().any(|criterion| {
         let text = criterion.text.trim().to_lowercase();
         !text.is_empty() && !criterion.id.as_deref().is_some_and(|id| id.starts_with("request-behavior-")) && ![
@@ -1406,10 +1399,7 @@ pub(crate) fn is_initial_backlog_template_ticket(ticket: &StudioTicket) -> bool 
         .iter()
         .any(|template| text.starts_with(template))
     });
-    TEMPLATE_TITLES
-        .iter()
-        .any(|template| title.eq_ignore_ascii_case(template))
-        || !has_specific_criterion
+    !has_specific_criterion
 }
 
 pub(crate) fn studio_initial_backlog_is_ready_for_project(
