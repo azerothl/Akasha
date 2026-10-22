@@ -1387,7 +1387,7 @@ pub(crate) fn studio_initial_backlog_is_ready(
     work_tickets.len() >= 3 && has_internal_dependency
 }
 
-fn is_initial_backlog_template_ticket(ticket: &StudioTicket) -> bool {
+pub(crate) fn is_initial_backlog_template_ticket(ticket: &StudioTicket) -> bool {
     const TEMPLATE_TITLES: &[&str] = &[
         "Établir le socle du projet",
         "Implémenter les fonctionnalités demandées",
@@ -1395,9 +1395,9 @@ fn is_initial_backlog_template_ticket(ticket: &StudioTicket) -> bool {
         "Valider le projet et le parcours utilisateur",
     ];
     let title = ticket.title.trim();
-    let generic_criterion = ticket.acceptance_criteria.iter().any(|criterion| {
+    let has_specific_criterion = ticket.acceptance_criteria.iter().any(|criterion| {
         let text = criterion.text.trim().to_lowercase();
-        [
+        !text.is_empty() && !criterion.id.as_deref().is_some_and(|id| id.starts_with("request-behavior-")) && ![
             "examiner le dépôt et sa stack, réutiliser la structure existante",
             "implémenter les comportements et fonctionnalités décrits dans la demande",
             "relier les fonctionnalités à l'interface, à l'état et aux services",
@@ -1409,7 +1409,7 @@ fn is_initial_backlog_template_ticket(ticket: &StudioTicket) -> bool {
     TEMPLATE_TITLES
         .iter()
         .any(|template| title.eq_ignore_ascii_case(template))
-        || generic_criterion
+        || !has_specific_criterion
 }
 
 pub(crate) fn studio_initial_backlog_is_ready_for_project(

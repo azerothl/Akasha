@@ -1,5 +1,17 @@
 # Générations Studio : délai, reprise et suivi
 
+## Planification et passage à l'implémentation
+
+Le coordinateur initial est lié au ticket racine par son affectation persistée. Les outils lui retournent les IDs canoniques et les clés des phases existantes. Le parent d'une mutation de plan vient de ce lien, y compris si le modèle invente un parent inexistant ; un autre parent existant est refusé. Les autres rôles ne bénéficient pas de cette résolution.
+
+Une création avec la clé canonique d'une phase (ou `foundation`, `features`, `integration`, `validation`) affine son ticket existant. Une création supplémentaire est refusée tant que les gabarits restent à préciser ; l'erreur indique les IDs à mettre à jour. Les clés des phases restent stables. Aucun rapprochement approximatif de titres n'est utilisé.
+
+Un titre précisé et des critères spécifiques peuvent conserver les critères de socle d'origine. Les seules copies `request-behavior-*` semées automatiquement ne constituent pas un affinement. Avant une réponse finale du coordinateur, le moteur vérifie les phases, leurs critères, les rôles, les dépendances internes, l'absence de cycle et l'existence d'un travail prêt. Il fournit au maximum deux tours de réparation du plan ; un échec restant termine avec `verification_failed`.
+
+Un plan valide produit un contrôle `kanban_plan`, l'événement `initial_plan_ready` et `planning_verified: true`. Cela ne produit ni `acceptance_verified`, ni statut `done`, ni preuve de modification applicative. La réconciliation ne bloque plus ce coordinateur pour absence de code : au balayage suivant, le scheduler sélectionne un ticket de travail prêt et son spécialiste. Les contrôles d'implémentation et la revue restent obligatoires pour livrer le projet.
+
+## Génération et reprise
+
 Le chemin Studio utilise `LLMRouter::complete_stream_bounded`. Le budget total réserve du temps aux routes alternatives configurées, sans répéter le primaire avant un fallback. Trois tentatives au maximum sont autorisées ; un modèle imposé reste épinglé, avec une seule reprise de transport si les retries sont activés. Les fragments d'une génération abandonnée ne sont pas exécutables. Les outils des tours antérieurs restent couverts par le registre d'opérations et le checkpoint.
 
 Les événements `llm_provider_attempt` et `llm_wait_heartbeat` indiquent la route réellement appelée, sa phase et son attente. Les erreurs finales donnent les modèles tentés et une marche à suivre. Un timeout ne déclenche pas `first_meaningful_progress`.

@@ -456,6 +456,7 @@ pub(crate) async fn run_message_via_llm(
              et une creation_key stable. Relis le Kanban après chaque mise à jour; ne modifie aucun fichier source\
              et ne délègue pas avant la fin de ce backlog.\n",
         );
+        studio_disk_system_append.push_str(&format!("\n[Références du plan liées à cette tâche]\n{}\n",crate::studio_planning::context(&tool_disk_workspace_root,&task_id.to_string())));
     } else if code_studio_disk_task && assigned_agent.eq_ignore_ascii_case("studio_project_manager") {
         studio_disk_system_append.push_str(
             "\n\n[Kanban workflow — required]\n\
@@ -2600,6 +2601,27 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
             let no_parseable_tools_this_round = parsed_tool_calls.is_none();
+            if studio_initial_kanban_planning && no_parseable_tools_this_round {
+                match crate::studio_planning::finish(&tool_disk_workspace_root, &task_id.to_string()) {
+                    Ok(check) => {
+                        run_outcome.checks.push(check);
+                        reply_text = "Planification vérifiée. Le Kanban est prêt pour les agents d'implémentation ; l'application reste à créer et valider.".into();
+                        break 'tool_rounds;
+                    }
+                    Err(error) => {
+                        let repairs = run_outcome.checks.iter().filter(|c| c["kind"] == "kanban_plan_repair").count();
+                        if repairs < 2 {
+                            run_outcome.checks.push(serde_json::json!({"kind":"kanban_plan_repair","status":"retried","detail":error}));
+                            current_prompt = format!("{delivered_prompt}\n[Planning verification failed]\n{error}\nUse the existing ticket IDs and studio_update_ticket to resolve these problems. Do not delegate, create duplicate phase tickets or claim project completion.");
+                            continue;
+                        }
+                        run_outcome.termination = TerminationReason::VerificationFailed;
+                        run_outcome.checks.push(serde_json::json!({"kind":"kanban_plan","status":"failed","detail":error}));
+                        reply_text = format!("Planification Kanban incomplète : {error}");
+                        break 'tool_rounds;
+                    }
+                }
+            }
             // Targeted missing-file recovery follows verified progress; a zero-effect claim still fails as a tool error.
             if code_studio_disk_task && no_parseable_tools_this_round && !explicit_file_goals.is_empty() && run_outcome.has_file_effect_progress() {
                 let current=if let Some(executor)=tools_executor.as_ref(){Some(crate::studio_policy::executor(executor.read().await.clone(), studio_policy_root))}else{tools_executor_snapshot.clone()};

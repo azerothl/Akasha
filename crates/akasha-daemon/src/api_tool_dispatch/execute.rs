@@ -574,10 +574,11 @@ pub(crate) async fn execute_tool_call_impl(
                     })
                 })
                 .collect();
-            let pretty = serde_json::to_string_pretty(&slim).unwrap_or_else(|_| "[]".to_string());
+            let pretty = serde_json::to_string(&slim).unwrap_or_else(|_| "[]".to_string());
             (
                 true,
-                format!("[studio_list_tickets]\n{}", pretty),
+                format!("[studio_list_tickets]\n{}\n[Planning context]\n{}", pretty,
+                    crate::studio_planning::context(&root, &task_id.to_string())),
                 None,
             )
         }
@@ -605,7 +606,14 @@ pub(crate) async fn execute_tool_call_impl(
                     );
                 }
             };
-            match crate::api_studio::studio_tool_create_ticket_json(&root, &v) {
+            let v = match crate::studio_planning::bind_arguments(&root, &task_id.to_string(), assigned_agent_for_task.as_deref().unwrap_or_default(), tool_name, &v) {
+                Ok(v) => v,
+                Err(error) => return (false, error, None),
+            };
+            let result = if v.get("ticket_id").is_some() {
+                crate::api_studio::studio_tool_apply_ticket_patch_json(&root, &v)
+            } else { crate::api_studio::studio_tool_create_ticket_json(&root, &v) };
+            match result {
                 Ok(ticket) => {
                     let enc = serde_json::to_string_pretty(&ticket).unwrap_or_default();
                     (true, format!("[studio_create_ticket]\n{}", enc), None)
@@ -636,6 +644,10 @@ pub(crate) async fn execute_tool_call_impl(
                         None,
                     );
                 }
+            };
+            let v = match crate::studio_planning::bind_arguments(&root, &task_id.to_string(), assigned_agent_for_task.as_deref().unwrap_or_default(), tool_name, &v) {
+                Ok(v) => v,
+                Err(error) => return (false, error, None),
             };
             match crate::api_studio::studio_tool_apply_ticket_patch_json(&root, &v) {
                 Ok(ticket) => {

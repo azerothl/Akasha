@@ -452,10 +452,10 @@ fn ticket_belongs_to_parent(ticket: &StudioTicket, parent_id: &str) -> bool {
 fn initial_backlog_needs_planning(
     project_root: &Path,
     summary: &StudioTicket,
-    tickets: &[StudioTicket],
+    _tickets: &[StudioTicket],
 ) -> bool {
     is_initial_backlog_summary(summary)
-        && !api_studio::studio_initial_backlog_is_ready_for_project(project_root, summary, tickets)
+        && crate::studio_planning::validate(project_root, summary).is_err()
 }
 
 pub(crate) fn project_has_active_task(store_path: &Path, project_id: &str) -> bool {
@@ -769,6 +769,14 @@ fn record_completed_task_without_review(
     if task_statuses.get(task_id) != Some(&TaskStatus::Completed) {
         return;
     }
+    // A verified planning pass hands the still-open tracker to its children.
+    // It is not an incomplete implementation, and must not incur a retry cooldown.
+    if is_initial_backlog_summary(ticket)
+        && TaskStore::open(store_path).ok()
+            .and_then(|store| uuid::Uuid::parse_str(task_id).ok().and_then(|id|store.get_outcome(id).ok().flatten()))
+            .is_some_and(|outcome| outcome["planning_verified"]==true)
+        && crate::studio_planning::validate(project_root,ticket).is_ok()
+    { return; }
     let Some(context) = incomplete_task_context(ticket, task_statuses, store_path) else {
         return;
     };
@@ -1202,7 +1210,11 @@ mod tests {
         validation.title = "Verify the playable Bomberman flow".to_string();
         validation.acceptance_criteria[0].id = Some("playable-validation".to_string());
         validation.depends_on_ticket_ids = vec![features.id.clone()];
-        let refined = vec![summary.clone(), foundation, features, validation];
+        let mut refined = vec![summary.clone(), foundation, features, validation];
+        for child in refined.iter_mut().skip(1) {
+            child.parent_ticket_id = Some(summary.id.clone());
+        }
+        for item in &refined { api_studio::studio_upsert_ticket(dir.path(), item.clone()).unwrap(); }
         assert!(!initial_backlog_needs_planning(
             dir.path(),
             &summary,
