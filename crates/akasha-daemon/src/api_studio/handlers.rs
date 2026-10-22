@@ -880,6 +880,66 @@ pub async fn handle_studio_route(
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "user".to_string());
+            let parent_ticket_id = match body_v.get("parent_ticket_id") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+                    Some(value.trim().to_string())
+                }
+                Some(_) => {
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"parent_ticket_id_invalid"}"#,
+                    ));
+                }
+            };
+            if let Some(parent_id) = parent_ticket_id.as_deref() {
+                let Some(parent) = studio_get_ticket(&root, parent_id) else {
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"parent_ticket_not_found"}"#,
+                    ));
+                };
+                if parent.project_id != id {
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"parent_ticket_project_mismatch"}"#,
+                    ));
+                }
+            }
+            let creation_key = match body_v.get("creation_key") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value))
+                    if !value.trim().is_empty() && value.trim().chars().count() <= 160 =>
+                {
+                    Some(value.trim().to_string())
+                }
+                Some(_) => {
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"creation_key_invalid"}"#,
+                    ));
+                }
+            };
+            if let Some(existing) = studio_find_duplicate_ticket(
+                &root,
+                parent_ticket_id.as_deref(),
+                creation_key.as_deref(),
+                title,
+            ) {
+                let _ = studio_append_ticket_event(
+                    &root,
+                    &existing.id,
+                    "ticket_duplicate_suppressed",
+                    "user",
+                    Some(serde_json::json!({
+                        "source": "http_create",
+                        "parent_ticket_id": parent_ticket_id,
+                        "creation_key": creation_key,
+                    })),
+                );
+                let body = serde_json::json!({ "ticket": existing, "deduplicated": true }).to_string();
+                return Some(json_response("200 OK", &body));
+            }
             let acceptance_criteria = match body_v.get("acceptance_criteria") {
                 None => vec![],
                 Some(v) => {
@@ -936,6 +996,14 @@ pub async fn handle_studio_route(
                 }
             }
             let new_ticket_id = uuid::Uuid::new_v4().to_string();
+            if let Some(parent_id) = parent_ticket_id.as_deref() {
+                if crate::api_studio::studio_ticket_parent_would_cycle(&root, &new_ticket_id, parent_id) {
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"parent_ticket_cycle"}"#,
+                    ));
+                }
+            }
             for d in &depends_on_ticket_ids {
                 if d == &new_ticket_id {
                     return Some(json_response(
@@ -972,6 +1040,8 @@ pub async fn handle_studio_route(
                 requested_by,
                 assigned_agent: assigned_agent.clone(),
                 review_agent: review_agent.clone(),
+                parent_ticket_id,
+                creation_key,
                 depends_on_ticket_ids,
                 depends_on_ticket_id,
                 related_task_id: None,
@@ -989,6 +1059,19 @@ pub async fn handle_studio_route(
                     &serde_json::json!({ "error": e }).to_string(),
                 ));
             }
+            if let Some(parent_id) = ticket.parent_ticket_id.as_deref() {
+                if let Err(error) = studio_reopen_user_request_parent_for_followup(
+                    &root,
+                    parent_id,
+                    &ticket.id,
+                    "user",
+                ) {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({ "error": error }).to_string(),
+                    ));
+                }
+            }
             let _ = studio_append_ticket_event(
                 &root,
                 &ticket.id,
@@ -997,6 +1080,8 @@ pub async fn handle_studio_route(
                 Some(serde_json::json!({
                     "assigned_agent": assigned_agent,
                     "review_agent": review_agent,
+                    "parent_ticket_id": ticket.parent_ticket_id,
+                    "creation_key": ticket.creation_key,
                     "depends_on_ticket_id": ticket.depends_on_ticket_id,
                     "depends_on_ticket_ids": ticket.depends_on_ticket_ids,
                 })),
@@ -1102,6 +1187,45 @@ pub async fn handle_studio_route(
                     ));
                 }
                 ticket.review_agent = a.to_string();
+            }
+            if let Some(parent_value) = body_v.get("parent_ticket_id") {
+                let next_parent = match parent_value {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(value) if !value.trim().is_empty() => {
+                        Some(value.trim().to_string())
+                    }
+                    _ => {
+                        return Some(json_response(
+                            "422 Unprocessable Entity",
+                            r#"{"error":"parent_ticket_id_invalid"}"#,
+                        ));
+                    }
+                };
+                if let Some(parent_id) = next_parent.as_deref() {
+                    let Some(parent) = studio_get_ticket(&root, parent_id) else {
+                        return Some(json_response(
+                            "422 Unprocessable Entity",
+                            r#"{"error":"parent_ticket_not_found"}"#,
+                        ));
+                    };
+                    if parent.project_id != ticket.project_id {
+                        return Some(json_response(
+                            "422 Unprocessable Entity",
+                            r#"{"error":"parent_ticket_project_mismatch"}"#,
+                        ));
+                    }
+                    if crate::api_studio::studio_ticket_parent_would_cycle(
+                        &root,
+                        ticket_id,
+                        parent_id,
+                    ) {
+                        return Some(json_response(
+                            "422 Unprocessable Entity",
+                            r#"{"error":"parent_ticket_cycle"}"#,
+                        ));
+                    }
+                }
+                ticket.parent_ticket_id = next_parent;
             }
             if body_v.get("depends_on_ticket_ids").is_some() {
                 let next_deps: Vec<String> = match body_v.get("depends_on_ticket_ids") {
@@ -1256,6 +1380,21 @@ pub async fn handle_studio_route(
                     &serde_json::json!({ "error": e }).to_string(),
                 ));
             }
+            if body_v.get("parent_ticket_id").is_some() {
+                if let Some(parent_id) = ticket.parent_ticket_id.as_deref() {
+                    if let Err(error) = studio_reopen_user_request_parent_for_followup(
+                        &root,
+                        parent_id,
+                        &ticket.id,
+                        "user",
+                    ) {
+                        return Some(json_response(
+                            "500 Internal Server Error",
+                            &serde_json::json!({ "error": error }).to_string(),
+                        ));
+                    }
+                }
+            }
             match recovered_execution {
                 Some((previous_status, previous_related_task_id)) => {
                     let _ = studio_append_ticket_event(
@@ -1276,7 +1415,11 @@ pub async fn handle_studio_route(
                         &ticket.id,
                         "ticket_updated",
                         "user",
-                        Some(serde_json::json!({ "status": ticket.status })),
+                        Some(serde_json::json!({
+                            "status": ticket.status,
+                            "parent_ticket_id": ticket.parent_ticket_id,
+                            "depends_on_ticket_ids": ticket.depends_on_ticket_ids,
+                        })),
                     );
                 }
             }

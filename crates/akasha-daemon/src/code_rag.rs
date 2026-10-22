@@ -430,10 +430,22 @@ fn scan_dir_recursive(base: &Path, dir: &Path, out: &mut Vec<ScannedFile>) -> an
 
 fn is_indexable_code_file(rel: &str) -> bool {
     let lower = rel.to_ascii_lowercase();
+    let file_name = Path::new(rel)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if lower.contains("/.git/")
         || lower.contains(".min.")
         || lower.starts_with("node_modules/")
         || lower.contains("/node_modules/")
+        // Studio ticket/event ledgers are served through the Kanban API. Indexing
+        // them duplicates long task histories in every agent prompt and can push
+        // small local models over their context window.
+        || matches!(
+            file_name.as_str(),
+            ".akasha-studio-tickets.json" | ".akasha-studio-events.json"
+        )
     {
         return false;
     }
@@ -628,6 +640,8 @@ mod tests {
         assert!(is_indexable_code_file("src/main.ts"));
         assert!(!is_indexable_code_file("dist/app.min.js"));
         assert!(!is_indexable_code_file("node_modules/pkg/index.js"));
+        assert!(!is_indexable_code_file(".akasha-studio-tickets.json"));
+        assert!(!is_indexable_code_file(".akasha-studio-events.json"));
     }
 
     #[test]

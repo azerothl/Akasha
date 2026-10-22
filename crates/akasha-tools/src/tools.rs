@@ -66,6 +66,26 @@ pub async fn read_file(path: &Path, policy: &ToolsPolicy) -> Result<(String, Too
     ))
 }
 
+fn validate_managed_manifest(path: &Path, content: &str, policy: &ToolsPolicy) -> Result<()> {
+    if let Some(root)=policy.studio_manifest_root.as_ref() {
+        if let (Some(parent),Some(root))=(path.parent().and_then(|p|p.canonicalize().ok()),root.canonicalize().ok()) {
+            if parent==root {return validate_json_candidate(path,content);}
+        }
+    }
+    Ok(())
+}
+
+// Strict JSON manifests must remain parseable; reject before any disk effect.
+// JSONC configuration (tsconfig etc.) is intentionally excluded.
+fn validate_json_candidate(path: &Path, content: &str) -> Result<()> {
+    if path.file_name().and_then(|v| v.to_str()).is_some_and(|v|
+        matches!(v, "package.json" | "package-lock.json" | "composer.json")) {
+        serde_json::from_str::<serde_json::Value>(content).with_context(||
+            format!("Invalid JSON candidate for {}; file unchanged. Read the current file, then use write_file with its version to replace the WHOLE document, or edit only the intended lines.", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Write content to a file. Path must be allowed by policy for write.
 pub async fn write_file(
     path: &Path,
@@ -80,6 +100,7 @@ pub async fn write_file(
             detail: Some(path.display().to_string()),
         });
     }
+    validate_managed_manifest(path, content, policy)?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -434,6 +455,7 @@ pub async fn search_replace(
         .with_context(|| format!("search_replace read {}", path.display()))?;
     let count = content.matches(search).count();
     let new_content = content.replace(search, replace);
+    validate_managed_manifest(path, &new_content, policy)?;
     tokio::fs::write(path, &new_content)
         .await
         .with_context(|| format!("search_replace write {}", path.display()))?;
@@ -493,6 +515,7 @@ pub async fn edit_file(
     if content.ends_with('\n') && !out.is_empty() {
         out.push('\n');
     }
+    validate_managed_manifest(path, &out, policy)?;
     tokio::fs::write(path, out)
         .await
         .with_context(|| format!("edit_file write {}", path.display()))?;
@@ -608,13 +631,14 @@ pub async fn apply_patch(
         return Ok(ToolResult {
             tool: "apply_patch".to_string(),
             success: false,
-            summary: "no valid hunk found in patch".to_string(),
+            summary: "no valid numbered unified-diff hunk found; use @@ -3,1 +3,1 @@ with -old/+new lines, or search_replace for literal text; full source and bare @@ are not patches".to_string(),
             detail: Some(path.display().to_string()),
         });
     }
     let out = lines.join("\n");
     let needs_newline = content.ends_with('\n') && !out.is_empty();
     let out = if needs_newline { format!("{}\n", out) } else { out };
+    validate_managed_manifest(path, &out, policy)?;
     tokio::fs::write(path, out)
         .await
         .with_context(|| format!("apply_patch write {}", path.display()))?;
@@ -839,6 +863,11 @@ fn search_files_inner(
             },
         ));
     }
+    if !dir.is_dir() {
+        return Ok((vec![],ToolResult{tool:"search_files".into(),success:false,
+            summary:"search root is unavailable or not a directory; use an existing directory (workspace:/ for the project root) and pass the glob separately".into(),
+            detail:Some(dir.display().to_string())}));
+    }
     let pattern_trimmed = pattern.trim();
     let simple_basename_pattern = !pattern_trimmed.is_empty()
         && !pattern_trimmed.contains('*')
@@ -978,6 +1007,8 @@ fn windows_spawn(
     for exe in &candidates {
         let mut cmd = tokio::process::Command::new(exe.as_ref());
         cmd.args(args).current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         for (k, v) in env {
@@ -1061,6 +1092,100 @@ fn substitute_env_vars(s: &str, env: &[(String, String)]) -> String {
     result
 }
 
+fn interactive_setup(command: &str, args: &[String]) -> bool {
+    let base = Path::new(command).file_stem().and_then(|v| v.to_str()).unwrap_or(command).to_ascii_lowercase();
+    let wizard = args.iter().any(|a| a == "--init")
+        && (base == "eslint" || args.iter().any(|a| a == "eslint" || a.starts_with("eslint@")));
+    wizard || (base == "npm" && args.first().is_some_and(|a| a == "init")
+        && !args.iter().any(|a| matches!(a.as_str(), "-y" | "--yes")))
+}
+
+struct CommandTreeGuard(Option<u32>);
+impl Drop for CommandTreeGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(pid) = self.0 {
+            use std::os::windows::process::CommandExt;
+            // Spawn immediately before tokio drops the child; hidden and scoped
+            // to the PID returned by this invocation, never a process name.
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .creation_flags(0x08000000).output();
+        }
+    }
+}
+
+#[cfg(test)]
+mod unattended_command_tests {
+    use super::*;
+    #[test]
+    fn nonexistent_search_root_is_not_a_successful_empty_search() {
+        let dir=std::env::temp_dir().join(format!("akasha-search-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let policy=ToolsPolicy{allowed_read_paths:vec![dir.display().to_string()],..Default::default()};
+        assert!(!search_files_inner(&dir.join("**"),"*",false,&policy).unwrap().1.success);
+        let (files,result)=search_files_inner(&dir,"*",false,&policy).unwrap();
+        assert!(result.success);assert!(files.is_empty());
+        std::fs::write(dir.join("example.ts"),"export const value = 1").unwrap();
+        let (files,result)=search_files_inner(&dir,"*.ts",false,&policy).unwrap();
+        assert!(result.success);assert_eq!(files.len(),1);
+        std::fs::remove_file(dir.join("example.ts")).unwrap();std::fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn invalid_manifest_edit_leaves_original_unchanged() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let dir = std::env::temp_dir().join(format!("akasha-manifest-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("package.json");
+            let original = "{\n  \"name\": \"original\"\n}\n";
+            std::fs::write(&path, original).unwrap();
+            let policy = ToolsPolicy { allowed_read_paths: vec![dir.display().to_string()], allowed_write_paths: vec![dir.display().to_string()], studio_manifest_root: Some(dir.clone()), ..Default::default() };
+            assert!(edit_file(&path, 2, 2, r#"{"name":"replacement"}"#, &policy).await.is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            // Generic callers can deliberately write invalid JSON fixtures.
+            let mut generic=policy.clone();generic.studio_manifest_root=None;
+            assert!(write_file(&path,"invalid JSON fixture",&generic).await.unwrap().success);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(),"invalid JSON fixture");
+            std::fs::remove_file(path).unwrap();
+            std::fs::remove_dir(dir).unwrap();
+        });
+    }
+    #[test]
+    fn command_receives_ci_and_closed_stdin() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let policy = ToolsPolicy { allowed_commands: vec!["node".into()], command_timeout_secs: 10, ..Default::default() };
+            let (output, result) = run_command("node", &["-e".into(), "process.stdin.on('end',()=>console.log(process.env.CI));process.stdin.resume()".into()], None, None, &policy).await.unwrap();
+            assert!(result.success);
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        });
+    }
+    #[test]
+    fn command_timeout_returns_promptly() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let policy = ToolsPolicy { allowed_commands: vec!["node".into()], command_timeout_secs: 1, ..Default::default() };
+            let started = std::time::Instant::now();
+            let error = run_command("node", &["-e".into(), "setInterval(()=>{},1000)".into()], None, None, &policy).await.unwrap_err();
+            assert!(error.to_string().contains("timeout"));
+            assert!(started.elapsed().as_secs() < 8);
+        });
+    }
+    #[test]
+    fn manifest_replacement_is_validated() {
+        assert!(validate_json_candidate(Path::new("package.json"), r#"{"name":"ok"}"#).is_ok());
+        assert!(validate_json_candidate(Path::new("package.json"), r#"{"name":"old", {"name":"new"}}"#).is_err());
+        assert!(validate_json_candidate(Path::new("tsconfig.json"), "{/* comment */}").is_ok());
+    }
+    #[test]
+    fn refuses_wizards_but_allows_finite_commands() {
+        let args = |s: &[&str]| s.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        assert!(interactive_setup("npx", &args(&["--yes", "eslint@latest", "--init"])));
+        assert!(interactive_setup("npm.cmd", &args(&["init"])));
+        assert!(!interactive_setup("npm", &args(&["init", "--yes"])));
+        assert!(!interactive_setup("npx", &args(&["tsc", "--noEmit"])));
+        assert!(!interactive_setup("npm", &args(&["run", "build"])));
+    }
+}
+
 /// Run a command with timeout. Command name must be allowed by policy.
 /// `extra_env`: optional env vars (e.g. from vault) to inject into the child process.
 /// When extra_env is set, $VAR and ${VAR} patterns in args are substituted in-process,
@@ -1088,15 +1213,20 @@ pub async fn run_command(
             },
         ));
     }
+    if interactive_setup(command, args) {
+        anyhow::bail!("Interactive setup is unavailable in unattended agent commands; no process started. Write configuration files directly. Use npm init --yes or npx --yes for noninteractive package execution; eslint --init requires a wizard and must not be retried.");
+    }
     let timeout_secs = policy.command_timeout_secs;
     let cwd = cwd.unwrap_or_else(|| Path::new("."));
-    let env_slice = extra_env.unwrap_or(&[]);
+    let mut command_env = vec![("CI".to_string(), "true".to_string())];
+    command_env.extend_from_slice(extra_env.unwrap_or(&[]));
+    let env_slice = command_env.as_slice();
 
     // Substitute $VAR/${VAR} patterns in args in-process, then spawn directly (no shell).
     // Env vars are also passed via Command::env so child processes inherit them.
     let substituted_args: Vec<String> = args.iter().map(|a| substitute_env_vars(a, env_slice)).collect();
 
-    let child = {
+    let mut child = {
         #[cfg(windows)]
         {
             windows_spawn(command, &substituted_args, cwd, env_slice)
@@ -1106,6 +1236,8 @@ pub async fn run_command(
         {
             let mut cmd = tokio::process::Command::new(command);
             cmd.args(&substituted_args).current_dir(cwd)
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
             for (k, v) in env_slice {
@@ -1115,10 +1247,23 @@ pub async fn run_command(
         }
     };
 
+    // Own only this command tree. On cancellation the guard also runs, while
+    // kill_on_drop handles the direct child on other platforms.
+    let mut tree_guard = CommandTreeGuard(child.id());
     let timeout = Duration::from_secs(if timeout_secs == 0 { 60 } else { timeout_secs });
-    let output: std::process::Output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .context("run_command timeout")??;
+    let mut stdout_pipe = child.stdout.take().context("command stdout missing")?;
+    let mut stderr_pipe = child.stderr.take().context("command stderr missing")?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let status = tokio::time::timeout(timeout, async {
+        use tokio::io::AsyncReadExt;
+        let (status, _, _) = tokio::try_join!(
+            child.wait(), stdout_pipe.read_to_end(&mut stdout), stderr_pipe.read_to_end(&mut stderr)
+        )?;
+        Ok::<_, std::io::Error>(status)
+    }).await.context("run_command timeout; command tree terminated")??;
+    let output = std::process::Output { status, stdout, stderr };
+    tree_guard.0 = None;
     let success = output.status.success();
     let code = output.status.code().unwrap_or(-1);
     let stdout_len = output.stdout.len();

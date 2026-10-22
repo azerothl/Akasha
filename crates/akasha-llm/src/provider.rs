@@ -56,6 +56,46 @@ pub struct CompletionRequest {
     pub image_data_urls: Option<Vec<String>>,
 }
 
+/// Some tool-tuned models return the complete standard function-call JSON in
+/// assistant content. Accept only a whole, unambiguous object/batch on a turn
+/// requiring an actual call; prose/examples never become operations.
+fn ollama_error_message(body:&[u8])->Option<String> {
+    let value:serde_json::Value=serde_json::from_slice(body).ok()?;
+    value.get("error").and_then(|error|error.as_str()).filter(|text|!text.trim().is_empty()).map(|text|text.chars().take(1200).collect())
+}
+async fn ollama_http_failure(mut response:reqwest::Response)->ProviderError {
+    let status=response.status();let mut bytes=Vec::new();
+    while bytes.len()<8192 {
+        match response.chunk().await {
+            Ok(Some(chunk))=>{let remaining=8192-bytes.len();bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);},
+            _=>break,
+        }
+    }
+    let detail=ollama_error_message(&bytes).map(|message|format!(": {message}")).unwrap_or_default();
+    ProviderError::Api(format!("status {status}{detail}"))
+}
+
+fn required_ollama_call(request:&CompletionRequest, native_chat:bool, had_calls:bool, complete:bool, text:String) -> Result<String,ProviderError> {
+    if !native_chat || !request.require_tool || had_calls {return Ok(text);}
+    let raw=text.trim();
+    let raw=raw.strip_prefix("```json").or_else(||raw.strip_prefix("```"))
+        .and_then(|s|s.strip_suffix("```")).map(str::trim).unwrap_or(raw);
+    let failure=||ProviderError::Api("tool_protocol_error: a complete advertised native function call is required; no operation executed. Use the named functions with literal keyword arguments, not prose or a tutorial".into());
+    if !complete || raw.len()>1024*1024{return Err(failure());}
+    let value:serde_json::Value=serde_json::from_str(raw).map_err(|_|failure())?;
+    let calls=match value {serde_json::Value::Array(calls)=>calls,call=>vec![call]};
+    if calls.is_empty()||calls.len()>32{return Err(failure());}
+    let names:Vec<_>=request.native_functions().iter().filter_map(|f|f["name"].as_str().map(str::to_owned)).collect();
+    let mut normalized=vec![];
+    for call in calls {
+        let object=call.as_object().ok_or_else(failure)?;
+        if object.len()!=2 || !call["arguments"].is_object(){return Err(failure());}
+        let name=call["name"].as_str().filter(|name|names.iter().any(|n|n==name)).ok_or_else(failure)?;
+        normalized.push(format!("TOOL_JSON: {}",serde_json::json!({"schema_version":1,"tool":name,"arguments":call["arguments"]})));
+    }
+    Ok(normalized.join("\n"))
+}
+
 fn normalized_thinking_level(level: Option<&str>) -> Option<&'static str> {
     match level.map(|s| s.trim().to_ascii_lowercase()) {
         Some(s) if s == "off" || s == "none" || s == "disabled" => Some("off"),
@@ -316,6 +356,17 @@ mod studio_native_tests {
     }
 
     #[test]
+    fn ollama_named_calls_preserve_arguments_and_enforce_catalogue() {
+        let arguments = json!({"path":"workspace:/a.ts","content":"exact\nTOOL: literal é🙂","expected_version":"missing"});
+        let frame = json!({"message":{"tool_calls":[{"function":{"name":"write_file","arguments":arguments}}]}});
+        let mut calls = vec![];
+        ollama_collect_native_calls(&frame, &mut calls).unwrap();
+        assert_eq!(calls[0]["arguments"], arguments);
+        assert_eq!(calls[0]["tool"], "write_file");
+        assert!(ollama_finish_native_calls(String::new(), calls.clone(), true, Some("stop"), &["read_file".into()]).is_err());
+        assert!(ollama_finish_native_calls(String::new(), calls, true, Some("stop"), &["write_file".into()]).is_ok());
+    }
+    #[test]
     fn ollama_wrapped_calls_cannot_escape_the_posted_inner_catalogue() {
         let valid = json!({"schema_version":1,"tool":"write_file","arguments":{"path":"workspace:/a","content":"safe","expected_version":"missing"}});
         let invalid =
@@ -368,6 +419,16 @@ mod studio_native_tests {
                 assert!(n > 0);
                 request.extend_from_slice(&buffer[..n]);
             }
+            // Drain the complete request before closing the response socket;
+            // unread request bytes can cause a TCP reset on Windows.
+            let header_end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            let length: usize = headers.lines().find_map(|line| line.strip_prefix("content-length:").and_then(|n| n.trim().parse().ok())).unwrap_or(0);
+            while request.len() < header_end + length {
+                let n = socket.read(&mut buffer).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&buffer[..n]);
+            }
             write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).unwrap();
             socket.write_all(&body[..split]).unwrap();
             socket.flush().unwrap();
@@ -389,6 +450,40 @@ mod studio_native_tests {
         assert!(response.text.starts_with("TOOL_JSON:"));
         assert!(response.text.contains("é🙂"));
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn raw_qwen_transport_preserves_calls_in_both_completion_paths() {
+        use std::io::{Read, Write};
+        for streaming in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let reply = "<tool_call>\n<function=write_file>\n<parameter=path>\nworkspace:/a.txt\n</parameter>\n<parameter=content>\né🙂\n</parameter>\n<parameter=expected_version>\nmissing\n</parameter>\n</function>\n</tool_call>";
+            let body = json!({"response":reply,"done":true,"done_reason":"stop","prompt_eval_count":42,"eval_count":7}).to_string()+"\n";
+            let server=std::thread::spawn(move|| {
+                let (mut socket,_)=listener.accept().unwrap();
+                let mut bytes=vec![];let mut buffer=[0;4096];
+                let header_end=loop {let n=socket.read(&mut buffer).unwrap();assert!(n>0);bytes.extend_from_slice(&buffer[..n]);if let Some(i)=bytes.windows(4).position(|w|w==b"\r\n\r\n"){break i+4;}};
+                let headers=String::from_utf8_lossy(&bytes[..header_end]).to_ascii_lowercase();
+                let length:usize=headers.lines().find_map(|l|l.strip_prefix("content-length:").and_then(|n|n.trim().parse().ok())).unwrap();
+                while bytes.len()<header_end+length {let n=socket.read(&mut buffer).unwrap();assert!(n>0);bytes.extend_from_slice(&buffer[..n]);}
+                let request:serde_json::Value=serde_json::from_slice(&bytes[header_end..header_end+length]).unwrap();
+                assert_eq!(request["raw"],true);
+                assert_eq!(request["options"]["presence_penalty"],json!(0.0));
+                assert!(request["prompt"].as_str().unwrap().contains("Active Qwen 3.5 transport"));
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            });
+            let provider=OllamaProvider::new(Some(format!("http://{address}")));
+            provider.chat_templates.lock().unwrap().insert("raw-qwen".into(),OllamaConversationTemplate::Qwen35ChatMl);
+            let request:CompletionRequest=serde_json::from_value(json!({"prompt":"create a.txt","conversation":[],"presence_penalty":0.0,"tools":[{"function":{"name":"write_file","parameters":{"properties":{"path":{"type":"string"},"content":{"type":"string"},"expected_version":{"type":"string"}}}}}]})).unwrap();
+            let result=if streaming {let(tx,_)=std::sync::mpsc::channel();provider.complete_stream_async(&request,"raw-qwen",Duration::from_secs(5),&tx).await.unwrap()}
+                else {provider.complete_async(&request,"raw-qwen",Duration::from_secs(5)).await.unwrap()};
+            assert_eq!(result.usage.as_ref().unwrap().prompt_tokens,42);
+            assert_eq!(result.usage.as_ref().unwrap().completion_tokens,7);
+            let envelope:serde_json::Value=serde_json::from_str(result.text.strip_prefix("TOOL_JSON: ").unwrap()).unwrap();
+            assert_eq!(envelope["arguments"]["content"],"é🙂");
+            server.join().unwrap();
+        }
     }
 
     #[tokio::test]
@@ -824,17 +919,19 @@ fn ollama_collect_native_calls(
         .and_then(|v| v.as_array())
     {
         for call in batch {
-            if call.pointer("/function/name").and_then(|v| v.as_str()) != Some("studio_call") {
-                return Err(ProviderError::Api(
-                    "unsupported Ollama native function; no tool exposed".into(),
-                ));
-            }
+            let name = call.pointer("/function/name").and_then(|v| v.as_str())
+                .filter(|name| !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+                .ok_or_else(|| ProviderError::Api("invalid Ollama native function name; no tool exposed".into()))?;
             if !call["function"]["arguments"].is_object() {
                 return Err(ProviderError::Api(
                     "Ollama native arguments must be a complete object; no tool exposed".into(),
                 ));
             }
-            calls.push(call["function"]["arguments"].clone());
+            calls.push(if name == "studio_call" {
+                call["function"]["arguments"].clone()
+            } else {
+                serde_json::json!({"schema_version":1,"tool":name,"arguments":call["function"]["arguments"]})
+            });
             if calls.len() > 128
                 || serde_json::to_vec(calls)
                     .map_err(|e| ProviderError::Api(e.to_string()))?
@@ -872,7 +969,7 @@ fn ollama_finish_native_calls(
                 .is_some_and(|name| functions.iter().any(|allowed| allowed == name))
     }) {
         return Err(ProviderError::Api(
-            "Ollama wrapped tool is outside the advertised catalogue; nothing executed".into(),
+            format!("Ollama tool names {:?} are outside the advertised catalogue {:?}, or arguments are not objects; nothing executed", calls.iter().map(|call|call["tool"].as_str().unwrap_or("<missing>")).collect::<Vec<_>>(), functions),
         ));
     }
     Ok(calls
@@ -898,6 +995,7 @@ fn ollama_apply_stream_ndjson_line(
     }
     let json: serde_json::Value = serde_json::from_str(line)
         .map_err(|e| ProviderError::Api(format!("ollama stream line: {}", e)))?;
+    if let Some(error)=ollama_error_message(line.as_bytes()) {return Err(ProviderError::Api(format!("Ollama streaming error: {error}")));}
     let done = json.get("done").and_then(|v| v.as_bool()) == Some(true);
     if let Some(delta) = json
         .get("response")
@@ -978,11 +1076,26 @@ fn ollama_check_stream_body_cap(
     )
 }
 
+fn ollama_template_needs_json_tool_results(template:&str)->bool {
+    let compact:String=template.chars().filter(|c|!c.is_whitespace()).collect();
+    compact.contains(r#"[TOOL_RESULTS]{"content":{{.Content}}}"#)
+}
+#[cfg(test)]
+mod raw_json_tool_template_tests {
+    #[test]
+    fn detects_raw_json_interpolation_not_preencoded_or_text_templates() {
+        assert!(super::ollama_template_needs_json_tool_results(r#"[TOOL_RESULTS]{"content": {{ .Content }}}[/TOOL_RESULTS]"#));
+        assert!(!super::ollama_template_needs_json_tool_results(r#"[TOOL_RESULTS]{"content": {{ json .Content }}}[/TOOL_RESULTS]"#));
+        assert!(!super::ollama_template_needs_json_tool_results("<tool_response>{{ .Content }}</tool_response>"));
+    }
+}
 #[derive(Clone, Copy)]
 enum OllamaConversationTemplate {
     Chat,
+    JsonToolChat,
     Text,
     Lfm2ChatMl,
+    Qwen35ChatMl,
 }
 
 pub struct OllamaProvider {
@@ -1050,11 +1163,14 @@ impl OllamaProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let mode = if template.contains(".Messages") {
-            OllamaConversationTemplate::Chat
+            if ollama_template_needs_json_tool_results(template) {OllamaConversationTemplate::JsonToolChat} else {OllamaConversationTemplate::Chat}
         } else if matches!(architecture, "lfm2" | "lfm2moe")
             && template.split_whitespace().collect::<String>() == "{{.Prompt}}"
         {
             OllamaConversationTemplate::Lfm2ChatMl
+        } else if matches!(architecture, "qwen35" | "qwen35moe")
+            && template.split_whitespace().collect::<String>() == "{{.Prompt}}" {
+            OllamaConversationTemplate::Qwen35ChatMl
         } else {
             OllamaConversationTemplate::Text
         };
@@ -1062,7 +1178,7 @@ impl OllamaProvider {
             .lock()
             .map_err(|_| ProviderError::Unavailable)?
             .insert(model.to_owned(), mode);
-        if !matches!(mode, OllamaConversationTemplate::Chat) {
+        if !matches!(mode, OllamaConversationTemplate::Chat | OllamaConversationTemplate::JsonToolChat) {
             warn!(model,"Completion-only Ollama template: using explicit conversation framing without changing the installed model");
         }
         Ok(())
@@ -1085,7 +1201,7 @@ impl OllamaProvider {
                     .and_then(|templates| templates.get(model).copied())
             })
             .unwrap_or(OllamaConversationTemplate::Text);
-        let chat = matches!(mode, OllamaConversationTemplate::Chat);
+        let chat = matches!(mode, OllamaConversationTemplate::Chat | OllamaConversationTemplate::JsonToolChat);
         let url = format!(
             "{}/api/{}",
             self.base_url,
@@ -1120,6 +1236,9 @@ impl OllamaProvider {
         if let Some(repeat_penalty) = request.repeat_penalty {
             options["repeat_penalty"] = serde_json::json!(repeat_penalty);
         }
+        if let Some(presence_penalty) = request.presence_penalty {
+            options["presence_penalty"] = serde_json::json!(presence_penalty);
+        }
         if let Some(num_ctx) = request.num_ctx {
             options["num_ctx"] = serde_json::json!(num_ctx);
         }
@@ -1143,13 +1262,19 @@ impl OllamaProvider {
                 .as_ref()
                 .is_some_and(|tools| !tools.is_empty())
             {
-                request.ollama_native_messages()
+                if matches!(mode,OllamaConversationTemplate::JsonToolChat) {request.ollama_native_json_result_messages()} else {request.ollama_native_messages()}
             } else {
                 request.ollama_messages()
             };
             if let Some(tools) = request.tools.as_ref().filter(|tools| !tools.is_empty()) {
-                body["tools"] = serde_json::json!(tools);
+                let _ = tools;
+                body["tools"] = serde_json::json!(request.native_functions().into_iter()
+                    .map(|function| serde_json::json!({"type":"function","function":function})).collect::<Vec<_>>());
             }
+        } else if matches!(mode, OllamaConversationTemplate::Qwen35ChatMl) {
+            body["prompt"] = serde_json::json!(crate::qwen35::prompt(request));
+            body["raw"] = serde_json::json!(true);
+            body["options"]["stop"] = serde_json::json!(["<|im_end|>", "<|endoftext|>"]);
         } else if matches!(mode, OllamaConversationTemplate::Lfm2ChatMl) {
             body["prompt"] = serde_json::json!(request.lfm2_chatml_prompt());
             body["raw"] = serde_json::json!(true);
@@ -1176,7 +1301,8 @@ impl OllamaProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         let client = reqwest::Client::new();
         self.prepare_conversation(request, model, timeout).await?;
-        let (url, body) = self.build_generate_body(request, model, false);
+        let bounded = request.bounded_context()?;
+        let (url, body) = self.build_generate_body(&bounded, model, false);
         let resp = client
             .post(&url)
             .json(&body)
@@ -1204,7 +1330,7 @@ impl OllamaProvider {
             return Err(ProviderError::RateLimit);
         }
         if !resp.status().is_success() {
-            return Err(ProviderError::Api(format!("status {}", resp.status())));
+            return Err(ollama_http_failure(resp).await);
         }
         let bytes = resp.bytes().await.map_err(|e| {
             if e.is_timeout() {
@@ -1240,6 +1366,7 @@ impl OllamaProvider {
             .to_string();
         let mut native_calls = Vec::new();
         ollama_collect_native_calls(&json, &mut native_calls)?;
+        let had_calls = !native_calls.is_empty();
         let text = ollama_finish_native_calls(
             text,
             native_calls,
@@ -1250,8 +1377,12 @@ impl OllamaProvider {
                 .iter()
                 .filter_map(|f| f["name"].as_str().map(str::to_owned))
                 .collect::<Vec<_>>(),
-        )?;
-        let text = if body["raw"] == true
+        ).map_err(|error|ProviderError::Api(format!("tool_protocol_error: {error}")))?;
+        let text = required_ollama_call(request, body.get("messages").is_some() && body.get("tools").is_some(), had_calls, json["done"]==true && json["done_reason"]=="stop", text)?;
+        let text = if body["raw"] == true && body.pointer("/options/stop").is_some() {
+            crate::qwen35::reply(request, &text, json["done"]==true && json["done_reason"]=="stop").map_err(|e|ProviderError::Api(format!("tool_protocol_error: {e}")))?
+        } else { text };
+        let text = if body["raw"] == true && body.pointer("/options/stop").is_none()
             && request
                 .tools
                 .as_ref()
@@ -1275,7 +1406,7 @@ impl OllamaProvider {
             .get("eval_count")
             .and_then(|v| v.as_u64())
             .map(|c| TokenUsage {
-                prompt_tokens: 0,
+                prompt_tokens: json.get("prompt_eval_count").and_then(|v|v.as_u64()).unwrap_or(0),
                 completion_tokens: c,
             });
 
@@ -1328,7 +1459,8 @@ impl OllamaProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         let client = reqwest::Client::new();
         self.prepare_conversation(request, model, timeout).await?;
-        let (url, body) = self.build_generate_body(request, model, true);
+        let bounded = request.bounded_context()?;
+        let (url, body) = self.build_generate_body(&bounded, model, true);
         let mut resp = client
             .post(&url)
             .json(&body)
@@ -1355,7 +1487,7 @@ impl OllamaProvider {
             return Err(ProviderError::RateLimit);
         }
         if !resp.status().is_success() {
-            return Err(ProviderError::Api(format!("status {}", resp.status())));
+            return Err(ollama_http_failure(resp).await);
         }
 
         let structured = body["raw"] == true
@@ -1457,8 +1589,12 @@ impl OllamaProvider {
                 .iter()
                 .filter_map(|f| f["name"].as_str().map(str::to_owned))
                 .collect::<Vec<_>>(),
-        )?;
-        let text = if structured {
+        ).map_err(|error|ProviderError::Api(format!("tool_protocol_error: {error}")))?;
+        let text = required_ollama_call(request, body.get("messages").is_some() && body.get("tools").is_some(), had_calls, json.is_some_and(|j|j["done"]==true && j["done_reason"]=="stop"), text)?;
+        let text = if body["raw"] == true && body.pointer("/options/stop").is_some() {
+            crate::qwen35::reply(request, &text, json.is_some_and(|j|j["done"]==true && j["done_reason"]=="stop")).map_err(|e|ProviderError::Api(format!("tool_protocol_error: {e}")))?
+        } else { text };
+        let text = if structured && body.pointer("/options/stop").is_none() {
             request
                 .lfm2_reply(
                     &text,
@@ -1485,7 +1621,7 @@ impl OllamaProvider {
         let usage = json
             .and_then(|j| j.get("eval_count").and_then(|v| v.as_u64()))
             .map(|c| TokenUsage {
-                prompt_tokens: 0,
+                prompt_tokens: json.and_then(|j|j.get("prompt_eval_count").and_then(|v|v.as_u64())).unwrap_or(0),
                 completion_tokens: c,
             });
         let done_reason = json
@@ -3281,7 +3417,7 @@ mod ollama_wrapper_history_regressions {
     use serde_json::json;
 
     #[test]
-    fn ollama_chat_continuation_keeps_the_advertised_wrapper_and_call_identity() {
+    fn ollama_chat_continuation_matches_flat_functions_and_keeps_call_identity() {
         let arguments = json!({"schema_version":1,"tool":"write_file",
             "arguments":{"path":"workspace:/a.txt","content":"exact","expected_version":"missing"}});
         let request:CompletionRequest=serde_json::from_value(json!({"prompt":"",
@@ -3301,20 +3437,61 @@ mod ollama_wrapper_history_regressions {
         assert!(url.ends_with("/api/chat"));
         assert_eq!(
             advertised_function_names(&body),
-            vec!["studio_call".to_string()]
+            vec!["write_file".to_string()]
         );
-        assert_eq!(body["messages"].as_array().unwrap().len(), 3);
-        let call = &body["messages"][1]["tool_calls"][0];
+        assert_eq!(body["messages"].as_array().unwrap().len(), 4);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert!(body["messages"][0]["content"].as_str().unwrap().contains("Active Ollama native tool transport"));
+        let call = &body["messages"][2]["tool_calls"][0];
         assert_eq!(
             call["function"]["name"],
             body["tools"][0]["function"]["name"]
         );
-        assert_eq!(call["function"]["name"], "studio_call");
-        assert_eq!(call["function"]["arguments"], arguments);
-        assert_eq!(call["id"], body["messages"][2]["tool_call_id"]);
+        assert_eq!(call["function"]["name"], "write_file");
+        assert_eq!(call["function"]["arguments"], arguments["arguments"]);
+        assert_eq!(call["id"], body["messages"][3]["tool_call_id"]);
         assert_eq!(
             request.conversation.as_ref().unwrap()[1].tool_calls[0]["function"]["name"],
             "studio_call"
         );
+    }
+}
+
+#[cfg(test)]
+mod required_native_call_tests {
+    use super::*;
+    fn request()->CompletionRequest {serde_json::from_value(serde_json::json!({"prompt":"execute","require_tool":true,"tools":[{"type":"function","function":{"name":"write_file","parameters":{"type":"object"}}}]})).unwrap()}
+    #[test]
+    fn whole_standard_call_preserves_literal_arguments_and_still_uses_typed_executor() {
+        let args=serde_json::json!({"path":"workspace:/é.md","content":"Exact\n🙂","expected_version":"missing"});
+        let text=format!("```json\n{}\n```",serde_json::json!({"name":"write_file","arguments":args}));
+        let result=required_ollama_call(&request(),true,false,true,text).unwrap();
+        let value:serde_json::Value=serde_json::from_str(result.strip_prefix("TOOL_JSON: ").unwrap()).unwrap();
+        assert_eq!(value["arguments"],args);assert_eq!(value["schema_version"],1);
+    }
+    #[test]
+    fn ambiguity_unknown_tools_and_unrequested_examples_never_execute() {
+        let mut request=request();
+        for text in ["Done", "Here is an example: {\"name\":\"write_file\",\"arguments\":{}}", "{\"name\":\"unknown\",\"arguments\":{}}", "{\"name\":\"write_file\",\"arguments\":{},\"extra\":1}"] {assert!(required_ollama_call(&request,true,false,true,text.into()).is_err());}
+        assert!(required_ollama_call(&request,true,false,false,"{\"name\":\"write_file\",\"arguments\":{}}".into()).is_err());
+        request.require_tool=false;let text="{\"name\":\"write_file\",\"arguments\":{}}";
+        assert_eq!(required_ollama_call(&request,true,false,true,text.into()).unwrap(),text);
+    }
+}
+
+#[cfg(test)]
+mod ollama_failure_detail_tests {
+    use super::*;
+    #[test]
+    fn structured_errors_are_bounded_and_html_is_not_exposed() {
+        assert_eq!(ollama_error_message(br#"{"error":"template failure"}"#),Some("template failure".into()));
+        assert!(ollama_error_message(b"<html>not a model error</html>").is_none());
+        assert_eq!(ollama_error_message(serde_json::json!({"error":"é".repeat(2000)}).to_string().as_bytes()).unwrap().chars().count(),1200);
+    }
+    #[test]
+    fn streaming_backend_error_is_not_an_empty_model_response() {
+        let (tx,_rx)=std::sync::mpsc::channel();
+        let error=ollama_apply_stream_ndjson_line(r#"{"error":"runner stopped"}"#,&mut String::new(),&mut String::new(),&mut None,&mut None,&tx).unwrap_err();
+        assert!(error.to_string().contains("runner stopped"));
     }
 }

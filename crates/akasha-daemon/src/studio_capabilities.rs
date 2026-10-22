@@ -251,7 +251,130 @@ pub(crate) fn prompt(policy: &ToolsPolicy, agent: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ; ");
-    format!("{list}\nStudio tool contract v1: prefer native studio_call or a single TOOL_JSON: {{\"schema_version\":1,\"operation_id\":\"UUID\",\"tool\":\"read_file\",\"arguments\":{{\"path\":\"workspace:/src/main.ts\"}}}} line. Files: path/content/expected_version (SHA-256 from read_file; missing for creation); edit_file also start_line/end_line. Commands: program,args,cwd. LSP query, delivery and MCP: their documented JSON argument object. Remaining tools: argv array. Legacy TOOL remains supported, but existing files must be read before mutation; stale reads are refused. Reuse an operation_id only for the identical completed operation; never replay an unknown result.")
+    format!("{list}\nStudio tool contract v1: prefer native studio_call or a single TOOL_JSON: {{\"schema_version\":1,\"tool\":\"read_file\",\"arguments\":{{\"path\":\"workspace:/src/main.ts\"}}}} line. Files: path/content/expected_version (SHA-256 from read_file; missing for creation); edit_file also start_line/end_line. Commands use program,args,cwd: `program` is only the executable and `args` starts after it. For `npm run build`, pass program `npm`, args [`run`,`build`], cwd `workspace:/`; never repeat `npm` as the first entry in args. A duplicated executable is corrected once by the runtime and reported. For an existing file, read it before editing and use its exact SHA-256 or omit expected_version. Use missing only for a new file. If missing is mistakenly sent for an existing file, the runtime repairs it only when this task's read hash still matches the current file and reports the correction. Use a focused line edit for a local syntax error; do not replace large unrelated functions or the whole file to fix one delimiter. LSP query, delivery and MCP: their documented JSON argument object. Remaining tools: argv array. Legacy TOOL remains supported, but existing files must be read before mutation; stale reads are refused. If a write returns stale_file_version, reread the file, verify the change still applies, then use the new SHA-256 or omit expected_version so the runtime binds the latest successful read. Never replay the same stale arguments. The runtime assigns operation IDs; do not invent one. Never replay an unknown result. Commands are unattended: do not launch interactive setup wizards (eslint --init, npm init without --yes). Write configuration files directly, install dependencies noninteractively, and run finite verification commands. For a whole JSON document replacement use write_file after read_file, not a one-line edit_file insertion.")
+}
+
+/// Progressive discovery keeps ordinary coding turns within local context
+/// windows. This only narrows advertisement, never runtime permissions.
+pub(crate) fn select_native_names(names: Vec<String>, expanded: bool) -> Vec<String> {
+    if expanded || !names.iter().any(|name|name=="list_tools") {return names;}
+    let core=names.iter().filter(|name|matches!(name.as_str(),
+        "read_file"|"write_file"|"write_code"|"edit_file"|"search_replace"|"apply_patch"|
+        "delete_file"|"rename_path"|"move_tree"|"search_files"|"grep_content"|"file_diff"|
+        "run_command"|"list_tools"|"list_skills"|"read_skill"|"ask_user"|
+        // Project-manager orchestration must be available on the first turn;
+        // otherwise the mandatory Kanban/delegation prompt contradicts the
+        // native function schema and small local models emit rejected calls.
+        "delegate_to_agent"|"studio_list_tickets"|"studio_create_ticket"|"studio_update_ticket"|"studio_review_ticket"|
+        "git_status"|"git_diff"|"git_log")).cloned().collect::<Vec<_>>();
+    // An explicitly configured non-coding/MCP-only profile must still work.
+    if core.is_empty() {names} else {core}
+}
+
+/// Initial backlog planning is a bounded Kanban-only turn. Advertise only the
+/// three ticket operations it can execute; source, shell, delegation, and
+/// unrelated project tools only inflate the first model request.
+pub(crate) fn select_initial_kanban_names(names: Vec<String>) -> Vec<String> {
+    names
+        .into_iter()
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "studio_list_tickets" | "studio_create_ticket" | "studio_update_ticket"
+            )
+        })
+        .collect()
+}
+
+/// Native schemas already carry argument descriptions. Repeating the legacy
+/// executable examples teaches models to print tutorials instead of calls.
+pub(crate) fn native_prompt(policy: &ToolsPolicy, agent: &str) -> String {
+    let names=select_native_names(announced_names(policy,agent),false).join(", ");
+    format!("[Code Studio native execution]\nExecute the requested changes with the provider's advertised native functions. Do not print tutorials, code blocks describing calls, or legacy TOOL lines for a native function. Request the next operation and observe its actual result before continuing. Initial capabilities: {names}. If additional capabilities are needed, call list_tools when available: discovery loads the complete currently permitted native catalogue for later turns.\nNew files require expected_version string missing; existing files require SHA-256 from read_file. Never send expected_version=missing for an existing file; use the latest SHA-256 from a successful read or omit expected_version when the runtime binds it safely. Read recovery: if read_file says the default result was partial/truncated or blocks a repeated default read, immediately use the native read_file function with full=true, or offset_line and limit_lines for successive windows. This is not a path or permission denial; do not ask the user for an absolute workspace path when workspace:/ access works. The runtime assigns operation IDs. Never replay unknown effects. Commands are unattended: no interactive wizards. For whole JSON documents, read then replace the complete file; never insert a complete document into a single line. For existing code, prefer small targeted edits with search_replace, edit_file or apply_patch; rewrite whole files only when necessary. Keep all requested functionality and checks in scope. Fix code when tests fail; never weaken acceptance tests. Finish only after the requested changes and validations really succeed.\n")
+}
+#[cfg(test)]
+mod native_prompt_tests {
+    #[test]
+    fn default_project_manager_catalogue_exposes_typed_dispatch_and_kanban() {
+        let announced = super::announced_names(&Default::default(), "studio_project_manager");
+        let native = super::select_native_names(announced, false);
+        for required in [
+            "delegate_to_agent",
+            "studio_list_tickets",
+            "studio_create_ticket",
+            "studio_update_ticket",
+        ] {
+            assert!(native.iter().any(|name| name == required), "missing {required}: {native:?}");
+            assert!(crate::studio_tool_contract::supports_typed(required));
+        }
+    }
+
+    #[test]
+    fn reviewer_catalogue_exposes_bound_review_submission_instead_of_general_ticket_patching() {
+        let announced = super::announced_names(&Default::default(), "studio_reviewer");
+        assert!(announced.iter().any(|name| name == "studio_list_tickets"));
+        assert!(announced.iter().any(|name| name == "studio_review_ticket"));
+        assert!(!announced.iter().any(|name| name == "studio_update_ticket"));
+        assert!(crate::studio_tool_contract::supports_typed("studio_review_ticket"));
+    }
+
+    #[test]
+    fn discovery_expands_only_the_supplied_permitted_catalogue() {
+        let names=["read_file","write_file","run_command","list_tools","pdf_extract","mcp_custom"].map(String::from).to_vec();
+        assert_eq!(super::select_native_names(names.clone(),false),["read_file","write_file","run_command","list_tools"]);
+        assert_eq!(super::select_native_names(names.clone(),true),names);
+        assert_eq!(super::select_native_names(vec!["mcp_custom".into()],false),vec!["mcp_custom"]);
+        assert_eq!(super::select_native_names(vec!["read_file".into(),"mcp_custom".into()],false),vec!["read_file","mcp_custom"]);
+    }
+    #[test]
+    fn first_project_manager_turn_keeps_kanban_and_dispatch_tools() {
+        let names = [
+            "read_file",
+            "list_tools",
+            "delegate_to_agent",
+            "studio_list_tickets",
+            "studio_create_ticket",
+            "studio_update_ticket",
+            "write_file",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(super::select_native_names(names.clone(), false), names);
+    }
+
+    #[test]
+    fn initial_kanban_planning_exposes_only_ticket_tools() {
+        let names = [
+            "read_file",
+            "list_tools",
+            "delegate_to_agent",
+            "studio_list_tickets",
+            "studio_create_ticket",
+            "studio_update_ticket",
+            "run_command",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            super::select_initial_kanban_names(names),
+            [
+                "studio_list_tickets",
+                "studio_create_ticket",
+                "studio_update_ticket"
+            ]
+            .map(String::from)
+        );
+    }
+    #[test]
+    fn native_transport_has_no_legacy_execution_examples() {
+        let prompt=super::native_prompt(&Default::default(),"studio_fullstack");
+        assert!(prompt.contains("advertised native functions"));
+        assert!(!prompt.contains("TOOL: write_file"));
+        assert!(!prompt.contains("operation_id\":\"UUID"));
+        assert!(prompt.contains("never weaken acceptance tests"));
+        assert!(prompt.contains("native read_file function with full=true"));
+        assert!(prompt.contains("This is not a path or permission denial"));
+    }
 }
 
 pub(crate) fn check(policy: &ToolsPolicy, agent: &str, name: &str) -> Result<(), String> {
@@ -345,4 +468,20 @@ pub(crate) fn preflight(
         "tools":catalogue(policy, &agent), "default_profile":policy.default_profile,
         "limits":["Availability is a preflight declaration, not proof of execution", "Arguments, paths, approvals and runtime budgets are checked at invocation"]
     }))
+}
+
+/// Prefer repair operations without withdrawing already permitted discovery or
+/// verification tools. A repair can require a fresh source read or a command.
+pub(crate) fn select_repair_names(mut names: Vec<String>) -> Vec<String> {
+    names.sort_by_key(|name|match name.as_str(){"search_replace"=>0,"edit_file"=>1,"apply_patch"=>2,"write_file"=>3,"write_code"=>4,_=>5});
+    names
+}
+#[cfg(test)]
+mod stalled_goal_catalogue_tests {
+    #[test]
+    fn focus_retains_required_source_reads_and_existing_permissions_only() {
+        let selected=super::select_repair_names(vec!["read_file".into(),"search_replace".into(),"run_command".into()]);
+        assert_eq!(selected,vec!["search_replace","read_file","run_command"]);
+        assert_eq!(super::select_repair_names(vec!["read_file".into()]),vec!["read_file"]);
+    }
 }

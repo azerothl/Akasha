@@ -181,7 +181,13 @@ pub(super) fn tool_turn(
 pub(super) fn tool_turn_with_results(response:&str, results:&str, per_call:&[String], round:u32, request:&str) -> Vec<ConversationMessage> {
     // Keep the small original goal near the observed result, without issuing a new
     // user "continue" request or reinjecting the full project template/catalogue.
-    let scope = user_request(request).chars().take(8000).collect::<String>();
+    let original = user_request(request);
+    let scope = if original.chars().count() <= 2000 {
+        original.to_owned()
+    } else {
+        let chars=original.chars().collect::<Vec<_>>();
+        format!("{}\n[The FULL original request is preserved in the initial user message; all its functionality, ordered operations and acceptance requirements remain required.]\n{}", chars[..600].iter().collect::<String>(),chars[chars.len()-600..].iter().collect::<String>())
+    };
     let results = if scope.is_empty() {
         format!("[Recorded execution results]\n{results}")
     } else {
@@ -271,6 +277,18 @@ mod tests {
         assert!(history_has_question(&history));
         assert!(history_has_question(&history[..1]));
         assert!(!history_has_question(&[ConversationMessage::assistant("finished".into())]));
+    }
+    #[test]
+    fn large_task_scope_does_not_repeat_thousands_of_tokens_per_result() {
+        let request=format!("FIRST requirement {} LAST required read", "long task paragraph ".repeat(1000));
+        let response=r#"TOOL_JSON: {"schema_version":1,"tool":"read_file","arguments":{"path":"a.txt"}}"#;
+        let history=tool_turn(response,"actual result",1,&request);
+        assert!(history[1].content.chars().count()<1600);
+        assert!(history[1].content.contains("FIRST requirement"));
+        assert!(history[1].content.contains("LAST required read"));
+        assert!(history[1].content.contains("FULL original request"));
+        let short=tool_turn(response,"actual result",1,"read FIRST then LAST");
+        assert!(short[1].content.contains("read FIRST then LAST"));
     }
     #[test]
     fn native_calls_have_complete_matching_results_and_no_repeated_proposal() {

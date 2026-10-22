@@ -21,6 +21,10 @@ pub struct ToolsPolicy {
     /// Daemon-only omission metadata; never grants rights in the global executor.
     #[serde(skip)]
     pub studio_default_fields: Vec<String>,
+    /// Runtime-only validation scope for registered Studio root manifests.
+    /// Generic file tools retain literal byte semantics outside this root.
+    #[serde(skip)]
+    pub studio_manifest_root: Option<PathBuf>,
     /// Path prefixes allowed for read and search.
     pub allowed_read_paths: Vec<String>,
     /// Path prefixes allowed for write.
@@ -334,7 +338,11 @@ impl ToolsPolicy {
             .and_then(|n| n.to_str())
             .unwrap_or(&name)
             .to_string();
-        let normalize=|value:String| {if cfg!(windows) {value.strip_suffix(".exe").unwrap_or(&value).to_owned()}else{value}};
+        // Windows package managers are commonly exposed through .cmd/.bat shims.
+        // Apply the same exact identity to allow and deny rules; never prefix-match.
+        let normalize=|value:String| {if cfg!(windows) {
+            [".exe", ".cmd", ".bat"].iter().find_map(|suffix|value.strip_suffix(suffix)).unwrap_or(&value).to_owned()
+        }else{value}};
         let name=normalize(name);let name_base=normalize(name_base);
         if self.blocked_commands.iter().any(|b| {
             let b = normalize(b.trim().to_lowercase());
@@ -1166,6 +1174,14 @@ mod windows_executable_alias_regressions {
         policy.allowed_commands=vec!["*".into()];policy.blocked_commands=vec!["git.exe".into()];
         assert!(!policy.can_run_command(r"C:\tools\git.exe"));
         assert!(policy.can_run_command("legitgit.exe"));
+    }
+    #[test] fn package_manager_shims_share_permissions_and_explicit_denials() {
+        let mut policy=ToolsPolicy {allowed_commands:vec!["npm".into(),"npx".into()],..Default::default()};
+        for name in ["npm", "npm.cmd", "NPM.CMD", "npx.bat", r"C:\node\npm.cmd"] {assert!(policy.can_run_command(name),"{name}");}
+        for name in ["evilnpm.cmd", "npm.cmd.cmd", "npm.ps1", "cmd.exe"] {assert!(!policy.can_run_command(name),"{name}");}
+        policy.blocked_commands=vec!["npm.cmd".into()];
+        for name in ["npm", "npm.exe", "npm.cmd", "npm.bat"] {assert!(!policy.can_run_command(name),"{name}");}
+        policy.allowed_commands.clear();policy.blocked_commands.clear();assert!(!policy.can_run_command("npx.cmd"));
     }
     #[test] fn exe_aliases_share_allow_and_deny_decisions() {
         let mut policy=ToolsPolicy {allowed_commands:vec!["cmd".into()],..Default::default()};

@@ -47,7 +47,10 @@ struct SearchReplaceArgs {
     path: String,
     search: String,
     replacement: String,
-    expected_version: String,
+    #[serde(default)]
+    replace_all: bool,
+    #[serde(default)]
+    expected_version: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -66,6 +69,93 @@ struct CommandArgs {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DelegateArgs {
+    agent_type: String,
+    message: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TicketCriterionArgs {
+    text: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    argv: Option<Vec<String>>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateTicketArgs {
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    assigned_agent: Option<String>,
+    #[serde(default)]
+    review_agent: Option<String>,
+    #[serde(default)]
+    parent_ticket_id: Option<String>,
+    #[serde(default)]
+    creation_key: Option<String>,
+    #[serde(default)]
+    depends_on_ticket_ids: Option<Vec<String>>,
+    #[serde(default)]
+    depends_on_ticket_id: Option<String>,
+    #[serde(default)]
+    acceptance_criteria: Option<Vec<TicketCriterionArgs>>,
+    #[serde(default)]
+    status: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateTicketArgs {
+    ticket_id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    assigned_agent: Option<String>,
+    #[serde(default)]
+    review_agent: Option<String>,
+    #[serde(default)]
+    parent_ticket_id: Option<String>,
+    #[serde(default)]
+    depends_on_ticket_ids: Option<Vec<String>>,
+    #[serde(default)]
+    depends_on_ticket_id: Option<String>,
+    #[serde(default)]
+    acceptance_criteria: Option<Vec<TicketCriterionArgs>>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    recover_stuck_execution: Option<bool>,
+    #[serde(default)]
+    evidence: Option<TicketEvidenceArgs>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewTicketArgs {
+    ticket_id: String,
+    outcome: String,
+    #[serde(default)]
+    review_notes: Option<String>,
+    #[serde(default)]
+    corrective_steps: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TicketEvidenceArgs {
+    #[serde(default)]
+    files: Option<Vec<String>>,
+    #[serde(default)]
+    summary: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Argv {
     argv: Vec<String>,
 }
@@ -74,6 +164,48 @@ pub(crate) struct Decoded {
     pub envelope: Envelope,
     pub argv: Vec<String>,
     pub expected: Option<String>,
+    pub replace_all: bool,
+}
+
+fn normalize_legacy_ticket_dependency(tool: &str, arguments: &mut Value) {
+    if !matches!(tool, "studio_create_ticket" | "studio_update_ticket") {
+        return;
+    }
+    let Some(object) = arguments.as_object_mut() else {
+        return;
+    };
+    let Some(legacy) = object.remove("depends_on_ticket_id") else {
+        return;
+    };
+    match legacy {
+        Value::Null => {}
+        Value::String(value) if value.trim().is_empty() => {}
+        Value::String(value) => {
+            let plural_key = "depends_on_ticket_ids";
+            if !object.contains_key(plural_key) {
+                object.insert(plural_key.to_string(), json!([value.trim()]));
+            } else if tool == "studio_create_ticket" {
+                match object.get(plural_key).cloned() {
+                    Some(Value::Array(mut values)) => {
+                        let dependency = json!(value.trim());
+                        if !values.contains(&dependency) {
+                            values.push(dependency);
+                        }
+                        object.insert(plural_key.to_string(), Value::Array(values));
+                    }
+                    Some(Value::Null) => {
+                        object.insert(plural_key.to_string(), json!([value.trim()]));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        invalid => {
+            // Preserve malformed legacy values so strict deserialization reports
+            // them instead of silently dropping a caller's invalid input.
+            object.insert("depends_on_ticket_id".to_string(), invalid);
+        }
+    }
 }
 
 pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
@@ -83,8 +215,8 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
     if text.len() > 1024 * 1024 {
         return Err("tool envelope exceeds 1 MiB".into());
     }
-    let envelope: Envelope = serde_json::from_str(text)
-        .map_err(|_| "invalid_tool_call: expected a complete Studio JSON envelope".to_string())?;
+    let mut envelope: Envelope = serde_json::from_str(text)
+        .map_err(|error| format!("invalid_tool_call: expected a complete Studio JSON envelope: {error}. Use schema_version:1, tool and arguments; the runtime assigns operation_id. No operation executed."))?;
     if !supports_typed(&envelope.tool) {
         return Err("this workflow tool uses the legacy TOOL contract".into());
     }
@@ -98,7 +230,9 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
     {
         return Err("unsupported tool contract version or name".into());
     }
+    normalize_legacy_ticket_dependency(&envelope.tool, &mut envelope.arguments);
     let mut expected = None;
+    let mut replace_all = false;
     let argv = match envelope.tool.as_str() {
         "search_replace" => {
             let input: SearchReplaceInput = serde_json::from_value(envelope.arguments.clone())
@@ -116,14 +250,15 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
                         arg.path.clone(), arg.content.ok_or("search and replacement required")?])
                         .map_err(|_| "legacy content requires old | new; prefer search and replacement")?;
                     SearchReplaceArgs { path: arg.path, search: pair.0, replacement: pair.1,
-                        expected_version: arg.expected_version.ok_or("expected_version required")? }
+                        replace_all: false, expected_version: arg.expected_version }
                 }
             };
             if arg.path.trim().is_empty() || arg.path.contains(['\0', '\n', '\r']) {
                 return Err("invalid file path".into());
             }
             if arg.search.is_empty() { return Err("search must not be empty".into()); }
-            expected = Some(arg.expected_version);
+            expected = arg.expected_version;
+            replace_all = arg.replace_all;
             vec![arg.path, "--studio-search-replace-v1".into(),
                 json!({"search":arg.search,"replacement":arg.replacement}).to_string()]
         }
@@ -223,6 +358,87 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
             argv.extend(arg.args);
             argv
         }
+        "delegate_to_agent" => {
+            let arg: DelegateArgs = serde_json::from_value(envelope.arguments.clone())
+                .map_err(|_| "invalid delegation arguments: expected agent_type and message")?;
+            if arg.agent_type.trim().is_empty()
+                || arg.agent_type.contains(['\0', '\r', '\n'])
+                || arg.message.trim().is_empty()
+                || arg.message.len() > 64 * 1024
+            {
+                return Err("invalid delegation agent_type or message".into());
+            }
+            vec![arg.agent_type, arg.message]
+        }
+        "studio_list_tickets" => {
+            if !envelope.arguments.as_object().is_some_and(|args| args.is_empty()) {
+                return Err("studio_list_tickets accepts an empty object".into());
+            }
+            Vec::new()
+        }
+        "studio_create_ticket" => {
+            let arg: CreateTicketArgs = serde_json::from_value(envelope.arguments.clone())
+                .map_err(|error| format!("invalid studio_create_ticket arguments: {error}"))?;
+            if arg.title.trim().is_empty()
+                || arg.title.chars().count() > 200
+                || arg.acceptance_criteria.as_ref().is_none_or(Vec::is_empty)
+                || arg.acceptance_criteria.as_ref().is_some_and(|criteria| {
+                    criteria.iter().any(|criterion| criterion.text.trim().is_empty())
+                })
+            {
+                return Err("studio_create_ticket requires a title and at least one non-empty acceptance criterion".into());
+            }
+            let _ = (
+                arg.description,
+                arg.assigned_agent,
+                arg.review_agent,
+                arg.parent_ticket_id,
+                arg.creation_key,
+                arg.depends_on_ticket_ids,
+                arg.depends_on_ticket_id,
+                arg.status,
+                arg.acceptance_criteria.as_ref().map(|criteria| {
+                    criteria.iter().map(|criterion| (&criterion.id, &criterion.kind, &criterion.path, &criterion.argv)).collect::<Vec<_>>()
+                }),
+            );
+            vec![envelope.arguments.to_string()]
+        }
+        "studio_update_ticket" => {
+            let arg: UpdateTicketArgs = serde_json::from_value(envelope.arguments.clone())
+                .map_err(|error| format!("invalid studio_update_ticket arguments: {error}"))?;
+            if arg.ticket_id.trim().is_empty() {
+                return Err("studio_update_ticket requires ticket_id".into());
+            }
+            let _ = (
+                arg.title,
+                arg.description,
+                arg.assigned_agent,
+                arg.review_agent,
+                arg.parent_ticket_id,
+                arg.depends_on_ticket_ids,
+                arg.depends_on_ticket_id,
+                arg.acceptance_criteria.as_ref().map(|criteria| {
+                    criteria.iter().map(|criterion| (&criterion.id, &criterion.kind, &criterion.path, &criterion.argv)).collect::<Vec<_>>()
+                }),
+                arg.status,
+                arg.recover_stuck_execution,
+                arg.evidence.as_ref().map(|evidence| (&evidence.files, &evidence.summary)),
+            );
+            vec![envelope.arguments.to_string()]
+        }
+        "studio_review_ticket" => {
+            let arg: ReviewTicketArgs = serde_json::from_value(envelope.arguments.clone())
+                .map_err(|error| format!("invalid studio_review_ticket arguments: {error}"))?;
+            let outcome = arg.outcome.trim();
+            if arg.ticket_id.trim().is_empty()
+                || !matches!(outcome, "approved" | "changes_requested")
+                || (outcome == "changes_requested" && arg.corrective_steps.iter().all(|step| step.trim().is_empty()))
+            {
+                return Err("studio_review_ticket requires a ticket, an approved/changes_requested outcome, and corrective steps when changes are requested".into());
+            }
+            let _ = arg.review_notes;
+            vec![envelope.arguments.to_string()]
+        }
         name if name.starts_with("mcp_")
             || name == "lsp_query"
             || crate::studio_delivery::is_delivery_tool(name) =>
@@ -239,25 +455,55 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
         }
     };
     if is_file_mutation(&envelope.tool)
-        && expected.as_deref().is_none_or(|v| {
+        && expected.as_deref().is_some_and(|v| {
             v != "missing" && (v.len() != 64 || !v.bytes().all(|b| b.is_ascii_hexdigit()))
         })
     {
-        return Err(
-            "expected_version required: SHA-256 returned by read_file, or 'missing' for creation"
-                .into(),
-        );
+        return Err("expected_version must be 'missing' or the SHA-256 returned by read_file".into());
     }
     Ok(Decoded {
         envelope,
         argv,
         expected,
+        replace_all,
     })
 }
 
 #[cfg(test)]
 mod read_window_tests {
     use super::*;
+
+    #[test]
+    fn project_manager_delegation_is_a_typed_native_call() {
+        let payload = json!({
+            "schema_version": 1,
+            "tool": "delegate_to_agent",
+            "arguments": {
+                "agent_type": "studio_fullstack",
+                "message": "Implement ticket 123 and run its acceptance checks."
+            }
+        });
+        let call = decode(&payload.to_string()).unwrap();
+        assert_eq!(call.argv, [
+            "studio_fullstack",
+            "Implement ticket 123 and run its acceptance checks."
+        ]);
+        assert_eq!(
+            argument_schema("delegate_to_agent")["required"],
+            json!(["agent_type", "message"])
+        );
+        assert!(supports_typed("delegate_to_agent"));
+        assert!(!supports_typed("ask_user"));
+        for bad in [
+            json!({"agent_type":"", "message":"Implement it"}),
+            json!({"agent_type":"studio_fullstack", "message":"  "}),
+            json!({"agent_type":"studio_fullstack", "message":"x".repeat(65_537)}),
+        ] {
+            let payload = json!({"schema_version":1,"tool":"delegate_to_agent","arguments":bad});
+            assert!(decode(&payload.to_string()).is_err());
+        }
+    }
+
     #[test]
     fn independently_optional_read_windows_use_documented_defaults() {
         for (arguments,expected) in [
@@ -275,13 +521,49 @@ mod read_window_tests {
         assert_eq!(argument_schema("read_file")["properties"]["limit_lines"]["default"],500);
         assert_eq!(native_definition(vec!["read_file".into()]).pointer("/function/parameters/oneOf/0/properties/arguments/properties/limit_lines/default"),Some(&json!(500)));
     }
+
+    #[test]
+    fn kanban_tools_use_structured_json_and_reject_vague_or_malformed_tickets() {
+        let list = decode(&json!({"schema_version":1,"tool":"studio_list_tickets","arguments":{}}).to_string()).unwrap();
+        assert!(list.argv.is_empty());
+        assert_eq!(argument_schema("studio_list_tickets")["additionalProperties"], false);
+
+        let create_args = json!({
+            "title":"Implement player movement",
+            "description":"Add keyboard controls.",
+            "depends_on_ticket_ids":["foundation"],
+            "acceptance_criteria":[{"text":"Arrow and WASD keys move the player without crossing walls."}]
+        });
+        let create = decode(&json!({"schema_version":1,"tool":"studio_create_ticket","arguments":create_args}).to_string()).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&create.argv[0]).unwrap()["title"], "Implement player movement");
+        assert!(argument_schema("studio_create_ticket")["required"].as_array().unwrap().contains(&json!("acceptance_criteria")));
+
+        let update = decode(&json!({"schema_version":1,"tool":"studio_update_ticket","arguments":{"ticket_id":"ticket-1","status":"review"}}).to_string()).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&update.argv[0]).unwrap()["status"], "review");
+        assert_eq!(argument_schema("studio_update_ticket")["required"], json!(["ticket_id"]));
+
+        for arguments in [
+            json!({"title":"Missing criteria"}),
+            json!({"title":"Empty criteria","acceptance_criteria":[]}),
+            json!({"title":"Invalid criterion","acceptance_criteria":[{"text":" "}]}),
+            json!({"title":"Unknown field","acceptance_criteria":[{"text":"Works"}],"argv":[]}),
+        ] {
+            assert!(decode(&json!({"schema_version":1,"tool":"studio_create_ticket","arguments":arguments}).to_string()).is_err());
+        }
+        assert!(decode(&json!({"schema_version":1,"tool":"studio_update_ticket","arguments":{"status":"done"}}).to_string()).is_err());
+        assert!(decode(&json!({"schema_version":1,"tool":"studio_list_tickets","arguments":{"limit":10}}).to_string()).is_err());
+
+        let review = decode(&json!({"schema_version":1,"tool":"studio_review_ticket","arguments":{"ticket_id":"ticket-1","outcome":"changes_requested","review_notes":"The interaction is incomplete.","corrective_steps":["Handle the missing keyboard action."]}}).to_string()).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&review.argv[0]).unwrap()["outcome"], "changes_requested");
+        assert!(argument_schema("studio_review_ticket")["required"].as_array().unwrap().contains(&json!("ticket_id")));
+        assert!(decode(&json!({"schema_version":1,"tool":"studio_review_ticket","arguments":{"ticket_id":"ticket-1","outcome":"changes_requested"}}).to_string()).is_err());
+    }
 }
 
 pub(crate) fn supports_typed(tool: &str) -> bool {
     !matches!(
         tool,
         "ask_user"
-            | "delegate_to_agent"
             | "install_skill"
             | "uninstall_skill"
             | "write_todos"
@@ -294,14 +576,62 @@ pub(crate) fn supports_typed(tool: &str) -> bool {
 }
 
 pub(crate) fn argument_schema(tool: &str) -> Value {
+    if tool == "studio_review_ticket" {
+        return json!({"type":"object","additionalProperties":false,"required":["ticket_id","outcome"],"properties":{
+            "ticket_id":{"type":"string","minLength":1},
+            "outcome":{"type":"string","enum":["approved","changes_requested"]},
+            "review_notes":{"type":"string"},
+            "corrective_steps":{"type":"array","items":{"type":"string","minLength":1},"description":"Required when outcome is changes_requested; each item should be a concrete correction."}
+        }});
+    }
+    if tool == "studio_list_tickets" {
+        return json!({"type":"object","additionalProperties":false,"description":"No arguments. Returns the project's Kanban tickets, dependencies, owners, and acceptance criteria."});
+    }
+    if tool == "studio_create_ticket" {
+        return json!({"type":"object","additionalProperties":false,"required":["title","acceptance_criteria"],"properties":{
+            "title":{"type":"string","minLength":1,"maxLength":200},
+            "description":{"type":"string"},
+            "assigned_agent":{"type":"string","minLength":1,"description":"Implementation specialist responsible for this ticket."},
+            "review_agent":{"type":"string","minLength":1,"description":"Read-only specialist who validates the completed ticket."},
+            "parent_ticket_id":{"type":"string","minLength":1,"description":"Ticket that groups this work. It is a tracking relationship and does not block dispatch."},
+            "creation_key":{"type":"string","minLength":1,"maxLength":160,"description":"Stable key for idempotent retries; reuse the same key for the same planned work."},
+            "depends_on_ticket_ids":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true},
+            "acceptance_criteria":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["text"],"properties":{"id":{"type":"string"},"text":{"type":"string","minLength":1},"kind":{"type":"string"},"path":{"type":"string"},"argv":{"type":"array","items":{"type":"string"}}}}},
+            "status":{"type":"string","enum":["todo","in_progress","review","done","blocked"],"description":"New work should normally start as todo."}
+        }});
+    }
+    if tool == "studio_update_ticket" {
+        return json!({"type":"object","additionalProperties":false,"required":["ticket_id"],"properties":{
+            "ticket_id":{"type":"string","minLength":1},
+            "title":{"type":"string","minLength":1,"maxLength":200},
+            "description":{"type":"string"},
+            "assigned_agent":{"type":"string","minLength":1},
+            "review_agent":{"type":"string","minLength":1},
+            "parent_ticket_id":{"type":["string","null"],"minLength":1,"description":"Tracking parent; independent from execution prerequisites."},
+            "depends_on_ticket_ids":{"type":["array","null"],"items":{"type":"string","minLength":1},"uniqueItems":true},
+            "acceptance_criteria":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text"],"properties":{"id":{"type":"string"},"text":{"type":"string","minLength":1},"kind":{"type":"string"},"path":{"type":"string"},"argv":{"type":"array","items":{"type":"string"}}}}},
+            "status":{"type":"string","enum":["todo","in_progress","review","done","blocked"]},
+            "recover_stuck_execution":{"type":"boolean","description":"Set true only to release a ticket whose linked task has ended while the ticket remains in progress or review."},
+            "evidence":{"type":"object","additionalProperties":false,"properties":{"files":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},"summary":{"type":"string"}},"description":"Observed changed files and verification results; task IDs remain daemon-managed."}
+        }});
+    }
+    if tool == "delegate_to_agent" {
+        return json!({"type":"object","additionalProperties":false,
+            "required":["agent_type","message"],
+            "properties":{
+                "agent_type":{"type":"string","minLength":1,"description":"One recognized specialist, such as studio_scaffold, studio_frontend, studio_backend, studio_fullstack, studio_auditor or qa."},
+                "message":{"type":"string","minLength":1,"maxLength":65536,"description":"Scoped task for the specialist, including relevant ticket ID and acceptance criteria."}
+            }});
+    }
     if tool == "search_replace" {
         return json!({"type":"object","additionalProperties":false,
-            "required":["path","search","replacement","expected_version"],
+            "required":["path","search","replacement"],
             "properties":{
                 "path":{"type":"string","minLength":1},
                 "search":{"type":"string","minLength":1,"description":"Exact text to find; whitespace and delimiters are literal."},
                 "replacement":{"type":"string","description":"Exact replacement; empty string deletes the match."},
-                "expected_version":{"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"SHA-256 returned by reading the target file."}
+                "replace_all":{"type":"boolean","description":"Set true only when every matching occurrence should change. By default multiple matches are rejected; use edit_file for a bounded change."},
+                "expected_version":{"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"Optional when this task has already read the existing file; the runtime uses that task-scoped snapshot and still rejects stale edits. Use missing when creating a file."}
             }});
     }
     if tool.starts_with("mcp_") {
@@ -370,7 +700,6 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
     ) {
         let mut required = vec!["path"];
         if is_file_mutation(tool) {
-            required.push("expected_version");
         }
         if matches!(
             tool,
@@ -383,17 +712,31 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
         }
         let mut properties=serde_json::Map::new();
         properties.insert("path".into(),json!({"type":"string","minLength":1,"description":"Exact requested workspace:/ relative path. Use the field path, never workspace."}));
-        if is_file_mutation(tool) {properties.insert("expected_version".into(),json!({"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"REQUIRED: literal missing for a NEW file; SHA-256 from read_file for an EXISTING file. Never invent a hash or omit this field."}));}
-        if required.contains(&"content") {properties.insert("content".into(),json!({"type":"string","description":"Exact file content requested by the user; preserve case and bytes, no heading, template, code fences or call punctuation unless requested."}));}
+        if is_file_mutation(tool) {properties.insert("expected_version".into(),json!({"type":"string","pattern":"^(missing|[a-fA-F0-9]{64})$","description":"For an existing file, include the SHA-256 from read_file when available. If omitted, the runtime uses this task's latest successful read and rejects stale edits. For a new file, use missing. If missing is mistakenly sent for an existing file, the runtime only repairs it when this task's read hash still matches the file on disk."}));}
+        if required.contains(&"content") {
+            let description=match tool {
+                "apply_patch"=>"A unified diff for this single file with numbered hunk headers, e.g. @@ -3,1 +3,1 @@ followed by -old and +new lines. Never pass a full source file, bare @@ headers, or *** Begin Patch syntax. Use search_replace for an exact text replacement instead.",
+                "edit_file"=>"Replacement text for the inclusive start_line..end_line range only; not the whole file unless that range covers it.",
+                _=>"Exact file content requested by the user; preserve case and bytes, no heading, template, code fences or call punctuation unless requested."
+            };
+            properties.insert("content".into(),json!({"type":"string","description":description}));
+        }
         if tool=="edit_file" {for field in ["start_line","end_line"] {properties.insert(field.into(),json!({"type":"integer","minimum":1}));}}
         json!({"type":"object","additionalProperties":false,"required":required,"properties":properties})
     } else if matches!(
         tool,
         "run_command" | "run_terminal" | "run_command_background"
     ) {
-        json!({"type":"object","additionalProperties":false,"required":["program"],"properties":{"program":{"type":"string","minLength":1},"args":{"type":"array","maxItems":128,"items":{"type":"string"}},"cwd":{"type":"string","minLength":1}}})
+        json!({"type":"object","additionalProperties":false,"required":["program"],"properties":{"program":{"type":"string","minLength":1,"description":"Executable name only, e.g. npm or node. Put command arguments in args, never concatenate a shell command here. For npm run build set program to npm."},"args":{"type":"array","maxItems":128,"items":{"type":"string"},"description":"Arguments after the executable; do not repeat program as args[0]. For npm run build use [run, build]. For npm install use [install, --no-audit, --no-fund]."},"cwd":{"type":"string","minLength":1,"description":"Existing working directory; workspace:/ selects this task's registered project root."}}})
     } else {
-        json!({"type":"object","additionalProperties":false,"required":["argv"],"properties":{"argv":{"type":"array","maxItems":128,"items":{"type":"string"}}}})
+        let description=match tool {
+            "search_files"=>"Arguments in order: [existing directory, filename glob]. Example: [workspace:/, *.ts]. Never put a glob in the directory argument.",
+            "grep_content"=>"Arguments in order: [existing directory or file, search pattern]. Use workspace:/ for the project root.",
+            "file_diff"=>"Arguments in order: [first file path, second file path].",
+            "list_tools"=>"Use [] to discover permitted capabilities, or [tool_name] to inspect its argument schema.",
+            _=>"Positional arguments in the tool's documented order. Each argument is a separate string."
+        };
+        json!({"type":"object","additionalProperties":false,"required":["argv"],"properties":{"argv":{"type":"array","maxItems":128,"items":{"type":"string"},"description":description}}})
     }
 }
 
@@ -417,7 +760,7 @@ pub(crate) fn native_definition(names: Vec<String>) -> Value {
         rebase_schema_refs(&mut schema,&format!("#/oneOf/{index}/properties/arguments"));
         json!({"properties":{"tool":{"enum":[name]},"arguments":schema}})
     }).collect();
-    json!({"type":"function","function":{"name":"studio_call","description":"Execute one Studio tool. The runtime assigns operation IDs; do not invent one. The tool-specific argument schema is mandatory. For write_file/write_code creation, explicitly pass expected_version: missing. Existing files must be read before mutation.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}},"oneOf":variants}}})
+    json!({"type":"function","function":{"name":"studio_call","description":"Execute one Studio tool. The runtime assigns operation IDs; do not invent one. The tool-specific argument schema is mandatory. Existing files must be read before mutation; if expected_version is omitted, the runtime uses this task's latest successful read and rejects stale edits. For new files, pass expected_version: missing.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}},"oneOf":variants}}})
 }
 
 /// Contextual constraints for literal-copy tasks. The model still emits the call;
@@ -562,11 +905,85 @@ pub(crate) struct Operation {
     tool: String,
     path: Option<PathBuf>,
     before: Option<String>,
+    argument_correction: Option<String>,
     effect_before: std::collections::BTreeMap<String,String>,
     terminal_context: Option<(String, Option<String>)>,
     _lock: tokio::sync::OwnedMutexGuard<()>,
     pub cached: Option<(bool, String)>,
 }
+
+fn resolve_expected_file_version(
+    explicit: Option<&str>,
+    read_snapshot: Option<&str>,
+    current: Option<&str>,
+) -> Result<(Option<String>, Option<String>), String> {
+    let explicit = explicit.map(str::to_ascii_lowercase);
+    let read_snapshot = read_snapshot.map(str::to_ascii_lowercase);
+    let current = current.map(str::to_ascii_lowercase);
+    let existing = current.as_deref().is_some_and(|version| version != "missing");
+
+    if explicit.as_deref() == Some("missing") && existing {
+        if read_snapshot.as_deref() == current.as_deref() {
+            let version = read_snapshot.expect("matching existing read snapshot");
+            return Ok((
+                Some(version.clone()),
+                Some(format!(
+                    "The path already exists. Replaced expected_version `missing` with the current task read version `{version}` after confirming the file has not changed."
+                )),
+            ));
+        }
+        return Err("expected_version `missing` only creates a new file; this path already exists. Read the current file before editing it.".into());
+    }
+
+    let expected = explicit
+        .or(read_snapshot)
+        .or_else(|| (current.as_deref() == Some("missing")).then(|| "missing".to_string()));
+    if expected.is_none() {
+        return Err("file_read_required: read the existing file before modifying it".into());
+    }
+    if expected.as_deref() != current.as_deref() {
+        return Err("stale_file_version: file changed since it was read; read it again before retrying".into());
+    }
+    Ok((expected, None))
+}
+
+#[cfg(test)]
+mod expected_file_version_tests {
+    use super::resolve_expected_file_version;
+
+    #[test]
+    fn repairs_missing_for_an_existing_file_only_when_the_task_read_is_current() {
+        let current = "a".repeat(64);
+        let (expected, correction) = resolve_expected_file_version(
+            Some("missing"),
+            Some(&current),
+            Some(&current.to_ascii_uppercase()),
+        )
+        .unwrap();
+
+        assert_eq!(expected.as_deref(), Some(current.as_str()));
+        assert!(correction.unwrap().contains("path already exists"));
+    }
+
+    #[test]
+    fn keeps_creation_and_stale_read_checks_strict() {
+        assert_eq!(
+            resolve_expected_file_version(Some("missing"), None, Some("missing")),
+            Ok((Some("missing".into()), None))
+        );
+        assert!(resolve_expected_file_version(Some("missing"), None, Some(&"a".repeat(64)))
+            .unwrap_err()
+            .contains("only creates a new file"));
+        assert!(resolve_expected_file_version(
+            Some(&"a".repeat(64)),
+            Some(&"b".repeat(64)),
+            Some(&"b".repeat(64))
+        )
+        .unwrap_err()
+        .contains("stale_file_version"));
+    }
+}
+
 impl Operation {
     pub(crate) async fn begin(
         db: &Path,
@@ -651,6 +1068,7 @@ impl Operation {
                 tool: tool.into(),
                 path: None,
                 before: None,
+                argument_correction: None,
                 effect_before: Default::default(),
                 terminal_context: None,
                 _lock: lock,
@@ -706,9 +1124,29 @@ impl Operation {
         let before = if let Some(ref path) = path {
             let plain = crate::api::strip_verbatim_prefix(path.clone());
             if !policy.can_read(&plain) || is_file_mutation(tool) && !policy.can_write(&plain) {
-                return Err("versioned path denied by current policy".into());
+                let setting = if !policy.can_read(&plain) {
+                    "allowed_read_paths"
+                } else {
+                    "allowed_write_paths"
+                };
+                return Err(format!(
+                    "[studio_policy_denied] {setting} blocks {}. The registered task workspace is known: {}. Do not ask the user for a replacement absolute path; report this explicit policy restriction.",
+                    plain.display(), canonical.display()
+                ));
             }
             Some(version(path)?)
+        } else {
+            None
+        };
+        let read_snapshot = if let Some(ref path) = path {
+            transaction
+                .query_row(
+                    "SELECT version FROM studio_file_versions WHERE task=?1 AND path=?2",
+                    params![task.to_string(), path.display().to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
         } else {
             None
         };
@@ -723,32 +1161,34 @@ impl Operation {
                 if value["success"]==true && value["result_unknown"]!=true && value["file_version"].as_str()==before.as_deref() && before.is_some() {
                     value["replayed"]=json!(true);
                     value["retry_hint"]=json!("Identical write already confirmed and current file version verified; no new disk effect. Continue with the next requested operation or conclude after all checks.");
-                    return Ok(Self{db:db.into(),task,id,tool:tool.into(),path:None,before:None,effect_before:Default::default(),terminal_context:None,_lock:lock,cached:Some((true,value.to_string()))});
+                    return Ok(Self{db:db.into(),task,id,tool:tool.into(),path:None,before:None,argument_correction:None,effect_before:Default::default(),terminal_context:None,_lock:lock,cached:Some((true,value.to_string()))});
                 }
             }
         }
+        let mut argument_correction = None;
         if is_file_mutation(tool) {
             let path = path.as_ref().ok_or("file mutation path missing")?;
-            let expected = if let Some(typed) = typed {
-                typed.expected.clone()
-            } else {
-                transaction
-                    .query_row(
-                        "SELECT version FROM studio_file_versions WHERE task=?1 AND path=?2",
-                        params![task.to_string(), path.display().to_string()],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(|e| e.to_string())?
-                    .or_else(|| (before.as_deref() == Some("missing")).then(|| "missing".into()))
-            };
+            let (expected, correction) = resolve_expected_file_version(
+                typed.and_then(|typed| typed.expected.as_deref()),
+                read_snapshot.as_deref(),
+                before.as_deref(),
+            )?;
             if expected.is_none() {
-                return Err(
-                    "file_read_required: read the existing file before modifying it".into(),
-                );
+                return Err("file_read_required: read the existing file before modifying it".into());
             }
-            if expected.as_ref().map(|s|s.to_ascii_lowercase()) != before {
-                return Err("stale_file_version: file changed since it was read; read it again before retrying".into());
+            argument_correction = correction;
+            if tool=="search_replace" {
+                if let Some(typed)=typed {
+                    let search=typed.envelope.arguments["search"].as_str();
+                    let replace_all=typed.replace_all;
+                    if let Some(search)=search.filter(|_|!replace_all) {
+                        let content=std::fs::read_to_string(path).map_err(|e|format!("search_replace read {}: {e}",path.display()))?;
+                        let matches=content.match_indices(search).count();
+                        if matches>1 {
+                            return Err(format!("ambiguous_search_replace: matched {matches} occurrences; use edit_file for a bounded change or set replace_all:true only when all matches are intended"));
+                        }
+                    }
+                }
             }
         }
         let mut effect_paths=if is_file_mutation(tool){path.iter().cloned().collect::<Vec<_>>()}else{Vec::new()};
@@ -765,6 +1205,7 @@ impl Operation {
             tool: tool.into(),
             path,
             before,
+            argument_correction,
             effect_before,
             terminal_context: (tool=="terminal_session").then(||(args.first().cloned().unwrap_or_default(),args.get(1).cloned())),
             _lock: lock,
@@ -775,6 +1216,11 @@ impl Operation {
         let mut success = success;
         let mut error = None;
         let after = self.path.as_ref().map(|path| version(path)).transpose()?;
+        let ineffective_edit=success && self.tool=="search_replace" && after==self.before;
+        if ineffective_edit {
+            success=false;
+            error=Some("edit_no_change: the requested replacement did not change file content; inspect the current source before retrying");
+        }
         if self.tool == "read_file" && after != self.before {
             success = false;
             error = Some("file changed during read; read again");
@@ -789,9 +1235,17 @@ impl Operation {
             }
         }
         let command_result=if matches!(self.tool.as_str(),"run_command"|"run_terminal") {serde_json::from_str::<Value>(text).ok()}else{None};
-        let plain=command_result.as_ref().and_then(|v|v["output"].as_str()).unwrap_or(text);
+        let plain=if ineffective_edit {
+            "No change was applied. The requested replacement left the file unchanged. Inspect the exact source and choose a matching replacement or a bounded edit."
+        } else {
+            command_result.as_ref().and_then(|v|v["output"].as_str()).unwrap_or(text)
+        };
         let (output,_,truncated) = crate::tool_output::truncate_utf8_by_bytes(plain, 64 * 1024);
         let mut value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
+        if let Some(correction) = self.argument_correction {
+            value["argument_correction"] = json!(correction);
+        }
+        if ineffective_edit {value["error_code"]=json!("edit_no_change");value["retry_hint"]=json!("No change was applied. Read the current target and choose an exact matching search or a bounded edit_file range. Do not repeat the same failed replacement or claim that the error was fixed.");}
         value["file_effects"]=crate::studio_file_effects::receipt_effects(&self.effect_before)?;
         if let Some((action,session))=&self.terminal_context {
             let output:Value=serde_json::from_str(text).unwrap_or(Value::Null);
@@ -837,6 +1291,34 @@ pub(crate) fn recovery_summary(db: &Path, task: Uuid) -> Result<Value, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     Ok(json!({"schema_version":1,"operations":records,"unknown_count":unknown}))
+}
+
+/// Model-facing resume receipts omit completed stdout/source bodies. The API
+/// and operation ledger retain them; uncertain effects keep their diagnostics.
+pub(crate) fn recovery_prompt_summary(mut ledger: Value) -> Value {
+    if let Some(operations)=ledger["operations"].as_array_mut() {
+        for operation in operations {
+            if operation["state"]=="completed" && operation["result"]["result_unknown"]!=true {
+                if let Some(result)=operation["result"].as_object_mut() {
+                    result.remove("output");
+                    result.insert("output_in_durable_ledger".into(),json!(true));
+                }
+            }
+        }
+    }
+    ledger
+}
+#[cfg(test)]
+mod recovery_prompt_tests {
+    #[test]
+    fn compact_resume_keeps_receipts_and_uncertainty_without_replaying_source() {
+        let full=serde_json::json!({"unknown_count":1,"operations":[{"state":"completed","operation_id":"real","result":{"success":true,"file_version":"hash","output":"big source"}},{"state":"started","result":{"result_unknown":true,"output":"uncertain details"}}]});
+        let summary=super::recovery_prompt_summary(full.clone());
+        assert!(summary["operations"][0]["result"].get("output").is_none());
+        assert_eq!(summary["operations"][0]["result"]["file_version"],"hash");
+        assert_eq!(summary["operations"][1],full["operations"][1]);
+        assert_eq!(full["operations"][0]["result"]["output"],"big source");
+    }
 }
 
 /// Workflow effects cannot hold the workspace lock while a delegated child runs.
@@ -911,6 +1393,14 @@ mod native_schema_regressions {
         let legacy = decode(&json!({"schema_version":1,"tool":"search_replace",
             "arguments":{"path":"a","content":"old | new","expected_version":"a".repeat(64)}}).to_string()).unwrap();
         assert_eq!(crate::api::parse_search_replace_payload(&legacy.argv).unwrap(), ("old".into(),"new".into()));
+
+        let args=json!({"path":"workspace:/a.txt","search":"old","replacement":"new"});
+        assert!(schema.is_valid(&args));
+        let decoded=decode(&json!({"schema_version":1,"tool":"search_replace","arguments":args}).to_string()).unwrap();
+        assert_eq!(decoded.expected,None);
+        let all=json!({"path":"workspace:/a.txt","search":"old","replacement":"new","replace_all":true});
+        assert!(schema.is_valid(&all));
+        assert!(decode(&json!({"schema_version":1,"tool":"search_replace","arguments":all}).to_string()).unwrap().replace_all);
     }
     #[test] fn full_read_and_line_window_are_exclusive_in_schema_and_decoder() {
         let schema=jsonschema::JSONSchema::compile(&argument_schema("read_file")).unwrap();
@@ -938,5 +1428,16 @@ mod literal_schema_tests {
         for content in ["alpha","alpha\n","alpha\r\n"] {assert!(schema.is_valid(&call("workspace:/first.txt",content)));}
         assert!(!schema.is_valid(&call("first.txt","Alpha")));assert!(!schema.is_valid(&call("first.txt","éTé")));assert!(!schema.is_valid(&call("other.txt","alpha")));
         assert!(schema.is_valid(&json!({"schema_version":1,"tool":"read_file","arguments":{"path":"workspace:/CODE_STUDIO_PLAN.md"}})));
+    }
+}
+
+#[cfg(test)]
+mod edit_content_contract_tests {
+    #[test]
+    fn patch_and_line_edits_do_not_advertise_whole_file_content() {
+        let patch=super::argument_schema("apply_patch");
+        assert!(patch["properties"]["content"]["description"].as_str().unwrap().contains("numbered hunk"));
+        let edit=super::argument_schema("edit_file");
+        assert!(edit["properties"]["content"]["description"].as_str().unwrap().contains("inclusive start_line"));
     }
 }

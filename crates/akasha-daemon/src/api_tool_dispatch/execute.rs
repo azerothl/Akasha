@@ -18,7 +18,9 @@ use crate::api_tool_dispatch::fs_ops::{
     rewrite_workspace_plan_key_to_lineage_root, rewrite_workspace_plan_path_str,
     sync_workspace_store_from_disk, workspace_lineage_root_task_id,
 };
-use crate::api_tool_dispatch::process_ops::{parse_run_command_args, resolve_run_command_working_dir};
+use crate::api_tool_dispatch::process_ops::{
+    parse_run_command_args, remove_repeated_executable_arg, resolve_run_command_working_dir,
+};
 use crate::api_tool_dispatch::web_device_memory_ops::parse_device_invoke_params;
 use crate::memory_actor::LongTermMemoryClient;
 use akasha_store::{Schedule, ScheduleStore, Task, TaskStatus, TaskStore, WorkspaceGraphStore};
@@ -220,7 +222,7 @@ pub(crate) async fn execute_tool_call_impl(
     let is_plugin_candidate = plugin_invocation.is_some();
     let studio_ticket_tool_ok = matches!(
         tool_name,
-        "studio_list_tickets" | "studio_create_ticket" | "studio_update_ticket"
+        "studio_list_tickets" | "studio_create_ticket" | "studio_update_ticket" | "studio_review_ticket"
     ) && studio_ticket_workspace.is_some();
     let can_use_named_tool =
         executor.policy.can_use_tool(tool_name) || studio_ticket_tool_ok;
@@ -559,10 +561,16 @@ pub(crate) async fn execute_tool_call_impl(
                     serde_json::json!({
                         "id": t.id,
                         "title": t.title,
+                        "description": t.description,
                         "status": t.status,
+                        "parent_ticket_id": t.parent_ticket_id,
+                        "creation_key": t.creation_key,
                         "depends_on_ticket_ids": crate::api_studio::ticket_dependency_ids(t),
                         "assigned_agent": t.assigned_agent,
                         "review_agent": t.review_agent,
+                        "acceptance_criteria": t.acceptance_criteria,
+                        "evidence": t.evidence,
+                        "related_task_id": t.related_task_id,
                     })
                 })
                 .collect();
@@ -635,6 +643,34 @@ pub(crate) async fn execute_tool_call_impl(
                     (true, format!("[studio_update_ticket]\n{}", enc), None)
                 }
                 Err(e) => (false, format!("[studio_update_ticket] {}", e), None),
+            }
+        }
+        "studio_review_ticket" => {
+            let Some(root) = studio_ticket_workspace.clone() else {
+                return (
+                    false,
+                    "[studio_review_ticket] Code Studio project workspace required".to_string(),
+                    None,
+                );
+            };
+            let payload = args.join(" ");
+            let v: serde_json::Value = match serde_json::from_str(payload.trim()) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        false,
+                        format!("[studio_review_ticket] invalid JSON (single JSON object as args): {error}"),
+                        None,
+                    );
+                }
+            };
+            let reviewer = assigned_agent_for_task.as_deref().unwrap_or_default();
+            match crate::api_studio::studio_tool_apply_ticket_review_json(&root, reviewer, &v) {
+                Ok(ticket) => {
+                    let encoded = serde_json::to_string_pretty(&ticket).unwrap_or_default();
+                    (true, format!("[studio_review_ticket]\n{encoded}"), None)
+                }
+                Err(error) => (false, format!("[studio_review_ticket] {error}"), None),
             }
         }
         "read_file" => {
@@ -784,7 +820,7 @@ pub(crate) async fn execute_tool_call_impl(
                             || detail.to_ascii_lowercase().contains("cannot find")
                             || detail.to_ascii_lowercase().contains("no such file")
                         {
-                            " (hint: verify path/casing and use search_files . <filename> first)"
+                            " (hint: this is a missing file, not an access denial. The registered Code Studio root is workspace:/; use list_files workspace:/ or search_files workspace:/ <filename>, then retry with the exact path. Do not ask the user for an absolute project root.)"
                         } else {
                             ""
                         };
@@ -822,7 +858,11 @@ pub(crate) async fn execute_tool_call_impl(
                                 || detail.to_ascii_lowercase().contains("cannot find")
                                 || detail.to_ascii_lowercase().contains("no such file")
                             {
-                                " (hint: verify path/casing and use search_files . <filename> first)"
+                                if workspace_root.is_some() {
+                                    " (hint: this is a missing file, not an access denial. The registered Code Studio root is workspace:/; use list_files workspace:/ or search_files workspace:/ <filename>, then retry with the exact path. Do not ask the user for an absolute project root.)"
+                                } else {
+                                    " (hint: verify path/casing and use search_files . <filename> first)"
+                                }
                             } else {
                                 ""
                             };
@@ -837,7 +877,14 @@ pub(crate) async fn execute_tool_call_impl(
             }
         }
         "run_command" => {
-            let (vault_specs, cwd_flag, cmd, cmd_args) = parse_run_command_args(args);
+            let (vault_specs, cwd_flag, cmd, mut cmd_args) = parse_run_command_args(args);
+            let removed_duplicate_program =
+                remove_repeated_executable_arg(&cmd, &mut cmd_args);
+            let correction_note = removed_duplicate_program.then(|| {
+                format!(
+                    "[run_command] Corrected malformed arguments: `program` already names `{cmd}`, so its duplicate first entry was removed from `args`. The correct shape is program `{cmd}` with args {cmd_args:?}.\n"
+                )
+            }).unwrap_or_default();
             let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
                 Ok(c) => c,
                 Err(e) => return (false, format!("[run_command] {}", e), None),
@@ -914,14 +961,22 @@ pub(crate) async fn execute_tool_call_impl(
                             stderr.as_ref(),
                         )
                     };
+                    let msg = format!("{correction_note}{msg}");
                     let msg=if is_studio_workspace {serde_json::json!({"output":msg,"exit_code":out.status.code()}).to_string()}else{msg};
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[run_command] failed: {}", e), None),
+                Err(e) => (false, format!("{correction_note}[run_command] failed: {}", e), None),
             }
         }
         "run_terminal" => {
-            let (_vault_specs, cwd_flag, cmd, cmd_args) = parse_run_command_args(args);
+            let (_vault_specs, cwd_flag, cmd, mut cmd_args) = parse_run_command_args(args);
+            let removed_duplicate_program =
+                remove_repeated_executable_arg(&cmd, &mut cmd_args);
+            let correction_note = removed_duplicate_program.then(|| {
+                format!(
+                    "[run_terminal] Corrected malformed arguments: `program` already names `{cmd}`, so its duplicate first entry was removed from `args`. The correct shape is program `{cmd}` with args {cmd_args:?}.\n"
+                )
+            }).unwrap_or_default();
             let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
                 Ok(c) => c,
                 Err(e) => return (false, format!("[run_terminal] {}", e), None),
@@ -957,14 +1012,22 @@ pub(crate) async fn execute_tool_call_impl(
                             stderr.as_ref(),
                         )
                     };
+                    let msg = format!("{correction_note}{msg}");
                     let msg=if is_studio_workspace {serde_json::json!({"output":msg,"exit_code":out.status.code()}).to_string()}else{msg};
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[run_terminal] failed: {}", e), None),
+                Err(e) => (false, format!("{correction_note}[run_terminal] failed: {}", e), None),
             }
         }
         "run_command_background" => {
-            let (_vault_specs, cwd_flag, cmd, cmd_args) = parse_run_command_args(args);
+            let (_vault_specs, cwd_flag, cmd, mut cmd_args) = parse_run_command_args(args);
+            let removed_duplicate_program =
+                remove_repeated_executable_arg(&cmd, &mut cmd_args);
+            let correction_note = removed_duplicate_program.then(|| {
+                format!(
+                    "[run_command_background] Corrected malformed arguments: `program` already names `{cmd}`, so its duplicate first entry was removed from `args`. The correct shape is program `{cmd}` with args {cmd_args:?}.\n"
+                )
+            }).unwrap_or_default();
             let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
                 Ok(c) => c,
                 Err(e) => return (false, format!("[run_command_background] {}", e), None),
@@ -998,7 +1061,7 @@ pub(crate) async fn execute_tool_call_impl(
                         reg_clone.write().await.remove(&session_id);
                     });
                     reg.write().await.insert(session_id, (task, cell));
-                    (true, format!("[run_command_background] session_id: {} (cmd: {})", session_id, cmd_display), None)
+                    (true, format!("{correction_note}[run_command_background] session_id: {} (cmd: {})", session_id, cmd_display), None)
                 }
                 None => (false, "[run_command_background] process registry not available".to_string(), None),
             }

@@ -4,6 +4,7 @@ mod code_extensions;
 mod guardrails;
 mod response_auditor;
 pub(crate) use acceptance::{
+    run_goal_acceptance_checks,
     format_acceptance_prefix_for_llm, parse_api_acceptance_field, run_mechanical_acceptance_checks,
     strip_embedded_acceptance_json, studio_survey_tool, StudioAcceptancePayload, StudioCriterionKind,
     STUDIO_ACCEPTANCE_JSON_BEGIN, STUDIO_ACCEPTANCE_JSON_END,
@@ -545,7 +546,8 @@ struct StudioMeta {
     /// Résumé produit / intention à la création (préfixe agent + graine plan & DESIGN.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project_summary: Option<String>,
-    /// Ticket enforcement mode for Code Studio runs: off | soft | strict.
+    /// Policy for blocking runs without a ticket reference: off | soft | strict.
+    /// Actionable chat requests are still auto-registered on Kanban in every mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ticket_enforcement_mode: Option<String>,
 }
@@ -593,6 +595,12 @@ pub struct StudioTicket {
     pub requested_by: String,
     pub assigned_agent: String,
     pub review_agent: String,
+    /// Ticket de suivi auquel ce ticket appartient; ne bloque pas sa disponibilité.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_ticket_id: Option<String>,
+    /// Clé idempotente pour que les reprises du planificateur réutilisent le ticket existant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_key: Option<String>,
     /// Tickets du même projet qui doivent être en `done` avant de lancer celui-ci (union avec `depends_on_ticket_id` si présent).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on_ticket_ids: Vec<String>,
@@ -750,6 +758,44 @@ fn project_summary_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
     ))
 }
 
+fn normalized_prompt_fragment(raw: &str) -> String {
+    raw.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn prompt_contains_context(message: &str, context: Option<&str>) -> bool {
+    let Some(context) = context.map(str::trim).filter(|value| value.chars().count() >= 32) else {
+        return false;
+    };
+    let message = normalized_prompt_fragment(message);
+    let context = normalized_prompt_fragment(context);
+    !context.is_empty() && message.contains(&context)
+}
+
+/// Avoid adding project metadata a second time when the initial request already
+/// contains it (project creation commonly submits both the summary and stack).
+pub fn studio_meta_prefixes_for_request(
+    project_root: &Path,
+    request: &str,
+) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    let Some(meta) = load_studio_meta(project_root) else {
+        return (None, None, None, None);
+    };
+    let project_summary = (!prompt_contains_context(request, meta.project_summary.as_deref()))
+        .then(|| project_summary_prefix_from_meta(&meta))
+        .flatten();
+    let evolution_summary = (!prompt_contains_context(request, meta.evolution_summary.as_deref()))
+        .then(|| evolution_summary_prefix_from_meta(&meta))
+        .flatten();
+    let policy_notes = policy_notes_prefix_from_meta(&meta);
+    let tech_stack = (!prompt_contains_context(request, meta.tech_stack.as_deref()))
+        .then(|| tech_stack_prefix_from_meta(&meta))
+        .flatten();
+    (project_summary, evolution_summary, policy_notes, tech_stack)
+}
+
 /// Load `.akasha-studio.json` once and return `(evolution_summary, policy_notes, tech_stack)` prefixes.
 /// Avoids redundant disk I/O when the caller needs all three in the same request.
 pub fn studio_meta_prefixes(project_root: &Path) -> (Option<String>, Option<String>, Option<String>) {
@@ -767,6 +813,103 @@ pub fn studio_meta_prefixes(project_root: &Path) -> (Option<String>, Option<Stri
 pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
     let meta = load_studio_meta(project_root)?;
     tech_stack_prefix_from_meta(&meta)
+}
+
+/// Compact, read-only inventory of the registered Code Studio root injected
+/// before the first agent turn. This distinguishes a new empty workspace from
+/// an inaccessible repository without asking the model to guess paths.
+pub fn studio_workspace_inventory_message_prefix(project_root: &Path) -> String {
+    const MAX_ENTRIES: usize = 40;
+    const MAX_CHARS: usize = 2_000;
+    const MANIFESTS: [&str; 8] = [
+        "package.json",
+        "pyproject.toml",
+        "Cargo.toml",
+        "go.mod",
+        "requirements.txt",
+        "pom.xml",
+        "build.gradle",
+        "vite.config.ts",
+    ];
+
+    let is_sensitive_name = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        lower == ".env"
+            || lower.starts_with(".env.")
+            || lower.ends_with(".pem")
+            || lower.ends_with(".key")
+            || lower.contains("secret")
+            || lower.contains("credential")
+    };
+    let (mut entries, inventory_available) = match std::fs::read_dir(project_root) {
+        Ok(rows) => (
+            rows
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if is_sensitive_name(&name) {
+                        return None;
+                    }
+                    let kind = entry
+                        .file_type()
+                        .map(|kind| {
+                            if kind.is_dir() {
+                                "dossier"
+                            } else if kind.is_file() {
+                                "fichier"
+                            } else {
+                                "lien/entrée spéciale"
+                            }
+                        })
+                        .unwrap_or("entrée");
+                    Some((name, kind))
+                })
+                .collect::<Vec<_>>(),
+            true,
+        ),
+        Err(_) => (Vec::new(), false),
+    };
+    entries.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+
+    let present_manifests = MANIFESTS
+        .iter()
+        .filter(|name| inventory_available && project_root.join(name).is_file())
+        .copied()
+        .collect::<Vec<_>>();
+    let no_manifest = inventory_available && present_manifests.is_empty();
+    let mut listing = entries
+        .iter()
+        .take(MAX_ENTRIES)
+        .map(|(name, kind)| {
+            let safe_name = name
+                .chars()
+                .map(|character| if character.is_control() { ' ' } else { character })
+                .collect::<String>();
+            format!("- {safe_name} ({kind})")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if entries.len() > MAX_ENTRIES {
+        listing.push_str(&format!("\n- … {} autres entrées", entries.len() - MAX_ENTRIES));
+    }
+    if listing.is_empty() {
+        listing.push_str("(aucune entrée visible)");
+    }
+    if listing.chars().count() > MAX_CHARS {
+        listing = listing.chars().take(MAX_CHARS).collect::<String>();
+        listing.push_str("\n[… inventaire tronqué]");
+    }
+
+    let manifests = if !inventory_available {
+        "L’inventaire de la racine n’a pas pu être lu par le daemon; ne conclus pas que le projet est vide. La racine gérée reste `workspace:/`; vérifie l’accès à cette racine avec les outils Code Studio avant de demander une intervention.".to_string()
+    } else if no_manifest {
+        "Aucun manifeste de stack détecté : traite ce dossier comme le projet à initialiser. Si la demande nécessite une application, crée ses fichiers de base directement dans `workspace:/`; ne demande pas de chemin absolu et ne crée pas de projet imbriqué.".to_string()
+    } else {
+        format!("Manifestes détectés : {}.", present_manifests.join(", "))
+    };
+    format!(
+        "[Inventaire initial du workspace Code Studio — instantané en lecture seule]\nRacine canonique : `workspace:/`.\nEntrées visibles :\n{listing}\n{manifests}\nUn fichier absent est un état du dépôt, pas une erreur d'accès. Après un échec de lecture, inspecte `workspace:/` avec `list_files` ou `search_files`, puis poursuis la tâche avec les outils autorisés. Ne redemande jamais à l'utilisateur la racine absolue du projet.\n]\n\n"
+    )
 }
 
 /// Résumé d’évolution / mémoire courte (fichier `.akasha-studio.json`).
@@ -991,6 +1134,145 @@ pub fn studio_ticket_deps_would_cycle(
     false
 }
 
+/// `true` si rattacher le ticket à ce parent créerait un cycle dans la hiérarchie.
+pub fn studio_ticket_parent_would_cycle(
+    project_root: &Path,
+    ticket_id: &str,
+    parent_ticket_id: &str,
+) -> bool {
+    let mut current = Some(parent_ticket_id.trim().to_string());
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = current {
+        if id.is_empty() || id == ticket_id || !seen.insert(id.clone()) {
+            return true;
+        }
+        current = studio_get_ticket(project_root, &id).and_then(|ticket| ticket.parent_ticket_id);
+    }
+    false
+}
+
+fn normalize_ticket_identity(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut pending_space = false;
+    for character in value.trim().to_lowercase().chars() {
+        if character.is_alphanumeric() {
+            if pending_space && !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            normalized.push(character);
+            pending_space = false;
+        } else {
+            pending_space = true;
+        }
+    }
+    normalized
+}
+
+/// Finds an open ticket with the same parent and idempotency identity or title.
+pub fn studio_find_duplicate_ticket(
+    project_root: &Path,
+    parent_ticket_id: Option<&str>,
+    creation_key: Option<&str>,
+    title: &str,
+) -> Option<StudioTicket> {
+    let normalized_title = normalize_ticket_identity(title);
+    studio_list_tickets(project_root).into_iter().find(|ticket| {
+        if ticket.parent_ticket_id.as_deref() != parent_ticket_id {
+            return false;
+        }
+        let same_key = ticket.status != "done"
+            && creation_key.is_some()
+            && ticket.creation_key.as_deref() == creation_key;
+        if same_key {
+            return true;
+        }
+        if ticket.status == "done" {
+            return false;
+        }
+        // Stable keys protect retries, while title matching also catches older
+        // agents that generated a fresh key for the same task on every pass.
+        normalize_ticket_identity(&ticket.title) == normalized_title
+    })
+}
+
+pub fn studio_reopen_user_request_parent_for_followup(
+    project_root: &Path,
+    parent_ticket_id: &str,
+    child_ticket_id: &str,
+    actor: &str,
+) -> Result<(), String> {
+    let Some(mut parent) = studio_get_ticket(project_root, parent_ticket_id) else {
+        return Ok(());
+    };
+    if parent.requested_by != "user_chat" || parent.status != "done" {
+        return Ok(());
+    }
+    parent.status = "in_progress".to_string();
+    parent.review_outcome = None;
+    parent.review_notes = None;
+    parent.corrective_steps.clear();
+    parent.evidence.summary = None;
+    parent.updated_at = chrono::Utc::now().to_rfc3339();
+    studio_upsert_ticket(project_root, parent.clone())?;
+    studio_append_ticket_event(
+        project_root,
+        &parent.id,
+        "ticket_reopened_for_follow_up",
+        actor,
+        Some(json!({ "child_ticket_id": child_ticket_id })),
+    )
+}
+
+/// Migrate legacy work tickets that used a user request as an execution
+/// prerequisite. User request tickets group follow-up work; they do not block
+/// its dispatch. Only an unambiguous, same-project root link is migrated.
+pub fn studio_migrate_legacy_request_parent_dependencies(
+    project_root: &Path,
+) -> Result<usize, String> {
+    let mut store = load_studio_tickets_store(project_root);
+    let request_roots: std::collections::HashSet<String> = store
+        .tickets
+        .iter()
+        .filter(|ticket| ticket.requested_by == "user_chat" && ticket.parent_ticket_id.is_none())
+        .map(|ticket| ticket.id.clone())
+        .collect();
+    let mut migrated = Vec::new();
+    for ticket in &mut store.tickets {
+        let linked_roots: Vec<String> = ticket
+            .depends_on_ticket_ids
+            .iter()
+            .filter(|dependency| request_roots.contains(*dependency))
+            .cloned()
+            .collect();
+        if linked_roots.len() != 1 {
+            continue;
+        }
+        let root_id = &linked_roots[0];
+        if ticket.parent_ticket_id.as_deref().is_some_and(|parent| parent != root_id) {
+            continue;
+        }
+        ticket.parent_ticket_id = Some(root_id.clone());
+        ticket.depends_on_ticket_ids.retain(|dependency| dependency != root_id);
+        normalize_ticket_dependencies(ticket);
+        ticket.updated_at = chrono::Utc::now().to_rfc3339();
+        migrated.push((ticket.id.clone(), root_id.clone()));
+    }
+    if migrated.is_empty() {
+        return Ok(0);
+    }
+    save_studio_tickets_store(project_root, &store)?;
+    for (ticket_id, parent_ticket_id) in &migrated {
+        studio_append_ticket_event(
+            project_root,
+            ticket_id,
+            "ticket_parent_migrated_from_prerequisite",
+            "system",
+            Some(json!({ "parent_ticket_id": parent_ticket_id })),
+        )?;
+    }
+    Ok(migrated.len())
+}
+
 fn save_studio_tickets_store(project_root: &Path, store: &StudioTicketsStore) -> Result<(), String> {
     let p = studio_tickets_path(project_root);
     let j = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
@@ -1023,6 +1305,135 @@ pub fn studio_get_ticket(project_root: &Path, ticket_id: &str) -> Option<StudioT
 }
 
 /// `true` lorsque tous les prérequis existent et sont `done` (ou aucun prérequis).
+/// Prevent first-request implementation from leaving the Kanban as a single
+/// umbrella ticket. The project manager must create a small, verifiable backlog
+/// before it can delegate any implementation work.
+pub(crate) fn studio_initial_backlog_preflight(
+    project_root: &Path,
+    task_id: &str,
+    task_message: &str,
+) -> Result<(), String> {
+    const INITIAL_BACKLOG_MARKER: &str = "initial-kanban-backlog";
+    let tickets = studio_list_tickets(project_root);
+    let prompt_ticket_id = task_message.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("- ticket_id:")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    });
+    let root_ticket = prompt_ticket_id
+        .and_then(|id| tickets.iter().find(|ticket| ticket.id == id))
+        .or_else(|| {
+            tickets.iter().find(|ticket| {
+                ticket.related_task_id.as_deref() == Some(task_id)
+                    && ticket
+                        .acceptance_criteria
+                        .iter()
+                        .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+            })
+        });
+    let Some(root_ticket) = root_ticket else {
+        return Ok(());
+    };
+    if !root_ticket
+        .acceptance_criteria
+        .iter()
+        .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+    {
+        return Ok(());
+    }
+
+    if !studio_initial_backlog_is_ready_for_project(project_root, root_ticket, &tickets) {
+        return Err("Le Kanban initial doit contenir au moins trois tickets de travail adaptés à la demande, avec des critères vérifiables et au moins une dépendance entre eux. Le backlog générique de démarrage ne suffit pas : précise les fonctionnalités et validations attendues dans les tickets avant toute délégation d'implémentation.".to_string());
+    }
+    Ok(())
+}
+
+/// Recognize both the first user project request and scheduled follow-up passes
+/// that only plan the initial Kanban backlog.
+pub(crate) fn studio_is_initial_backlog_planning_message(message: &str) -> bool {
+    message.contains("[Planification Kanban initiale Code Studio]")
+        || message.contains("[Code Studio — première demande : planifier le backlog initial")
+}
+
+pub(crate) fn studio_initial_backlog_is_ready(
+    root_ticket: &StudioTicket,
+    tickets: &[StudioTicket],
+) -> bool {
+    let work_tickets: Vec<&StudioTicket> = tickets
+        .iter()
+        .filter(|ticket| {
+            ticket.id != root_ticket.id
+                && !is_initial_backlog_template_ticket(ticket)
+                && !ticket.acceptance_criteria.is_empty()
+                && ticket
+                    .acceptance_criteria
+                    .iter()
+                    .all(|criterion| !criterion.text.trim().is_empty())
+        })
+        .collect();
+    let work_ids: std::collections::HashSet<&str> = work_tickets
+        .iter()
+        .map(|ticket| ticket.id.as_str())
+        .collect();
+    let has_internal_dependency = work_tickets.iter().any(|ticket| {
+        ticket_dependency_ids(ticket)
+            .iter()
+            .any(|dependency| work_ids.contains(dependency.as_str()))
+    });
+    work_tickets.len() >= 3 && has_internal_dependency
+}
+
+fn is_initial_backlog_template_ticket(ticket: &StudioTicket) -> bool {
+    const TEMPLATE_TITLES: &[&str] = &[
+        "Établir le socle du projet",
+        "Implémenter les fonctionnalités demandées",
+        "Intégrer les fonctionnalités dans l'application",
+        "Valider le projet et le parcours utilisateur",
+    ];
+    let title = ticket.title.trim();
+    let generic_criterion = ticket.acceptance_criteria.iter().any(|criterion| {
+        let text = criterion.text.trim().to_lowercase();
+        [
+            "examiner le dépôt et sa stack, réutiliser la structure existante",
+            "implémenter les comportements et fonctionnalités décrits dans la demande",
+            "relier les fonctionnalités à l'interface, à l'état et aux services",
+            "exécuter les contrôles adaptés au dépôt et parcourir l'application",
+        ]
+        .iter()
+        .any(|template| text.starts_with(template))
+    });
+    TEMPLATE_TITLES
+        .iter()
+        .any(|template| title.eq_ignore_ascii_case(template))
+        || generic_criterion
+}
+
+pub(crate) fn studio_initial_backlog_is_ready_for_project(
+    project_root: &Path,
+    root_ticket: &StudioTicket,
+    tickets: &[StudioTicket],
+) -> bool {
+    if !studio_initial_backlog_is_ready(root_ticket, tickets) {
+        return false;
+    }
+    let seeded_child_ids: Vec<String> = studio_list_ticket_events(project_root, &root_ticket.id)
+        .into_iter()
+        .filter(|event| event.event_type == "initial_backlog_seeded")
+        .filter_map(|event| event.payload)
+        .filter_map(|payload| payload.get("child_ticket_ids").cloned())
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .next()
+        .unwrap_or_default();
+    seeded_child_ids.is_empty()
+        || seeded_child_ids.iter().all(|id| {
+            tickets
+                .iter()
+                .find(|ticket| &ticket.id == id)
+                .is_some_and(|ticket| !is_initial_backlog_template_ticket(ticket))
+        })
+}
+
 pub fn studio_ticket_prerequisite_done(project_root: &Path, ticket: &StudioTicket) -> bool {
     let deps = ticket_dependency_ids(ticket);
     if deps.is_empty() {
@@ -1032,6 +1443,16 @@ pub fn studio_ticket_prerequisite_done(project_root: &Path, ticket: &StudioTicke
         let Some(dep) = studio_get_ticket(project_root, &dep_id) else {
             return false;
         };
+        // The initial request ticket is an umbrella tracker that is closed only
+        // after its work tickets finish. It must never be a prerequisite for
+        // those tickets, or the Kanban creates a circular dispatch deadlock.
+        if dep.requested_by == "user_chat"
+            || dep.acceptance_criteria.iter().any(|criterion| {
+                criterion.id.as_deref() == Some("initial-kanban-backlog")
+            })
+        {
+            continue;
+        }
         if dep.status != "done" {
             return false;
         }
@@ -1051,6 +1472,26 @@ pub fn studio_list_ticket_events(project_root: &Path, ticket_id: &str) -> Vec<St
         .collect();
     events.sort_by(|a, b| a.at.cmp(&b.at));
     events
+}
+
+/// Return the most recently selected model for this project. Chat requests
+/// record this on their linked ticket so background Kanban dispatches preserve
+/// the model choice made by the user.
+pub(crate) fn studio_project_model_preference(
+    project_root: &Path,
+) -> Option<crate::studio_execution::ModelChoice> {
+    load_studio_tickets_store(project_root)
+        .events
+        .into_iter()
+        .filter(|event| event.event_type == "studio_model_selected")
+        .filter_map(|event| {
+            let at = chrono::DateTime::parse_from_rfc3339(&event.at).ok()?;
+            let payload = event.payload?;
+            let model = serde_json::from_value(payload).ok()?;
+            Some((at, model))
+        })
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, model)| model)
 }
 
 pub fn studio_upsert_ticket(project_root: &Path, mut ticket: StudioTicket) -> Result<(), String> {
@@ -1098,8 +1539,12 @@ pub fn studio_attach_task_to_ticket(
     let Some(mut ticket) = studio_get_ticket(project_root, ticket_id) else {
         return Err("ticket_not_found".to_string());
     };
-    if ticket.status == "todo" {
+    if ticket.status == "todo" || ticket.status == "blocked" {
         ticket.status = "in_progress".to_string();
+        // A new execution is a deliberate retry of the previous blocked attempt.
+        // Keep the diagnostic in the event timeline, but don't show it as the
+        // current result while a new run is active.
+        ticket.evidence.summary = None;
     }
     ticket.related_task_id = Some(task_id.to_string());
     if !ticket.evidence.task_ids.iter().any(|t| t == task_id) {
@@ -1129,8 +1574,9 @@ pub fn studio_mark_ticket_ready_for_review(
     let Some(mut ticket) = studio_get_ticket(project_root, ticket_id) else {
         return Err("ticket_not_found".to_string());
     };
-    if ticket.status == "in_progress" {
+    if ticket.status == "in_progress" || ticket.status == "blocked" {
         ticket.status = "review".to_string();
+        ticket.evidence.summary = None;
     }
     ticket.related_task_id = Some(task_id.to_string());
     if !ticket.evidence.task_ids.iter().any(|t| t == task_id) {
@@ -1173,10 +1619,10 @@ pub fn studio_user_message_suggests_evolution(message: &str) -> bool {
     if t.starts_with("[Bootstrap Kanban") {
         return false;
     }
-    if t.len() < 16 {
+    if t.is_empty() {
         return false;
     }
-    let lower = t.to_ascii_lowercase();
+    let lower = t.to_lowercase();
     if lower.len() < 48
         && (lower == "bonjour"
             || lower == "salut"
@@ -1190,65 +1636,548 @@ pub fn studio_user_message_suggests_evolution(message: &str) -> bool {
         return false;
     }
     const KW: &[&str] = &[
-        "implement",
+        // Initial creation requests must enter the same Kanban workflow as later evolutions.
+        "créer",
+        "crée ",
+        "crée-moi",
+        "creer",
+        "création",
+        "creation",
+        "create ",
+        "create a ",
+        "create an ",
+        "build me ",
+        "build ",
+        "build a ",
+        "build an ",
+        "génère",
+        "generer",
+        "generate ",
+        "développe",
+        "developpe",
+        "développer",
+        "develop ",
+        "construis",
+        "construire",
         "implément",
-        "implémente",
-        "feature",
-        "bug",
-        "fix",
+        "implement",
         "corrige",
-        "correct",
-        "refactor",
-        "refonte",
-        " ajoute",
+        "corriger",
+        "fix ",
+        "repair ",
+        "répare",
+        "ajout",
         "add ",
-        "change",
+        "change ",
         "chang",
         "modif",
         "modify",
         "update ",
         "mise à jour",
-        "endpoint",
-        "route ",
-        "component",
-        "composant",
+        "refactor",
+        "refonte",
+        "supprime",
+        "remove ",
+        "delete ",
+        "améliore",
+        "améliorer",
+        "rends ",
+        "rendre ",
+        "simplifie",
+        "simplifier",
+        "optimise",
+        "optimiser",
+        "modernise",
+        "moderniser",
+        "réorganise",
+        "reorganise",
+        "redesign",
+        "polish ",
+        // Imperative/specification phrasing used when describing desired product behavior.
+        "il faut ",
+        "il faudrait ",
+        "doit être",
+        "doivent être",
+        "devrait ",
+        "devraient ",
+        "should ",
+        "should be ",
+        "must ",
+        "must be ",
+        "make sure ",
+        "dispatcher",
+        "dispatch ",
+        "dispatches ",
+        "suivi des tâches",
+        "suivi des tickets",
+        "ticket kanban",
+        "make it ",
+        "make the ",
+        "improve ",
+        "debug ",
+        "audit ",
+        "test ",
+        "from scratch",
+        "new feature",
+        "nouvelle fonctionnalité",
+        "feature request",
+        "bug",
         "build error",
         "erreur de build",
-        "typescript",
-        "eslint",
-        "nouvelle fonctionnalité",
-        "new feature",
+        "problème",
+        "probleme",
+        "erreur",
+        "error",
+        "crash",
+        "crashes",
+        "ne répond pas",
+        "ne repond pas",
+        "doesn't respond",
+        "does not respond",
+        "not responding",
+        "fails to ",
+        "failure",
+        "wrong result",
+        "cassé",
+        "broken",
         "patch",
         "hotfix",
-        "évolution",
-        "evolution",
         "enhancement",
         "régression",
         "regression",
-        "fonctionnalité",
-        "migration",
-        "schema",
-        "database",
-        "api ",
+        "évolution de",
+        "evolution of",
+        "ne fonctionne pas",
+        "ne marche pas",
+        "is broken",
+        "doesn't work",
+        "does not work",
     ];
     KW.iter().any(|k| lower.contains(k))
 }
 
-/// Auto-create a Kanban ticket from a chat message (linked to the next `/api/message` turn).
+/// Heuristic for recognizing a first request to create a new project or app.
+pub fn studio_user_message_suggests_project_creation(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    [
+        "je veux créer",
+        "je veux creer",
+        "je veux un ",
+        "je veux une ",
+        "je voudrais un ",
+        "je voudrais une ",
+        "j'aimerais un ",
+        "j'aimerais une ",
+        "j’aimerais un ",
+        "j’aimerais une ",
+        "fais-moi ",
+        "fais moi ",
+        "conçois ",
+        "concois ",
+        "concevoir ",
+        "créer un nouveau projet",
+        "creer un nouveau projet",
+        "crée le projet",
+        "cree le projet",
+        "créer le projet",
+        "creer le projet",
+        "create the project",
+        "create this project",
+        "crée une application",
+        "cree une application",
+        "créer une application",
+        "creer une application",
+        "créer un jeu",
+        "creer un jeu",
+        "crée un jeu",
+        "cree un jeu",
+        "build me ",
+        "make me a ",
+        "make me an ",
+        "build a new ",
+        "create a new ",
+        "create an app",
+        "create a game",
+        "i need a ",
+        "i need an ",
+        "i want a ",
+        "i want an ",
+        "i would like a ",
+        "i would like an ",
+        "from scratch",
+        "new project",
+        "nouvelle application",
+        "nouveau projet",
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword))
+}
+
+pub(crate) fn studio_seed_initial_backlog(
+    project_root: &Path,
+    root_ticket_id: &str,
+) -> Result<Vec<String>, String> {
+    const INITIAL_BACKLOG_MARKER: &str = "initial-kanban-backlog";
+    let Some(root_ticket) = studio_get_ticket(project_root, root_ticket_id) else {
+        return Err("initial_request_ticket_not_found".to_string());
+    };
+    let seeded_event = studio_list_ticket_events(project_root, root_ticket_id)
+        .into_iter()
+        .find(|event| event.event_type == "initial_backlog_seeded");
+    if let Some(event) = seeded_event.as_ref() {
+        let child_ids: Vec<String> = event
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("child_ticket_ids"))
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        for (index, child_id) in child_ids.iter().enumerate() {
+            let Some(mut child) = studio_get_ticket(project_root, child_id) else {
+                continue;
+            };
+            let phase = match index {
+                0 => "foundation",
+                1 => "features",
+                2 => "integration",
+                _ => "validation",
+            };
+            let mut changed = false;
+            if child.parent_ticket_id.as_deref() != Some(root_ticket_id) {
+                child.parent_ticket_id = Some(root_ticket_id.to_string());
+                changed = true;
+            }
+            if child.creation_key.is_none() {
+                child.creation_key = Some(format!("initial:{root_ticket_id}:{phase}"));
+                changed = true;
+            }
+            if child.depends_on_ticket_ids.iter().any(|id| id == root_ticket_id) {
+                child.depends_on_ticket_ids.retain(|id| id != root_ticket_id);
+                normalize_ticket_dependencies(&mut child);
+                changed = true;
+            }
+            if changed {
+                child.updated_at = chrono::Utc::now().to_rfc3339();
+                studio_upsert_ticket(project_root, child)?;
+            }
+        }
+    }
+    if !root_ticket
+        .acceptance_criteria
+        .iter()
+        .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+        || seeded_event.is_some()
+    {
+        return Ok(Vec::new());
+    }
+    for mut child in studio_list_tickets(project_root).into_iter().filter(|ticket| {
+        ticket.id != root_ticket_id
+            && ticket
+                .depends_on_ticket_ids
+                .iter()
+                .any(|dependency| dependency == root_ticket_id)
+    }) {
+        child.parent_ticket_id = Some(root_ticket_id.to_string());
+        child
+            .depends_on_ticket_ids
+            .retain(|dependency| dependency != root_ticket_id);
+        normalize_ticket_dependencies(&mut child);
+        child.updated_at = chrono::Utc::now().to_rfc3339();
+        studio_upsert_ticket(project_root, child)?;
+    }
+    let existing = studio_list_tickets(project_root);
+    if studio_initial_backlog_is_ready(&root_ticket, &existing) {
+        return Ok(Vec::new());
+    }
+
+    let request = root_ticket.description.chars().take(2500).collect::<String>();
+    let phases = [
+        (
+            "Établir le socle du projet",
+            "studio_scaffold",
+            "Examiner le dépôt et sa stack, réutiliser la structure existante et ne créer que les éléments de socle réellement absents. `workspace:/` est la racine canonique de l'application: réutilise ses manifests et ne crée pas un second projet imbriqué. Critère: l'architecture, le point d'entrée et les commandes du projet sont identifiés et cohérents avec la demande.",
+            Vec::<String>::new(),
+        ),
+        (
+            "Implémenter les fonctionnalités demandées",
+            "studio_fullstack",
+            "Implémenter les comportements et fonctionnalités décrits dans la demande, avec des critères vérifiables. Critère: chaque comportement demandé possède une implémentation réelle, sans placeholder ni parcours principal simulé.",
+            vec!["foundation".to_string()],
+        ),
+        (
+            "Intégrer les fonctionnalités dans l'application",
+            "studio_fullstack",
+            "Relier les fonctionnalités à l'interface, à l'état et aux services déjà présents, en couvrant les états d'erreur pertinents. Critère: le parcours principal fonctionne de bout en bout dans l'application.",
+            vec!["features".to_string()],
+        ),
+        (
+            "Valider le projet et le parcours utilisateur",
+            "studio_fullstack",
+            "Exécuter les contrôles adaptés au dépôt et parcourir l'application sur les tailles d'écran pertinentes. Lance le build et l'aperçu depuis la racine canonique `workspace:/`; ne valide pas un autre projet imbriqué à la place. Critères: build et vérifications applicables réussis; tout défaut distinct découvert est consigné dans un ticket Kanban.",
+            vec!["integration".to_string()],
+        ),
+    ];
+    let mut phase_ids: HashMap<String, String> = HashMap::new();
+    let mut created_ids = Vec::new();
+    for (key, (title, assigned_agent, phase_description, dependency_keys)) in phases.iter().enumerate() {
+        let phase_key = match key {
+            0 => "foundation",
+            1 => "features",
+            2 => "integration",
+            _ => "validation",
+        };
+        let creation_key = format!("initial:{root_ticket_id}:{phase_key}");
+        let legacy_criterion_id = format!("initial-phase-{key}");
+        if let Some(mut existing_ticket) = studio_find_duplicate_ticket(
+            project_root,
+            Some(root_ticket_id),
+            Some(&creation_key),
+            title,
+        )
+        .or_else(|| {
+            studio_list_tickets(project_root).into_iter().find(|ticket| {
+                ticket.requested_by == "system_initial_backlog"
+                    && ticket
+                        .acceptance_criteria
+                        .iter()
+                        .any(|criterion| criterion.id.as_deref() == Some(legacy_criterion_id.as_str()))
+            })
+        }) {
+            let mut changed = false;
+            if existing_ticket.parent_ticket_id.as_deref() != Some(root_ticket_id) {
+                existing_ticket.parent_ticket_id = Some(root_ticket_id.to_string());
+                changed = true;
+            }
+            if existing_ticket.creation_key.as_deref() != Some(creation_key.as_str()) {
+                existing_ticket.creation_key = Some(creation_key);
+                changed = true;
+            }
+            if changed {
+                existing_ticket.updated_at = chrono::Utc::now().to_rfc3339();
+                studio_upsert_ticket(project_root, existing_ticket.clone())?;
+            }
+            phase_ids.insert(phase_key.to_string(), existing_ticket.id.clone());
+            created_ids.push(existing_ticket.id);
+            continue;
+        }
+        let ticket_id = uuid::Uuid::new_v4().to_string();
+        let dependencies: Vec<String> = dependency_keys
+            .iter()
+            .filter_map(|key| phase_ids.get(key).cloned())
+            .collect();
+        let ticket = StudioTicket {
+            id: ticket_id.clone(),
+            project_id: root_ticket.project_id.clone(),
+            title: (*title).to_string(),
+            description: format!(
+                "{phase_description}\n\nDemande initiale à traiter:\n{request}\n\nCe ticket fait partie du backlog initial du ticket {root_ticket_id}. Tous les fichiers de cette application restent sous la racine canonique `workspace:/`; inspecte et réutilise la stack existante au lieu de créer un projet imbriqué. Ne modifie pas le suivi directement: rapporte les fichiers et les résultats au chef de projet via Code Studio."
+            ),
+            status: "todo".to_string(),
+            requested_by: "system_initial_backlog".to_string(),
+            assigned_agent: (*assigned_agent).to_string(),
+            review_agent: "studio_reviewer".to_string(),
+            parent_ticket_id: Some(root_ticket_id.to_string()),
+            creation_key: Some(creation_key),
+            depends_on_ticket_ids: dependencies,
+            depends_on_ticket_id: None,
+            related_task_id: None,
+            acceptance_criteria: vec![StudioTicketAcceptanceCriterion {
+                id: Some(format!("initial-phase-{key}")),
+                text: phase_description.to_string(),
+                kind: None,
+                path: None,
+                argv: None,
+            }],
+            evidence: StudioTicketEvidence::default(),
+            review_outcome: None,
+            review_notes: None,
+            corrective_steps: Vec::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        studio_upsert_ticket(project_root, ticket.clone())?;
+        studio_append_ticket_event(
+            project_root,
+            &ticket_id,
+            "ticket_created",
+            "system_initial_backlog",
+            Some(json!({
+                "source": "initial_kanban_backlog",
+                "root_ticket_id": root_ticket_id,
+                "phase": key,
+                "depends_on_ticket_ids": ticket.depends_on_ticket_ids,
+            })),
+        )?;
+        phase_ids.insert(phase_key.to_string(), ticket_id.clone());
+        created_ids.push(ticket_id);
+    }
+    studio_append_ticket_event(
+        project_root,
+        root_ticket_id,
+        "initial_backlog_seeded",
+        "system",
+        Some(json!({
+            "child_ticket_ids": created_ids,
+            "schema_version": 1,
+        })),
+    )?;
+    Ok(created_ids)
+}
+
+/// Complete the initial request ticket only after the refined backlog and all
+/// other project tickets have been reviewed and approved.
+pub(crate) fn studio_complete_initial_backlog_if_ready(
+    project_root: &Path,
+) -> Result<Vec<String>, String> {
+    const INITIAL_BACKLOG_MARKER: &str = "initial-kanban-backlog";
+    let tickets = studio_list_tickets(project_root);
+    let mut completed_roots = Vec::new();
+    for root in tickets.iter().filter(|ticket| {
+        ticket
+            .acceptance_criteria
+            .iter()
+            .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+    }) {
+        let mut root = root.clone();
+        if !studio_initial_backlog_is_ready_for_project(project_root, &root, &tickets) {
+            if root.status == "done" {
+                root.status = "in_progress".to_string();
+                root.review_outcome = None;
+                root.review_notes = Some(
+                    "Réouverture automatique : le Kanban initial contient encore des gabarits ou des critères non spécifiques."
+                        .to_string(),
+                );
+                root.updated_at = chrono::Utc::now().to_rfc3339();
+                studio_upsert_ticket(project_root, root.clone())?;
+                studio_append_ticket_event(
+                    project_root,
+                    &root.id,
+                    "initial_backlog_reopened",
+                    "system",
+                    Some(json!({ "reason": "initial_backlog_not_refined" })),
+                )?;
+            }
+            continue;
+        }
+        if root.status == "done" {
+            continue;
+        }
+        let child_ids: Vec<String> = studio_list_ticket_events(project_root, &root.id)
+            .into_iter()
+            .filter(|event| event.event_type == "initial_backlog_seeded")
+            .filter_map(|event| event.payload)
+            .filter_map(|payload| payload.get("child_ticket_ids").cloned())
+            .filter_map(|value| serde_json::from_value(value).ok())
+            .next()
+            .unwrap_or_default();
+        if child_ids.len() < 3 {
+            continue;
+        }
+        let children: Vec<StudioTicket> = child_ids
+            .iter()
+            .filter_map(|id| studio_get_ticket(project_root, id))
+            .collect();
+        if children.len() != child_ids.len()
+            || children.iter().any(|ticket| {
+                ticket.status != "done" || ticket.review_outcome.as_deref() != Some("approved")
+            })
+        {
+            continue;
+        }
+        let all_project_work_is_approved = tickets.iter().filter(|ticket| ticket.id != root.id).all(
+            |ticket| {
+                ticket.status == "done" && ticket.review_outcome.as_deref() == Some("approved")
+            },
+        );
+        if !all_project_work_is_approved {
+            continue;
+        }
+
+        root.status = "done".to_string();
+        root.review_outcome = Some("approved".to_string());
+        root.review_notes = Some(
+            "Tous les tickets du projet ont été validés, y compris le backlog initial."
+                .to_string(),
+        );
+        root.evidence.summary = root.review_notes.clone();
+        for child in &children {
+            for file in &child.evidence.files {
+                if !root.evidence.files.contains(file) {
+                    root.evidence.files.push(file.clone());
+                }
+            }
+            for task_id in &child.evidence.task_ids {
+                if !root.evidence.task_ids.contains(task_id) {
+                    root.evidence.task_ids.push(task_id.clone());
+                }
+            }
+        }
+        root.updated_at = chrono::Utc::now().to_rfc3339();
+        studio_upsert_ticket(project_root, root.clone())?;
+        studio_append_ticket_event(
+            project_root,
+            &root.id,
+            "initial_backlog_completed",
+            "system",
+            Some(json!({
+                "child_ticket_ids": child_ids,
+                "review_outcome": "approved",
+            })),
+        )?;
+        completed_roots.push(root.id);
+    }
+    Ok(completed_roots)
+}
+
+fn studio_chat_ticket_title(message: &str) -> String {
+    const MAX_CHARS: usize = 84;
+    let first_line = message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let compact = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let sentence = compact
+        .find(|character| matches!(character, '.' | '!' | '?'))
+        .map(|end| compact[..end].trim())
+        .filter(|head| !head.is_empty())
+        .unwrap_or(&compact);
+    let mut title = sentence.chars().take(MAX_CHARS).collect::<String>();
+    if sentence.chars().count() > MAX_CHARS {
+        title.push('…');
+    }
+    if title.is_empty() {
+        "Évolution (chat)".to_string()
+    } else {
+        title
+    }
+}
+
+/// Auto-register an actionable chat request and seed an initial project backlog
+/// when this is the first request to create a project or application.
 pub fn studio_create_evolution_ticket_from_chat(
     project_root: &Path,
     message: &str,
 ) -> Result<String, String> {
     let meta = load_studio_meta(project_root).ok_or_else(|| "studio_meta_missing".to_string())?;
-    let raw_title = message.lines().next().unwrap_or(message).trim();
-    let mut title = if raw_title.chars().count() > 200 {
-        raw_title.chars().take(200).collect::<String>()
-    } else {
-        raw_title.to_string()
-    };
-    if title.is_empty() {
-        title = "Évolution (chat)".to_string();
+    let normalized_message = normalize_ticket_identity(message);
+    if let Some(existing) = studio_list_tickets(project_root).into_iter().find(|ticket| {
+        ticket.requested_by == "user_chat"
+            && ticket.status != "done"
+            && ticket.status != "blocked"
+            && normalize_ticket_identity(&ticket.description) == normalized_message
+    }) {
+        let _ = studio_append_ticket_event(
+            project_root,
+            &existing.id,
+            "ticket_duplicate_suppressed",
+            "system",
+            Some(json!({ "source": "chat_evolution_auto", "title": existing.title })),
+        );
+        return Ok(existing.id);
     }
+    let is_first_project_creation = studio_list_tickets(project_root).is_empty()
+        && studio_user_message_suggests_project_creation(message);
+    let title = studio_chat_ticket_title(message);
     let new_ticket_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let ticket = StudioTicket {
@@ -1260,10 +2189,39 @@ pub fn studio_create_evolution_ticket_from_chat(
         requested_by: "user_chat".to_string(),
         assigned_agent: "studio_fullstack".to_string(),
         review_agent: "studio_reviewer".to_string(),
+        parent_ticket_id: None,
+        creation_key: None,
         depends_on_ticket_ids: Vec::new(),
         depends_on_ticket_id: None,
         related_task_id: None,
-        acceptance_criteria: Vec::new(),
+        acceptance_criteria: {
+            let mut criteria = vec![
+                StudioTicketAcceptanceCriterion {
+                    id: Some("request-scope".to_string()),
+                    text: "Le résultat couvre le besoin décrit dans cette demande.".to_string(),
+                    kind: None,
+                    path: None,
+                    argv: None,
+                },
+                StudioTicketAcceptanceCriterion {
+                    id: Some("verification".to_string()),
+                    text: "Les vérifications pertinentes du projet sont exécutées et leurs résultats consignés.".to_string(),
+                    kind: None,
+                    path: None,
+                    argv: None,
+                },
+            ];
+            if is_first_project_creation {
+                criteria.push(StudioTicketAcceptanceCriterion {
+                    id: Some("initial-kanban-backlog".to_string()),
+                    text: "Avant l'implémentation, la première demande est décomposée dans le Kanban en tickets de portée claire, avec critères vérifiables et dépendances explicites pour le socle, les fonctionnalités demandées, l'intégration et la validation.".to_string(),
+                    kind: None,
+                    path: None,
+                    argv: None,
+                });
+            }
+            criteria
+        },
         evidence: StudioTicketEvidence::default(),
         review_outcome: None,
         review_notes: None,
@@ -1282,6 +2240,9 @@ pub fn studio_create_evolution_ticket_from_chat(
             "title": ticket.title,
         })),
     );
+    if is_first_project_creation {
+        studio_seed_initial_backlog(project_root, &ticket.id)?;
+    }
     Ok(new_ticket_id)
 }
 
@@ -1324,6 +2285,77 @@ pub fn studio_tool_create_ticket_json(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "studio_project_manager".to_string());
+    let parent_ticket_id = match body.get("parent_ticket_id") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("parent_ticket_id_invalid".to_string());
+            }
+            Some(value.to_string())
+        }
+        Some(_) => return Err("parent_ticket_id_invalid".to_string()),
+        None if requested_by == "studio_project_manager" => {
+            let roots = studio_list_tickets(project_root)
+                .into_iter()
+                .filter(|ticket| {
+                    ticket.requested_by == "user_chat"
+                        && ticket.parent_ticket_id.is_none()
+                        && ticket.status != "done"
+                        && ticket.status != "blocked"
+                })
+                .collect::<Vec<_>>();
+            match roots.as_slice() {
+                [] => None,
+                [root] => Some(root.id.clone()),
+                _ => return Err("parent_ticket_ambiguous".to_string()),
+            }
+        }
+        None => None,
+    };
+    if let Some(parent_id) = parent_ticket_id.as_deref() {
+        let Some(parent) = studio_get_ticket(project_root, parent_id) else {
+            return Err("parent_ticket_not_found".to_string());
+        };
+        if parent.project_id != meta.id {
+            return Err("parent_ticket_project_mismatch".to_string());
+        }
+        if studio_ticket_parent_would_cycle(project_root, &uuid::Uuid::new_v4().to_string(), parent_id) {
+            return Err("parent_ticket_cycle".to_string());
+        }
+    }
+    let creation_key = match body.get("creation_key") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() || value.chars().count() > 160 {
+                return Err("creation_key_invalid".to_string());
+            }
+            Some(value.to_string())
+        }
+        Some(_) => return Err("creation_key_invalid".to_string()),
+    };
+    if let Some(existing) = studio_find_duplicate_ticket(
+        project_root,
+        parent_ticket_id.as_deref(),
+        creation_key.as_deref(),
+        title,
+    ) {
+        let _ = studio_append_ticket_event(
+            project_root,
+            &existing.id,
+            "ticket_duplicate_suppressed",
+            "agent",
+            Some(json!({
+                "source": "studio_create_ticket",
+                "attempted_title": title,
+                "parent_ticket_id": parent_ticket_id,
+                "creation_key": creation_key,
+                "canonical_ticket_id": existing.id,
+            })),
+        );
+        return Ok(existing);
+    }
     let acceptance_criteria = match body.get("acceptance_criteria") {
         None => vec![],
         Some(v) => serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v.clone())
@@ -1347,6 +2379,7 @@ pub fn studio_tool_create_ticket_json(
     }
     match body.get("depends_on_ticket_id") {
         None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(s)) if s.trim().is_empty() => {}
         Some(v) => {
             let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                 return Err("depends_on_ticket_id_invalid".to_string());
@@ -1390,6 +2423,8 @@ pub fn studio_tool_create_ticket_json(
         requested_by,
         assigned_agent,
         review_agent,
+        parent_ticket_id,
+        creation_key,
         depends_on_ticket_ids,
         depends_on_ticket_id,
         related_task_id: None,
@@ -1402,6 +2437,48 @@ pub fn studio_tool_create_ticket_json(
         updated_at: now,
     };
     studio_upsert_ticket(project_root, ticket.clone())?;
+    if let Some(parent_id) = ticket.parent_ticket_id.as_deref() {
+        studio_reopen_user_request_parent_for_followup(
+            project_root,
+            parent_id,
+            &ticket.id,
+            "agent",
+        )?;
+    }
+    let mut related_parent_ids = ticket.depends_on_ticket_ids.clone();
+    if let Some(parent_id) = ticket.parent_ticket_id.as_ref() {
+        if !related_parent_ids.iter().any(|candidate| candidate == parent_id) {
+            related_parent_ids.push(parent_id.clone());
+        }
+    }
+    for parent_id in &related_parent_ids {
+        let Some(mut parent) = studio_get_ticket(project_root, parent_id) else {
+            continue;
+        };
+        if parent.requested_by == "user_chat"
+            && parent.review_outcome.as_deref() == Some("changes_requested")
+        {
+            let previous_review = parent.review_notes.clone();
+            let previous_corrections = parent.corrective_steps.clone();
+            parent.review_outcome = None;
+            parent.review_notes = None;
+            parent.corrective_steps.clear();
+            parent.evidence.summary = None;
+            parent.updated_at = chrono::Utc::now().to_rfc3339();
+            studio_upsert_ticket(project_root, parent.clone())?;
+            studio_append_ticket_event(
+                project_root,
+                &parent.id,
+                "ticket_follow_up_created",
+                "agent",
+                Some(json!({
+                    "child_ticket_id": ticket.id,
+                    "previous_review_notes": previous_review,
+                    "previous_corrective_steps": previous_corrections,
+                })),
+            )?;
+        }
+    }
     let _ = studio_append_ticket_event(
         project_root,
         &ticket.id,
@@ -1410,6 +2487,8 @@ pub fn studio_tool_create_ticket_json(
         Some(json!({
             "assigned_agent": ticket.assigned_agent,
             "review_agent": ticket.review_agent,
+            "parent_ticket_id": ticket.parent_ticket_id,
+            "creation_key": ticket.creation_key,
             "depends_on_ticket_id": ticket.depends_on_ticket_id,
             "depends_on_ticket_ids": ticket.depends_on_ticket_ids,
             "source": "studio_create_ticket",
@@ -1458,6 +2537,27 @@ pub fn studio_tool_apply_ticket_patch_json(
         }
         ticket.review_agent = a.to_string();
     }
+    if let Some(parent_value) = body_v.get("parent_ticket_id") {
+        let next_parent = match parent_value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value) if !value.trim().is_empty() => {
+                Some(value.trim().to_string())
+            }
+            _ => return Err("parent_ticket_id_invalid".to_string()),
+        };
+        if let Some(parent_id) = next_parent.as_deref() {
+            let Some(parent) = studio_get_ticket(project_root, parent_id) else {
+                return Err("parent_ticket_not_found".to_string());
+            };
+            if parent.project_id != ticket.project_id {
+                return Err("parent_ticket_project_mismatch".to_string());
+            }
+            if studio_ticket_parent_would_cycle(project_root, ticket_id, parent_id) {
+                return Err("parent_ticket_cycle".to_string());
+            }
+        }
+        ticket.parent_ticket_id = next_parent;
+    }
     if body_v.get("depends_on_ticket_ids").is_some() {
         let next_deps: Vec<String> = match body_v.get("depends_on_ticket_ids") {
             Some(serde_json::Value::Null) => Vec::new(),
@@ -1494,6 +2594,7 @@ pub fn studio_tool_apply_ticket_patch_json(
     } else if body_v.get("depends_on_ticket_id").is_some() {
         let next_dep = match body_v.get("depends_on_ticket_id") {
             Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) if s.trim().is_empty() => None,
             Some(v) => {
                 let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                     return Err("depends_on_ticket_id_invalid".to_string());
@@ -1524,6 +2625,22 @@ pub fn studio_tool_apply_ticket_patch_json(
             Ok(criteria) => ticket.acceptance_criteria = criteria,
             Err(_) => return Err("acceptance_criteria_invalid".to_string()),
         }
+    }
+    if let Some(value) = body_v.get("evidence") {
+        let evidence = serde_json::from_value::<StudioTicketEvidence>(value.clone())
+            .map_err(|_| "evidence_invalid".to_string())?;
+        let mut files = Vec::new();
+        for file in evidence.files {
+            let file = file.trim();
+            if !file.is_empty() && !files.iter().any(|existing| existing == file) {
+                files.push(file.to_string());
+            }
+        }
+        ticket.evidence.files = files;
+        ticket.evidence.summary = evidence
+            .summary
+            .map(|summary| summary.trim().to_string())
+            .filter(|summary| !summary.is_empty());
     }
     let mut recovered_execution: Option<(String, Option<String>)> = None;
     if body_v.get("recover_stuck_execution").and_then(|x| x.as_bool()) == Some(true) {
@@ -1560,6 +2677,16 @@ pub fn studio_tool_apply_ticket_patch_json(
     }
     ticket.updated_at = chrono::Utc::now().to_rfc3339();
     studio_upsert_ticket(project_root, ticket.clone())?;
+    if body_v.get("parent_ticket_id").is_some() {
+        if let Some(parent_id) = ticket.parent_ticket_id.as_deref() {
+            studio_reopen_user_request_parent_for_followup(
+                project_root,
+                parent_id,
+                &ticket.id,
+                "agent",
+            )?;
+        }
+    }
     match recovered_execution {
         Some((previous_status, previous_related_task_id)) => {
             let _ = studio_append_ticket_event(
@@ -1584,6 +2711,108 @@ pub fn studio_tool_apply_ticket_patch_json(
             );
         }
     }
+    Ok(ticket)
+}
+
+/// Agent tool: submit a ticket review using the reviewer's bound agent identity.
+/// Reviewers cannot approve tickets they did not receive or write review data on another agent's behalf.
+pub fn studio_tool_apply_ticket_review_json(
+    project_root: &Path,
+    reviewer_agent: &str,
+    body: &serde_json::Value,
+) -> Result<StudioTicket, String> {
+    let ticket_id = body
+        .get("ticket_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "ticket_id_required".to_string())?;
+    let Some(mut ticket) = studio_get_ticket(project_root, ticket_id) else {
+        return Err("ticket_not_found".to_string());
+    };
+    if ticket.status != "review" {
+        return Err("ticket_not_in_review".to_string());
+    }
+    if reviewer_agent.trim().is_empty() || !reviewer_agent.eq_ignore_ascii_case(&ticket.review_agent) {
+        return Err("reviewer_not_authorized".to_string());
+    }
+    let outcome = body
+        .get("outcome")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "review_outcome_required".to_string())?;
+    if !matches!(outcome.as_str(), "approved" | "changes_requested") {
+        return Err("review_outcome_invalid".to_string());
+    }
+    let review_notes = body
+        .get("review_notes")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let corrective_steps = body
+        .get("corrective_steps")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if outcome == "changes_requested" && corrective_steps.is_empty() {
+        return Err("corrective_steps_required".to_string());
+    }
+    ticket.review_outcome = Some(outcome.clone());
+    ticket.review_notes = review_notes.clone();
+    ticket.corrective_steps = corrective_steps.clone();
+    ticket.evidence.summary = review_notes.clone().or(ticket.evidence.summary.take());
+    let child_tickets = studio_list_tickets(project_root)
+        .into_iter()
+        .filter(|child| {
+            child.id != ticket.id
+                && (child.parent_ticket_id.as_deref() == Some(ticket.id.as_str())
+                    || ticket_dependency_ids(child).iter().any(|id| id == &ticket.id))
+        })
+        .collect::<Vec<_>>();
+    for child in child_tickets {
+        for file in child.evidence.files {
+            if !ticket.evidence.files.contains(&file) {
+                ticket.evidence.files.push(file);
+            }
+        }
+        for task_id in child.evidence.task_ids {
+            if !ticket.evidence.task_ids.contains(&task_id) {
+                ticket.evidence.task_ids.push(task_id);
+            }
+        }
+    }
+    ticket.status = if outcome == "approved" {
+        "done".to_string()
+    } else {
+        "in_progress".to_string()
+    };
+    ticket.updated_at = chrono::Utc::now().to_rfc3339();
+    studio_upsert_ticket(project_root, ticket.clone())?;
+    let event_type = if outcome == "approved" {
+        "ticket_review_approved"
+    } else {
+        "ticket_review_changes_requested"
+    };
+    let _ = studio_append_ticket_event(
+        project_root,
+        &ticket.id,
+        event_type,
+        reviewer_agent,
+        Some(serde_json::json!({
+            "review_notes": review_notes,
+            "corrective_steps": corrective_steps,
+        })),
+    );
     Ok(ticket)
 }
 
@@ -3039,6 +4268,388 @@ fn guess_mime_and_text(rel: &str, bytes: &[u8]) -> (&'static str, bool) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn recognizes_user_and_scheduled_initial_backlog_planning_runs() {
+        assert!(super::studio_is_initial_backlog_planning_message(
+            "[Code Studio — première demande : planifier le backlog initial]"
+        ));
+        assert!(super::studio_is_initial_backlog_planning_message(
+            "[Planification Kanban initiale Code Studio]"
+        ));
+        assert!(!super::studio_is_initial_backlog_planning_message(
+            "Crée une webapp de todo list avec une page responsive."
+        ));
+    }
+
+    #[test]
+    fn workspace_inventory_marks_empty_roots_and_hides_secret_files() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let empty = super::studio_workspace_inventory_message_prefix(dir.path());
+        assert!(empty.contains("Racine canonique : `workspace:/`"));
+        assert!(empty.contains("Aucun manifeste de stack détecté"));
+        assert!(empty.contains("ne demande pas de chemin absolu"));
+
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}\n").unwrap();
+        std::fs::write(dir.path().join(".env"), "TOKEN=private\n").unwrap();
+        let populated = super::studio_workspace_inventory_message_prefix(dir.path());
+        assert!(populated.contains("package.json (fichier)"));
+        assert!(populated.contains("src (dossier)"));
+        assert!(populated.contains("Manifestes détectés : package.json"));
+        assert!(!populated.contains(".env"));
+        assert!(!populated.contains("private"));
+    }
+
+    fn backlog_ticket(
+        id: &str,
+        status: &str,
+        dependencies: &[&str],
+        acceptance: &[(&str, &str)],
+    ) -> super::StudioTicket {
+        super::StudioTicket {
+            id: id.to_string(),
+            project_id: "project".to_string(),
+            title: id.to_string(),
+            description: String::new(),
+            status: status.to_string(),
+            requested_by: "agent".to_string(),
+            assigned_agent: "studio_fullstack".to_string(),
+            review_agent: "studio_reviewer".to_string(),
+            parent_ticket_id: None,
+            creation_key: None,
+            depends_on_ticket_ids: dependencies.iter().map(|id| (*id).to_string()).collect(),
+            depends_on_ticket_id: dependencies.first().map(|id| (*id).to_string()),
+            related_task_id: None,
+            acceptance_criteria: acceptance
+                .iter()
+                .map(|(id, text)| super::StudioTicketAcceptanceCriterion {
+                    id: Some((*id).to_string()),
+                    text: (*text).to_string(),
+                    kind: None,
+                    path: None,
+                    argv: None,
+                })
+                .collect(),
+            evidence: super::StudioTicketEvidence::default(),
+            review_outcome: None,
+            review_notes: None,
+            corrective_steps: Vec::new(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn initial_backlog_requires_three_actionable_tickets_and_a_dependency() {
+        let root = backlog_ticket(
+            "root",
+            "in_progress",
+            &[],
+            &[("initial-kanban-backlog", "Create the first project backlog")],
+        );
+        let foundation = backlog_ticket(
+            "foundation",
+            "todo",
+            &[],
+            &[("setup", "Project scaffold builds")],
+        );
+        let feature = backlog_ticket(
+            "feature",
+            "todo",
+            &["foundation"],
+            &[("feature", "Requested feature works")],
+        );
+        let validation = backlog_ticket(
+            "validation",
+            "todo",
+            &["feature"],
+            &[("validation", "Relevant checks pass")],
+        );
+        let complete = vec![
+            root.clone(),
+            foundation.clone(),
+            feature.clone(),
+            validation.clone(),
+        ];
+        assert!(super::studio_initial_backlog_is_ready(&root, &complete));
+
+        let generic_seed = vec![
+            root.clone(),
+            {
+                let mut value = backlog_ticket(
+                "seed-foundation",
+                "todo",
+                &[],
+                &[("initial-phase-0", "The project scaffold is ready")],
+                );
+                value.title = "Établir le socle du projet".to_string();
+                value.acceptance_criteria[0].text = "Examiner le dépôt et sa stack, réutiliser la structure existante et ne créer que les éléments de socle réellement absents.".to_string();
+                value
+            },
+            {
+                let mut value = backlog_ticket(
+                "seed-features",
+                "todo",
+                &["seed-foundation"],
+                &[("initial-phase-1", "The requested features work")],
+                );
+                value.title = "Implémenter les fonctionnalités demandées".to_string();
+                value.acceptance_criteria[0].text = "Implémenter les comportements et fonctionnalités décrits dans la demande initiale.".to_string();
+                value
+            },
+            {
+                let mut value = backlog_ticket(
+                "seed-validation",
+                "todo",
+                &["seed-features"],
+                &[("initial-phase-2", "The app passes validation")],
+                );
+                value.title = "Valider le projet et le parcours utilisateur".to_string();
+                value.acceptance_criteria[0].text = "Exécuter les contrôles adaptés au dépôt et parcourir l'application.".to_string();
+                value
+            },
+        ];
+        assert!(!super::studio_initial_backlog_is_ready(
+            &root,
+            &generic_seed
+        ));
+
+        let only_two = vec![root.clone(), foundation.clone(), feature.clone()];
+        assert!(!super::studio_initial_backlog_is_ready(&root, &only_two));
+
+        let no_dependencies = vec![
+            root.clone(),
+            foundation.clone(),
+            backlog_ticket(
+                "feature-2",
+                "todo",
+                &[],
+                &[("feature", "Second requested feature works")],
+            ),
+            validation.clone(),
+        ];
+        assert!(!super::studio_initial_backlog_is_ready(
+            &root,
+            &no_dependencies
+        ));
+    }
+
+    #[test]
+    fn open_initial_backlog_tracker_does_not_block_work_ticket() {
+        let dir = tempfile::tempdir().expect("temporary Code Studio project");
+        let root = backlog_ticket(
+            "root",
+            "in_progress",
+            &[],
+            &[("initial-kanban-backlog", "Track the overall request")],
+        );
+        let work = backlog_ticket(
+            "work",
+            "todo",
+            &["root"],
+            &[("implement", "Implement the requested change")],
+        );
+        super::studio_upsert_ticket(dir.path(), root).expect("save umbrella ticket");
+
+        assert!(super::studio_ticket_prerequisite_done(dir.path(), &work));
+    }
+
+    #[test]
+    fn legacy_user_request_ticket_does_not_block_work_ticket() {
+        let dir = tempfile::tempdir().expect("temporary Code Studio project");
+        let mut root = backlog_ticket(
+            "root",
+            "in_progress",
+            &[],
+            &[("request-scope", "Track the overall request")],
+        );
+        root.requested_by = "user_chat".to_string();
+        let mut work = backlog_ticket(
+            "work",
+            "todo",
+            &["root"],
+            &[("implement", "Implement the requested change")],
+        );
+        work.requested_by = "studio_project_manager".to_string();
+        super::studio_upsert_ticket(dir.path(), root).expect("save legacy request ticket");
+
+        assert!(super::studio_ticket_prerequisite_done(dir.path(), &work));
+    }
+
+    #[test]
+    fn initial_backlog_preflight_blocks_delegation_until_breakdown_exists() {
+        use super::{
+            save_studio_meta, studio_initial_backlog_preflight, studio_tool_create_ticket_json,
+            StudioMeta,
+        };
+
+        let dir = tempfile::tempdir().expect("temporary Code Studio project");
+        save_studio_meta(
+            dir.path(),
+            &StudioMeta {
+                id: "kanban-bootstrap".to_string(),
+                name: "Kanban bootstrap".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
+                project_summary: None,
+                ticket_enforcement_mode: Some("off".to_string()),
+            },
+        )
+        .expect("save project metadata");
+        let root = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title": "Initial project request",
+                "acceptance_criteria": [{
+                    "id": "initial-kanban-backlog",
+                    "text": "Create the initial task breakdown before implementation."
+                }]
+            }),
+        )
+        .expect("create initial request ticket");
+        let task_message = format!("[Ticket Kanban obligatoire]\n- ticket_id: {}", root.id);
+        assert!(studio_initial_backlog_preflight(dir.path(), "task-1", &task_message).is_err());
+
+        let foundation = super::studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title": "Project foundation",
+                "acceptance_criteria": [{"text":"The project builds from a clean install."}]
+            }),
+        )
+        .expect("create foundation ticket");
+        let feature = super::studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title": "Core requested features",
+                "depends_on_ticket_ids": [foundation.id],
+                "acceptance_criteria": [{"text":"The requested interaction works."}]
+            }),
+        )
+        .expect("create feature ticket");
+        super::studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title": "Integration and validation",
+                "depends_on_ticket_ids": [feature.id],
+                "acceptance_criteria": [{"text":"The integrated application passes its checks."}]
+            }),
+        )
+        .expect("create validation ticket");
+        assert!(studio_initial_backlog_preflight(dir.path(), "task-1", &task_message).is_ok());
+    }
+
+    #[test]
+    fn same_open_parent_ticket_title_is_deduplicated_across_creation_keys() {
+        use super::{save_studio_meta, studio_list_tickets, studio_tool_create_ticket_json, StudioMeta};
+
+        let dir = tempfile::tempdir().expect("temporary Code Studio project");
+        save_studio_meta(
+            dir.path(),
+            &StudioMeta {
+                id: "ticket-dedupe".to_string(),
+                name: "Ticket dedupe".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
+                project_summary: None,
+                ticket_enforcement_mode: Some("off".to_string()),
+            },
+        )
+        .expect("save project metadata");
+        let parent = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({"title":"Todo app request"}),
+        )
+        .expect("create request tracker");
+        let first = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title":"Implement todo filters",
+                "parent_ticket_id":parent.id,
+                "creation_key":"filters-attempt-1"
+            }),
+        )
+        .expect("create implementation ticket");
+        let retry = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title":"Implement todo filters",
+                "parent_ticket_id":parent.id,
+                "creation_key":"filters-attempt-2"
+            }),
+        )
+        .expect("reuse matching ticket");
+
+        assert_eq!(first.id, retry.id);
+        assert_eq!(studio_list_tickets(dir.path()).len(), 2);
+    }
+
+    #[test]
+    fn completed_ticket_creation_key_does_not_block_a_corrective_ticket() {
+        use super::{save_studio_meta, studio_tool_create_ticket_json, StudioMeta};
+
+        let dir = tempfile::tempdir().expect("temporary Code Studio project");
+        save_studio_meta(
+            dir.path(),
+            &StudioMeta {
+                id: "ticket-dedupe-done".to_string(),
+                name: "Ticket dedupe done".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
+                project_summary: None,
+                ticket_enforcement_mode: Some("off".to_string()),
+            },
+        )
+        .expect("save project metadata");
+        let parent = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({"title":"Todo app request"}),
+        )
+        .expect("create parent");
+        let first = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title":"Implement todo filters",
+                "parent_ticket_id":parent.id,
+                "creation_key":"filters"
+            }),
+        )
+        .expect("create first attempt");
+        let mut completed = first.clone();
+        completed.status = "done".to_string();
+        super::studio_upsert_ticket(dir.path(), completed).expect("complete first attempt");
+
+        let correction = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title":"Implement todo filters",
+                "parent_ticket_id":parent.id,
+                "creation_key":"filters"
+            }),
+        )
+        .expect("allow corrective attempt with the same stable key");
+        assert_ne!(correction.id, first.id);
+        assert_eq!(correction.status, "todo");
+    }
+
+    #[test]
     fn scoped_file_context_retains_constraints_without_copying_maintenance_examples() {
         let dir=tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("CODE_STUDIO_PLAN.md"),"# Title\nPREAMBLE_CONSTRAINT\n## Scope\nPRODUCT_SCOPE\n## Stack\nSTACK_CONSTRAINT\n## Fichiers hors scope\nKEEP.txt must remain unchanged\n## Demandes d'évolutions utilisateur par phase\nMAINTENANCE_EXAMPLE_BAIT\n## Recommandations\nSTYLE_CONSTRAINT\n## Todos\nUNRELATED_BACKLOG").unwrap();
@@ -3400,7 +5011,9 @@ Try `npm i --save-dev @types/jest`";
 
     #[test]
     fn evolution_heuristic_skips_bootstrap_and_greetings() {
-        use super::studio_user_message_suggests_evolution;
+        use super::{
+            studio_user_message_suggests_evolution, studio_user_message_suggests_project_creation,
+        };
         assert!(!studio_user_message_suggests_evolution(
             "[Bootstrap Kanban — exécution unique] x"
         ));
@@ -3412,5 +5025,471 @@ Try `npm i --save-dev @types/jest`";
         assert!(studio_user_message_suggests_evolution(
             "Please fix the TypeScript error in src/App.tsx when building."
         ));
+        assert!(studio_user_message_suggests_evolution(
+            "je veux créer un petit jeu type bomberman en solo contre la machine"
+        ));
+        assert!(studio_user_message_suggests_evolution(
+            "Create a lightweight web app for tracking project tasks."
+        ));
+        assert!(studio_user_message_suggests_evolution(
+            "Ajoute un filtre aux résultats de recherche."
+        ));
+        assert!(studio_user_message_suggests_evolution(
+            "Rends le chat plus lisible sur mobile."
+        ));
+        assert!(studio_user_message_suggests_evolution(
+            "Le bouton de sauvegarde ne répond pas quand je clique dessus."
+        ));
+        assert!(studio_user_message_suggests_evolution(
+            "Make the preview simpler and modernize its layout."
+        ));
+        assert!(studio_user_message_suggests_evolution(
+            "Le Kanban doit être rempli à la première demande et un agent devrait vérifier régulièrement les tickets ouverts pour les dispatcher."
+        ));
+        assert!(studio_user_message_suggests_evolution("Créer un jeu"));
+        assert!(studio_user_message_suggests_evolution("Fix bug"));
+        assert!(!studio_user_message_suggests_evolution(
+            "Can you explain what this API does?"
+        ));
+        assert!(studio_user_message_suggests_project_creation(
+            "je veux créer un petit jeu type bomberman"
+        ));
+        assert!(studio_user_message_suggests_project_creation(
+            "Je voudrais une application de suivi de budget."
+        ));
+        assert!(studio_user_message_suggests_project_creation(
+            "I need a small website for my portfolio."
+        ));
+        assert!(studio_user_message_suggests_project_creation(
+            "Crée le projet « Todo — observation autonome » selon ce résumé : Crée une webapp de todo list."
+        ));
+        assert!(!studio_user_message_suggests_project_creation(
+            "Please fix the bug in the existing project."
+        ));
+    }
+
+    #[test]
+    fn chat_ticket_titles_are_single_line_and_compact() {
+        assert_eq!(
+            super::studio_chat_ticket_title("  Améliorer le suivi Kanban\nDétails: dispatcher les tickets ouverts."),
+            "Améliorer le suivi Kanban"
+        );
+        let title = super::studio_chat_ticket_title(&format!("{}\nDétails complémentaires", "a".repeat(120)));
+        assert_eq!(title.chars().count(), 85);
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn ticket_review_tool_is_role_bound_and_records_structured_feedback() {
+        use super::{studio_list_ticket_events, studio_tool_apply_ticket_review_json};
+
+        let dir = tempfile::tempdir().expect("temporary project");
+        let mut ticket = backlog_ticket(
+            "review-ticket",
+            "review",
+            &[],
+            &[("acceptance", "The feature behaves as requested")],
+        );
+        ticket.review_agent = "studio_reviewer".to_string();
+        super::studio_upsert_ticket(dir.path(), ticket).expect("save review ticket");
+        let mut child = backlog_ticket(
+            "review-child",
+            "done",
+            &[],
+            &[("changed", "The feature behaves as requested")],
+        );
+        child.parent_ticket_id = Some("review-ticket".to_string());
+        child.evidence.files.push("src/feature.ts".to_string());
+        child.evidence.task_ids.push("worker-task".to_string());
+        super::studio_upsert_ticket(dir.path(), child).expect("save completed child evidence");
+
+        let changes_requested = serde_json::json!({
+            "ticket_id":"review-ticket",
+            "outcome":"changes_requested",
+            "review_notes":"One acceptance criterion is still missing.",
+            "corrective_steps":[]
+        });
+        assert_eq!(
+            studio_tool_apply_ticket_review_json(dir.path(), "studio_reviewer", &changes_requested)
+                .unwrap_err(),
+            "corrective_steps_required"
+        );
+        assert_eq!(
+            studio_tool_apply_ticket_review_json(dir.path(), "studio_fullstack", &serde_json::json!({
+                "ticket_id":"review-ticket","outcome":"approved"
+            })).unwrap_err(),
+            "reviewer_not_authorized"
+        );
+
+        let approved = studio_tool_apply_ticket_review_json(
+            dir.path(),
+            "studio_reviewer",
+            &serde_json::json!({
+                "ticket_id":"review-ticket",
+                "outcome":"approved",
+                "review_notes":"The requested behavior and build were verified."
+            }),
+        )
+        .expect("reviewer can approve the assigned review");
+        assert_eq!(approved.status, "done");
+        assert_eq!(approved.review_outcome.as_deref(), Some("approved"));
+        assert_eq!(approved.evidence.files, vec!["src/feature.ts"]);
+        assert_eq!(approved.evidence.task_ids, vec!["worker-task"]);
+        assert!(approved.evidence.summary.is_some());
+        assert!(studio_list_ticket_events(dir.path(), "review-ticket")
+            .iter()
+            .any(|event| event.event_type == "ticket_review_approved"));
+    }
+
+    #[test]
+    fn ticket_updates_record_file_and_verification_evidence_without_overwriting_task_ids() {
+        let dir = tempfile::tempdir().expect("temporary project");
+        let mut ticket = backlog_ticket(
+            "evidence-ticket",
+            "in_progress",
+            &[],
+            &[("build", "The project builds successfully")],
+        );
+        ticket.evidence.task_ids.push("daemon-linked-task".to_string());
+        super::studio_upsert_ticket(dir.path(), ticket).expect("save working ticket");
+
+        let updated = super::studio_tool_apply_ticket_patch_json(
+            dir.path(),
+            &serde_json::json!({
+                "ticket_id":"evidence-ticket",
+                "evidence":{
+                    "files":[" src/main.ts ","src/main.ts","tests/main.spec.ts"],
+                    "summary":"npm run build passed.",
+                    "task_ids":["untrusted-model-task"]
+                }
+            }),
+        )
+        .expect("apply the evidence patch");
+        assert_eq!(updated.evidence.files, vec!["src/main.ts", "tests/main.spec.ts"]);
+        assert_eq!(updated.evidence.summary.as_deref(), Some("npm run build passed."));
+        assert_eq!(updated.evidence.task_ids, vec!["daemon-linked-task"]);
+    }
+
+    #[test]
+    fn retrying_a_blocked_ticket_clears_the_stale_failure_summary() {
+        let dir = tempfile::tempdir().expect("temporary project");
+        let mut ticket = backlog_ticket("retry-ticket", "blocked", &[], &[]);
+        ticket.evidence.summary = Some("The previous agent run failed.".to_string());
+        super::studio_upsert_ticket(dir.path(), ticket).expect("save blocked ticket");
+
+        super::studio_attach_task_to_ticket(
+            dir.path(),
+            "retry-ticket",
+            "new-task-id",
+            "kanban_scheduler",
+        )
+        .expect("attach retry task");
+
+        let retried = super::studio_get_ticket(dir.path(), "retry-ticket").expect("reload ticket");
+        assert_eq!(retried.status, "in_progress");
+        assert_eq!(retried.evidence.summary, None);
+        assert_eq!(retried.related_task_id.as_deref(), Some("new-task-id"));
+    }
+
+    #[test]
+    fn creating_a_correction_child_clears_the_stale_parent_review_outcome() {
+        use super::{
+            save_studio_meta, studio_get_ticket, studio_list_ticket_events,
+            studio_tool_create_ticket_json, StudioMeta,
+        };
+
+        let dir = tempfile::tempdir().expect("temporary project");
+        save_studio_meta(
+            dir.path(),
+            &StudioMeta {
+                id: "correction-planning-test".to_string(),
+                name: "Correction planning test".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
+                project_summary: None,
+                ticket_enforcement_mode: None,
+            },
+        )
+        .expect("save project metadata");
+        let mut parent = backlog_ticket(
+            "request-root",
+            "in_progress",
+            &[],
+            &[("result", "The user request is complete")],
+        );
+        parent.requested_by = "user_chat".to_string();
+        parent.project_id = "correction-planning-test".to_string();
+        parent.review_outcome = Some("changes_requested".to_string());
+        parent.review_notes = Some("The requested keyboard control is missing.".to_string());
+        parent.corrective_steps = vec!["Implement and verify the missing control.".to_string()];
+        super::studio_upsert_ticket(dir.path(), parent).expect("save reviewed request");
+
+        studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title":"Implement the missing keyboard control",
+                "description":"Correction requested by the reviewer.",
+                "depends_on_ticket_ids":["request-root"],
+                "acceptance_criteria":[{"text":"The missing control works and passes the relevant check."}]
+            }),
+        )
+        .expect("create corrective child");
+
+        let refreshed = studio_get_ticket(dir.path(), "request-root").expect("reload parent");
+        assert_eq!(refreshed.review_outcome, None);
+        assert_eq!(refreshed.review_notes, None);
+        assert!(refreshed.corrective_steps.is_empty());
+        assert!(studio_list_ticket_events(dir.path(), "request-root")
+            .iter()
+            .any(|event| event.event_type == "ticket_follow_up_created"));
+    }
+
+    #[test]
+    fn scheduled_kanban_dispatch_preserves_the_latest_user_selected_model() {
+        use super::{
+            save_studio_meta, studio_append_ticket_event,
+            studio_create_evolution_ticket_from_chat, studio_project_model_preference, StudioMeta,
+        };
+
+        let dir = tempfile::tempdir().expect("temporary project");
+        save_studio_meta(
+            dir.path(),
+            &StudioMeta {
+                id: "kanban-model-test".to_string(),
+                name: "Kanban model test".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
+                project_summary: None,
+                ticket_enforcement_mode: None,
+            },
+        )
+        .expect("save project metadata");
+        let ticket_id = studio_create_evolution_ticket_from_chat(
+            dir.path(),
+            "Ajouter un parcours de validation au projet existant.",
+        )
+        .expect("create linked request ticket");
+        studio_append_ticket_event(
+            dir.path(),
+            &ticket_id,
+            "studio_model_selected",
+            "user_chat",
+            Some(serde_json::json!({"provider":"ollama","model":"qwen3.5:9b"})),
+        )
+        .expect("persist selected model on the ticket timeline");
+
+        let preference = studio_project_model_preference(dir.path())
+            .expect("scheduled dispatch should load the selected model");
+        assert_eq!(preference.provider, "ollama");
+        assert_eq!(preference.model, "qwen3.5:9b");
+    }
+
+    #[test]
+    fn chat_creation_request_creates_a_ticket_even_when_enforcement_is_off() {
+        use super::{
+            save_studio_meta, studio_create_evolution_ticket_from_chat, studio_get_ticket,
+            studio_list_tickets, studio_seed_initial_backlog, studio_user_message_suggests_evolution,
+            StudioMeta,
+        };
+
+        let dir = tempfile::tempdir().expect("temporary project");
+        let meta = StudioMeta {
+            id: "kanban-test".to_string(),
+            name: "Kanban test".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            evolutions: Vec::new(),
+            tech_stack: None,
+            verify_skip: false,
+            verify_argv: None,
+            verify_timeout_sec: None,
+            evolution_summary: None,
+            policy_notes: None,
+            project_summary: None,
+            ticket_enforcement_mode: Some("off".to_string()),
+        };
+        save_studio_meta(dir.path(), &meta).expect("save project metadata");
+
+        let message = "je veux créer un jeu Bomberman jouable";
+        assert!(studio_user_message_suggests_evolution(message));
+        let id = studio_create_evolution_ticket_from_chat(dir.path(), message)
+            .expect("create initial request ticket");
+        let ticket = studio_get_ticket(dir.path(), &id).expect("ticket is visible on board");
+
+        assert_eq!(ticket.status, "todo");
+        assert_eq!(ticket.requested_by, "user_chat");
+        assert_eq!(ticket.description, message);
+        assert_eq!(ticket.acceptance_criteria.len(), 3);
+        assert_eq!(
+            ticket.acceptance_criteria[2].id.as_deref(),
+            Some("initial-kanban-backlog")
+        );
+        let tickets = studio_list_tickets(dir.path());
+        assert_eq!(tickets.len(), 5, "global ticket plus four initial work phases");
+        assert_eq!(
+            tickets
+                .iter()
+                .filter(|ticket| ticket.requested_by == "system_initial_backlog")
+                .count(),
+            4
+        );
+        assert!(studio_seed_initial_backlog(dir.path(), &id)
+            .expect("backfill is idempotent")
+            .is_empty());
+        let mut children: Vec<_> = studio_list_tickets(dir.path())
+            .into_iter()
+            .filter(|ticket| ticket.requested_by == "system_initial_backlog")
+            .collect();
+        for child in children.iter_mut() {
+            child.status = "done".to_string();
+            child.review_outcome = Some("approved".to_string());
+            super::studio_upsert_ticket(dir.path(), child.clone()).expect("approve work ticket");
+        }
+        assert!(super::studio_complete_initial_backlog_if_ready(dir.path())
+            .expect("check initial backlog")
+            .is_empty());
+        let specific_criteria = [
+            "Le joueur se déplace dans une arène Bomberman et les murs bloquent son passage.",
+            "Les bombes déclenchent des explosions qui détruisent les caisses atteintes.",
+            "Les ennemis sont distincts et peuvent être éliminés par une explosion.",
+            "Le build et le parcours navigateur confirment que le jeu est jouable.",
+        ];
+        for (index, child) in children.iter_mut().enumerate() {
+            child.title = format!("Bomberman: phase de travail {index}");
+            child.acceptance_criteria[0].id = Some(format!("bomberman-phase-{index}"));
+            child.acceptance_criteria[0].text = specific_criteria[index].to_string();
+            super::studio_upsert_ticket(dir.path(), child.clone())
+                .expect("refine the initial work ticket");
+        }
+        let extra = super::studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title": "Add an enemy movement behavior",
+                "acceptance_criteria": [{"id":"enemy-movement", "text":"Enemies move inside the arena and avoid walls."}]
+            }),
+        )
+        .expect("create a task discovered during planning");
+        assert!(super::studio_complete_initial_backlog_if_ready(dir.path())
+            .expect("keep the initial request open while project work remains")
+            .is_empty());
+        let mut extra = extra;
+        extra.status = "done".to_string();
+        extra.review_outcome = Some("approved".to_string());
+        super::studio_upsert_ticket(dir.path(), extra).expect("approve discovered task");
+        assert_eq!(
+            super::studio_complete_initial_backlog_if_ready(dir.path())
+                .expect("complete initial request after every task is approved"),
+            vec![id.clone()]
+        );
+        assert_eq!(
+            studio_get_ticket(dir.path(), &id).unwrap().status,
+            "done"
+        );
+    }
+
+    #[test]
+    fn completed_initial_summary_reopens_when_its_seeded_backlog_is_still_generic() {
+        use super::{
+            studio_create_evolution_ticket_from_chat, studio_get_ticket,
+            studio_list_ticket_events, studio_upsert_ticket,
+        };
+
+        let dir = tempfile::tempdir().expect("temporary project");
+        super::save_studio_meta(
+            dir.path(),
+            &super::StudioMeta {
+                id: "reopen-generic-backlog".to_string(),
+                name: "Reopen generic backlog".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
+                project_summary: None,
+                ticket_enforcement_mode: Some("off".to_string()),
+            },
+        )
+        .expect("save project metadata");
+        let id = studio_create_evolution_ticket_from_chat(
+            dir.path(),
+            "Créer une application Todo avec filtres et sauvegarde.",
+        )
+        .expect("create project request and generic backlog");
+        let mut summary = studio_get_ticket(dir.path(), &id).expect("request summary");
+        summary.status = "done".to_string();
+        studio_upsert_ticket(dir.path(), summary).expect("simulate premature completion");
+
+        assert!(super::studio_complete_initial_backlog_if_ready(dir.path())
+            .expect("reconcile premature completion")
+            .is_empty());
+        assert_eq!(
+            studio_get_ticket(dir.path(), &id).expect("reopened summary").status,
+            "in_progress"
+        );
+        assert!(studio_list_ticket_events(dir.path(), &id)
+            .iter()
+            .any(|event| event.event_type == "initial_backlog_reopened"));
+    }
+
+    #[test]
+    fn project_creation_form_request_seeds_kanban_before_the_agent_turn() {
+        use super::{
+            save_studio_meta, studio_create_evolution_ticket_from_chat, studio_get_ticket,
+            studio_list_tickets, StudioMeta,
+        };
+
+        let dir = tempfile::tempdir().expect("temporary project");
+        let summary = "Crée une webapp Todo en français, avec ajout, complétion, suppression, filtres et persistance locale. L'interface doit rester responsive et accessible au clavier.";
+        save_studio_meta(
+            dir.path(),
+            &StudioMeta {
+                id: "todo-first-request".to_string(),
+                name: "Todo first request".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: Some("Vite + React + TypeScript strict; tests Vitest".to_string()),
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: Some(summary.to_string()),
+                policy_notes: None,
+                project_summary: Some(summary.to_string()),
+                ticket_enforcement_mode: None,
+            },
+        )
+        .expect("save project metadata");
+
+        let request = format!(
+            "Crée le projet « Todo — observation autonome » selon ce résumé :\n\n{summary}"
+        );
+        let id = studio_create_evolution_ticket_from_chat(dir.path(), &request)
+            .expect("create initial ticket and seed backlog");
+        let root = studio_get_ticket(dir.path(), &id).expect("initial request ticket");
+        assert!(root
+            .acceptance_criteria
+            .iter()
+            .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog")));
+        let tickets = studio_list_tickets(dir.path());
+        assert_eq!(tickets.len(), 5, "root request plus four seeded work tickets");
+        let (project, evolution, _policy, stack) =
+            super::studio_meta_prefixes_for_request(dir.path(), &request);
+        assert!(project.is_none(), "the summary is already in the submitted request");
+        assert!(evolution.is_none(), "the evolution summary repeats the project brief");
+        let stack = stack.expect("the separately saved stack is injected exactly once");
+        assert!(stack.contains("Vite + React + TypeScript strict; tests Vitest"));
     }
 }

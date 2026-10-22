@@ -141,21 +141,22 @@ pub(crate) fn validate_model(
     {
         return Err("Requested model is not configured or its provider is unavailable; no fallback was used".into());
     }
-    for category in router.routes_by_category().values() {
-        if let Some(entry) = category
-            .primary
-            .iter()
-            .chain(category.fallback.iter())
-            .find(|entry| entry.provider == model.provider && entry.model == model.model)
-        {
-            return Ok(entry.clone());
-        }
+    if let Some(entry) = configured_model_route(router.routes_by_category(), model) {
+        return Ok(entry);
     }
     Ok(RouteEntry {
         provider: model.provider.clone(),
         model: model.model.clone(),
         config: None,
     })
+}
+// The same model can have a tiny utility budget and a large coding budget.
+// Never select one by randomized HashMap iteration order.
+fn configured_model_route(routes: std::collections::HashMap<String, akasha_llm::config::TaskTypeConfig>, model: &ModelChoice) -> Option<RouteEntry> {
+    let mut routes = routes.into_iter().collect::<Vec<_>>();
+    routes.sort_by_key(|(name, _)| (name != "code_generation", name.clone()));
+    routes.into_iter().find_map(|(_, route)| route.primary.into_iter().chain(route.fallback)
+        .find(|entry| entry.provider == model.provider && entry.model == model.model))
 }
 fn connection(db: &Path) -> Result<Connection, String> {
     let connection = Connection::open(db).map_err(|error| error.to_string())?;
@@ -205,6 +206,53 @@ pub(crate) fn load(db: &Path, task: Uuid) -> Result<Execution, String> {
     }
     Ok(Execution::default())
 }
+
+/// Copy an explicit Studio execution contract to a delegated worker. Goals are
+/// clamped to the parent task's remaining budgets so delegation cannot reset
+/// the user's limits. The root tracker remains authoritative for final
+/// completion; the child receives the same mechanical criteria to guide repair.
+pub(crate) fn delegated_contract(db: &Path, root_task: Uuid) -> Result<Option<Execution>, String> {
+    let mut execution = load(db, root_task)?;
+    if let Some(goal) = execution.goal.as_mut() {
+        let state = state(db, root_task)?.ok_or("Studio goal state missing")?;
+        if state.state != "active" {
+            return Err(format!("Cannot delegate a goal in state {}", state.state));
+        }
+        let cycles_left = goal.max_cycles.saturating_sub(state.cycles);
+        let seconds_left = goal
+            .max_seconds
+            .saturating_mul(1000)
+            .saturating_sub(state.elapsed_ms)
+            / 1000;
+        let tokens_left = goal.max_tokens.saturating_sub(state.tokens_used);
+        if cycles_left == 0 || seconds_left == 0 || tokens_left == 0 {
+            return Err("Studio goal budget exhausted before delegation".into());
+        }
+        goal.max_cycles = cycles_left;
+        goal.max_seconds = seconds_left;
+        goal.max_tokens = tokens_left;
+    }
+    if execution.goal.is_some() || execution.model.is_some() || execution.action.is_some() {
+        Ok(Some(execution))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Goal delegates may run for the remaining goal window instead of being cut
+/// off by the generic five-minute sub-agent timeout. The small grace period
+/// lets the worker return its final status; the root goal still enforces its
+/// original hard deadline.
+pub(crate) fn delegated_completion_timeout_ms(
+    execution: Option<&Execution>,
+    default_ms: u64,
+) -> u64 {
+    execution
+        .and_then(|execution| execution.goal.as_ref())
+        .map(|goal| goal.max_seconds.saturating_add(10).saturating_mul(1000))
+        .unwrap_or(default_ms)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct GoalState {
     pub objective: String,
@@ -314,6 +362,11 @@ pub(crate) enum GoalBoundary {
     Pending(Vec<String>),
     Budget,
 }
+/// A goal cycle is a verification/refinement attempt, not one file read.
+/// Retain a finite tool ceiling alongside its explicit time/token/cycle budgets.
+pub(crate) fn goal_tool_round_budget(current: u32, goal: &Goal) -> u32 {
+    current.max(goal.max_cycles.saturating_mul(10))
+}
 pub(crate) struct GoalTracker {
     pub goal: Goal,
     pub state: GoalState,
@@ -329,6 +382,27 @@ impl GoalTracker {
             state,
             started: Instant::now(),
             prior_ms,
+        })
+    }
+    pub fn continuation_hint(&self) -> String {
+        format!("[Active goal — not yet mechanically verified] {}\nThe original requested functionality remains required. Continue with the next real operation needed to implement or verify it. Inspect recorded results and fix failures. Do not rerun the same failed check without a repair or a documented reason for changed results. Do not return a tutorial or a completion claim. Remaining verification attempts: {}.\n",self.goal.objective,self.goal.max_cycles.saturating_sub(self.state.cycles))
+    }
+    pub fn continuation_hint_for_workspace(&self, root: &Path) -> String {
+        let mut hint=self.continuation_hint();
+        let files:Vec<_>=self.goal.criteria.criteria.iter().filter(|criterion|matches!(criterion.kind,crate::api_studio::StudioCriterionKind::FileExists)).filter_map(|criterion|criterion.path.as_ref()).collect();
+        if !files.is_empty() {
+            hint.push_str("[Observed file prerequisites — presence only, not functional validation]\n");
+            for path in files.iter().take(64) {
+                hint.push_str(&format!("- {}: {}\n",if root.join(path).is_file(){"present"}else{"MISSING"},path));
+            }
+            hint.push_str("Implement missing application files next. Do not repeat a completed dependency installation or recreate existing configuration merely because it appeared in the original checklist. Existing files may still require repairs based on diagnostics.\n");
+        }
+        hint
+    }
+    pub fn ready_for_tool_boundary(&self, root: &Path) -> bool {
+        self.goal.criteria.criteria.iter().all(|criterion| {
+            !matches!(criterion.kind, crate::api_studio::StudioCriterionKind::FileExists)
+                || criterion.path.as_ref().is_some_and(|path| root.join(path).is_file())
         })
     }
     pub fn exhausted(&self) -> bool {
@@ -413,18 +487,162 @@ impl GoalTracker {
             .max_seconds
             .saturating_sub((self.prior_ms + self.started.elapsed().as_millis() as u64) / 1000)
             .max(1);
-        crate::api_studio::run_mechanical_acceptance_checks(
-            root,
-            &self.goal.criteria,
-            left.min(300),
-        )
-        .await
+        verify_in_dependency_order(root, &self.goal.criteria, left.min(300)).await
     }
+}
+
+/// Build must pass before engine tests and browser acceptance. Returning the
+/// first failing criterion keeps the next repair focused and avoids cascades
+/// such as "dist missing" hiding the compiler error that caused it.
+async fn verify_in_dependency_order(root: &Path, criteria: &crate::api_studio::StudioAcceptancePayload, seconds: u64) -> Vec<String> {
+    let started=Instant::now();
+    for criterion in &criteria.criteria {
+        let remaining=seconds.saturating_sub(started.elapsed().as_secs());
+        if remaining==0 {return vec!["Goal verification time budget exhausted".into()];}
+        let check=crate::api_studio::StudioAcceptancePayload{criteria:vec![criterion.clone()]};
+        let errors=crate::api_studio::run_goal_acceptance_checks(root,&check,remaining).await;
+        if !errors.is_empty() {return errors;}
+    }
+    Vec::new()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn goal_verification_reports_the_first_dependency_failure() {
+        let dir=tempfile::tempdir().unwrap();
+        let criteria:crate::api_studio::StudioAcceptancePayload=serde_json::from_value(json!({"criteria":[
+            {"id":"first","text":"first dependency","kind":"file_exists","path":"first.txt"},
+            {"id":"second","text":"next dependency","kind":"file_exists","path":"second.txt"}]})).unwrap();
+        let errors=verify_in_dependency_order(dir.path(),&criteria,10).await;
+        assert_eq!(errors.len(),1);assert!(errors[0].contains("[first]"));
+        std::fs::write(dir.path().join("first.txt"),"ok").unwrap();
+        let errors=verify_in_dependency_order(dir.path(),&criteria,10).await;
+        assert_eq!(errors.len(),1);assert!(errors[0].contains("[second]"));
+        std::fs::write(dir.path().join("second.txt"),"ok").unwrap();
+        assert!(verify_in_dependency_order(dir.path(),&criteria,10).await.is_empty());
+    }
+    #[test]
+    fn goal_prerequisites_do_not_spend_cycles_on_scaffolding() {
+        let goal:Goal=serde_json::from_value(json!({"objective":"create app","max_cycles":4,"max_seconds":60,"criteria":{"criteria":[{"id":"app","text":"application","kind":"file_exists","path":"App.tsx"}]}})).unwrap();
+        assert_eq!(goal_tool_round_budget(10,&goal),40);
+        let tracker=GoalTracker{goal,state:GoalState{objective:"create app".into(),state:"active".into(),cycles:0,max_cycles:4,elapsed_ms:0,max_seconds:60,tokens_used:0,max_tokens:50000,detail:String::new()},started:Instant::now(),prior_ms:0};
+        let dir=tempfile::tempdir().unwrap();
+        assert!(!tracker.ready_for_tool_boundary(dir.path()));
+        assert!(tracker.continuation_hint_for_workspace(dir.path()).contains("MISSING: App.tsx"));
+        std::fs::write(dir.path().join("App.tsx"),"app").unwrap();
+        assert!(tracker.continuation_hint_for_workspace(dir.path()).contains("present: App.tsx"));
+        assert!(!tracker.continuation_hint_for_workspace(dir.path()).contains("MISSING: App.tsx"));
+        assert!(tracker.ready_for_tool_boundary(dir.path()));
+        assert_eq!(tracker.state.cycles,0);
+        assert!(tracker.continuation_hint().contains("not yet mechanically verified"));
+        assert!(tracker.continuation_hint().contains("Remaining verification attempts: 4"));
+    }
+    #[test]
+    fn delegated_goal_inherits_criteria_and_only_remaining_budgets() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("tasks.db");
+        let root = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let store = TaskStore::open(&db).unwrap();
+        store
+            .insert(&akasha_store::Task {
+                id: root,
+                parent_task_id: None,
+                status: TaskStatus::Running,
+                assigned_agent: "studio_project_manager".into(),
+                created_at: now,
+                updated_at: now,
+                initial_message: None,
+                studio_project_id: Some("project".into()),
+            })
+            .unwrap();
+        let goal: Goal = serde_json::from_value(json!({
+            "objective":"finish the game",
+            "max_cycles":8,
+            "max_seconds":300,
+            "max_tokens":20000,
+            "criteria":{"criteria":[{"id":"build","text":"build passes","kind":"command_ok","argv":["npm","run","build"]}]}
+        }))
+        .unwrap();
+        let original = Execution {
+            model: Some(ModelChoice {
+                provider: "ollama".into(),
+                model: "qwen3.5:9b".into(),
+            }),
+            action: Some("goal".into()),
+            goal: Some(goal.clone()),
+        };
+        persist(&db, root, &original).unwrap();
+
+        let mut tracker = GoalTracker::new(&db, root, goal).unwrap();
+        tracker.state.cycles = 3;
+        tracker.state.tokens_used = 7500;
+        tracker.save(&db, root, "active", "one failed check").unwrap();
+
+        let delegated = delegated_contract(&db, root).unwrap().unwrap();
+        assert_eq!(delegated.model.unwrap().model, "qwen3.5:9b");
+        assert_eq!(delegated.action.as_deref(), Some("goal"));
+        let inherited = delegated.goal.unwrap();
+        assert_eq!(inherited.objective, "finish the game");
+        assert_eq!(inherited.criteria.criteria.len(), 1);
+        assert_eq!(inherited.max_cycles, 5);
+        assert!(inherited.max_seconds > 0 && inherited.max_seconds <= 300);
+        assert_eq!(inherited.max_tokens, 12500);
+    }
+
+    #[test]
+    fn goal_delegate_wait_uses_remaining_window_with_small_grace() {
+        let execution: Execution = serde_json::from_value(json!({
+            "action":"goal",
+            "goal":{"objective":"finish","max_cycles":1,"max_seconds":123,"criteria":{"criteria":[{"id":"file","text":"file exists","kind":"file_exists","path":"game.ts"}]}}
+        }))
+        .unwrap();
+        assert_eq!(delegated_completion_timeout_ms(Some(&execution), 300_000), 133_000);
+        assert_eq!(delegated_completion_timeout_ms(None, 300_000), 300_000);
+    }
+
+    #[test]
+    fn exhausted_goal_cannot_spawn_a_delegate_with_reset_budgets() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("tasks.db");
+        let root = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let store = TaskStore::open(&db).unwrap();
+        store
+            .insert(&akasha_store::Task {
+                id: root,
+                parent_task_id: None,
+                status: TaskStatus::Running,
+                assigned_agent: "studio_project_manager".into(),
+                created_at: now,
+                updated_at: now,
+                initial_message: None,
+                studio_project_id: Some("project".into()),
+            })
+            .unwrap();
+        let goal: Goal = serde_json::from_value(json!({
+            "objective":"finish",
+            "max_cycles":1,
+            "max_seconds":120,
+            "criteria":{"criteria":[{"id":"file","text":"file exists","kind":"file_exists","path":"game.ts"}]}
+        }))
+        .unwrap();
+        persist(&db, root, &Execution { goal: Some(goal.clone()), ..Default::default() }).unwrap();
+        let mut tracker = GoalTracker::new(&db, root, goal).unwrap();
+        tracker.state.cycles = 1;
+        tracker.save(&db, root, "active", "budget exhausted").unwrap();
+        assert!(delegated_contract(&db, root).is_err());
+    }
+
+    #[test]
+    fn selected_model_prefers_coding_budget_over_utility_budget() {
+        let route = |tokens| serde_json::from_value(json!({"primary":{"provider":"ollama","model":"same-model","config":{"max_tokens":tokens}}})).unwrap();
+        let routes = std::collections::HashMap::from([("utility".into(),route(1536)),("conversation".into(),route(4096)),("code_generation".into(),route(8192))]);
+        let model=ModelChoice{provider:"ollama".into(),model:"same-model".into()};
+        for _ in 0..32 { assert_eq!(configured_model_route(routes.clone(),&model).unwrap().config.unwrap()["max_tokens"], json!(8192)); }
+    }
     #[test]
     fn rejects_unbounded_goals_and_manual_completion() {
         let router = LLMRouter::new(akasha_llm::config::RoutingConfig::default_config());
@@ -521,5 +739,40 @@ mod tests {
         resumed.prior_ms = 0;
         resumed.state.cycles = resumed.goal.max_cycles;
         assert!(resumed.exhausted());
+    }
+}
+
+/// Failed operations already contain their diagnostics; rerunning every failed
+/// command at a goal boundary creates a reproduce/reproduce loop without edits.
+pub(crate) fn goal_verification_after_tool(tool: &str, success: bool) -> bool {
+    success && (crate::studio_tool_contract::is_file_mutation(tool)
+        || matches!(tool,"run_command"|"write_code"|"rename_path"|"move_tree"))
+}
+#[cfg(test)]
+mod tool_boundary_success_tests {
+    #[test]
+    fn failed_commands_and_reads_do_not_trigger_duplicate_verification() {
+        assert!(!super::goal_verification_after_tool("run_command",false));
+        assert!(!super::goal_verification_after_tool("write_file",false));
+        assert!(!super::goal_verification_after_tool("read_file",true));
+        assert!(super::goal_verification_after_tool("run_command",true));
+        assert!(super::goal_verification_after_tool("search_replace",true));
+    }
+}
+
+/// The startup watchdog must hand off to the provider's finite deadline for
+/// buffered native calls. This marks worker activity, never task completion.
+pub(crate) fn mark_bounded_native_wait(activity: &std::sync::atomic::AtomicBool, timeout_secs:u64) {
+    if timeout_secs>0 {activity.store(true,std::sync::atomic::Ordering::Relaxed);}
+}
+#[cfg(test)]
+mod native_wait_watchdog_tests {
+    #[test]
+    fn finite_native_wait_disarms_startup_stall_without_claiming_completion() {
+        let activity=std::sync::atomic::AtomicBool::new(false);
+        super::mark_bounded_native_wait(&activity,0);
+        assert!(!activity.load(std::sync::atomic::Ordering::Relaxed));
+        super::mark_bounded_native_wait(&activity,600);
+        assert!(activity.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

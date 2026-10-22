@@ -4,6 +4,7 @@ pub mod classifier;
 pub mod config;
 mod conversation;
 mod lfm2;
+mod qwen35;
 pub use conversation::{ConversationMessage, MessageRole};
 pub mod discovery;
 pub mod fallback;
@@ -26,3 +27,5 @@ pub use provider::{
 };
 pub use retry::{RetryClass, RetryPolicy};
 pub use router::LLMRouter;
+
+mod context_window;
