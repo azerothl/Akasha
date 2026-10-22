@@ -271,6 +271,21 @@ pub(crate) fn select_native_names(names: Vec<String>, expanded: bool) -> Vec<Str
     if core.is_empty() {names} else {core}
 }
 
+/// Initial backlog planning is a bounded Kanban-only turn. Advertise only the
+/// three ticket operations it can execute; source, shell, delegation, and
+/// unrelated project tools only inflate the first model request.
+pub(crate) fn select_initial_kanban_names(names: Vec<String>) -> Vec<String> {
+    names
+        .into_iter()
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "studio_list_tickets" | "studio_create_ticket" | "studio_update_ticket"
+            )
+        })
+        .collect()
+}
+
 /// Native schemas already carry argument descriptions. Repeating the legacy
 /// executable examples teaches models to print tutorials instead of calls.
 pub(crate) fn native_prompt(policy: &ToolsPolicy, agent: &str) -> String {
@@ -325,6 +340,30 @@ mod native_prompt_tests {
         .map(String::from)
         .to_vec();
         assert_eq!(super::select_native_names(names.clone(), false), names);
+    }
+
+    #[test]
+    fn initial_kanban_planning_exposes_only_ticket_tools() {
+        let names = [
+            "read_file",
+            "list_tools",
+            "delegate_to_agent",
+            "studio_list_tickets",
+            "studio_create_ticket",
+            "studio_update_ticket",
+            "run_command",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            super::select_initial_kanban_names(names),
+            [
+                "studio_list_tickets",
+                "studio_create_ticket",
+                "studio_update_ticket"
+            ]
+            .map(String::from)
+        );
     }
     #[test]
     fn native_transport_has_no_legacy_execution_examples() {

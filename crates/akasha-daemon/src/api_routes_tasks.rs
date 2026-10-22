@@ -920,12 +920,15 @@ pub(crate) fn code_studio_suggested_actions(
                     || lower.contains("maximum context length")
                     || (lower.contains("context") && lower.contains("too many tokens"))
             };
+            let local_context_preflight = hint
+                .to_ascii_lowercase()
+                .contains("context_window_preflight_rejected");
             let truncated = if hint.chars().count() > 500 {
                 hint.chars().take(500).collect::<String>() + "…"
             } else {
                 hint
             };
-            if context_window_failure {
+            if context_window_failure && !local_context_preflight {
                 v.push(serde_json::json!({
                     "id": "retry_compacted_context",
                     "label": "Reprendre avec un contexte allégé",
@@ -935,11 +938,11 @@ pub(crate) fn code_studio_suggested_actions(
             }
             v.push(serde_json::json!({
                 "id": "analyze_failure",
-                "label": if context_window_failure { "Comprendre l’erreur de contexte" } else { "Demander une analyse de l’échec" },
+                "label": if local_context_preflight { "Solutions au dépassement de contexte" } else if context_window_failure { "Comprendre l’erreur de contexte" } else { "Demander une analyse de l’échec" },
                 "kind": "message",
                 "message": format!(
                     "{}\nContexte:\n{}\n\nPropose un plan de correction ciblé sans répéter l’implémentation. Si la cause est un contexte trop volumineux, identifie les résumés ou historiques redondants à compacter tout en conservant la demande, les règles et les résultats récents nécessaires.",
-                    if context_window_failure { "Le modèle a refusé la requête car le contexte dépasse sa fenêtre. Une reprise compacte est disponible." } else { "La dernière tâche a échoué ou été annulée." },
+                    if local_context_preflight { "Le précontrôle local a arrêté la requête avant de contacter le fournisseur. Aucun appel au modèle ni outil n'a été exécuté. Choisissez un modèle avec une fenêtre plus grande ou augmentez le contexte configuré (par exemple Ollama model_options.<modèle>.num_ctx / AKASHA_OLLAMA_NUM_CTX) si la mémoire disponible le permet." } else if context_window_failure { "Le fournisseur du modèle a refusé la requête car le contexte dépasse sa fenêtre. Choisissez un modèle à fenêtre plus grande, augmentez le contexte configuré si les ressources le permettent, ou réduisez le contexte facultatif." } else { "La dernière tâche a échoué ou été annulée." },
                     truncated
                 )
             }));
@@ -3053,6 +3056,21 @@ mod tests {
             None,
         );
         assert!(generic.iter().all(|action| action["ui_action"] != "retry_compacted_context"));
+    }
+
+    #[test]
+    fn local_context_preflight_offers_a_workaround_instead_of_a_ineffective_retry() {
+        let actions = code_studio_suggested_actions(
+            &akasha_store::TaskStatus::Failed,
+            Some("context_window_exceeded: context_window_preflight_rejected: no request sent"),
+            None,
+            None,
+        );
+        assert!(actions.iter().all(|action| action["ui_action"] != "retry_compacted_context"));
+        let solution = actions[0]["message"].as_str().unwrap_or_default();
+        assert!(solution.contains("avant de contacter le fournisseur"));
+        assert!(solution.contains("AKASHA_OLLAMA_NUM_CTX"));
+        assert!(solution.contains("Aucun appel au modèle ni outil"));
     }
 
     #[test]

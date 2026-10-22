@@ -120,7 +120,12 @@ impl CompletionRequest {
             tracing::info!(before_bytes=bytes(self),after_bytes=bytes(&result),max_tokens=result.max_tokens,"Reduced response reservation to retain protected context");
             return Ok(result);
         }
-        Err(ProviderError::Api("context_window_exceeded: protected instructions and recent execution cannot fit configured model context; no instructions were silently discarded".into()))
+        let estimated_input_tokens = bytes(&result).div_ceil(3);
+        let estimated_input_tokens_u32 = u32::try_from(estimated_input_tokens).unwrap_or(u32::MAX);
+        let remaining = ctx.saturating_sub(margin).saturating_sub(estimated_input_tokens_u32);
+        Err(ProviderError::Api(format!(
+            "context_window_exceeded: context_window_preflight_rejected: local context guard stopped this request before contacting the model; estimated input is about {estimated_input_tokens} tokens for a configured {ctx}-token window, leaving {remaining} tokens after the safety margin, below the 512-token minimum response budget. The estimate includes protected system/user instructions, tool schemas, and recent execution. Nothing was sent and no instructions were discarded. Workaround: choose a model with a larger context window, raise this provider's effective context setting (for Ollama, model_options.<model>.num_ctx or AKASHA_OLLAMA_NUM_CTX) if available memory permits, or reduce optional prompt/tool context."
+        )))
     }
 }
 
@@ -158,7 +163,11 @@ mod tests {
     #[test]
     fn impossible_human_context_fails_explicitly() {
         let mut request=fixture();request.conversation=Some(vec![ConversationMessage::user("human".repeat(10000))]);
-        assert!(request.bounded_context().unwrap_err().to_string().contains("context_window_exceeded"));
+        let error=request.bounded_context().unwrap_err().to_string();
+        assert!(error.contains("context_window_exceeded"));
+        assert!(error.contains("context_window_preflight_rejected"));
+        assert!(error.contains("before contacting the model"));
+        assert!(error.contains("AKASHA_OLLAMA_NUM_CTX"));
     }
     #[test]
     fn large_recent_batch_reduces_output_without_dropping_files() {

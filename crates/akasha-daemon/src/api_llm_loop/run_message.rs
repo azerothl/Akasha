@@ -436,7 +436,21 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
-    if code_studio_disk_task && assigned_agent.eq_ignore_ascii_case("studio_project_manager") {
+    let studio_initial_kanban_planning = code_studio_disk_task
+        && assigned_agent.eq_ignore_ascii_case("studio_project_manager")
+        && message.contains("[Planification Kanban initiale Code Studio]");
+    if studio_initial_kanban_planning {
+        // This first turn only refines the seeded backlog. Keep its system
+        // instructions short and avoid repeating the full project-manager loop.
+        studio_disk_system_append.push_str(
+            "\n\n[Planification Kanban initiale — portée limitée]\n\
+             Lis les tickets existants, adapte les gabarits et crée seulement les tickets manquants.\
+             Couvre socle, fonctionnalités, intégration et validation avec des critères observables.\
+             Utilise parent_ticket_id pour le suivi, depends_on_ticket_ids uniquement pour les vrais prérequis,\
+             et une creation_key stable. Relis le Kanban après chaque mise à jour; ne modifie aucun fichier source\
+             et ne délègue pas avant la fin de ce backlog.\n",
+        );
+    } else if code_studio_disk_task && assigned_agent.eq_ignore_ascii_case("studio_project_manager") {
         studio_disk_system_append.push_str(
             "\n\n[Kanban workflow — required]\n\
             Before implementation delegation, read the whole Kanban. When the linked ticket has the initial-kanban-backlog criterion, refine the seeded work tickets before creating missing ones. Ensure at least three focused work tickets with non-empty, verifiable acceptance criteria cover the foundation, requested features, integration, and validation, with at least one real dependency between work tickets. Each work ticket uses parent_ticket_id for the global tracker and a stable creation_key; parent-child tracking does not block dispatch. Use depends_on_ticket_ids only for real execution prerequisites, never for the global tracker. Before creating work, reread the Kanban and reuse the existing canonical ticket ID; repeated requests must not create duplicates. Do not delegate implementation until this backlog exists. Every user evolution has an automatically linked global ticket; do not duplicate it. Before editing source, create or reuse at least one actionable child ticket under that tracker: exactly one for a small change, multiple for independent or sequential work. Give each child observable acceptance criteria, an owner, and a reviewer. A queued follow-up has its own linked tracker and follows the same rule. After every worker result and on every scheduled Kanban pass, compare open tickets with task states, update blockers and dispatch one ready ticket per pass in dependency order. If verification finds a confirmed bug outside the current ticket, create a distinct bug ticket with expected result, observed result, and a reproducible check; do not duplicate a bug already covered by the current ticket. Never mark a ticket done without observed validation evidence."
@@ -809,7 +823,9 @@ pub(crate) async fn run_message_via_llm(
         } else {
             None
         };
-        let base = if studio_tool_list.is_some() {
+        let base = if studio_initial_kanban_planning {
+            "Kanban uniquement : studio_list_tickets, studio_create_ticket, studio_update_ticket".to_string()
+        } else if studio_tool_list.is_some() {
             tools_executor_snapshot.as_ref().map(|executor| crate::studio_capabilities::prompt(&executor.policy, &assigned_agent)).unwrap_or_default()
         } else {
             available_tools_instruction(allowed_tools.as_deref())
@@ -823,7 +839,9 @@ pub(crate) async fn run_message_via_llm(
         if code_studio_disk_task {
             let native_studio_tools =
                 std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref() != Some("0");
-            let skills_part_studio = match &skill_registry {
+            let skills_part_studio = if studio_initial_kanban_planning {
+                String::new()
+            } else { match &skill_registry {
                 Some(reg) => {
                     let list = reg.for_agent(&assigned_agent).await;
                     if list.is_empty() {
@@ -837,7 +855,7 @@ pub(crate) async fn run_message_via_llm(
                     }
                 }
                 None => String::new(),
-            };
+            }};
             code_studio_system_tools_block = format!(
                 "[Code Studio — outils]\n\
                  Une ligne par invocation : `TOOL: nom_outil arg1 …`.\n\
@@ -856,16 +874,26 @@ pub(crate) async fn run_message_via_llm(
                 base, skills_part_studio, run_command_os_rule
             );
             if native_studio_tools {
-                code_studio_system_tools_block = tools_executor_snapshot.as_ref()
-                    .map(|executor| crate::studio_capabilities::native_prompt(&executor.policy,&assigned_agent))
-                    .unwrap_or_default();
+                code_studio_system_tools_block = if studio_initial_kanban_planning {
+                    "[Code Studio — planification Kanban]\nUtilise les fonctions natives annoncées pour lire, adapter ou créer les tickets. N'utilise aucun outil de fichier, shell ou délégation pendant cette phase. Le schéma de chaque fonction décrit ses arguments. Relis le Kanban après chaque modification et conserve les IDs retournés.\n".to_string()
+                } else {
+                    tools_executor_snapshot.as_ref()
+                        .map(|executor| crate::studio_capabilities::native_prompt(&executor.policy,&assigned_agent))
+                        .unwrap_or_default()
+                };
                 code_studio_system_tools_block.push_str(&skills_part_studio);
             }
             if native_studio_tools {
                 // The native system block and function schemas already contain the
                 // available names, argument contracts, and file safety rules. Repeating
                 // the legacy catalogue here wastes context on the first Code Studio turn.
-                "\n\nFollow the Code Studio native tool contract and the advertised function schemas. Use only tools needed for the current task, wait for each result, and never replay an operation with an unknown result.\n".to_string()
+                if studio_initial_kanban_planning {
+                    "\n\nUse only the advertised Kanban ticket functions. Wait for every result, then reread the ticket list before continuing. Do not delegate or edit source files in this planning turn.\n".to_string()
+                } else {
+                    "\n\nFollow the Code Studio native tool contract and the advertised function schemas. Use only tools needed for the current task, wait for each result, and never replay an operation with an unknown result.\n".to_string()
+                }
+            } else if studio_initial_kanban_planning {
+                "\n\nUse only TOOL: studio_list_tickets, TOOL: studio_create_ticket, and TOOL: studio_update_ticket. Read the existing list before changes and after each change. Do not use source, shell, or delegation tools in this planning pass.\n".to_string()
             } else { format!(
                 "\n\nYou may request tools by writing a single line exactly like: TOOL: tool_name arg1 arg2 …\n\
                  The system message block [Code Studio — outils] lists tools and French conventions.\n\
@@ -1020,6 +1048,8 @@ pub(crate) async fn run_message_via_llm(
     }
     let role_prompt=if focused_file_task {
         Some("You are the Code Studio project manager in direct file execution mode. Execute the user's explicitly named file operations yourself, using the real tools and current permissions. Follow repository instructions and preserved project constraints. Include every explicitly requested read in its requested order: a failed read or a read before creation does not count as a post-write verification. Create a new file with expected_version=missing, then perform the requested read successfully before proceeding to its next step. Preserve exact file bytes: no headings, dates, project templates or explanations unless requested. Do not add unrelated plans, tickets, designs or delegation outside the user's request. Finish only after all requested operations actually ran; do not repeat confirmed writes.")
+    } else if studio_initial_kanban_planning {
+        Some("You are doing only the initial Kanban planning pass for a Code Studio project. Read the existing tickets, refine generic starters, and create only missing work tickets. Cover foundation, requested features, integration, and verification with observable acceptance criteria. Use parent_ticket_id for grouping, stable creation_key values, and depends_on_ticket_ids only for genuine execution prerequisites. Reuse returned IDs, avoid duplicates, and reread the list after changes. Do not edit source files or delegate in this planning pass; leave the global request ticket open. Summarize the resulting backlog briefly.")
     } else {agent_role_system_prompt(role_agent_for_system_prompt)};
     if let Some(role_prompt) = role_prompt {
         system_prompt.push_str("[Role]\n");
@@ -2038,8 +2068,12 @@ pub(crate) async fn run_message_via_llm(
             let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
                 tools_executor_snapshot.as_ref().and_then(|exec| {
                     let mut names:Vec<String>=crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name).collect();
-                    names=crate::studio_capabilities::select_native_names(names,
-                        run_outcome.checks.iter().any(|check|check["kind"]=="native_catalogue_discovery"));
+                    names=if studio_initial_kanban_planning {
+                        crate::studio_capabilities::select_initial_kanban_names(names)
+                    } else {
+                        crate::studio_capabilities::select_native_names(names,
+                            run_outcome.checks.iter().any(|check|check["kind"]=="native_catalogue_discovery"))
+                    };
                     if repair_focus_this_turn && !literal_only {
                         names=crate::studio_capabilities::select_repair_names(names);
                         insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"stalled_goal_repair","tools":names}));
@@ -2054,7 +2088,7 @@ pub(crate) async fn run_message_via_llm(
             let mut turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             // Workflow tools use the text protocol. Include their effective
             // announced names for ordinary turns, without widening literal-only turns.
-            if !literal_only {
+            if !literal_only && !studio_initial_kanban_planning {
                 if let (Some(names),Some(exec))=(turn_tool_names.as_mut(),tools_executor_snapshot.as_ref()) {
                     names.extend(crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && !crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name));
                 }
