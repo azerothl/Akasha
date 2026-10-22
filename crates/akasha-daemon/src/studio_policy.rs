@@ -1,4 +1,4 @@
-//! Daemon defaults for managed Studio workspaces. Explicit policy restrictions win.
+//! Daemon defaults for managed Studio workspaces.
 use akasha_tools::ToolsPolicy;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -29,6 +29,20 @@ pub(crate) fn for_workspace(policy: &ToolsPolicy, root: &Path) -> ToolsPolicy {
             "run_command_default_cwd_workspace" => scoped.run_command_default_cwd_workspace = true,
             _ => {},
         }
+    }
+    // Selecting a managed Code Studio project grants its agent access to that
+    // project root. Keep configured paths and restrictions, while adding this
+    // one workspace to the scoped executor. Global conversations stay scoped
+    // by the original policy.
+    let workspace_root = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf());
+    let workspace_path = workspace_root.to_string_lossy().into_owned();
+    if !scoped.can_read(&workspace_root) {
+        scoped.allowed_read_paths.push(workspace_path.clone());
+    }
+    if !scoped.can_write(&workspace_root) {
+        scoped.allowed_write_paths.push(workspace_path);
     }
     scoped
 }
@@ -108,12 +122,26 @@ mod tests {
     }
 
     #[test]
-    fn explicit_denials_blocked_commands_and_profiles_are_preserved() {
+    fn managed_workspace_access_is_added_without_relaxing_other_policy() {
         let dir = tempfile::tempdir().unwrap();
-        let global = decode(json!({"allowed_read_paths":[],"allowed_write_paths":[],"allowed_commands":[],"command_timeout_secs":0,"run_command_default_cwd_workspace":false}), dir.path()).unwrap();
-        let policy = for_workspace(&global, &dir.path().join("studio-projects/id"));
-        assert!(!policy.can_read(&dir.path().join("studio-projects/id/package.json")));
-        assert!(!policy.can_write(&dir.path().join("studio-projects/id/package.json")));
+        let shared = dir.path().join("shared");
+        let root = dir.path().join("studio-projects/id");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let global = decode(json!({
+            "allowed_read_paths":[shared],
+            "allowed_write_paths":[shared],
+            "allowed_commands":[],
+            "command_timeout_secs":0,
+            "run_command_default_cwd_workspace":false
+        }), dir.path()).unwrap();
+        let policy = for_workspace(&global, &root);
+        assert!(policy.can_read(&root.join("package.json")));
+        assert!(policy.can_write(&root.join("package.json")));
+        assert!(policy.can_read(&shared.join("notes.md")));
+        assert!(policy.can_write(&shared.join("notes.md")));
+        assert!(!policy.can_read(&dir.path().join("other/file")));
+        assert!(!policy.can_write(&dir.path().join("other/file")));
         assert!(!policy.can_run_command("npm"));
         assert_eq!(policy.command_timeout_secs, 0);
         assert!(!policy.run_command_default_cwd_workspace);
@@ -139,7 +167,7 @@ mod tests {
         assert!(for_workspace(&load(&path, dir.path()).unwrap(),&root).can_run_command("npm"));
         let mut saved = serde_json::to_value(default.config_value().unwrap()).unwrap();
         saved["allowed_write_paths"] = json!([]);
-        assert!(!for_workspace(&decode(saved, dir.path()).unwrap(),&root).can_write(&root.join("game.ts")));
+        assert!(for_workspace(&decode(saved, dir.path()).unwrap(),&root).can_write(&root.join("game.ts")));
         std::fs::write(&path, "allowed_read_paths: [").unwrap();
         assert!(load(&path, dir.path()).is_err());
         std::fs::write(&path, "- invalid-list\n").unwrap();

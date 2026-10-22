@@ -777,6 +777,103 @@ pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
     tech_stack_prefix_from_meta(&meta)
 }
 
+/// Compact, read-only inventory of the registered Code Studio root injected
+/// before the first agent turn. This distinguishes a new empty workspace from
+/// an inaccessible repository without asking the model to guess paths.
+pub fn studio_workspace_inventory_message_prefix(project_root: &Path) -> String {
+    const MAX_ENTRIES: usize = 80;
+    const MAX_CHARS: usize = 5_000;
+    const MANIFESTS: [&str; 8] = [
+        "package.json",
+        "pyproject.toml",
+        "Cargo.toml",
+        "go.mod",
+        "requirements.txt",
+        "pom.xml",
+        "build.gradle",
+        "vite.config.ts",
+    ];
+
+    let is_sensitive_name = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        lower == ".env"
+            || lower.starts_with(".env.")
+            || lower.ends_with(".pem")
+            || lower.ends_with(".key")
+            || lower.contains("secret")
+            || lower.contains("credential")
+    };
+    let (mut entries, inventory_available) = match std::fs::read_dir(project_root) {
+        Ok(rows) => (
+            rows
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if is_sensitive_name(&name) {
+                        return None;
+                    }
+                    let kind = entry
+                        .file_type()
+                        .map(|kind| {
+                            if kind.is_dir() {
+                                "dossier"
+                            } else if kind.is_file() {
+                                "fichier"
+                            } else {
+                                "lien/entrée spéciale"
+                            }
+                        })
+                        .unwrap_or("entrée");
+                    Some((name, kind))
+                })
+                .collect::<Vec<_>>(),
+            true,
+        ),
+        Err(_) => (Vec::new(), false),
+    };
+    entries.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+
+    let present_manifests = MANIFESTS
+        .iter()
+        .filter(|name| inventory_available && project_root.join(name).is_file())
+        .copied()
+        .collect::<Vec<_>>();
+    let no_manifest = inventory_available && present_manifests.is_empty();
+    let mut listing = entries
+        .iter()
+        .take(MAX_ENTRIES)
+        .map(|(name, kind)| {
+            let safe_name = name
+                .chars()
+                .map(|character| if character.is_control() { ' ' } else { character })
+                .collect::<String>();
+            format!("- {safe_name} ({kind})")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if entries.len() > MAX_ENTRIES {
+        listing.push_str(&format!("\n- … {} autres entrées", entries.len() - MAX_ENTRIES));
+    }
+    if listing.is_empty() {
+        listing.push_str("(aucune entrée visible)");
+    }
+    if listing.chars().count() > MAX_CHARS {
+        listing = listing.chars().take(MAX_CHARS).collect::<String>();
+        listing.push_str("\n[… inventaire tronqué]");
+    }
+
+    let manifests = if !inventory_available {
+        "L’inventaire de la racine n’a pas pu être lu par le daemon; ne conclus pas que le projet est vide. La racine gérée reste `workspace:/`; vérifie l’accès à cette racine avec les outils Code Studio avant de demander une intervention.".to_string()
+    } else if no_manifest {
+        "Aucun manifeste de stack détecté : traite ce dossier comme le projet à initialiser. Si la demande nécessite une application, crée ses fichiers de base directement dans `workspace:/`; ne demande pas de chemin absolu et ne crée pas de projet imbriqué.".to_string()
+    } else {
+        format!("Manifestes détectés : {}.", present_manifests.join(", "))
+    };
+    format!(
+        "[Inventaire initial du workspace Code Studio — instantané en lecture seule]\nRacine canonique : `workspace:/`.\nEntrées visibles :\n{listing}\n{manifests}\nUn fichier absent est un état du dépôt, pas une erreur d'accès. Après un échec de lecture, inspecte `workspace:/` avec `list_files` ou `search_files`, puis poursuis la tâche avec les outils autorisés. Ne redemande jamais à l'utilisateur la racine absolue du projet.\n]\n\n"
+    )
+}
+
 /// Résumé d’évolution / mémoire courte (fichier `.akasha-studio.json`).
 pub fn studio_evolution_summary_prefix(project_root: &Path) -> Option<String> {
     let meta = load_studio_meta(project_root)?;
@@ -1033,7 +1130,7 @@ fn normalize_ticket_identity(value: &str) -> String {
     normalized
 }
 
-/// Finds an open ticket with the same parent and idempotency identity.
+/// Finds an open ticket with the same parent and idempotency identity or title.
 pub fn studio_find_duplicate_ticket(
     project_root: &Path,
     parent_ticket_id: Option<&str>,
@@ -1053,9 +1150,9 @@ pub fn studio_find_duplicate_ticket(
         if ticket.status == "done" {
             return false;
         }
-        let same_legacy_title = normalize_ticket_identity(&ticket.title) == normalized_title
-            && (creation_key.is_none() || ticket.creation_key.is_none());
-        same_legacy_title
+        // Stable keys protect retries, while title matching also catches older
+        // agents that generated a fresh key for the same task on every pass.
+        normalize_ticket_identity(&ticket.title) == normalized_title
     })
 }
 
@@ -4114,6 +4211,25 @@ fn guess_mime_and_text(rel: &str, bytes: &[u8]) -> (&'static str, bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_inventory_marks_empty_roots_and_hides_secret_files() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let empty = super::studio_workspace_inventory_message_prefix(dir.path());
+        assert!(empty.contains("Racine canonique : `workspace:/`"));
+        assert!(empty.contains("Aucun manifeste de stack détecté"));
+        assert!(empty.contains("ne demande pas de chemin absolu"));
+
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}\n").unwrap();
+        std::fs::write(dir.path().join(".env"), "TOKEN=private\n").unwrap();
+        let populated = super::studio_workspace_inventory_message_prefix(dir.path());
+        assert!(populated.contains("package.json (fichier)"));
+        assert!(populated.contains("src (dossier)"));
+        assert!(populated.contains("Manifestes détectés : package.json"));
+        assert!(!populated.contains(".env"));
+        assert!(!populated.contains("private"));
+    }
+
     fn backlog_ticket(
         id: &str,
         status: &str,
@@ -4357,6 +4473,57 @@ mod tests {
         )
         .expect("create validation ticket");
         assert!(studio_initial_backlog_preflight(dir.path(), "task-1", &task_message).is_ok());
+    }
+
+    #[test]
+    fn same_open_parent_ticket_title_is_deduplicated_across_creation_keys() {
+        use super::{save_studio_meta, studio_list_tickets, studio_tool_create_ticket_json, StudioMeta};
+
+        let dir = tempfile::tempdir().expect("temporary Code Studio project");
+        save_studio_meta(
+            dir.path(),
+            &StudioMeta {
+                id: "ticket-dedupe".to_string(),
+                name: "Ticket dedupe".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
+                project_summary: None,
+                ticket_enforcement_mode: Some("off".to_string()),
+            },
+        )
+        .expect("save project metadata");
+        let parent = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({"title":"Todo app request"}),
+        )
+        .expect("create request tracker");
+        let first = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title":"Implement todo filters",
+                "parent_ticket_id":parent.id,
+                "creation_key":"filters-attempt-1"
+            }),
+        )
+        .expect("create implementation ticket");
+        let retry = studio_tool_create_ticket_json(
+            dir.path(),
+            &serde_json::json!({
+                "title":"Implement todo filters",
+                "parent_ticket_id":parent.id,
+                "creation_key":"filters-attempt-2"
+            }),
+        )
+        .expect("reuse matching ticket");
+
+        assert_eq!(first.id, retry.id);
+        assert_eq!(studio_list_tickets(dir.path()).len(), 2);
     }
 
     #[test]

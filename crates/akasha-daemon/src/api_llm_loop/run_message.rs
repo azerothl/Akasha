@@ -422,8 +422,7 @@ pub(crate) async fn run_message_via_llm(
     let code_studio_disk_task = TaskStore::open(&store_path).ok()
             .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten()).is_some();
     let mut studio_disk_system_append = {
-        let proj_base = crate::studio::studio_projects_base(data_dir_for_studio_flags);
-        if tool_disk_workspace_root.starts_with(proj_base) {
+        if code_studio_disk_task {
             format!("{}{}", STUDIO_DISK_REMINDER, STUDIO_AGENT_QUALITY_REMINDER)
         } else {
             String::new()
@@ -1072,6 +1071,13 @@ pub(crate) async fn run_message_via_llm(
     }
     if !studio_disk_system_append.is_empty() {
         system_prompt.push_str(&studio_disk_system_append);
+    }
+    if code_studio_disk_task {
+        system_prompt.push_str(
+            &crate::api_studio::studio_workspace_inventory_message_prefix(
+                &tool_disk_workspace_root,
+            ),
+        );
     }
     if !code_studio_system_tools_block.is_empty() {
         system_prompt.push_str("\n\n");
