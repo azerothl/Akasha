@@ -1695,12 +1695,12 @@ pub(crate) async fn run_message_via_llm(
         // Code Studio implementation tasks need enough bounded iterations to inspect,
         // change, and verify a real project instead of stopping at the chat default.
         if code_studio_disk_task {
-            let floor = std::env::var("AKASHA_MAX_TOOL_ROUNDS_STUDIO")
+            let studio_budget = std::env::var("AKASHA_MAX_TOOL_ROUNDS_STUDIO")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(32)
-                .clamp(12, 64);
-            max_tool_rounds = max_tool_rounds.max(floor);
+                .unwrap_or(64)
+                .clamp(32, 96);
+            max_tool_rounds = max_tool_rounds.max(studio_budget).min(96);
         }
         // Orchestrated subtasks / remediation: extra tool rounds (models often read/search first).
         if orch_disk_deliverables {
@@ -3903,7 +3903,7 @@ pub(crate) async fn run_message_via_llm(
                         } else {
                             actual_tool.as_str()
                         };
-                        let payload = serde_json::json!({
+                        let mut payload = serde_json::json!({
                             "tool": tool_display,
                             "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
                             "args": redacted_args,
@@ -3911,6 +3911,33 @@ pub(crate) async fn run_message_via_llm(
                             "success": success,
                             "explanation": serde_json::Value::Null
                         });
+                        if !success && matches!(actual_tool.as_str(), "run_command" | "run_terminal") {
+                            let result = serde_json::from_str::<serde_json::Value>(&res).ok();
+                            let output = result
+                                .as_ref()
+                                .and_then(|value| value.get("output"))
+                                .and_then(serde_json::Value::as_str)
+                                .or_else(|| result.as_ref().and_then(|value| value.get("error")).and_then(serde_json::Value::as_str))
+                                .unwrap_or(&res);
+                            const MAX_COMMAND_DIAGNOSTIC_CHARS: usize = 1600;
+                            let output_chars = output.chars().count();
+                            let diagnostic: String = output
+                                .chars()
+                                .rev()
+                                .take(MAX_COMMAND_DIAGNOSTIC_CHARS)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
+                            payload["diagnostic_preview"] = serde_json::json!(if output_chars > MAX_COMMAND_DIAGNOSTIC_CHARS {
+                                format!("… (début omis)\n{diagnostic}")
+                            } else {
+                                diagnostic
+                            });
+                            if let Some(exit_code) = result.as_ref().and_then(|value| value.get("exit_code")) {
+                                payload["exit_code"] = exit_code.clone();
+                            }
+                        }
                         let _ = bus.send(
                             EventEnvelope::new(EventType::ToolInvoked, Some(payload))
                                 .with_correlation(timeline_correlation),

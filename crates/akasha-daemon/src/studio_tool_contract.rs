@@ -167,6 +167,47 @@ pub(crate) struct Decoded {
     pub replace_all: bool,
 }
 
+fn normalize_legacy_ticket_dependency(tool: &str, arguments: &mut Value) {
+    if !matches!(tool, "studio_create_ticket" | "studio_update_ticket") {
+        return;
+    }
+    let Some(object) = arguments.as_object_mut() else {
+        return;
+    };
+    let Some(legacy) = object.remove("depends_on_ticket_id") else {
+        return;
+    };
+    match legacy {
+        Value::Null => {}
+        Value::String(value) if value.trim().is_empty() => {}
+        Value::String(value) => {
+            let plural_key = "depends_on_ticket_ids";
+            if !object.contains_key(plural_key) {
+                object.insert(plural_key.to_string(), json!([value.trim()]));
+            } else if tool == "studio_create_ticket" {
+                match object.get(plural_key).cloned() {
+                    Some(Value::Array(mut values)) => {
+                        let dependency = json!(value.trim());
+                        if !values.contains(&dependency) {
+                            values.push(dependency);
+                        }
+                        object.insert(plural_key.to_string(), Value::Array(values));
+                    }
+                    Some(Value::Null) => {
+                        object.insert(plural_key.to_string(), json!([value.trim()]));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        invalid => {
+            // Preserve malformed legacy values so strict deserialization reports
+            // them instead of silently dropping a caller's invalid input.
+            object.insert("depends_on_ticket_id".to_string(), invalid);
+        }
+    }
+}
+
 pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
     if text == "invalid incomplete legacy quotes" {
         return Err("invalid_tool_call: incomplete quotes in legacy TOOL line; no operation executed".into());
@@ -174,7 +215,7 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
     if text.len() > 1024 * 1024 {
         return Err("tool envelope exceeds 1 MiB".into());
     }
-    let envelope: Envelope = serde_json::from_str(text)
+    let mut envelope: Envelope = serde_json::from_str(text)
         .map_err(|error| format!("invalid_tool_call: expected a complete Studio JSON envelope: {error}. Use schema_version:1, tool and arguments; the runtime assigns operation_id. No operation executed."))?;
     if !supports_typed(&envelope.tool) {
         return Err("this workflow tool uses the legacy TOOL contract".into());
@@ -189,6 +230,7 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
     {
         return Err("unsupported tool contract version or name".into());
     }
+    normalize_legacy_ticket_dependency(&envelope.tool, &mut envelope.arguments);
     let mut expected = None;
     let mut replace_all = false;
     let argv = match envelope.tool.as_str() {
@@ -554,7 +596,6 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
             "parent_ticket_id":{"type":"string","minLength":1,"description":"Ticket that groups this work. It is a tracking relationship and does not block dispatch."},
             "creation_key":{"type":"string","minLength":1,"maxLength":160,"description":"Stable key for idempotent retries; reuse the same key for the same planned work."},
             "depends_on_ticket_ids":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true},
-            "depends_on_ticket_id":{"type":"string","minLength":1},
             "acceptance_criteria":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["text"],"properties":{"id":{"type":"string"},"text":{"type":"string","minLength":1},"kind":{"type":"string"},"path":{"type":"string"},"argv":{"type":"array","items":{"type":"string"}}}}},
             "status":{"type":"string","enum":["todo","in_progress","review","done","blocked"],"description":"New work should normally start as todo."}
         }});
@@ -568,7 +609,6 @@ pub(crate) fn argument_schema(tool: &str) -> Value {
             "review_agent":{"type":"string","minLength":1},
             "parent_ticket_id":{"type":["string","null"],"minLength":1,"description":"Tracking parent; independent from execution prerequisites."},
             "depends_on_ticket_ids":{"type":["array","null"],"items":{"type":"string","minLength":1},"uniqueItems":true},
-            "depends_on_ticket_id":{"type":["string","null"]},
             "acceptance_criteria":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text"],"properties":{"id":{"type":"string"},"text":{"type":"string","minLength":1},"kind":{"type":"string"},"path":{"type":"string"},"argv":{"type":"array","items":{"type":"string"}}}}},
             "status":{"type":"string","enum":["todo","in_progress","review","done","blocked"]},
             "recover_stuck_execution":{"type":"boolean","description":"Set true only to release a ticket whose linked task has ended while the ticket remains in progress or review."},

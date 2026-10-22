@@ -2225,6 +2225,7 @@ pub fn studio_tool_create_ticket_json(
     }
     match body.get("depends_on_ticket_id") {
         None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(s)) if s.trim().is_empty() => {}
         Some(v) => {
             let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                 return Err("depends_on_ticket_id_invalid".to_string());
@@ -2439,6 +2440,7 @@ pub fn studio_tool_apply_ticket_patch_json(
     } else if body_v.get("depends_on_ticket_id").is_some() {
         let next_dep = match body_v.get("depends_on_ticket_id") {
             Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) if s.trim().is_empty() => None,
             Some(v) => {
                 let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                     return Err("depends_on_ticket_id_invalid".to_string());
