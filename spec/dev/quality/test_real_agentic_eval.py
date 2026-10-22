@@ -20,7 +20,34 @@ class RealAgenticEvalTests(unittest.TestCase):
             eval_runner.classify_llm_failure("Provider rejected malformed tool-call JSON before execution"),
             "tool_call_json_parse",
         )
+        self.assertEqual(
+            eval_runner.classify_llm_failure("Provider rejected malformed_tool_call_json before execution"),
+            "tool_call_json_parse",
+        )
         self.assertEqual(eval_runner.classify_llm_failure("task timed out"), "timeout")
+        self.assertEqual(eval_runner.classify_llm_failure("context_window_exceeded"), "context_window")
+
+    def test_unfinished_llm_call_uses_terminal_failure_diagnostics(self):
+        diagnostics = eval_runner.llm_call_diagnostics(
+            [
+                {"event_type": "llm_call_started", "payload": {"round": 2}},
+                {"event_type": "task_failed", "payload": {"reason": "context_window_exceeded"}},
+            ],
+            {"status": "failed"},
+            "",
+        )
+        self.assertEqual(diagnostics["call_count"], 1)
+        self.assertEqual(diagnostics["unfinished_count"], 1)
+        self.assertEqual(diagnostics["failure_kinds"], ["context_window"])
+        self.assertEqual(diagnostics["success_models"], [])
+
+    def test_schedule_response_marker_is_exact_after_whitespace_normalization(self):
+        self.assertEqual(eval_runner.normalized_marker_response("  SCHEDULE_OK\n"), "schedule_ok")
+        self.assertEqual(eval_runner.normalized_marker_response("The task says SCHEDULE_OK"), "thetasksaysschedule_ok")
+        self.assertNotEqual(
+            eval_runner.normalized_marker_response("The task says SCHEDULE_OK"),
+            "schedule_ok",
+        )
 
     def test_provider_and_model_are_verified_from_success_event_and_provider_key(self):
         matched, provider = eval_runner.provider_model_evidence(
@@ -101,6 +128,9 @@ class RealAgenticEvalTests(unittest.TestCase):
         self.assertFalse(eval_runner.policy_refusal_passed(call, True, False, True))
         self.assertFalse(eval_runner.policy_refusal_passed(call, False, True, True))
         self.assertFalse(eval_runner.policy_refusal_passed(call, True, True, False))
+
+    def test_policy_refusal_prompt_exercises_virtual_workspace_path(self):
+        self.assertIn("workspace:/denied/policy_canary.txt", eval_runner.policy_refusal_prompt())
 
     def test_tool_choice_prompt_forbids_file_writes(self):
         prompt = eval_runner.memory_store_prompt("AKASHA_EVAL_MEMORY_TEST")
