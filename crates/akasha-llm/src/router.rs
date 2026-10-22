@@ -648,6 +648,41 @@ impl LLMRouter {
             .await
     }
 
+    /// Studio's outer task deadline is shared by all provider attempts. Only
+    /// configured alternatives are used; a selected route never changes models.
+    pub async fn complete_stream_bounded(
+        &self,
+        request: &CompletionRequest,
+        selected: Option<&crate::config::RouteEntry>,
+        recovered: Option<&crate::config::RouteEntry>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+        budget: std::time::Duration,
+        observe: crate::AttemptObserver,
+    ) -> Result<CompletionResponse, String> {
+        let (mut routes, options, allow_same_retry) = {
+            let config = self.config.read().unwrap_or_else(|e|e.into_inner());
+            let routes = if let Some(entry) = selected { vec![entry.clone()] } else {
+                let task_type = request.preferred_task_type.as_deref().map(|t|resolve_preferred_task_type(t, &config))
+                    .unwrap_or_else(||classify_task_type(&request.prompt).0.as_str().to_string());
+                let route = config.get_route(&task_type).cloned().unwrap_or_else(||crate::config::TaskTypeConfig {
+                    primary: Some(crate::config::RouteEntry {provider:"akasha_embedded".into(),model:"default".into(),config:None}),
+                    fallback:vec![],constraints:None,
+                });
+                let route = task_config_for_completion(&route, config.global.enable_fallback.unwrap_or(true));
+                route.primary.into_iter().chain(route.fallback).collect()
+            };
+            (routes, config.model_options.clone(), config.global.default_max_retries.unwrap_or(2)>0)
+        };
+        if selected.is_none() {
+            if let Some(index)=recovered.and_then(|preferred|routes.iter().position(|entry|entry.provider==preferred.provider && entry.model==preferred.model)) {
+                let preferred=routes.remove(index);routes.insert(0,preferred);
+            }
+        }
+        let resolve = self.resolve();
+        let routes = routes.into_iter().filter(|entry| !self.degraded_mode || resolve(&entry.provider).is_some_and(|provider|provider.is_local())).collect();
+        crate::bounded::complete_stream(request, routes, &resolve, &options, &self.metrics, chunk_tx, budget, allow_same_retry, observe).await
+    }
+
     /// Complete with streaming: chunks are sent to `chunk_tx`. Uses preferred_task_type if set, else classifier.
     pub async fn complete_stream(
         &self,

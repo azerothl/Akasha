@@ -784,6 +784,9 @@ pub async fn handle_studio_route(
                     r#"{"error":"project_not_found"}"#,
                 ));
             }
+            let project_lock=crate::studio_kanban_dispatch::project_dispatch_lock(id);
+            let _reservation=project_lock.lock().await;
+            crate::studio_kanban_dispatch::reconcile_project_tickets(&root,&data_dir.join("akasha.db"));
             let mut items = studio_list_tickets(&root);
             if let Some(status) = query_param(query_str, "status") {
                 let s = status.trim().to_ascii_lowercase();

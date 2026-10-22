@@ -361,6 +361,30 @@ pub(crate) async fn get_task_events(store_path: &Path, events: &EventsCache, id:
     json_response("200 OK", &body.to_string())
 }
 
+fn report_done_messages(status:&TaskStatus,progress:&[(u8,String)],outcome:Option<&serde_json::Value>)->Vec<String> {
+    if *status!=TaskStatus::Completed || outcome.is_none_or(|value|value["result"]!="succeeded" || value["acceptance_verified"]!=true) {return Vec::new();}
+    let mut seen=HashSet::new();
+    progress.iter().filter(|(pct,message)|*pct>=100 && !task_progress_is_chat_stub(message))
+        .map(|(_,message)|message.trim().to_string()).filter(|message|seen.insert(message.clone())).take(5).collect()
+}
+
+#[cfg(test)]
+mod report_semantics_tests {
+    use super::*;
+    #[test]
+    fn timeout_is_never_counted_as_a_completed_action_even_at_one_hundred_percent() {
+        let progress=vec![(24,"Waiting for model".into()),(100,"LLM response timed out after 300 seconds.".into()),(100,"LLM response timed out after 300 seconds.".into())];
+        assert!(report_done_messages(&TaskStatus::Failed,&progress,Some(&serde_json::json!({"result":"failed"}))).is_empty());
+        assert!(report_done_messages(&TaskStatus::Completed,&progress,Some(&serde_json::json!({"result":"partial"}))).is_empty());
+        assert!(report_done_messages(&TaskStatus::Completed,&progress,Some(&serde_json::json!({"result":"succeeded","acceptance_verified":false}))).is_empty());
+    }
+    #[test]
+    fn completed_messages_are_deduplicated() {
+        let progress=vec![(100,"Build verified".into()),(100,"Build verified".into())];
+        assert_eq!(report_done_messages(&TaskStatus::Completed,&progress,Some(&serde_json::json!({"result":"succeeded","acceptance_verified":true}))),vec!["Build verified"]);
+    }
+}
+
 pub(crate) async fn get_task_report(store_path: &Path, events: &EventsCache, id: Uuid) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
@@ -372,16 +396,14 @@ pub(crate) async fn get_task_report(store_path: &Path, events: &EventsCache, id:
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
     let persisted_progress = store.get_progress(id).unwrap_or_default();
-    let mut done: Vec<String> = persisted_progress
-        .iter()
-        .filter(|(pct, msg)| *pct >= 100 && !task_progress_is_chat_stub(msg))
-        .map(|(_, msg)| msg.clone())
-        .collect();
-    done.truncate(5);
+    let outcome=store.get_outcome(id).ok().flatten();
+    let done=report_done_messages(&task.status,&persisted_progress,outcome.as_ref());
 
     let mut failed: Vec<String> = Vec::new();
     if matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled) {
-        if let Some((_, msg)) = persisted_progress
+        if let Some(reason)=outcome.as_ref().and_then(|value|value["reason"].as_str()).filter(|reason|!reason.trim().is_empty()) {
+            failed.push(reason.chars().take(2000).collect());
+        } else if let Some((_, msg)) = persisted_progress
             .iter()
             .rev()
             .find(|(_, msg)| !task_progress_is_chat_stub(msg))
@@ -393,6 +415,12 @@ pub(crate) async fn get_task_report(store_path: &Path, events: &EventsCache, id:
     }
 
     let mut needs_review: Vec<String> = Vec::new();
+    if task.status==TaskStatus::Completed && outcome.as_ref().is_none_or(|value|value["acceptance_verified"]!=true) {
+        needs_review.push("L’exécution est terminée, mais les critères ne sont pas tous vérifiés. La progression à 100 % ne vaut pas validation du résultat.".into());
+    }
+    if task.status!=TaskStatus::Completed && outcome.as_ref().is_some_and(|value|value["confirmed_file_mutation"]==true) {
+        needs_review.push("Des fichiers ont été modifiés avant l’arrêt. Examinez le diff ; la reprise conserve les opérations déjà enregistrées.".into());
+    }
     let mut saw_approval_request = store
         .get_events(id)
         .unwrap_or_default()
@@ -430,9 +458,10 @@ pub(crate) async fn get_task_report(store_path: &Path, events: &EventsCache, id:
         TaskStatus::WaitingUserInput => vec![
             "Répondre à la demande d'approbation ou d'information de l'agent.".to_string(),
         ],
-        TaskStatus::Failed | TaskStatus::Cancelled => vec![
-            "Analyser la cause d'échec puis relancer avec une consigne ciblée.".to_string(),
+        TaskStatus::Failed => vec![
+            "Consulter le diagnostic, rétablir le fournisseur si nécessaire, puis reprendre cette tâche depuis son checkpoint et son ticket existant.".to_string(),
         ],
+        TaskStatus::Cancelled => vec!["Examiner les effets déjà produits avant de démarrer explicitement une nouvelle tâche.".to_string()],
         _ => vec!["Attendre la fin de la tâche puis relire le rapport.".to_string()],
     };
     next_steps.truncate(5);
@@ -453,7 +482,7 @@ pub(crate) async fn get_task_report(store_path: &Path, events: &EventsCache, id:
         "failed": failed,
         "next_steps": next_steps,
         "transcript_path": transcript,
-        "outcome": store.get_outcome(id).ok().flatten()
+        "outcome": outcome
     });
     json_response("200 OK", &body.to_string())
 }
@@ -829,6 +858,10 @@ pub(crate) async fn resume_task(store_path: &Path, id: Uuid, main_agent: &crate:
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
+    let project=store.lineage_root_studio_project_id(id).ok().flatten();
+    let _reservation=if let Some(project)=project.as_ref() {
+        Some(crate::studio_kanban_dispatch::project_dispatch_lock(project).lock_owned().await)
+    } else {None};
     let task = match store.get(id) {
         Ok(Some(t)) => t,
         Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
@@ -837,13 +870,23 @@ pub(crate) async fn resume_task(store_path: &Path, id: Uuid, main_agent: &crate:
     if !is_resumable(&task.status) {
         let body = serde_json::json!({
             "error": "task_not_resumable",
-            "detail": "Seules les tâches en pause ou interrompues peuvent être reprises.",
+            "detail": "Les tâches en pause ou interrompues, et les tâches Code Studio en échec disposant d’un checkpoint, peuvent être reprises.",
             "status": task.status.as_str()
         });
         return json_response("400 Bad Request", &body.to_string());
     }
+    if project.as_ref().is_some_and(|project|crate::studio_kanban_dispatch::project_has_active_task(store_path,project)) {
+        return json_response("409 Conflict",r#"{"error":"studio_project_busy","detail":"Une autre tâche est active dans ce projet; attendez sa fin avant de reprendre."}"#);
+    }
     match main_agent.resume_task(store_path, id) {
         Ok(()) => {
+            if let Some(root)=store_path.parent().and_then(|data_dir|store.lineage_root_studio_project_id(id).ok().flatten()
+                .and_then(|project|crate::studio::resolve_studio_project_dir(data_dir,&project).ok())) {
+                for ticket in crate::api_studio::studio_list_tickets(&root).into_iter().filter(|ticket|ticket.related_task_id.as_deref()==Some(id.to_string().as_str()) && ticket.status!="done") {
+                    let _=crate::api_studio::studio_attach_task_to_ticket(&root,&ticket.id,&id.to_string(),"user_resume");
+                }
+                crate::studio_kanban_dispatch::reconcile_project_tickets(&root,store_path);
+            }
             let body = serde_json::json!({ "resumed": true, "task_id": id.to_string() });
             json_response("200 OK", &body.to_string())
         }
@@ -2728,6 +2771,7 @@ if method == "POST" && path == "/api/message" {
                         &chrono::Utc::now().to_rfc3339(),
                     );
                 }
+                crate::studio_kanban_dispatch::reconcile_project_tickets(root,store_path);
             }
             if let Some(meta) = fork_meta_for_task {
                 if let Ok(task_store) = TaskStore::open(store_path) {

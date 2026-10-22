@@ -1826,6 +1826,8 @@ pub(crate) async fn run_message_via_llm(
         }
         if let Some(saved)=recovery_checkpoint.as_ref().and_then(|checkpoint|checkpoint.max_tool_rounds) {max_tool_rounds=saved;}
         let mut round = recovery_checkpoint.as_ref().map(|checkpoint|checkpoint.round).unwrap_or(0);
+        let mut recovered_model_route=run_outcome.checks.iter().rev().find(|check|check["kind"]=="provider_route_recovered")
+            .and_then(|check|Some(akasha_llm::config::RouteEntry{provider:check["provider"].as_str()?.into(),model:check["model"].as_str()?.into(),config:None}));
         // Tours d'affilée avec uniquement des outils d'exploration (Code Studio).
         let mut studio_read_only_streak_rounds: u32 = 0;
         let mut studio_goal_failure_seen = goal_tracker.as_ref().is_some_and(|goal|goal.state.cycles>0);
@@ -2037,9 +2039,10 @@ pub(crate) async fn run_message_via_llm(
             } else {
                 Some(merged_image_urls)
             };
-            if let Some((provider, model)) = preferred_task_type
-                .as_deref()
-                .and_then(|tt| llm_router.primary_route_for_task_type(tt))
+            if let Some((provider, model)) = selected_model_route.as_ref()
+                .or(recovered_model_route.as_ref())
+                .map(|route|(route.provider.clone(),route.model.clone()))
+                .or_else(||preferred_task_type.as_deref().and_then(|tt|llm_router.primary_route_for_task_type(tt)))
             {
                 insert_task_tracking_event(
                     store_path.as_path(),
@@ -2144,6 +2147,7 @@ pub(crate) async fn run_message_via_llm(
             // handing off to that bounded wait is real worker activity, not a
             // claim that files changed or the goal succeeded.
             if code_studio_disk_task && request.tools.as_ref().is_some_and(|tools|!tools.is_empty()) {
+                crate::api::cancel_progress_watchdog(&mut watchdog_cancel);
                 crate::studio_execution::mark_bounded_native_wait(&meaningful_progress_flag,llm_timeout_secs);
                 insert_task_tracking_event(&store_path,task_id,"bounded_native_model_wait",serde_json::json!({"round":round+1,"timeout_secs":llm_timeout_secs,"files_changed":false}));
             }
@@ -2163,14 +2167,42 @@ pub(crate) async fn run_message_via_llm(
                 .ok();
             let router = llm_router.clone();
             let selected_route = selected_model_route.clone();
-            let stream_join = tokio::spawn(async move {
-                if let Some(route) = selected_route { router.complete_stream_for_entry(&request, &route, stream_tx).await }
+            let recovered_route = recovered_model_route.clone();
+            let turn_budget = std::time::Duration::from_secs(goal_tracker.as_ref().map(|goal|llm_timeout_secs.min(goal.goal.max_seconds.saturating_sub(goal.state.elapsed_ms/1000).max(1))).unwrap_or(llm_timeout_secs));
+            let attempt_state = std::sync::Arc::new(std::sync::Mutex::new((serde_json::Value::Null, std::time::Instant::now())));
+            let observer_state = attempt_state.clone();
+            let observer_store = store_path.clone();
+            let observer_bus = bus.clone();
+            let observer: akasha_llm::AttemptObserver = std::sync::Arc::new(move |event| {
+                if let Ok(mut state) = observer_state.lock() {
+                    if matches!(event["phase"].as_str(), Some("started"|"retry"|"fallback")) {state.1=std::time::Instant::now();}
+                    state.0=event.clone();
+                }
+                insert_task_tracking_event(&observer_store, task_id, "llm_provider_attempt", event.clone());
+                if matches!(event["phase"].as_str(), Some("started"|"retry"|"fallback")) {
+                    let action=match event["phase"].as_str() {Some("retry")=>"Nouvelle tentative",Some("fallback")=>"Repli automatique",_=>"Appel au modèle"};
+                    let message=format!("{action} : {} / {} · tentative {}/{}",event["provider"].as_str().unwrap_or("?"),event["model"].as_str().unwrap_or("?"),event["attempt"],event["max_attempts"]);
+                    let _=observer_bus.send(EventEnvelope::new(EventType::ProgressUpdate,Some(serde_json::json!({"task_id":task_id,"progress_pct":24,"message":message}))).with_correlation(task_id));
+                }
+            });
+            let mut stream_join = tokio::spawn(async move {
+                if code_studio_disk_task {
+                    router.complete_stream_bounded(&request,selected_route.as_ref(),recovered_route.as_ref(),stream_tx,turn_budget.saturating_sub(std::time::Duration::from_millis(100)),observer).await
+                } else if let Some(route) = selected_route { router.complete_stream_for_entry(&request, &route, stream_tx).await }
                 else { router.complete_stream(&request, stream_tx).await }
             });
             let mut accumulated = String::new();
             let mut first_wait = true;
-            let overall_deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_secs(goal_tracker.as_ref().map(|goal|llm_timeout_secs.min(goal.goal.max_seconds.saturating_sub(goal.state.elapsed_ms/1000).max(1))).unwrap_or(llm_timeout_secs));
+            let overall_deadline = tokio::time::Instant::now() + turn_budget;
+            let timeout_message=|| {
+                if code_studio_disk_task {
+                    let state=attempt_state.lock().ok();
+                    let route=state.as_ref().map(|state|format!("{} / {}",state.0["provider"].as_str().unwrap_or("inconnu"),state.0["model"].as_str().unwrap_or("inconnu"))).unwrap_or_else(||"fournisseur inconnu".into());
+                    format!("provider_generation_failed: {route} : délai de génération dépassé après {} s. Vérifiez que le service répond et que la mémoire disponible suffit, puis reprenez cette tâche depuis son checkpoint. Les événements conservent les tentatives et les modèles appelés.",turn_budget.as_secs())
+                } else {format!("LLM response timed out after {} seconds.",llm_timeout_secs)}
+            };
+            let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+            heartbeat.tick().await;
             loop {
                 // Check the overall deadline before waiting for a chunk to avoid spurious zero-duration timeouts.
                 if tokio::time::Instant::now() >= overall_deadline {
@@ -2180,20 +2212,40 @@ pub(crate) async fn run_message_via_llm(
                     );
                     stream_join.abort();
                     run_outcome.termination = TerminationReason::Timeout;
-                    reply_text = if accumulated.is_empty() {
-                        format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                    reply_text = if code_studio_disk_task || accumulated.is_empty() {
+                        timeout_message()
                     } else {
                         accumulated
                     };
                     break 'tool_rounds;
                 }
-                let idle = if first_wait {
+                let idle = if code_studio_disk_task {
+                    overall_deadline.saturating_duration_since(tokio::time::Instant::now())
+                } else if first_wait {
                     first_wait = false;
                     std::time::Duration::from_secs(first_chunk_timeout_secs)
                 } else {
                     std::time::Duration::from_secs(idle_timeout_secs)
                 };
-                match tokio::time::timeout(idle.min(overall_deadline.saturating_duration_since(tokio::time::Instant::now())), tok_rx.recv()).await {
+                let receive = tokio::time::timeout(idle.min(overall_deadline.saturating_duration_since(tokio::time::Instant::now())), tok_rx.recv());
+                tokio::pin!(receive);
+                let received = loop {
+                    tokio::select! {
+                        result = &mut receive => break result,
+                        _ = heartbeat.tick(), if code_studio_disk_task => {
+                            if let Ok(state)=attempt_state.lock() {
+                                let event=&state.0;
+                                if event.is_null() {continue;}
+                                let elapsed=state.1.elapsed().as_secs();
+                                let activity=if event["phase"]=="first_token" {"génération en cours"}else{"attente de réponse"};
+                                let message=format!("{} / {} : {activity} depuis {elapsed} s · tentative {}/{}.",event["provider"].as_str().unwrap_or("?"),event["model"].as_str().unwrap_or("?"),event["attempt"],event["max_attempts"]);
+                                insert_task_tracking_event(&store_path,task_id,"llm_wait_heartbeat",serde_json::json!({"provider":event["provider"],"model":event["model"],"attempt":event["attempt"],"elapsed_secs":elapsed,"phase":event["phase"],"files_changed":false}));
+                                let _=bus.send(EventEnvelope::new(EventType::ProgressUpdate,Some(serde_json::json!({"task_id":task_id,"progress_pct":24,"message":message}))).with_correlation(task_id));
+                            }
+                        }
+                    }
+                };
+                match received {
                     Ok(Some(chunk)) => {
                         if !first_meaningful_progress_sent {
                             first_meaningful_progress_sent = true;
@@ -2296,19 +2348,20 @@ pub(crate) async fn run_message_via_llm(
             // Wrap stream_join.await with remaining overall budget; guard against zero remaining.
             let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
             let response = if remaining.is_zero() {
+                stream_join.abort();
                 run_outcome.termination = TerminationReason::Timeout;
                 tracing::warn!(
                     timeout_secs = llm_timeout_secs,
                     "Overall LLM timeout on stream completion"
                 );
-                reply_text = if accumulated.is_empty() {
-                    format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                reply_text = if code_studio_disk_task || accumulated.is_empty() {
+                    timeout_message()
                 } else {
                     accumulated
                 };
                 break;
             } else {
-                match tokio::time::timeout(remaining, stream_join).await {
+                match tokio::time::timeout(remaining, &mut stream_join).await {
                     Ok(Ok(Ok(resp))) => {
                         if let Some(goal)=goal_tracker.as_mut() {
                             let used=resp.usage.as_ref().map(|usage|usage.prompt_tokens.saturating_add(usage.completion_tokens)).filter(|count|*count>0).unwrap_or(estimated_request_tokens.saturating_add(resp.text.len() as u64));
@@ -2316,6 +2369,15 @@ pub(crate) async fn run_message_via_llm(
                             if let Err(error)=goal.save(&store_path,task_id,"active","Réponse modèle reçue; consommation enregistrée") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
                         }
                         last_llm_model_used = Some(resp.model_used.clone());
+                        if code_studio_disk_task && selected_model_route.is_none() {
+                            if let Some(provider)=resp.provider_used.as_ref() {
+                                let route=akasha_llm::config::RouteEntry{provider:provider.clone(),model:resp.model_used.clone(),config:None};
+                                if recovered_model_route.as_ref().is_none_or(|old|old.provider!=route.provider || old.model!=route.model) {
+                                    run_outcome.checks.push(serde_json::json!({"kind":"provider_route_recovered","provider":route.provider,"model":route.model,"status":"passed","detail":"Le fournisseur a retourné une génération complète; cette route configurée est préférée pour les tours suivants."}));
+                                }
+                                recovered_model_route=Some(route);
+                            }
+                        }
                         insert_task_tracking_event(
                             store_path.as_path(),
                             task_id,
@@ -2414,9 +2476,11 @@ pub(crate) async fn run_message_via_llm(
                             current_prompt.push_str(&format!("\n[Transport rejection — no tool call from this response was executed] {retry_detail} Regenerate one complete operation using an advertised function and its literal keyword arguments. Do not mix formats or use legacy TOOL lines. Keep the arguments small and valid JSON. Re-read current ticket and file state before making any assumptions about earlier operations. Continue the requested implementation only after the repaired call succeeds.\n"));
                             continue 'tool_rounds;
                         }
-                        run_outcome.termination = TerminationReason::ProviderError;
+                        run_outcome.termination = if error_text.to_ascii_lowercase().contains("timeout") {TerminationReason::Timeout}else{TerminationReason::ProviderError};
                         reply_text = if provider_parse_error {
                             "Le fournisseur LLM a rejeté le JSON d’un appel d’outil. La tâche s’est arrêtée et cet appel n’a pas été exécuté. Des opérations précédentes peuvent avoir abouti : vérifiez l’état du projet avant de relancer ou choisissez un autre modèle.".to_string()
+                        } else if error_text.starts_with("provider_generation_failed:") {
+                            error_text.chars().take(2000).collect()
                         } else {
                             format!("Sorry, I couldn't get a response (error: {}).", safe_error)
                         };
@@ -2433,13 +2497,14 @@ pub(crate) async fn run_message_via_llm(
                         break;
                     }
                     Err(_timeout) => {
+                        stream_join.abort();
                         run_outcome.termination = TerminationReason::Timeout;
                         tracing::warn!(
                             timeout_secs = llm_timeout_secs,
                             "Overall LLM timeout on stream completion"
                         );
-                        reply_text = if accumulated.is_empty() {
-                            format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                        reply_text = if code_studio_disk_task || accumulated.is_empty() {
+                            timeout_message()
                         } else {
                             accumulated
                         };
@@ -4892,7 +4957,8 @@ pub(crate) async fn run_message_via_llm(
             }
         }
     }
-    if !first_meaningful_progress_sent && !reply_text.trim().is_empty() {
+    if !first_meaningful_progress_sent && !reply_text.trim().is_empty()
+        && run_outcome.termination == TerminationReason::Success {
         meaningful_progress_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
         if emit_timeline_once_for_task(
@@ -5329,6 +5395,15 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     };
     if code_studio_disk_task {if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.phase=final_status.as_str().into();checkpoint.outcome=run_outcome.clone();let _=crate::studio_recovery::save(&store_path,&checkpoint);}}
     let final_status_str = final_status.as_str();
+    if code_studio_disk_task && matches!(final_status,TaskStatus::Failed|TaskStatus::Cancelled|TaskStatus::Interrupted) {
+        if let Some(project)=store.lineage_root_studio_project_id(task_id).ok().flatten() {
+            let lock=crate::studio_kanban_dispatch::project_dispatch_lock(&project);
+            let _reservation=lock.lock().await;
+            if let Ok(root)=crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags,&project) {
+                crate::studio_kanban_dispatch::reconcile_project_tickets(&root,&store_path);
+            }
+        }
+    }
 
     let mut final_payload = serde_json::json!({
         "task_id": task_id.to_string(),

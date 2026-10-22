@@ -4205,7 +4205,7 @@ pub(crate) fn spawn_progress_watchdog(
     });
 }
 
-fn cancel_progress_watchdog(cancel_tx: &mut Option<oneshot::Sender<()>>) {
+pub(crate) fn cancel_progress_watchdog(cancel_tx: &mut Option<oneshot::Sender<()>>) {
     if let Some(tx) = cancel_tx.take() {
         let _ = tx.send(());
     }

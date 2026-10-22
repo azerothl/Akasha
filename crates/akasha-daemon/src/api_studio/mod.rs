@@ -577,6 +577,9 @@ pub struct StudioTicketAcceptanceCriterion {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StudioTicketEvidence {
+    /// Lifecycle phase to restore after a failed execution, especially review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_status: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1540,7 +1543,8 @@ pub fn studio_attach_task_to_ticket(
         return Err("ticket_not_found".to_string());
     };
     if ticket.status == "todo" || ticket.status == "blocked" {
-        ticket.status = "in_progress".to_string();
+        ticket.status = if ticket.evidence.resume_status.as_deref()==Some("review") {"review"}else{"in_progress"}.to_string();
+        ticket.evidence.resume_status=None;
         // A new execution is a deliberate retry of the previous blocked attempt.
         // Keep the diagnostic in the event timeline, but don't show it as the
         // current result while a new run is active.
@@ -1990,13 +1994,17 @@ pub(crate) fn studio_seed_initial_backlog(
             depends_on_ticket_ids: dependencies,
             depends_on_ticket_id: None,
             related_task_id: None,
-            acceptance_criteria: vec![StudioTicketAcceptanceCriterion {
+            acceptance_criteria: {
+                let mut criteria=vec![StudioTicketAcceptanceCriterion {
                 id: Some(format!("initial-phase-{key}")),
                 text: phase_description.to_string(),
                 kind: None,
                 path: None,
                 argv: None,
-            }],
+                }];
+                if key > 0 {criteria.extend(studio_request_criteria(&root_ticket.description));}
+                criteria
+            },
             evidence: StudioTicketEvidence::default(),
             review_outcome: None,
             review_notes: None,
@@ -2140,7 +2148,8 @@ pub(crate) fn studio_complete_initial_backlog_if_ready(
 
 fn studio_chat_ticket_title(message: &str) -> String {
     const MAX_CHARS: usize = 84;
-    let first_line = message
+    let title_source=message.split_once("selon ce résumé :").map(|(_,summary)|summary).unwrap_or(message);
+    let first_line = title_source
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
@@ -2162,6 +2171,82 @@ fn studio_chat_ticket_title(message: &str) -> String {
     }
 }
 
+fn studio_request_criteria(message:&str)->Vec<StudioTicketAcceptanceCriterion> {
+    let request=message.split_once("selon ce résumé :").map(|(_,summary)|summary).unwrap_or(message);
+    request.lines().map(str::trim).filter(|line|!line.is_empty()).take(12).enumerate().map(|(index,line)| {
+        StudioTicketAcceptanceCriterion {id:Some(format!("request-behavior-{index}")),text:format!("Résultat à démontrer : {}",line.chars().take(900).collect::<String>()),kind:None,path:None,argv:None}
+    }).collect()
+}
+
+#[cfg(test)]
+mod initial_request_recovery_tests {
+    use super::*;
+    fn project()->tempfile::TempDir {
+        let dir=tempfile::tempdir().unwrap();
+        let meta=serde_json::from_value(json!({"id":"todo-test","name":"Todo","created_at":chrono::Utc::now().to_rfc3339(),"evolutions":[],"verify_skip":false})).unwrap();
+        save_studio_meta(dir.path(),&meta).unwrap();
+        dir
+    }
+    const REQUEST:&str="Crée le projet « Todo E2E — 2026-10-22 » selon ce résumé :\n\nPetit outil Todo en français, responsive et accessible, avec tâches à ajouter, terminer, rouvrir et supprimer, filtres et persistance locale.";
+    #[test]
+    fn observed_creation_request_seeds_specific_criteria_and_preserves_the_ticket_on_retry() {
+        let dir=project();
+        let id=studio_create_evolution_ticket_from_chat(dir.path(),REQUEST).unwrap();
+        let mut root=studio_get_ticket(dir.path(),&id).unwrap();
+        assert_eq!(root.assigned_agent,"studio_project_manager");
+        assert!(root.title.starts_with("Petit outil Todo"));
+        let children:Vec<_>=studio_list_tickets(dir.path()).into_iter().filter(|ticket|ticket.parent_ticket_id.as_deref()==Some(&id)).collect();
+        assert_eq!(children.len(),4);
+        assert!(children.iter().filter(|ticket|!ticket.depends_on_ticket_ids.is_empty()).count()>=3);
+        assert!(children.iter().filter(|ticket|ticket.creation_key.as_deref().is_some_and(|key|key.ends_with(":features"))).all(|ticket|ticket.acceptance_criteria.iter().any(|criterion|criterion.text.contains("persistance locale"))));
+        root.status="blocked".into();
+        studio_upsert_ticket(dir.path(),root).unwrap();
+        assert_eq!(studio_create_evolution_ticket_from_chat(dir.path(),REQUEST).unwrap(),id);
+        assert_eq!(studio_list_tickets(dir.path()).len(),5);
+    }
+    #[test]
+    fn legacy_single_ticket_is_upgraded_once_without_erasing_the_failed_run() {
+        let dir=project();
+        let id=studio_create_evolution_ticket_from_chat(dir.path(),REQUEST).unwrap();
+        let mut root=studio_get_ticket(dir.path(),&id).unwrap();
+        root.acceptance_criteria.retain(|criterion|matches!(criterion.id.as_deref(),Some("request-scope"|"verification")));
+        root.status="blocked".into();root.related_task_id=Some("original-run".into());root.evidence.summary=Some("timeout".into());
+        std::fs::write(dir.path().join(STUDIO_TICKETS_FILE),json!({"tickets":[root],"events":[]}).to_string()).unwrap();
+        studio_upgrade_initial_request(dir.path()).unwrap();studio_upgrade_initial_request(dir.path()).unwrap();
+        let root=studio_get_ticket(dir.path(),&id).unwrap();
+        assert_eq!(studio_list_tickets(dir.path()).len(),5);
+        assert_eq!(root.related_task_id.as_deref(),Some("original-run"));
+        assert_eq!(root.status,"blocked");assert_eq!(root.evidence.summary.as_deref(),Some("timeout"));
+    }
+    #[test]
+    fn resuming_a_blocked_review_restores_review_without_duplicate_task_evidence() {
+        let dir=project();let id=studio_create_evolution_ticket_from_chat(dir.path(),REQUEST).unwrap();
+        let mut root=studio_get_ticket(dir.path(),&id).unwrap();
+        root.status="blocked".into();root.evidence.resume_status=Some("review".into());root.evidence.summary=Some("timeout".into());
+        studio_upsert_ticket(dir.path(),root).unwrap();
+        studio_attach_task_to_ticket(dir.path(),&id,"same-run","test").unwrap();
+        studio_attach_task_to_ticket(dir.path(),&id,"same-run","test").unwrap();
+        let root=studio_get_ticket(dir.path(),&id).unwrap();
+        assert_eq!(root.status,"review");assert_eq!(root.evidence.summary,None);assert_eq!(root.evidence.task_ids,vec!["same-run"]);
+    }
+}
+
+/// Upgrade a legacy creation ticket in place, preserving its task history.
+pub(crate) fn studio_upgrade_initial_request(project_root:&Path)->Result<(),String> {
+    let tickets=studio_list_tickets(project_root);
+    if tickets.iter().any(|ticket|ticket.acceptance_criteria.iter().any(|criterion|criterion.id.as_deref()==Some("initial-kanban-backlog"))) {return Ok(());}
+    let roots:Vec<_>=tickets.iter().filter(|ticket|ticket.requested_by=="user_chat" && ticket.parent_ticket_id.is_none()).collect();
+    if roots.len()!=1 || roots[0].status=="done" || !studio_user_message_suggests_project_creation(&roots[0].description) {return Ok(());}
+    let mut root=roots[0].clone();
+    root.assigned_agent="studio_project_manager".into();
+    root.title=studio_chat_ticket_title(&root.description);
+    root.acceptance_criteria.extend(studio_request_criteria(&root.description));
+    root.acceptance_criteria.push(StudioTicketAcceptanceCriterion{id:Some("initial-kanban-backlog".into()),text:"Décomposer la demande en tickets spécifiques avec critères vérifiables et dépendances avant toute implémentation.".into(),kind:None,path:None,argv:None});
+    studio_upsert_ticket(project_root,root.clone())?;
+    studio_seed_initial_backlog(project_root,&root.id)?;
+    Ok(())
+}
+
 /// Auto-register an actionable chat request and seed an initial project backlog
 /// when this is the first request to create a project or application.
 pub fn studio_create_evolution_ticket_from_chat(
@@ -2173,7 +2258,6 @@ pub fn studio_create_evolution_ticket_from_chat(
     if let Some(existing) = studio_list_tickets(project_root).into_iter().find(|ticket| {
         ticket.requested_by == "user_chat"
             && ticket.status != "done"
-            && ticket.status != "blocked"
             && normalize_ticket_identity(&ticket.description) == normalized_message
     }) {
         let _ = studio_append_ticket_event(
@@ -2183,6 +2267,7 @@ pub fn studio_create_evolution_ticket_from_chat(
             "system",
             Some(json!({ "source": "chat_evolution_auto", "title": existing.title })),
         );
+        studio_upgrade_initial_request(project_root)?;
         return Ok(existing.id);
     }
     let is_first_project_creation = studio_list_tickets(project_root).is_empty()
@@ -2197,7 +2282,7 @@ pub fn studio_create_evolution_ticket_from_chat(
         description: message.trim().to_string(),
         status: "todo".to_string(),
         requested_by: "user_chat".to_string(),
-        assigned_agent: "studio_fullstack".to_string(),
+        assigned_agent: if is_first_project_creation {"studio_project_manager"}else{"studio_fullstack"}.to_string(),
         review_agent: "studio_reviewer".to_string(),
         parent_ticket_id: None,
         creation_key: None,
@@ -2222,6 +2307,7 @@ pub fn studio_create_evolution_ticket_from_chat(
                 },
             ];
             if is_first_project_creation {
+                criteria.extend(studio_request_criteria(message));
                 criteria.push(StudioTicketAcceptanceCriterion {
                     id: Some("initial-kanban-backlog".to_string()),
                     text: "Avant l'implémentation, la première demande est décomposée dans le Kanban en tickets de portée claire, avec critères vérifiables et dépendances explicites pour le socle, les fonctionnalités demandées, l'intégration et la validation.".to_string(),
@@ -5346,9 +5432,9 @@ Try `npm i --save-dev @types/jest`";
         assert_eq!(ticket.status, "todo");
         assert_eq!(ticket.requested_by, "user_chat");
         assert_eq!(ticket.description, message);
-        assert_eq!(ticket.acceptance_criteria.len(), 3);
+        assert_eq!(ticket.acceptance_criteria.len(), 4);
         assert_eq!(
-            ticket.acceptance_criteria[2].id.as_deref(),
+            ticket.acceptance_criteria.last().unwrap().id.as_deref(),
             Some("initial-kanban-backlog")
         );
         let tickets = studio_list_tickets(dir.path());

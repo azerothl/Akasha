@@ -1,0 +1,13 @@
+# Générations Studio : délai, reprise et suivi
+
+Le chemin Studio utilise `LLMRouter::complete_stream_bounded`. Le budget total réserve du temps aux routes alternatives configurées, sans répéter le primaire avant un fallback. Trois tentatives au maximum sont autorisées ; un modèle imposé reste épinglé, avec une seule reprise de transport si les retries sont activés. Les fragments d'une génération abandonnée ne sont pas exécutables. Les outils des tours antérieurs restent couverts par le registre d'opérations et le checkpoint.
+
+Les événements `llm_provider_attempt` et `llm_wait_heartbeat` indiquent la route réellement appelée, sa phase et son attente. Les erreurs finales donnent les modèles tentés et une marche à suivre. Un timeout ne déclenche pas `first_meaningful_progress`.
+
+Une tâche Studio en échec peut reprendre depuis un checkpoint valide. Le moteur, l'API de reprise et le contrôle d'admission reconnaissent cet état. La réservation du projet empêche une reprise concurrente à une autre tâche active. Les autres restrictions de projet, rôle et opérations interrompues restent appliquées.
+
+Le ticket est réconcilié à la finalisation et à la lecture du board. Une revue en échec devient bloquée mais conserve `evidence.resume_status = review`, afin que la reprise retourne au reviewer. Les anciennes demandes de création à ticket unique reçoivent un backlog sans remplacer le ticket ou son historique.
+
+Le rapport `GET /api/tasks/:id/report` ne déduit pas une validation de `progress_pct = 100` : les résumés `done` demandent une fin réussie et des critères vérifiés, et sont dédupliqués.
+
+Recette : dans le dépôt Code Studio, définir `CODE_STUDIO_DAEMON_BIN` vers le binaire reconstruit puis exécuter `npm run test:daemon:recovery`. Elle démarre un daemon isolé avec fournisseur HTTP scripté et conserve un rapport portant le SHA-256 du binaire. Elle couvre timeout, fallback, heartbeat, absence d'exécution des fragments abandonnés et reprise avec les mêmes identifiants. Une recette avec vrai LLM reste distincte.

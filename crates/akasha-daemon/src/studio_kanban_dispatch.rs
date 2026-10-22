@@ -132,6 +132,7 @@ async fn dispatch_idle_projects(
                 "Cannot migrate legacy Code Studio request-ticket relationships"
             );
         }
+        let _ = api_studio::studio_upgrade_initial_request(&root);
         let _ = api_studio::studio_complete_initial_backlog_if_ready(&root);
         let initial_ticket = studio_list_tickets(&root).into_iter().find(|ticket| {
             ticket
@@ -379,7 +380,7 @@ fn ticket_agent_for_dispatch<'a>(
             ticket.review_agent.as_str()
         };
     }
-    if ticket.status == "review" {
+    if ticket.status == "review" || ticket.evidence.resume_status.as_deref()==Some("review") {
         ticket.review_agent.as_str()
     } else {
         ticket.assigned_agent.as_str()
@@ -833,6 +834,10 @@ fn record_terminal_task_failure(
     task_statuses: &HashMap<String, TaskStatus>,
     store_path: &Path,
 ) {
+    // A delayed event from an older run must not overwrite a newer assignment
+    // or a reviewed result.
+    let Some(current)=api_studio::studio_get_ticket(project_root,&ticket.id) else {return;};
+    if current.related_task_id != ticket.related_task_id || current.status == "done" {return;}
     let Some(task_id) = ticket.related_task_id.as_deref() else {
         return;
     };
@@ -844,6 +849,16 @@ fn record_terminal_task_failure(
     }) else {
         return;
     };
+    let context = terminal_failure_context(ticket, task_statuses, store_path);
+    if matches!(current.status.as_str(),"in_progress"|"review") {
+        let mut blocked=current;
+        blocked.evidence.resume_status=Some(blocked.status.clone());
+        blocked.status="blocked".into();
+        blocked.evidence.summary=Some(context.clone().unwrap_or_else(||format!("La tâche liée s’est terminée avec le statut {}.",status.as_str())));
+        blocked.updated_at=chrono::Utc::now().to_rfc3339();
+        if api_studio::studio_upsert_ticket(project_root,blocked).is_err() {return;}
+    }
+    let terminal_updated_at=uuid::Uuid::parse_str(task_id).ok().and_then(|id|TaskStore::open(store_path).ok()?.get(id).ok().flatten()).map(|task|task.updated_at.to_rfc3339());
     if studio_list_ticket_events(project_root, &ticket.id)
         .iter()
         .any(|event| {
@@ -854,19 +869,10 @@ fn record_terminal_task_failure(
                     .and_then(|payload| payload.get("task_id"))
                     .and_then(|value| value.as_str())
                     == Some(task_id)
+                && event.payload.as_ref().and_then(|payload|payload.get("task_updated_at")).and_then(|value|value.as_str()) == terminal_updated_at.as_deref()
         })
     {
         return;
-    }
-    let context = terminal_failure_context(ticket, task_statuses, store_path);
-    if ticket.status == "in_progress" {
-        let mut blocked = ticket.clone();
-        blocked.status = "blocked".to_string();
-        blocked.evidence.summary = Some(context.clone().unwrap_or_else(|| {
-            format!("La tâche liée s’est terminée avec le statut {}.", status.as_str())
-        }));
-        blocked.updated_at = chrono::Utc::now().to_rfc3339();
-        let _ = api_studio::studio_upsert_ticket(project_root, blocked);
     }
     let _ = api_studio::studio_append_ticket_event(
         project_root,
@@ -876,9 +882,25 @@ fn record_terminal_task_failure(
         Some(serde_json::json!({
             "task_id": task_id,
             "task_status": status.as_str(),
+            "task_updated_at": terminal_updated_at,
             "detail": context,
         })),
     );
+}
+
+/// Terminal task status is reconciled independently of automatic dispatch.
+/// Called on completion and when the board is read, including after a restart.
+pub(crate) fn reconcile_project_tickets(project_root:&Path,store_path:&Path) {
+    let Ok(store)=TaskStore::open(store_path) else {return;};
+    let tickets=studio_list_tickets(project_root);
+    let statuses:HashMap<String,TaskStatus>=tickets.iter().filter_map(|ticket| {
+        let id=ticket.related_task_id.as_ref()?;
+        let task=store.get(uuid::Uuid::parse_str(id).ok()?).ok()??;
+        Some((id.clone(),task.status))
+    }).collect();
+    for ticket in tickets {
+        record_terminal_task_failure(project_root,&ticket,&statuses,store_path);
+    }
 }
 
 fn is_initial_backlog_summary(ticket: &StudioTicket) -> bool {
@@ -1340,7 +1362,19 @@ mod tests {
     }
 
     #[test]
-    fn failed_reviewer_attempt_keeps_the_ticket_in_review_for_the_next_review() {
+    fn reconciliation_works_without_scheduler_and_does_not_block_a_newer_assignment() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path().join("project");std::fs::create_dir_all(&root).unwrap();
+        let db=dir.path().join("tasks.db");let store=TaskStore::open(&db).unwrap();let id=uuid::Uuid::new_v4();let now=chrono::Utc::now();
+        store.insert(&akasha_store::Task{id,parent_task_id:None,status:TaskStatus::Failed,assigned_agent:"studio_project_manager".into(),created_at:now,updated_at:now,initial_message:None,studio_project_id:Some("project".into())}).unwrap();
+        let mut failed=ticket("in_progress",Some(&id.to_string()));failed.id="execution".into();api_studio::studio_upsert_ticket(&root,failed).unwrap();
+        reconcile_project_tickets(&root,&db);reconcile_project_tickets(&root,&db);
+        let mut blocked=api_studio::studio_get_ticket(&root,"execution").unwrap();assert_eq!(blocked.status,"blocked");
+        assert_eq!(studio_list_ticket_events(&root,"execution").iter().filter(|event|event.event_type=="ticket_execution_failed").count(),1);
+        blocked.related_task_id=Some(uuid::Uuid::new_v4().to_string());blocked.status="in_progress".into();api_studio::studio_upsert_ticket(&root,blocked).unwrap();
+        reconcile_project_tickets(&root,&db);assert_eq!(api_studio::studio_get_ticket(&root,"execution").unwrap().status,"in_progress");
+    }
+    #[test]
+    fn failed_reviewer_attempt_is_blocked_but_resumes_the_review_role() {
         let dir = tempfile::tempdir().expect("project root");
         let root = dir.path().join("project");
         std::fs::create_dir_all(&root).expect("create project root");
@@ -1358,7 +1392,8 @@ mod tests {
             .into_iter()
             .find(|candidate| candidate.id == review.id)
             .expect("review ticket remains available");
-        assert_eq!(saved.status, "review");
+        assert_eq!(saved.status, "blocked");
+        assert_eq!(saved.evidence.resume_status.as_deref(),Some("review"));
         assert_eq!(ticket_agent_for_dispatch(&saved, &[]), "studio_reviewer");
         assert!(ticket_can_be_retried(
             &saved,

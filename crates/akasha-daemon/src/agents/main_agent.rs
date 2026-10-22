@@ -835,15 +835,15 @@ User message:\n{}",
     fn resume_task_admitted(&self,store_path:&Path,task_id:Uuid)->anyhow::Result<()> {
         let store = TaskStore::open(store_path)?;
         let task = store.get(task_id)?.ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        let studio=store.lineage_root_studio_project_id(task_id)?.is_some();
         let resumable = matches!(
             task.status,
             TaskStatus::Paused | TaskStatus::Interrupted
-        );
+        ) || (studio && task.status==TaskStatus::Failed);
         if !resumable {
             anyhow::bail!("task not resumable (status: {})", task.status.as_str());
         }
         if crate::studio_recovery::is_active(task_id){anyhow::bail!("task execution is still stopping; retry resume when it is inactive");}
-        let studio=store.lineage_root_studio_project_id(task_id)?.is_some();
         let checkpoint=if studio {Some(crate::studio_recovery::request_resume(store_path,task_id).map_err(anyhow::Error::msg)?)}else{None};
         // Remember the original status so we can roll back on channel closure.
         let original_status = task.status;
@@ -880,7 +880,7 @@ User message:\n{}",
         };
         // Update status to Queued BEFORE enqueuing so the conversation worker won't
         // see a Paused/Interrupted status and silently drop the task.
-        if !store.transition_if(task_id,&[TaskStatus::Paused,TaskStatus::Interrupted],TaskStatus::Queued)?{anyhow::bail!("task changed while preparing resume");}
+        if !store.transition_if(task_id,&[original_status.clone()],TaskStatus::Queued)?{anyhow::bail!("task changed while preparing resume");}
         if let Err(e) = tx.try_send(task_msg) {
             match e {
                 mpsc::error::TrySendError::Full(_) => {
