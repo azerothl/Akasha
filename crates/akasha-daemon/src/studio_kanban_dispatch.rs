@@ -163,7 +163,9 @@ async fn dispatch_idle_projects(
             initial_ticket
                 .as_ref()
                 .filter(|ticket| ticket.status != "done")
-                .filter(|ticket| ticket_can_be_retried(ticket, &root, &task_statuses, now))
+                .filter(|ticket| {
+                    ticket_can_be_retried(ticket, &root, &task_statuses, store_path, now)
+                })
                 .cloned()
                 .into_iter()
                 .collect()
@@ -171,7 +173,9 @@ async fn dispatch_idle_projects(
             request_needing_planning
                 .or(request_needing_correction_planning)
                 .filter(|ticket| ticket.status != "done")
-                .filter(|ticket| ticket_can_be_retried(ticket, &root, &task_statuses, now))
+                .filter(|ticket| {
+                    ticket_can_be_retried(ticket, &root, &task_statuses, store_path, now)
+                })
                 .cloned()
                 .into_iter()
                 .collect()
@@ -185,7 +189,9 @@ async fn dispatch_idle_projects(
                 })
                 .filter(|ticket| ticket.status != "done")
                 .filter(|ticket| studio_ticket_prerequisite_done(&root, ticket))
-                .filter(|ticket| ticket_can_be_retried(ticket, &root, &task_statuses, now))
+                .filter(|ticket| {
+                    ticket_can_be_retried(ticket, &root, &task_statuses, store_path, now)
+                })
                 .cloned()
                 .collect()
         };
@@ -425,6 +431,7 @@ fn ticket_can_be_retried(
     ticket: &StudioTicket,
     project_root: &Path,
     task_statuses: &HashMap<String, TaskStatus>,
+    store_path: &Path,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     if ticket.status == "todo" {
@@ -435,10 +442,17 @@ fn ticket_can_be_retried(
     if ticket.status != "in_progress" && ticket.status != "review" && !automatically_blocked {
         return false;
     }
-    if automatically_blocked
-        && automatic_failure_attempt_count(ticket, project_root) >= MAX_AUTOMATIC_FAILURE_ATTEMPTS
-    {
-        return false;
+    if automatically_blocked {
+        let attempts = automatic_failure_attempt_count(ticket, project_root);
+        if attempts >= MAX_AUTOMATIC_FAILURE_ATTEMPTS {
+            return false;
+        }
+        // The local context guard rejects before contacting the provider or
+        // running tools. Retry promptly with the compact Kanban planning prompt;
+        // normal provider/tool failures still use the cooldown below.
+        if is_local_context_preflight_failure(ticket, task_statuses, store_path) {
+            return true;
+        }
     }
     let related_task_terminal = ticket
         .related_task_id
@@ -472,6 +486,35 @@ fn ticket_can_be_retried(
     let failed_attempts = failed_dispatch_count(ticket, project_root, task_statuses);
     let effective_cooldown = retry_cooldown_secs(cooldown_secs, failed_attempts);
     retry_cooldown_elapsed(last_dispatch, now, effective_cooldown)
+}
+
+fn is_local_context_preflight_failure(
+    ticket: &StudioTicket,
+    task_statuses: &HashMap<String, TaskStatus>,
+    store_path: &Path,
+) -> bool {
+    let Some(task_id) = ticket.related_task_id.as_deref() else {
+        return false;
+    };
+    if !task_statuses.get(task_id).is_some_and(|status| {
+        matches!(
+            status,
+            TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Interrupted
+        )
+    }) {
+        return false;
+    }
+    let Ok(task_id) = uuid::Uuid::parse_str(task_id) else {
+        return false;
+    };
+    TaskStore::open(store_path)
+        .ok()
+        .and_then(|store| store.get_outcome(task_id).ok().flatten())
+        .is_some_and(|outcome| {
+            outcome
+                .to_string()
+                .contains("context_window_preflight_rejected")
+        })
 }
 
 fn has_automatic_failure_for_current_task(ticket: &StudioTicket, project_root: &Path) -> bool {
@@ -1130,24 +1173,28 @@ mod tests {
     #[test]
     fn dispatches_todo_and_review_but_not_blocked_tickets() {
         let dir = tempfile::tempdir().expect("project root");
+        let store_path = dir.path().join("tasks.db");
         let statuses = HashMap::new();
         let now = chrono::Utc::now();
         assert!(ticket_can_be_retried(
             &ticket("todo", None),
             dir.path(),
             &statuses,
+            &store_path,
             now
         ));
         assert!(ticket_can_be_retried(
             &ticket("review", None),
             dir.path(),
             &statuses,
+            &store_path,
             now
         ));
         assert!(!ticket_can_be_retried(
             &ticket("blocked", None),
             dir.path(),
             &statuses,
+            &store_path,
             now
         ));
     }
@@ -1172,11 +1219,22 @@ mod tests {
             .find(|candidate| candidate.id == "failed-ticket")
             .expect("reconciled ticket");
         assert_eq!(blocked.status, "blocked");
-        assert!(blocked.evidence.summary.as_deref().unwrap_or_default().contains("failed"));
+        assert!(blocked
+            .evidence
+            .summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("failed"));
         assert!(has_automatic_failure_for_current_task(&blocked, &root));
 
         let future = chrono::Utc::now() + chrono::Duration::hours(1);
-        assert!(ticket_can_be_retried(&blocked, &root, &statuses, future));
+        assert!(ticket_can_be_retried(
+            &blocked,
+            &root,
+            &statuses,
+            &task_store_path,
+            future
+        ));
         for task_id in [
             "00000000-0000-0000-0000-000000000002",
             "00000000-0000-0000-0000-000000000003",
@@ -1191,7 +1249,84 @@ mod tests {
             .expect("record later failed retry");
         }
         assert_eq!(automatic_failure_attempt_count(&blocked, &root), 3);
-        assert!(!ticket_can_be_retried(&blocked, &root, &statuses, future));
+        assert!(!ticket_can_be_retried(
+            &blocked,
+            &root,
+            &statuses,
+            &task_store_path,
+            future
+        ));
+    }
+
+    #[test]
+    fn local_context_preflight_retries_immediately_but_provider_errors_wait() {
+        for (reason, expected_retry) in [
+            (
+                "context_window_preflight_rejected: nothing was sent",
+                true,
+            ),
+            ("provider context_window_exceeded: request rejected", false),
+        ] {
+            let dir = tempfile::tempdir().expect("project root");
+            let root = dir.path().join("project");
+            std::fs::create_dir_all(&root).expect("create project root");
+            let store_path = dir.path().join("tasks.db");
+            let store = TaskStore::open(&store_path).expect("create task store");
+            let task_id = uuid::Uuid::new_v4();
+            store
+                .insert(&akasha_store::Task {
+                    id: task_id,
+                    parent_task_id: None,
+                    status: TaskStatus::Failed,
+                    assigned_agent: "studio_project_manager".to_string(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                    initial_message: None,
+                    studio_project_id: Some("project-1".to_string()),
+                })
+                .expect("insert failed planning task");
+            store
+                .finalize_outcome(
+                    task_id,
+                    TaskStatus::Failed,
+                    serde_json::json!({
+                        "termination_reason": "provider_error",
+                        "reason": reason,
+                    }),
+                )
+                .expect("save failure outcome");
+
+            let mut failed = ticket("in_progress", Some(&task_id.to_string()));
+            failed.id = "initial-request".to_string();
+            failed.acceptance_criteria[0].id = Some("initial-kanban-backlog".to_string());
+            api_studio::studio_upsert_ticket(&root, failed.clone()).expect("save request ticket");
+            let statuses = HashMap::from([(task_id.to_string(), TaskStatus::Failed)]);
+            record_terminal_task_failure(&root, &failed, &statuses, &store_path);
+            api_studio::studio_append_ticket_event(
+                &root,
+                &failed.id,
+                "ticket_dispatch_scheduled",
+                "kanban_scheduler",
+                Some(serde_json::json!({"task_id": task_id.to_string()})),
+            )
+            .expect("record recent dispatch");
+
+            let blocked = studio_list_tickets(&root)
+                .into_iter()
+                .find(|candidate| candidate.id == failed.id)
+                .expect("read blocked request ticket");
+            assert_eq!(
+                ticket_can_be_retried(
+                    &blocked,
+                    &root,
+                    &statuses,
+                    &store_path,
+                    chrono::Utc::now()
+                ),
+                expected_retry,
+                "unexpected retry decision for {reason}"
+            );
+        }
     }
 
     #[test]
@@ -1205,6 +1340,7 @@ mod tests {
             &current,
             dir.path(),
             &statuses,
+            &dir.path().join("tasks.db"),
             chrono::Utc::now()
         ));
         statuses.insert(task_id.to_string(), TaskStatus::Failed);
@@ -1212,6 +1348,7 @@ mod tests {
             &current,
             dir.path(),
             &statuses,
+            &dir.path().join("tasks.db"),
             chrono::Utc::now()
         ));
     }

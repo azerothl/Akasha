@@ -1348,6 +1348,13 @@ pub(crate) fn studio_initial_backlog_preflight(
     Ok(())
 }
 
+/// Recognize both the first user project request and scheduled follow-up passes
+/// that only plan the initial Kanban backlog.
+pub(crate) fn studio_is_initial_backlog_planning_message(message: &str) -> bool {
+    message.contains("[Planification Kanban initiale Code Studio]")
+        || message.contains("[Code Studio — première demande : planifier le backlog initial")
+}
+
 pub(crate) fn studio_initial_backlog_is_ready(
     root_ticket: &StudioTicket,
     tickets: &[StudioTicket],
@@ -4256,6 +4263,19 @@ fn guess_mime_and_text(rel: &str, bytes: &[u8]) -> (&'static str, bool) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn recognizes_user_and_scheduled_initial_backlog_planning_runs() {
+        assert!(super::studio_is_initial_backlog_planning_message(
+            "[Code Studio — première demande : planifier le backlog initial]"
+        ));
+        assert!(super::studio_is_initial_backlog_planning_message(
+            "[Planification Kanban initiale Code Studio]"
+        ));
+        assert!(!super::studio_is_initial_backlog_planning_message(
+            "Crée une webapp de todo list avec une page responsive."
+        ));
+    }
+
+    #[test]
     fn workspace_inventory_marks_empty_roots_and_hides_secret_files() {
         let dir = tempfile::tempdir().expect("temporary workspace");
         let empty = super::studio_workspace_inventory_message_prefix(dir.path());
@@ -5347,7 +5367,7 @@ Try `npm i --save-dev @types/jest`";
         .expect("save project metadata");
 
         let request = format!(
-            "Crée le projet « Todo — observation autonome » selon ce résumé :\n\n{summary}\n\nStack demandée : Vite + React + TypeScript strict; tests Vitest"
+            "Crée le projet « Todo — observation autonome » selon ce résumé :\n\n{summary}"
         );
         let id = studio_create_evolution_ticket_from_chat(dir.path(), &request)
             .expect("create initial ticket and seed backlog");
@@ -5362,6 +5382,7 @@ Try `npm i --save-dev @types/jest`";
             super::studio_meta_prefixes_for_request(dir.path(), &request);
         assert!(project.is_none(), "the summary is already in the submitted request");
         assert!(evolution.is_none(), "the evolution summary repeats the project brief");
-        assert!(stack.is_none(), "the selected stack is already in the submitted request");
+        let stack = stack.expect("the separately saved stack is injected exactly once");
+        assert!(stack.contains("Vite + React + TypeScript strict; tests Vitest"));
     }
 }

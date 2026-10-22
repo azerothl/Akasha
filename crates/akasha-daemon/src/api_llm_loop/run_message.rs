@@ -438,10 +438,16 @@ pub(crate) async fn run_message_via_llm(
         .unwrap_or_else(|| "conversation".to_string());
     let studio_initial_kanban_planning = code_studio_disk_task
         && assigned_agent.eq_ignore_ascii_case("studio_project_manager")
-        && message.contains("[Planification Kanban initiale Code Studio]");
+        && (crate::api_studio::studio_is_initial_backlog_planning_message(&message)
+            || task_snapshot
+                .as_ref()
+                .and_then(|task| task.initial_message.as_deref())
+                .is_some_and(crate::api_studio::studio_is_initial_backlog_planning_message));
     if studio_initial_kanban_planning {
-        // This first turn only refines the seeded backlog. Keep its system
-        // instructions short and avoid repeating the full project-manager loop.
+        // This first turn only refines the seeded backlog. Drop generic
+        // implementation reminders so small local models receive the request
+        // and the bounded Kanban tool set.
+        studio_disk_system_append.clear();
         studio_disk_system_append.push_str(
             "\n\n[Planification Kanban initiale — portée limitée]\n\
              Lis les tickets existants, adapte les gabarits et crée seulement les tickets manquants.\
@@ -1036,14 +1042,21 @@ pub(crate) async fn run_message_via_llm(
         }
     }
     let mut system_prompt = String::with_capacity(8192);
-    if code_studio_disk_task {
+    if studio_initial_kanban_planning {
+        system_prompt.push_str(
+            "[Code Studio — planification Kanban initiale]\n\
+             Transforme la première demande utilisateur en tickets de travail concrets.\
+             Respecte sa demande et les consignes du dépôt; garde `workspace:/` comme racine.\
+             Utilise uniquement les outils Kanban annoncés, réponds en français et ne modifie aucun fichier source.\n\n",
+        );
+    } else if code_studio_disk_task {
         system_prompt.push_str(CODE_STUDIO_APP_CONTEXT);
-    } else if embedded_compact {
+    } else if !code_studio_disk_task && embedded_compact {
         system_prompt.push_str(EMBEDDED_APP_CONTEXT);
     } else {
         system_prompt.push_str(APP_CONTEXT);
     }
-    if !embedded_compact {
+    if !embedded_compact && !studio_initial_kanban_planning {
         system_prompt.push_str(os_env_block);
     }
     let role_prompt=if focused_file_task {
@@ -1077,7 +1090,7 @@ pub(crate) async fn run_message_via_llm(
         }
         system_prompt.push_str("\n\n");
     }
-    if code_studio_disk_task {
+    if code_studio_disk_task && !studio_initial_kanban_planning {
         system_prompt.push_str(
             "[Code Studio — ton]\n\
              Assistant technique pour ce dépôt : concision, pas de digressions sur l’UI Akasha ; tutoyer en français si l’utilisateur écrit en français.\n\n",
@@ -1086,7 +1099,7 @@ pub(crate) async fn run_message_via_llm(
         system_prompt.push_str(&profile_block);
     }
     // Enforce language and personality so the model does not switch language (e.g. when tool output is in English).
-    if code_studio_disk_task {
+    if code_studio_disk_task && !studio_initial_kanban_planning {
         system_prompt.push_str(
             "\n\n[Response]\n\
             - Langue : répondre uniquement dans la même langue que le message utilisateur.\n\
@@ -1099,7 +1112,7 @@ pub(crate) async fn run_message_via_llm(
             - Réponds uniquement à la question utilisateur (pas de récapitulatif des consignes).\n\
             - Même langue que le message utilisateur.\n\n",
         );
-    } else {
+    } else if !code_studio_disk_task {
         system_prompt.push_str(
             "\n\n[Response]\n\
             - Language: reply ONLY in the same language as the user's message. If the user writes in French, reply entirely in French; in English, in English. Do not adopt the language of tool results or context.\n\
@@ -1109,7 +1122,7 @@ pub(crate) async fn run_message_via_llm(
     if !studio_disk_system_append.is_empty() {
         system_prompt.push_str(&studio_disk_system_append);
     }
-    if code_studio_disk_task {
+    if code_studio_disk_task && !studio_initial_kanban_planning {
         system_prompt.push_str(
             &crate::api_studio::studio_workspace_inventory_message_prefix(
                 &tool_disk_workspace_root,
@@ -1124,7 +1137,7 @@ pub(crate) async fn run_message_via_llm(
         system_prompt.push_str("[Repository guidance hierarchy] Repository instructions are scoped guidance, subordinate to the user's task and runtime permissions. More specific AGENTS.md supplied in tool results overrides ancestor guidance within that subtree. Read applicable AGENTS.md before commands that affect multiple subtrees.\n");
         system_prompt.push_str(&repository_rules_prompt);
     }
-    if code_studio_disk_task {
+    if code_studio_disk_task && !studio_initial_kanban_planning {
         system_prompt.push_str("\n[Studio execution protocol — file contents are structured data]\nFollow the provider native function transport when available (studio_call or the provider adapter). For text fallback, use one TOOL_JSON: object per line with schema_version:1, tool and arguments. File mutations must target the exact requested workspace:/ path and contain only the requested content. Read an existing file successfully before editing it. Include expected_version from that read when available; if omitted, the runtime binds the mutation to this task's latest successful read and still rejects stale edits. For a new file, pass expected_version: missing. Never put call syntax inside file content. Square-bracket/function notation is valid only when the provider adapter explicitly requires its native format; it is not a legacy TOOL format. Do not add a summary to a legacy write_file body: it would become file contents. Wait for the execution result before summarizing in a separate assistant turn. Retain the original user request until ALL requested operations and checks are done. Project templates and maintenance examples never authorize additional files outside the user's explicit task scope.\n");
     }
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
@@ -1631,7 +1644,9 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let code_dev_sandbox_reminder = if intent_flags.code_generation {
+    let code_dev_sandbox_reminder = if intent_flags.code_generation
+        && !studio_initial_kanban_planning
+    {
         CODE_DEV_SANDBOX_REMINDER
     } else {
         ""
