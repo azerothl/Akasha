@@ -34,7 +34,24 @@ class RealAgenticEvalTests(unittest.TestCase):
 
     def test_task_completion_status_aliases_are_supported(self):
         self.assertEqual(eval_runner.TASK_SUCCEEDED, {"done", "completed"})
-        self.assertTrue(eval_runner.TASK_SUCCEEDED <= eval_runner.TERMINAL)
+        self.assertTrue({"waiting_user_input", "paused", "interrupted"} <= eval_runner.TERMINAL)
+
+    def test_task_polling_finishes_at_pending_user_input_without_text_in_report(self):
+        task_id = "e2f5b1a7-0c6b-4738-9a8d-8cb24e75d8f1"
+        with patch.object(
+            eval_runner,
+            "http_json",
+            side_effect=[
+                {"status": "running"},
+                {"pending": [{"task_id": task_id, "question": "Do not preserve this question"}]},
+                {"events": [{"event_type": "task_waiting_user_input", "payload": {"tool_approval": True}}]},
+            ],
+        ):
+            task, events = eval_runner.poll_task("http://daemon", task_id, 5)
+        self.assertEqual(task["status"], "waiting_user_input")
+        self.assertTrue(task["tool_approval_pending"])
+        self.assertNotIn("question", task)
+        self.assertEqual(len(events["events"]), 1)
 
     def test_clean_env_removes_secrets_but_keeps_runtime_path(self):
         with patch.dict(os.environ, {"AKASHA_EVAL_TEST_API_KEY": "secret", "AKASHA_EVAL_TEST_TOKEN": "secret", "AKASHA_EVAL_TEST_VISIBLE": "yes"}):

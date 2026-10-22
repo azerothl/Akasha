@@ -41,7 +41,7 @@ ROUTES = (
     "utility",
     "research",
 )
-TERMINAL = {"done", "completed", "failed", "cancelled"}
+TERMINAL = {"done", "completed", "failed", "cancelled", "paused", "interrupted", "waiting_user_input"}
 TASK_SUCCEEDED = {"done", "completed"}
 MUTATING_TOOLS = {
     "write_file",
@@ -345,6 +345,17 @@ def poll_task(base: str, task_id: str, timeout_secs: int) -> tuple[dict[str, Any
         if task.get("status") in TERMINAL:
             events = http_json(base, "GET", f"/api/tasks/{task_id}/events").get("events", [])
             return task, {"events": events if isinstance(events, list) else []}
+        pending = http_json(base, "GET", "/api/pending-human-input").get("pending", [])
+        if any(isinstance(item, dict) and item.get("task_id") == task_id for item in pending):
+            events = http_json(base, "GET", f"/api/tasks/{task_id}/events").get("events", [])
+            events = events if isinstance(events, list) else []
+            task["status"] = "waiting_user_input"
+            task["tool_approval_pending"] = any(
+                entry.get("event_type") == "task_waiting_user_input"
+                and (entry.get("payload") or {}).get("tool_approval") is True
+                for entry in events
+            )
+            return task, {"events": events}
         time.sleep(2)
     raise RuntimeError(f"task timed out ({task_id})")
 
@@ -424,6 +435,7 @@ def submit_message(
     return {
         "task_id": task_id,
         "status": task.get("status"),
+        "tool_approval_pending": bool(task.get("tool_approval_pending")),
         "assigned_agent": task.get("assigned_agent"),
         "model_used": model_used,
         "model_match": model_match,
@@ -481,6 +493,7 @@ def scenario_result(
         "tools": tools,
         "tool_results": [{"tool": tool, "success": success} for tool, success in tool_results],
         "task_statuses": [call.get("status") for call in calls],
+        "tool_approval_pending": any(call.get("tool_approval_pending") for call in calls),
         "response_chars": sum(int(call.get("response_chars", 0) or 0) for call in calls),
         "provider_model_deltas": providers,
         "llm_call_count": sum(len(call.get("llm_success_models", [])) + len(call.get("llm_failure_kinds", [])) for call in calls),
