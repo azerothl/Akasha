@@ -55,6 +55,18 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use uuid::Uuid;
 
+fn write_file_reminder_for_policy(
+    save_file: bool,
+    code_studio_disk_task: bool,
+    write_file_allowed: bool,
+) -> &'static str {
+    if save_file && !code_studio_disk_task && write_file_allowed {
+        WRITE_FILE_REMINDER
+    } else {
+        ""
+    }
+}
+
 async fn studio_round_limit_choice(store: &Option<HumanInputStore>, bus: &EventBus, task: Uuid, round: u32, max: u32) -> Option<String> {
     let store = store.as_ref()?;
     let question = "Limite de tours d'outils atteinte. Souhaitez-vous continuer la tâche ?".to_string();
@@ -1264,11 +1276,15 @@ pub(crate) async fn run_message_via_llm(
             }
         }
     };
-    let write_reminder = if intent_flags.save_file && !code_studio_disk_task {
-        WRITE_FILE_REMINDER
-    } else {
-        ""
-    };
+    let write_file_allowed = tools_executor_snapshot
+        .as_ref()
+        .map(|executor| executor.policy.can_use_tool("write_file"))
+        .unwrap_or(false);
+    let write_reminder = write_file_reminder_for_policy(
+        intent_flags.save_file,
+        code_studio_disk_task,
+        write_file_allowed,
+    );
     // web_search is available when allowed by profile, enabled in policy, and a provider chain exists
     // (Brave/Tavily/Serper/Google PSE with keys, or keyless SearXNG + DuckDuckGo).
     let web_search_effectively_available = tools_executor_snapshot
@@ -4913,5 +4929,30 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             )
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod write_file_reminder_tests {
+    use super::write_file_reminder_for_policy;
+    use crate::api::WRITE_FILE_REMINDER;
+
+    #[test]
+    fn reminder_is_omitted_when_write_file_is_disallowed() {
+        assert_eq!(write_file_reminder_for_policy(true, false, false), "");
+    }
+
+    #[test]
+    fn reminder_is_included_when_write_file_is_allowed_for_file_intent() {
+        assert_eq!(
+            write_file_reminder_for_policy(true, false, true),
+            WRITE_FILE_REMINDER
+        );
+    }
+
+    #[test]
+    fn reminder_is_omitted_for_code_studio_disk_tasks_and_other_intents() {
+        assert_eq!(write_file_reminder_for_policy(true, true, true), "");
+        assert_eq!(write_file_reminder_for_policy(false, false, true), "");
     }
 }

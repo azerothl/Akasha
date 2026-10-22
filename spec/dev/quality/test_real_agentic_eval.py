@@ -15,9 +15,111 @@ SPEC.loader.exec_module(eval_runner)
 
 
 class RealAgenticEvalTests(unittest.TestCase):
+    def test_llm_failure_diagnostics_are_categorical(self):
+        self.assertEqual(
+            eval_runner.classify_llm_failure("Provider rejected malformed tool-call JSON before execution"),
+            "tool_call_json_parse",
+        )
+        self.assertEqual(
+            eval_runner.classify_llm_failure("Provider rejected malformed_tool_call_json before execution"),
+            "tool_call_json_parse",
+        )
+        self.assertEqual(eval_runner.classify_llm_failure("task timed out"), "timeout")
+        self.assertEqual(eval_runner.classify_llm_failure("context_window_exceeded"), "context_window")
+
+    def test_unfinished_llm_call_uses_terminal_failure_diagnostics(self):
+        diagnostics = eval_runner.llm_call_diagnostics(
+            [
+                {"event_type": "llm_call_started", "payload": {"round": 2}},
+                {"event_type": "task_failed", "payload": {"reason": "context_window_exceeded"}},
+            ],
+            {"status": "failed"},
+            "",
+        )
+        self.assertEqual(diagnostics["call_count"], 1)
+        self.assertEqual(diagnostics["unfinished_count"], 1)
+        self.assertEqual(diagnostics["failure_kinds"], ["context_window"])
+        self.assertEqual(diagnostics["success_models"], [])
+
+    def test_submit_message_passes_collected_models_to_provider_verification(self):
+        events = [
+            {"event_type": "llm_call_started", "payload": {"round": 1}},
+            {
+                "event_type": "llm_call_finished",
+                "payload": {"round": 1, "success": True, "model_used": "qwen2.5-coder:14b"},
+            },
+        ]
+        after = {
+            "ollama::qwen2.5-coder:14b": {
+                "total_requests": 1,
+                "successful_requests": 1,
+                "failed_requests": 0,
+                "fallback_triggered": 0,
+                "fallback_success": 0,
+            }
+        }
+        with (
+            patch.object(eval_runner, "metric_snapshot", side_effect=[{}, after]),
+            patch.object(eval_runner, "http_json", return_value={"task_id": "task-1"}),
+            patch.object(
+                eval_runner,
+                "poll_task",
+                return_value=({"status": "done", "progress": [{"message": "ok"}]}, {"events": events}),
+            ),
+            patch.object(eval_runner, "model_device_match", return_value=(True, 1024)),
+        ):
+            result = eval_runner.submit_message(
+                "http://daemon",
+                "prompt",
+                "ask",
+                True,
+                5,
+                "qwen2.5-coder:14b",
+                "http://ollama",
+                "cuda",
+            )
+        self.assertTrue(result["model_match"])
+        self.assertEqual(result["provider_used"], "ollama")
+        self.assertEqual(result["llm_success_models"], ["qwen2.5-coder:14b"])
+
+    def test_schedule_response_marker_is_exact_after_whitespace_normalization(self):
+        self.assertEqual(eval_runner.normalized_marker_response("  SCHEDULE_OK\n"), "schedule_ok")
+        self.assertEqual(eval_runner.normalized_marker_response("The task says SCHEDULE_OK"), "thetasksaysschedule_ok")
+        self.assertNotEqual(
+            eval_runner.normalized_marker_response("The task says SCHEDULE_OK"),
+            "schedule_ok",
+        )
+
+    def test_provider_and_model_are_verified_from_success_event_and_provider_key(self):
+        matched, provider = eval_runner.provider_model_evidence(
+            "qwen3.5:9b",
+            "qwen3.5:9b",
+            ["qwen3.5:9b"],
+            [{"provider": "ollama", "model": "qwen3.5:9b", "total_requests": 3, "successful_requests": 0}],
+        )
+        self.assertTrue(matched)
+        self.assertEqual(provider, "ollama")
+
     def test_task_completion_status_aliases_are_supported(self):
         self.assertEqual(eval_runner.TASK_SUCCEEDED, {"done", "completed"})
-        self.assertTrue(eval_runner.TASK_SUCCEEDED <= eval_runner.TERMINAL)
+        self.assertTrue({"waiting_user_input", "paused", "interrupted"} <= eval_runner.TERMINAL)
+
+    def test_task_polling_finishes_at_pending_user_input_without_text_in_report(self):
+        task_id = "e2f5b1a7-0c6b-4738-9a8d-8cb24e75d8f1"
+        with patch.object(
+            eval_runner,
+            "http_json",
+            side_effect=[
+                {"status": "running"},
+                {"pending": [{"task_id": task_id, "question": "Do not preserve this question"}]},
+                {"events": [{"event_type": "task_waiting_user_input", "payload": {"tool_approval": True}}]},
+            ],
+        ):
+            task, events = eval_runner.poll_task("http://daemon", task_id, 5)
+        self.assertEqual(task["status"], "waiting_user_input")
+        self.assertTrue(task["tool_approval_pending"])
+        self.assertNotIn("question", task)
+        self.assertEqual(len(events["events"]), 1)
 
     def test_clean_env_removes_secrets_but_keeps_runtime_path(self):
         with patch.dict(os.environ, {"AKASHA_EVAL_TEST_API_KEY": "secret", "AKASHA_EVAL_TEST_TOKEN": "secret", "AKASHA_EVAL_TEST_VISIBLE": "yes"}):
@@ -37,9 +139,93 @@ class RealAgenticEvalTests(unittest.TestCase):
         self.assertEqual(policy["allowed_write_paths"], [str(root)])
         self.assertEqual(policy["allowed_commands"], [])
         tools = policy["tool_profiles"]["real_agentic_eval"]
-        self.assertIn("write_file", tools)
+        self.assertIn("memory_store", tools)
+        self.assertIn("schedule_task", tools)
+        self.assertNotIn("write_file", tools)
         self.assertNotIn("run_command", tools)
         self.assertNotIn("github_create_pr", tools)
+
+    def test_policy_refusal_profile_allows_only_a_write_tool_and_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / "data"
+            allowed_dir = root / "allowed"
+            data_dir.mkdir()
+            allowed_dir.mkdir()
+            eval_runner.write_eval_tools_policy(
+                data_dir,
+                root,
+                allowed_tools=["write_file"],
+                allowed_write_paths=[allowed_dir],
+            )
+            policy = json.loads((data_dir / "tools_policy.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(policy["tool_profiles"]["real_agentic_eval"], ["write_file"])
+        self.assertEqual(policy["allowed_write_paths"], [str(allowed_dir)])
+        self.assertEqual(policy["allowed_commands"], [])
+
+    def test_policy_refusal_passes_when_denial_is_expected_even_if_task_fails(self):
+        call = {"status": "failed", "model_match": True, "provider_used": "ollama"}
+        self.assertTrue(eval_runner.policy_refusal_passed(call, True, True, True))
+        self.assertFalse(eval_runner.policy_refusal_passed(call, True, False, True))
+        self.assertFalse(eval_runner.policy_refusal_passed(call, False, True, True))
+        self.assertFalse(eval_runner.policy_refusal_passed(call, True, True, False))
+
+    def test_policy_refusal_prompt_exercises_virtual_workspace_path(self):
+        self.assertIn("workspace:/denied/policy_canary.txt", eval_runner.policy_refusal_prompt())
+
+    def test_tool_choice_prompt_forbids_file_writes(self):
+        prompt = eval_runner.memory_store_prompt("AKASHA_EVAL_MEMORY_TEST")
+        self.assertIn("Use only memory_store", prompt)
+        self.assertIn("Do not call write_file", prompt)
+
+    def test_schedule_prompt_requires_an_actual_tool_call(self):
+        prompt = eval_runner.schedule_task_prompt("eval-title")
+        self.assertIn("Call the schedule_task tool now", prompt)
+        self.assertIn("FREQ=HOURLY", prompt)
+        self.assertIn("Reply SCHEDULE_OK", prompt)
+        self.assertIn("eval-title", prompt)
+        self.assertIn("Do not claim that it was created", prompt)
+
+    def test_scenario_report_keeps_tool_outcomes_without_result_previews(self):
+        call = {
+            "tools": ["write_file"],
+            "tool_events": [
+                {"tool": "write_file", "success": False, "result_preview": "path not allowed by policy"}
+            ],
+            "provider_model_deltas": [],
+            "status": "done",
+            "response_chars": 12,
+            "latency_ms": 100,
+            "model_used": None,
+            "tokens_out": 0,
+            "fallback_triggered": False,
+            "fallback_success": False,
+            "model_match": True,
+            "provider_used": "ollama",
+            "device_match": True,
+            "model_vram_bytes": 1024,
+            "llm_success_models": ["qwen2.5-coder:14b"],
+            "llm_failure_kinds": ["context_window"],
+        }
+        result = eval_runner.scenario_result(
+            "policy_refusal",
+            [call],
+            True,
+            "denied",
+            {"policy_denial_observed": True, "protected_file_unchanged": True},
+        )
+        self.assertEqual(result["tool_results"], [{"tool": "write_file", "success": False}])
+        self.assertEqual(result["task_statuses"], ["done"])
+        self.assertEqual(result["response_chars"], 12)
+        self.assertEqual(result["llm_call_count"], 2)
+        self.assertEqual(result["llm_success_count"], 1)
+        self.assertEqual(result["llm_failure_kinds"], ["context_window"])
+        self.assertEqual(result["llm_success_models"], ["qwen2.5-coder:14b"])
+        self.assertEqual(
+            result["checks"],
+            {"policy_denial_observed": True, "protected_file_unchanged": True},
+        )
+        self.assertNotIn("result_preview", json.dumps(result))
 
     def test_fallback_uses_known_provider_and_unavailable_model(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -51,6 +237,15 @@ class RealAgenticEvalTests(unittest.TestCase):
         self.assertEqual(route["primary"]["model"], "qwen2.5-coder:14b-akasha-eval-unavailable")
         self.assertEqual(route["fallback"][0]["model"], "qwen2.5-coder:14b")
         self.assertEqual(route["fallback"][0]["config"]["num_gpu"], 0)
+
+    def test_router_allows_real_models_a_reasonable_tool_response_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            eval_runner.write_router(root, "qwen3.5:9b", "http://127.0.0.1:11434", "cuda")
+            config = json.loads((root / "llm_router.yaml").read_text(encoding="utf-8"))
+        route = config["task_types"]["conversation"]["primary"]["config"]
+        self.assertEqual(route["max_tokens"], 2048)
+        self.assertEqual(route["num_gpu"], 99)
 
     def test_device_verification_uses_ollama_vram_evidence(self):
         with patch.object(eval_runner, "ollama_processes", return_value=[{"name": "qwen2.5-coder:14b", "size_vram_bytes": 0}]):
