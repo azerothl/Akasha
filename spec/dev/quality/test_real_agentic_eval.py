@@ -37,9 +37,54 @@ class RealAgenticEvalTests(unittest.TestCase):
         self.assertEqual(policy["allowed_write_paths"], [str(root)])
         self.assertEqual(policy["allowed_commands"], [])
         tools = policy["tool_profiles"]["real_agentic_eval"]
-        self.assertIn("write_file", tools)
+        self.assertIn("memory_store", tools)
+        self.assertIn("schedule_task", tools)
+        self.assertNotIn("write_file", tools)
         self.assertNotIn("run_command", tools)
         self.assertNotIn("github_create_pr", tools)
+
+    def test_policy_refusal_profile_allows_only_a_write_tool_and_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / "data"
+            allowed_dir = root / "allowed"
+            data_dir.mkdir()
+            allowed_dir.mkdir()
+            eval_runner.write_eval_tools_policy(
+                data_dir,
+                root,
+                allowed_tools=["write_file"],
+                allowed_write_paths=[allowed_dir],
+            )
+            policy = json.loads((data_dir / "tools_policy.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(policy["tool_profiles"]["real_agentic_eval"], ["write_file"])
+        self.assertEqual(policy["allowed_write_paths"], [str(allowed_dir)])
+        self.assertEqual(policy["allowed_commands"], [])
+
+    def test_scenario_report_keeps_tool_outcomes_without_result_previews(self):
+        call = {
+            "tools": ["write_file"],
+            "tool_events": [
+                {"tool": "write_file", "success": False, "result_preview": "path not allowed by policy"}
+            ],
+            "provider_model_deltas": [],
+            "status": "done",
+            "response_chars": 12,
+            "latency_ms": 100,
+            "model_used": None,
+            "tokens_out": 0,
+            "fallback_triggered": False,
+            "fallback_success": False,
+            "model_match": True,
+            "provider_used": "ollama",
+            "device_match": True,
+            "model_vram_bytes": 1024,
+        }
+        result = eval_runner.scenario_result("policy_refusal", [call], True, "denied")
+        self.assertEqual(result["tool_results"], [{"tool": "write_file", "success": False}])
+        self.assertEqual(result["task_statuses"], ["done"])
+        self.assertEqual(result["response_chars"], 12)
+        self.assertNotIn("result_preview", json.dumps(result))
 
     def test_fallback_uses_known_provider_and_unavailable_model(self):
         with tempfile.TemporaryDirectory() as temp:
