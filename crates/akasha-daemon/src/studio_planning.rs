@@ -216,13 +216,6 @@ pub(crate) fn validate(root: &Path, parent: &StudioTicket) -> Result<Vec<String>
         .filter(|t| t.status == "todo" && t.depends_on_ticket_ids.is_empty())
         .map(|t| t.id.clone())
         .collect();
-    if ready.is_empty()
-        && !children
-            .iter()
-            .any(|t| matches!(t.status.as_str(), "in_progress" | "review" | "done"))
-    {
-        problems.push("No implementation ticket is ready".into());
-    }
     if problems.is_empty() {
         Ok(ready)
     } else {
@@ -238,6 +231,16 @@ pub(crate) fn validate(root: &Path, parent: &StudioTicket) -> Result<Vec<String>
 pub(crate) fn finish(root: &Path, task_id: &str) -> Result<Value, String> {
     let parent = linked_root(root, task_id).ok_or("planning_tracker_unavailable")?;
     let ready = validate(root, &parent)?;
+    // Readiness is an admission condition for the planning milestone, not a
+    // reason to invalidate it later when a dispatched worker becomes blocked.
+    if ready.is_empty()
+        && !api_studio::studio_list_tickets(root).iter().any(|t| {
+            t.parent_ticket_id.as_deref() == Some(&parent.id)
+                && matches!(t.status.as_str(), "in_progress" | "review" | "done")
+        })
+    {
+        return Err("initial_plan_incomplete: no implementation ticket is ready".into());
+    }
     if !api_studio::studio_list_ticket_events(root, &parent.id)
         .iter()
         .any(|e| {
@@ -442,6 +445,22 @@ mod tests {
         let root = api_studio::studio_get_ticket(dir.path(), &id).unwrap();
         assert_eq!(root.status, "in_progress");
         assert!(validate(dir.path(), &root).is_ok());
+        // A later worker failure must not retroactively fail the successful plan.
+        let mut first = api_studio::studio_list_tickets(dir.path())
+            .into_iter()
+            .find(|t| {
+                t.parent_ticket_id.as_deref() == Some(&id) && t.depends_on_ticket_ids.is_empty()
+            })
+            .unwrap();
+        first.status = "blocked".into();
+        api_studio::studio_upsert_ticket(dir.path(), first).unwrap();
+        crate::studio_kanban_dispatch::reconcile_project_tickets(dir.path(), &db);
+        assert_eq!(
+            api_studio::studio_get_ticket(dir.path(), &id)
+                .unwrap()
+                .status,
+            "in_progress"
+        );
         assert!(!api_studio::studio_list_ticket_events(dir.path(), &id)
             .iter()
             .any(|e| e.event_type == "ticket_execution_incomplete"));
