@@ -1396,8 +1396,12 @@ pub fn studio_attach_task_to_ticket(
     let Some(mut ticket) = studio_get_ticket(project_root, ticket_id) else {
         return Err("ticket_not_found".to_string());
     };
-    if ticket.status == "todo" {
+    if ticket.status == "todo" || ticket.status == "blocked" {
         ticket.status = "in_progress".to_string();
+        // A new execution is a deliberate retry of the previous blocked attempt.
+        // Keep the diagnostic in the event timeline, but don't show it as the
+        // current result while a new run is active.
+        ticket.evidence.summary = None;
     }
     ticket.related_task_id = Some(task_id.to_string());
     if !ticket.evidence.task_ids.iter().any(|t| t == task_id) {
@@ -1427,8 +1431,9 @@ pub fn studio_mark_ticket_ready_for_review(
     let Some(mut ticket) = studio_get_ticket(project_root, ticket_id) else {
         return Err("ticket_not_found".to_string());
     };
-    if ticket.status == "in_progress" {
+    if ticket.status == "in_progress" || ticket.status == "blocked" {
         ticket.status = "review".to_string();
+        ticket.evidence.summary = None;
     }
     ticket.related_task_id = Some(task_id.to_string());
     if !ticket.evidence.task_ids.iter().any(|t| t == task_id) {
@@ -1740,7 +1745,7 @@ pub(crate) fn studio_seed_initial_backlog(
         (
             "Établir le socle du projet",
             "studio_scaffold",
-            "Examiner le dépôt et sa stack, réutiliser la structure existante et ne créer que les éléments de socle réellement absents. Critère: l'architecture, le point d'entrée et les commandes du projet sont identifiés et cohérents avec la demande.",
+            "Examiner le dépôt et sa stack, réutiliser la structure existante et ne créer que les éléments de socle réellement absents. `workspace:/` est la racine canonique de l'application: réutilise ses manifests et ne crée pas un second projet imbriqué. Critère: l'architecture, le point d'entrée et les commandes du projet sont identifiés et cohérents avec la demande.",
             Vec::<String>::new(),
         ),
         (
@@ -1758,7 +1763,7 @@ pub(crate) fn studio_seed_initial_backlog(
         (
             "Valider le projet et le parcours utilisateur",
             "studio_fullstack",
-            "Exécuter les contrôles adaptés au dépôt et parcourir l'application sur les tailles d'écran pertinentes. Critères: build et vérifications applicables réussis; tout défaut distinct découvert est consigné dans un ticket Kanban.",
+            "Exécuter les contrôles adaptés au dépôt et parcourir l'application sur les tailles d'écran pertinentes. Lance le build et l'aperçu depuis la racine canonique `workspace:/`; ne valide pas un autre projet imbriqué à la place. Critères: build et vérifications applicables réussis; tout défaut distinct découvert est consigné dans un ticket Kanban.",
             vec!["integration".to_string()],
         ),
     ];
@@ -1815,7 +1820,7 @@ pub(crate) fn studio_seed_initial_backlog(
             project_id: root_ticket.project_id.clone(),
             title: (*title).to_string(),
             description: format!(
-                "{phase_description}\n\nDemande initiale à traiter:\n{request}\n\nCe ticket fait partie du backlog initial du ticket {root_ticket_id}. Ne modifie pas le suivi directement: rapporte les fichiers et les résultats au chef de projet via Code Studio."
+                "{phase_description}\n\nDemande initiale à traiter:\n{request}\n\nCe ticket fait partie du backlog initial du ticket {root_ticket_id}. Tous les fichiers de cette application restent sous la racine canonique `workspace:/`; inspecte et réutilise la stack existante au lieu de créer un projet imbriqué. Ne modifie pas le suivi directement: rapporte les fichiers et les résultats au chef de projet via Code Studio."
             ),
             status: "todo".to_string(),
             requested_by: "system_initial_backlog".to_string(),
@@ -4872,6 +4877,27 @@ Try `npm i --save-dev @types/jest`";
     }
 
     #[test]
+    fn retrying_a_blocked_ticket_clears_the_stale_failure_summary() {
+        let dir = tempfile::tempdir().expect("temporary project");
+        let mut ticket = backlog_ticket("retry-ticket", "blocked", &[], &[]);
+        ticket.evidence.summary = Some("The previous agent run failed.".to_string());
+        super::studio_upsert_ticket(dir.path(), ticket).expect("save blocked ticket");
+
+        super::studio_attach_task_to_ticket(
+            dir.path(),
+            "retry-ticket",
+            "new-task-id",
+            "kanban_scheduler",
+        )
+        .expect("attach retry task");
+
+        let retried = super::studio_get_ticket(dir.path(), "retry-ticket").expect("reload ticket");
+        assert_eq!(retried.status, "in_progress");
+        assert_eq!(retried.evidence.summary, None);
+        assert_eq!(retried.related_task_id.as_deref(), Some("new-task-id"));
+    }
+
+    #[test]
     fn creating_a_correction_child_clears_the_stale_parent_review_outcome() {
         use super::{
             save_studio_meta, studio_get_ticket, studio_list_ticket_events,
@@ -4904,6 +4930,7 @@ Try `npm i --save-dev @types/jest`";
             &[("result", "The user request is complete")],
         );
         parent.requested_by = "user_chat".to_string();
+        parent.project_id = "correction-planning-test".to_string();
         parent.review_outcome = Some("changes_requested".to_string());
         parent.review_notes = Some("The requested keyboard control is missing.".to_string());
         parent.corrective_steps = vec!["Implement and verify the missing control.".to_string()];

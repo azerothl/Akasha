@@ -12,6 +12,7 @@ use std::time::Duration;
 
 const DEFAULT_INTERVAL_SECS: u64 = 60;
 const DEFAULT_RETRY_COOLDOWN_SECS: i64 = 300;
+const MAX_AUTOMATIC_FAILURE_ATTEMPTS: usize = 3;
 
 pub fn spawn(data_dir: PathBuf, store_path: PathBuf, main_agent: MainAgent) {
     if std::env::var("AKASHA_STUDIO_KANBAN_DISPATCH_ENABLED").as_deref() == Ok("0") {
@@ -125,11 +126,20 @@ async fn dispatch_idle_projects(
                 );
             }
         }
-        let tickets = studio_list_tickets(&root);
-        for ticket in &tickets {
+        let tickets_before_reconciliation = studio_list_tickets(&root);
+        for ticket in &tickets_before_reconciliation {
             record_terminal_task_failure(&root, ticket, &task_statuses, store_path);
             record_completed_task_without_review(&root, ticket, &task_statuses, store_path);
         }
+        // Re-read after reconciliation so this pass reflects terminal task
+        // failures immediately instead of leaving stale in-progress tickets.
+        let tickets = studio_list_tickets(&root);
+        let initial_ticket = tickets.iter().find(|ticket| {
+            ticket
+                .acceptance_criteria
+                .iter()
+                .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog"))
+        }).cloned();
         let needs_backlog_planning = initial_ticket
             .as_ref()
             .is_some_and(|summary| initial_backlog_needs_planning(&root, summary, &tickets));
@@ -152,7 +162,7 @@ async fn dispatch_idle_projects(
         let mut ready: Vec<StudioTicket> = if needs_backlog_planning {
             initial_ticket
                 .as_ref()
-                .filter(|ticket| ticket.status != "done" && ticket.status != "blocked")
+                .filter(|ticket| ticket.status != "done")
                 .filter(|ticket| ticket_can_be_retried(ticket, &root, &task_statuses, now))
                 .cloned()
                 .into_iter()
@@ -160,7 +170,7 @@ async fn dispatch_idle_projects(
         } else if needs_user_request_planning || needs_user_request_correction_planning {
             request_needing_planning
                 .or(request_needing_correction_planning)
-                .filter(|ticket| ticket.status != "done" && ticket.status != "blocked")
+                .filter(|ticket| ticket.status != "done")
                 .filter(|ticket| ticket_can_be_retried(ticket, &root, &task_statuses, now))
                 .cloned()
                 .into_iter()
@@ -173,7 +183,7 @@ async fn dispatch_idle_projects(
                     !is_user_request_tracker(ticket, &tickets)
                         || user_request_children_done(ticket, &tickets)
                 })
-                .filter(|ticket| ticket.status != "done" && ticket.status != "blocked")
+                .filter(|ticket| ticket.status != "done")
                 .filter(|ticket| studio_ticket_prerequisite_done(&root, ticket))
                 .filter(|ticket| ticket_can_be_retried(ticket, &root, &task_statuses, now))
                 .cloned()
@@ -191,7 +201,7 @@ async fn dispatch_idle_projects(
                 })
                 .then_with(|| left.created_at.cmp(&right.created_at))
         });
-        if !should_dispatch_pass(ready.len(), needs_backlog_planning) {
+        if !should_dispatch_pass(ready.len()) {
             continue;
         }
         let selected_ticket = ready.first();
@@ -235,7 +245,7 @@ async fn dispatch_idle_projects(
         });
         let message = if selected_ticket_summary {
             format!(
-                "{current_ticket_marker}[Planification Kanban initiale Code Studio]\nProjet: {project_id}\nTicket global: {selected_ticket_json}\nLe backlog initial contient encore des phases génériques. Lis la demande et adapte d’abord les tickets gabarits existants; ne crée que les tâches réellement manquantes. Chaque ticket de travail doit porter parent_ticket_id = id du ticket global et une creation_key stable unique dans ce parent. N’utilise depends_on_ticket_ids que pour une vraie dépendance d’exécution entre tickets de travail : le parent sert au suivi et ne bloque pas le dispatch. Relis la liste après chaque création/mise à jour et réutilise les IDs retournés; ne recrée jamais un ticket déjà présent. Le Kanban doit couvrir les fonctionnalités demandées, leur intégration et leur validation, avec des critères observables. N'édite pas les fichiers source pendant ce passage et ne marque pas le ticket global terminé. Termine quand au moins trois tickets précis remplacent les gabarits et que seuls les vrais prérequis sont ordonnés; le balayage suivant dispatchera le premier ticket prêt. Passage planifié, pas une nouvelle demande utilisateur."
+                "{current_ticket_marker}[Planification Kanban initiale Code Studio]\nProjet: {project_id}\nTicket global: {selected_ticket_json}\nLe backlog initial contient encore des phases génériques. Lis la demande et adapte d’abord les tickets gabarits existants; ne crée que les tâches réellement manquantes. La racine `workspace:/` est l’unique racine de l’application : inspecte la stack existante et ne planifie pas un second projet imbriqué. Chaque ticket de travail doit porter parent_ticket_id = id du ticket global et une creation_key stable unique dans ce parent. N’utilise depends_on_ticket_ids que pour une vraie dépendance d’exécution entre tickets de travail : le parent sert au suivi et ne bloque pas le dispatch. Relis la liste après chaque création/mise à jour et réutilise les IDs retournés; ne recrée jamais un ticket déjà présent. Le Kanban doit couvrir les fonctionnalités demandées, leur intégration et leur validation, avec des critères observables. N'édite pas les fichiers source pendant ce passage et ne marque pas le ticket global terminé. Termine quand au moins trois tickets précis remplacent les gabarits et que seuls les vrais prérequis sont ordonnés; le balayage suivant dispatchera le premier ticket prêt. Passage planifié, pas une nouvelle demande utilisateur."
             )
         } else if needs_user_request_correction_planning {
             format!(
@@ -308,8 +318,8 @@ async fn dispatch_idle_projects(
     dispatched
 }
 
-fn should_dispatch_pass(ready_ticket_count: usize, needs_backlog_planning: bool) -> bool {
-    needs_backlog_planning || ready_ticket_count > 0
+fn should_dispatch_pass(ready_ticket_count: usize) -> bool {
+    ready_ticket_count > 0
 }
 
 fn ticket_agent_for_dispatch<'a>(
@@ -420,7 +430,14 @@ fn ticket_can_be_retried(
     if ticket.status == "todo" {
         return true;
     }
-    if ticket.status != "in_progress" && ticket.status != "review" {
+    let automatically_blocked =
+        ticket.status == "blocked" && has_automatic_failure_for_current_task(ticket, project_root);
+    if ticket.status != "in_progress" && ticket.status != "review" && !automatically_blocked {
+        return false;
+    }
+    if automatically_blocked
+        && automatic_failure_attempt_count(ticket, project_root) >= MAX_AUTOMATIC_FAILURE_ATTEMPTS
+    {
         return false;
     }
     let related_task_terminal = ticket
@@ -441,7 +458,10 @@ fn ticket_can_be_retried(
     }
     let last_dispatch = studio_list_ticket_events(project_root, &ticket.id)
         .into_iter()
-        .filter(|event| event.event_type == "ticket_dispatch_scheduled")
+        .filter(|event| matches!(
+            event.event_type.as_str(),
+            "ticket_dispatch_scheduled" | "ticket_execution_failed" | "ticket_execution_incomplete"
+        ))
         .filter_map(|event| chrono::DateTime::parse_from_rfc3339(&event.at).ok())
         .max();
     let cooldown_secs = std::env::var("AKASHA_STUDIO_KANBAN_RETRY_COOLDOWN_SECS")
@@ -452,6 +472,44 @@ fn ticket_can_be_retried(
     let failed_attempts = failed_dispatch_count(ticket, project_root, task_statuses);
     let effective_cooldown = retry_cooldown_secs(cooldown_secs, failed_attempts);
     retry_cooldown_elapsed(last_dispatch, now, effective_cooldown)
+}
+
+fn has_automatic_failure_for_current_task(ticket: &StudioTicket, project_root: &Path) -> bool {
+    let Some(task_id) = ticket.related_task_id.as_deref() else {
+        return false;
+    };
+    studio_list_ticket_events(project_root, &ticket.id).iter().any(|event| {
+        matches!(
+            event.event_type.as_str(),
+            "ticket_execution_failed" | "ticket_execution_incomplete"
+        ) && event
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("task_id"))
+            .and_then(serde_json::Value::as_str)
+            == Some(task_id)
+    })
+}
+
+fn automatic_failure_attempt_count(ticket: &StudioTicket, project_root: &Path) -> usize {
+    let mut task_ids = std::collections::HashSet::new();
+    studio_list_ticket_events(project_root, &ticket.id)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.event_type.as_str(),
+                "ticket_execution_failed" | "ticket_execution_incomplete"
+            )
+        })
+        .filter_map(|event| event.payload)
+        .filter_map(|payload| {
+            payload
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|task_id| task_ids.insert(task_id.clone()))
+        .count()
 }
 
 fn failed_dispatch_count(
@@ -639,6 +697,13 @@ fn record_completed_task_without_review(
     {
         return;
     }
+    if ticket.status == "in_progress" || ticket.status == "review" {
+        let mut blocked = ticket.clone();
+        blocked.status = "blocked".to_string();
+        blocked.evidence.summary = Some(format!("Vérification incomplète : {context}"));
+        blocked.updated_at = chrono::Utc::now().to_rfc3339();
+        let _ = api_studio::studio_upsert_ticket(project_root, blocked);
+    }
     let _ = api_studio::studio_append_ticket_event(
         project_root,
         &ticket.id,
@@ -700,6 +765,15 @@ fn record_terminal_task_failure(
         return;
     }
     let context = terminal_failure_context(ticket, task_statuses, store_path);
+    if ticket.status == "in_progress" || ticket.status == "review" {
+        let mut blocked = ticket.clone();
+        blocked.status = "blocked".to_string();
+        blocked.evidence.summary = Some(context.clone().unwrap_or_else(|| {
+            format!("La tâche liée s’est terminée avec le statut {}.", status.as_str())
+        }));
+        blocked.updated_at = chrono::Utc::now().to_rfc3339();
+        let _ = api_studio::studio_upsert_ticket(project_root, blocked);
+    }
     let _ = api_studio::studio_append_ticket_event(
         project_root,
         &ticket.id,
@@ -891,9 +965,8 @@ mod tests {
 
     #[test]
     fn empty_scheduled_pass_is_skipped_unless_backlog_planning_is_needed() {
-        assert!(!should_dispatch_pass(0, false));
-        assert!(should_dispatch_pass(0, true));
-        assert!(should_dispatch_pass(1, false));
+        assert!(!should_dispatch_pass(0));
+        assert!(should_dispatch_pass(1));
     }
 
     #[test]
@@ -1077,6 +1150,48 @@ mod tests {
             &statuses,
             now
         ));
+    }
+
+    #[test]
+    fn terminal_failures_block_the_ticket_and_automatic_retries_are_bounded() {
+        let dir = tempfile::tempdir().expect("project root");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).expect("create project root");
+        let task_store_path = dir.path().join("tasks.db");
+        let _store = TaskStore::open(&task_store_path).expect("create task store");
+        let failed_task = "00000000-0000-0000-0000-000000000001";
+        let mut blocked = ticket("in_progress", Some(failed_task));
+        blocked.id = "failed-ticket".to_string();
+        api_studio::studio_upsert_ticket(&root, blocked.clone()).expect("save ticket");
+        let mut statuses = HashMap::new();
+        statuses.insert(failed_task.to_string(), TaskStatus::Failed);
+
+        record_terminal_task_failure(&root, &blocked, &statuses, &task_store_path);
+        let blocked = studio_list_tickets(&root)
+            .into_iter()
+            .find(|candidate| candidate.id == "failed-ticket")
+            .expect("reconciled ticket");
+        assert_eq!(blocked.status, "blocked");
+        assert!(blocked.evidence.summary.as_deref().unwrap_or_default().contains("failed"));
+        assert!(has_automatic_failure_for_current_task(&blocked, &root));
+
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+        assert!(ticket_can_be_retried(&blocked, &root, &statuses, future));
+        for task_id in [
+            "00000000-0000-0000-0000-000000000002",
+            "00000000-0000-0000-0000-000000000003",
+        ] {
+            api_studio::studio_append_ticket_event(
+                &root,
+                &blocked.id,
+                "ticket_execution_failed",
+                "kanban_scheduler",
+                Some(serde_json::json!({"task_id": task_id, "detail": "failed"})),
+            )
+            .expect("record later failed retry");
+        }
+        assert_eq!(automatic_failure_attempt_count(&blocked, &root), 3);
+        assert!(!ticket_can_be_retried(&blocked, &root, &statuses, future));
     }
 
     #[test]

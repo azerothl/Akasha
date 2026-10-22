@@ -887,6 +887,28 @@ pub fn new_task_completion_registry() -> TaskCompletionRegistry {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
+fn delegated_message_for_child(root_user_request: &str, child_request: &str) -> String {
+    let root = root_user_request.trim();
+    let child = child_request.trim();
+    if child.starts_with("[Task]\n") || root.is_empty() {
+        return child_request.to_string();
+    }
+    // Kanban tickets for initial project creation include the original request
+    // in their description. Avoid sending the same long request twice to each
+    // worker; keep the ticket scope and criteria as the canonical child task.
+    let root_prefix: String = root.chars().take(256).collect();
+    let parent_is_already_embedded = if root_prefix.chars().count() >= 128 {
+        child.contains(&root_prefix)
+    } else {
+        child.contains(root)
+    };
+    if parent_is_already_embedded {
+        child_request.to_string()
+    } else {
+        format!("[Parent user request]\n{}\n\n[Delegated subtask]\n{}", root, child)
+    }
+}
+
 /// Runs in a loop: receives DelegationRequest, checks depth (root or direct child only), creates child task, sends to conv_tx, waits for child completion, sends reply on oneshot.
 /// `delegation_sem`: semaphore for backpressure; when full, replies with "système surchargé".
 pub async fn run_delegation_handler(
@@ -972,20 +994,8 @@ pub async fn run_delegation_handler(
             }
             root
         };
-        let mut delegated_message = if req.message.trim_start().starts_with("[Task]\n") {
-            req.message.clone()
-        } else {
-            let root_trim = root_user_request.trim();
-            if root_trim.is_empty() {
-                req.message.clone()
-            } else {
-                format!(
-                    "[Parent user request]\n{}\n\n[Delegated subtask]\n{}",
-                    root_trim,
-                    req.message.trim()
-                )
-            }
-        };
+        let mut delegated_message =
+            delegated_message_for_child(&root_user_request, &req.message);
         let child_id = Uuid::new_v4();
         let agent_type = if crate::agents::is_specialist_agent(&req.agent_type) {
             req.agent_type.trim().to_lowercase()
@@ -1188,18 +1198,19 @@ pub async fn run_delegation_handler(
                 .unwrap_or_else(|| {
                     env_duration_ms("AKASHA_DELEGATION_COMPLETION_TIMEOUT_MS", 300_000)
                 });
+            let completion_started = tokio::time::Instant::now();
             let had_first_activity =
                 wait_for_task_activity(&progress, child_id_span, first_activity_timeout).await;
             if !had_first_activity {
-                task_completion.write().await.remove(&child_id_span);
-                let _ = reply_tx.send(Err(format!(
-                    "delegation startup timeout ({} ms without visible activity)",
-                    first_activity_timeout.as_millis()
-                )));
-                return;
+                tracing::warn!(
+                    child_task_id = %child_id_span,
+                    first_activity_timeout_ms = first_activity_timeout.as_millis(),
+                    "Delegated task has not reported activity yet; continue waiting for its bounded completion deadline"
+                );
             }
+            let remaining_completion = completion_timeout.saturating_sub(completion_started.elapsed());
             let timed_out =
-                tokio::time::timeout(completion_timeout, notify.notified().instrument(span))
+                tokio::time::timeout(remaining_completion, notify.notified().instrument(span))
                     .await
                     .is_err();
             // Ensure the registry entry is removed regardless of outcome.
@@ -1300,8 +1311,23 @@ pub async fn run_delegation_handler(
                         )
                         .with_correlation(parent_task_id_span),
                     );
-                    Err(msg)
+                    Err(format!(
+                        "child_task_terminal:{}:failed: {}",
+                        child_id_span, msg
+                    ))
                 }
+                TaskStatus::Cancelled => Err(format!(
+                    "child_task_terminal:{}:{}: {}",
+                    child_id_span,
+                    "cancelled",
+                    msg
+                )),
+                TaskStatus::Interrupted => Err(format!(
+                    "child_task_terminal:{}:{}: {}",
+                    child_id_span,
+                    "interrupted",
+                    msg
+                )),
                 _ => Err("child task did not complete successfully".to_string()),
             });
         });
@@ -3366,6 +3392,8 @@ Contrainte de stack : la stack active du projet (injectée dans le message) est 
  Règles d’orchestration :\n\
  - **Kanban à chaque demande** : au début de chaque tâche racine, lis `studio_list_tickets` et l’instantané Kanban injecté; utilise les outils natifs annoncés par le runtime. Pour la première demande de création, transforme le besoin en tickets indépendants et vérifiables couvrant le socle, les fonctionnalités demandées, leur intégration et leur validation. Les tickets de démarrage génériques sont des gabarits : adapte-les et remplace leurs critères `initial-phase-*` avant toute délégation. Chaque ticket de travail indique `parent_ticket_id` pour le suivi du ticket global et une `creation_key` stable; cette relation parent/enfant ne bloque pas son dispatch. Réserve `depends_on_ticket_ids` aux vrais prérequis d’exécution entre tickets de travail, jamais au ticket global. Avant chaque création, relis la liste; réutilise le ticket existant ou l’ID canonique retourné, ne crée pas de doublon. Une demande d’évolution ou de bug reçoit un ticket global automatiquement lié; crée sous ce parent exactement un ticket actionnable pour une évolution simple, plusieurs pour des éléments indépendants ou séquentiels. Chaque ticket précise des critères observables, un responsable et un reviewer. Le ticket global reste ouvert jusqu’à validation de tous ses tickets enfants.\n\
  - **Passage régulier et dispatch** : relis le Kanban avant chaque délégation, après chaque résultat d’agent et avant la réponse finale. Sur chaque nouveau run, reprends les tickets ouverts liés au projet et à l’objectif; choisis les tickets prêts dont tous les `depends_on_ticket_ids` sont `done`, assigne-les au spécialiste, marque-les `in_progress`, puis délègue un par un. Le planificateur Code Studio peut aussi dispatcher directement un ticket à son agent assigné lorsque le projet est inactif. Continue jusqu’à épuiser les tickets prêts de cette demande. Les tickets hors périmètre restent ouverts et visibles; ils ne sont jamais déclarés terminés sans preuve.\n\
+ - **Racine et chemins** : `workspace:/` est la racine canonique de l’application. Inspecte et réutilise sa stack, garde le build et l’aperçu sur cette racine et ne crée pas un second projet imbriqué. Si un fichier est absent, distingue ce cas d’un refus d’accès, redécouvre son chemin avec `list_files` ou `search_files`, puis continue; ne demande pas à l’utilisateur le chemin absolu du dépôt Code Studio.
+ - **Reprise autonome** : quand un sous-agent est confirmé en échec, interrompu ou annulé, consulte son diagnostic et le diff réellement produit, mets à jour le ticket puis poursuis avec une reprise ciblée dans le budget restant. Ne laisse pas une tâche parente échouer uniquement parce qu’un enfant est en échec; ne répète pas la même action sans examiner son effet. Continue les reprises bornées jusqu’à validation ou jusqu’à une limite dure de budget/temps clairement rapportée. Demande une intervention seulement si une entrée externe ou une autorisation réellement indisponible est nécessaire.\n\
 - **Bugs et preuves** : dès qu’une vérification révèle une régression, inscris un ticket bug distinct avec résultat attendu, résultat observé et test de reproduction, puis traite-le dans l’ordre des dépendances. Après chaque agent, mets à jour le ticket avec les fichiers, tâches et résultats réellement observés. Passe en `review` uniquement quand les critères sont satisfaits; `done` exige une validation réussie. Si un ticket reste bloqué, consigne la cause et les prochaines étapes dans le ticket, puis poursuis les autres tickets prêts.\n\
 - **Outils Kanban** : appelle les fonctions natives `studio_list_tickets`, `studio_create_ticket` et `studio_update_ticket`; crée avec un `parent_ticket_id` et une `creation_key` stable, et modifie `parent_ticket_id` séparément de `depends_on_ticket_ids`. Une clé ou un titre déjà présent sous le même parent doit être réutilisé; conserve tous les IDs retournés par les outils. Le reviewer utilise `studio_review_ticket` pour approuver ou demander des corrections; fournis un objet JSON conforme au schéma. Le ticket de travail doit contenir des critères vérifiables avant le dispatch. Le Kanban est l’unique source de suivi: ne crée pas de fichiers `tickets/<id>.md`, ne modifie pas `.akasha-studio-tickets.json` directement et ne copie pas le suivi dans `CODE_STUDIO_PLAN.md`.\n\
 - **Dossier `specs/`** : pour toute demande d’**évolution** (nouvelle fonctionnalité, changement de comportement, refonte ciblée, branche d’évolution active, ou demande explicitement traitée comme évolution), crée un fichier plan dédié `workspace:/specs/<YYYYMMDD>-<slug-court>.md` avant de lancer l’implémentation. Le plan doit contenir : objectif, périmètre, critères d’acceptation, liste d’étapes numérotées, **marquage des étapes parallélisables** (ex. « (parallèle avec 3) »), risques, et une section **Iterations** pour suivre les passes de correction.\n\
@@ -6051,6 +6079,7 @@ mod tests {
     use crate::api_routes_tasks::{is_pausable, is_resumable};
     use super::{
         agent_role_system_prompt, build_image_markdown, build_session_recap_reply,
+        delegated_message_for_child,
         canonicalize_tool_name, classify_small_talk_message, detect_session_recall_intent,
         embedded_tools_instruction_hint, should_use_compact_local_prompt,
         ensure_no_open_code_block, extract_how_to_call_from_message,
@@ -7038,7 +7067,7 @@ line two new"#;
     fn code_studio_roles_treat_kanban_as_the_work_source_of_truth() {
         let manager = agent_role_system_prompt("studio_project_manager").unwrap();
         assert!(manager.contains("tickets indépendants et vérifiables"));
-        assert!(manager.contains("au moins un ticket de travail actionnable"));
+        assert!(manager.contains("exactement un ticket actionnable"));
         assert!(manager.contains("studio_review_ticket"));
         assert!(manager.contains("ne crée pas de fichiers `tickets/<id>.md`"));
         assert!(manager.contains("studio_create_ticket"));
@@ -7050,6 +7079,20 @@ line two new"#;
         assert!(implementer.contains("Move it to `review` only after its criteria pass"));
         assert!(implementer.contains("If a write reports `stale_file_version`"));
         assert!(implementer.contains("genuinely different targeted edit"));
+    }
+
+    #[test]
+    fn delegated_ticket_context_does_not_duplicate_the_full_user_request() {
+        let root = "Create a todo app with persistence and keyboard support. This parent request is intentionally repeated in the ticket description.";
+        let child = format!(
+            "[Ticket Kanban obligatoire]\n{}\n\nCritères: the app builds and the list works.",
+            root
+        );
+        let delegated = delegated_message_for_child(root, &child);
+        assert_eq!(delegated, child);
+
+        let unrelated_child = delegated_message_for_child(root, "Implement the persistence layer.");
+        assert!(unrelated_child.starts_with("[Parent user request]"));
     }
 
     // --- ensure_no_open_code_block ---

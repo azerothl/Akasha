@@ -820,7 +820,7 @@ pub(crate) async fn execute_tool_call_impl(
                             || detail.to_ascii_lowercase().contains("cannot find")
                             || detail.to_ascii_lowercase().contains("no such file")
                         {
-                            " (hint: verify path/casing and use search_files . <filename> first)"
+                            " (hint: this is a missing file, not an access denial. The registered Code Studio root is workspace:/; use list_files workspace:/ or search_files workspace:/ <filename>, then retry with the exact path. Do not ask the user for an absolute project root.)"
                         } else {
                             ""
                         };
@@ -858,7 +858,11 @@ pub(crate) async fn execute_tool_call_impl(
                                 || detail.to_ascii_lowercase().contains("cannot find")
                                 || detail.to_ascii_lowercase().contains("no such file")
                             {
-                                " (hint: verify path/casing and use search_files . <filename> first)"
+                                if workspace_root.is_some() {
+                                    " (hint: this is a missing file, not an access denial. The registered Code Studio root is workspace:/; use list_files workspace:/ or search_files workspace:/ <filename>, then retry with the exact path. Do not ask the user for an absolute project root.)"
+                                } else {
+                                    " (hint: verify path/casing and use search_files . <filename> first)"
+                                }
                             } else {
                                 ""
                             };

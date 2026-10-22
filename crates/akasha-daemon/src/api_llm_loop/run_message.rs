@@ -81,6 +81,46 @@ async fn studio_round_limit_choice(store: &Option<HumanInputStore>, bus: &EventB
     answer
 }
 
+fn auto_extend_studio_round_budget(
+    store_path: &std::path::Path,
+    task_id: Uuid,
+    round: u32,
+    max_tool_rounds: &mut u32,
+    prompt: &str,
+    outcome: &crate::task_outcome::RunOutcome,
+) -> Result<bool, String> {
+    const STUDIO_TOOL_ROUND_HARD_CAP: u32 = 96;
+    if *max_tool_rounds >= STUDIO_TOOL_ROUND_HARD_CAP {
+        return Ok(false);
+    }
+    let previous_limit = *max_tool_rounds;
+    *max_tool_rounds = round
+        .max(*max_tool_rounds)
+        .saturating_add(10)
+        .min(STUDIO_TOOL_ROUND_HARD_CAP);
+    if let Some(mut checkpoint) = crate::studio_recovery::load(store_path, task_id, false)? {
+        checkpoint.phase = "auto_continuing_tool_rounds".into();
+        checkpoint.waiting = None;
+        checkpoint.prompt = prompt.to_owned();
+        checkpoint.round = round;
+        checkpoint.max_tool_rounds = Some(*max_tool_rounds);
+        checkpoint.outcome = outcome.clone();
+        crate::studio_recovery::save(store_path, &checkpoint)?;
+    }
+    insert_task_tracking_event(
+        store_path,
+        task_id,
+        "studio_auto_tool_round_extension",
+        serde_json::json!({
+            "round": round,
+            "previous_limit": previous_limit,
+            "new_limit": *max_tool_rounds,
+            "hard_cap": STUDIO_TOOL_ROUND_HARD_CAP,
+        }),
+    );
+    Ok(true)
+}
+
 fn should_recover_duplicate_read(
     tool: &str,
     repeated_three_times: bool,
@@ -1811,6 +1851,24 @@ pub(crate) async fn run_message_via_llm(
 
             if let Some(waiting) = resumed_limit_wait.take() {
                 max_tool_rounds = waiting["max_tool_rounds"].as_u64().map(|v|v as u32).unwrap_or(max_tool_rounds);
+                if code_studio_disk_task {
+                    match auto_extend_studio_round_budget(
+                        &store_path,
+                        task_id,
+                        round,
+                        &mut max_tool_rounds,
+                        &current_prompt,
+                        &run_outcome,
+                    ) {
+                        Ok(true) => continue 'tool_rounds,
+                        Ok(false) => {}
+                        Err(error) => {
+                            run_outcome.termination = TerminationReason::ContextUnavailable;
+                            reply_text = error;
+                            break 'tool_rounds;
+                        }
+                    }
+                }
                 if let Err(error)={crate::studio_recovery::record_waiting(&store_path,task_id,"waiting_tool_round_limit",waiting,(&current_prompt,round,max_tool_rounds,&run_outcome))} {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
                 match studio_round_limit_choice(&human_input_store, &bus, task_id, round, max_tool_rounds).await.as_deref() {
                     Some("Continuer (+10 tours)") => max_tool_rounds = round.max(max_tool_rounds).saturating_add(10),
@@ -3497,6 +3555,15 @@ pub(crate) async fn run_message_via_llm(
                                                         format!("[delegate_to_agent] {}", msg),
                                                         None,
                                                     ),
+                                                    Ok(Ok(Err(e))) if e.starts_with("child_task_terminal:") => (
+                                                        // The child is confirmed terminal, so this is a
+                                                        // known delegation result rather than an unknown
+                                                        // side effect. Let the project manager inspect the
+                                                        // child and continue recovery in this task.
+                                                        true,
+                                                        format!("[delegate_to_agent] Le sous-agent a terminé sans valider son travail ({e}). Le résultat de cette délégation est connu. Inspecte la tâche et le Kanban, conserve les modifications déjà confirmées puis poursuis avec une reprise ciblée; ne demande pas un chemin de dépôt déjà fourni par Code Studio."),
+                                                        None,
+                                                    ),
                                                     Ok(Ok(Err(e))) => (
                                                         false,
                                                         format!("[delegate_to_agent] {}", e),
@@ -4262,6 +4329,29 @@ pub(crate) async fn run_message_via_llm(
                     } else {
                         format!("{}\n\n[{}]{}", response_clean, limit_msg, image_md)
                     };
+
+                    // Code Studio tasks continue autonomously in bounded
+                    // increments. Only the global hard cap can request a user
+                    // decision, so ordinary scaffolding doesn't stop at a
+                    // small per-run tool budget.
+                    if code_studio_disk_task {
+                        match auto_extend_studio_round_budget(
+                            &store_path,
+                            task_id,
+                            round,
+                            &mut max_tool_rounds,
+                            &current_prompt,
+                            &run_outcome,
+                        ) {
+                            Ok(true) => continue 'tool_rounds,
+                            Ok(false) => {}
+                            Err(error) => {
+                                run_outcome.termination = TerminationReason::ContextUnavailable;
+                                reply_text = error;
+                                break 'tool_rounds;
+                            }
+                        }
+                    }
 
                     // When human_input_store is available, ask user whether to continue (+10 rounds), reset and continue, or stop.
                     if code_studio_disk_task {
