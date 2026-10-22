@@ -15,6 +15,13 @@ SPEC.loader.exec_module(eval_runner)
 
 
 class RealAgenticEvalTests(unittest.TestCase):
+    def test_llm_failure_diagnostics_are_categorical(self):
+        self.assertEqual(
+            eval_runner.classify_llm_failure("Provider rejected malformed tool-call JSON before execution"),
+            "tool_call_json_parse",
+        )
+        self.assertEqual(eval_runner.classify_llm_failure("task timed out"), "timeout")
+
     def test_task_completion_status_aliases_are_supported(self):
         self.assertEqual(eval_runner.TASK_SUCCEEDED, {"done", "completed"})
         self.assertTrue(eval_runner.TASK_SUCCEEDED <= eval_runner.TERMINAL)
@@ -79,6 +86,8 @@ class RealAgenticEvalTests(unittest.TestCase):
             "provider_used": "ollama",
             "device_match": True,
             "model_vram_bytes": 1024,
+            "llm_success_models": ["qwen2.5-coder:14b"],
+            "llm_failure_kinds": ["context_window"],
         }
         result = eval_runner.scenario_result(
             "policy_refusal",
@@ -90,6 +99,10 @@ class RealAgenticEvalTests(unittest.TestCase):
         self.assertEqual(result["tool_results"], [{"tool": "write_file", "success": False}])
         self.assertEqual(result["task_statuses"], ["done"])
         self.assertEqual(result["response_chars"], 12)
+        self.assertEqual(result["llm_call_count"], 2)
+        self.assertEqual(result["llm_success_count"], 1)
+        self.assertEqual(result["llm_failure_kinds"], ["context_window"])
+        self.assertEqual(result["llm_success_models"], ["qwen2.5-coder:14b"])
         self.assertEqual(
             result["checks"],
             {"policy_denial_observed": True, "protected_file_unchanged": True},
@@ -106,6 +119,15 @@ class RealAgenticEvalTests(unittest.TestCase):
         self.assertEqual(route["primary"]["model"], "qwen2.5-coder:14b-akasha-eval-unavailable")
         self.assertEqual(route["fallback"][0]["model"], "qwen2.5-coder:14b")
         self.assertEqual(route["fallback"][0]["config"]["num_gpu"], 0)
+
+    def test_router_allows_real_models_a_reasonable_tool_response_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            eval_runner.write_router(root, "qwen3.5:9b", "http://127.0.0.1:11434", "cuda")
+            config = json.loads((root / "llm_router.yaml").read_text(encoding="utf-8"))
+        route = config["task_types"]["conversation"]["primary"]["config"]
+        self.assertEqual(route["max_tokens"], 2048)
+        self.assertEqual(route["num_gpu"], 99)
 
     def test_device_verification_uses_ollama_vram_evidence(self):
         with patch.object(eval_runner, "ollama_processes", return_value=[{"name": "qwen2.5-coder:14b", "size_vram_bytes": 0}]):

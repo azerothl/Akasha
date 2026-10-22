@@ -30,6 +30,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[3]
 BASELINE_PATH = ROOT / "spec" / "dev" / "quality" / "evals_agentic_real_baseline.json"
+MAX_OUTPUT_TOKENS = 2048
 ROUTES = (
     "conversation",
     "code_generation",
@@ -118,7 +119,7 @@ def write_router(data_dir: Path, model: str, ollama_url: str, device: str, unava
         "task_types": {},
         "model_options": {},
     }
-    options: dict[str, Any] = {"temperature": 0.0, "max_tokens": 512}
+    options: dict[str, Any] = {"temperature": 0.0, "max_tokens": MAX_OUTPUT_TOKENS}
     if device == "cpu":
         options["num_gpu"] = 0
     elif device == "cuda":
@@ -294,6 +295,19 @@ def metric_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any
     return deltas
 
 
+def classify_llm_failure(error: Any) -> str:
+    message = str(error or "").lower()
+    if "malformed tool-call json" in message or "error parsing tool call" in message:
+        return "tool_call_json_parse"
+    if "context window" in message or "context length" in message:
+        return "context_window"
+    if "timeout" in message or "timed out" in message:
+        return "timeout"
+    if "connection refused" in message or "connect error" in message:
+        return "connection"
+    return "other"
+
+
 def poll_task(base: str, task_id: str, timeout_secs: int) -> tuple[dict[str, Any], dict[str, Any]]:
     deadline = time.monotonic() + timeout_secs
     task: dict[str, Any] = {}
@@ -337,6 +351,18 @@ def submit_message(
     after = metric_snapshot(base)
     events = event_data["events"]
     tool_events = [entry for entry in events if entry.get("event_type") in {"tool_call_finished", "tool_invoked"}]
+    llm_events = [entry for entry in events if entry.get("event_type") == "llm_call_finished"]
+    llm_success_models = [
+        (entry.get("payload") or {}).get("model_used")
+        for entry in llm_events
+        if (entry.get("payload") or {}).get("success") is True
+        and isinstance((entry.get("payload") or {}).get("model_used"), str)
+    ]
+    llm_failure_kinds = [
+        classify_llm_failure((entry.get("payload") or {}).get("error"))
+        for entry in llm_events
+        if (entry.get("payload") or {}).get("success") is False
+    ]
     tools: list[str] = []
     for entry in tool_events:
         payload = entry.get("payload") or {}
@@ -386,6 +412,8 @@ def submit_message(
         "response_chars": len(final_text),
         "response_sha256": hashlib.sha256(final_text.encode("utf-8")).hexdigest() if final_text else None,
         "response_exact_match": None,
+        "llm_success_models": llm_success_models,
+        "llm_failure_kinds": llm_failure_kinds,
         "tools": tools,
         "tool_events": [
             {
@@ -429,6 +457,10 @@ def scenario_result(
         "task_statuses": [call.get("status") for call in calls],
         "response_chars": sum(int(call.get("response_chars", 0) or 0) for call in calls),
         "provider_model_deltas": providers,
+        "llm_call_count": sum(len(call.get("llm_success_models", [])) + len(call.get("llm_failure_kinds", [])) for call in calls),
+        "llm_success_count": sum(len(call.get("llm_success_models", [])) for call in calls),
+        "llm_failure_kinds": [kind for call in calls for kind in call.get("llm_failure_kinds", [])],
+        "llm_success_models": list(dict.fromkeys(model for call in calls for model in call.get("llm_success_models", []))),
         "model_used": next((call["model_used"] for call in reversed(calls) if call["model_used"]), None),
         "tokens_out": sum(int(call["tokens_out"] or 0) for call in calls),
         "fallback_triggered": any(call["fallback_triggered"] for call in calls),
@@ -862,6 +894,11 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                 "cpu_logical_cores": os.cpu_count(),
                 "provider_configured": "ollama",
                 "model_requested": model,
+                "generation_config": {
+                    "temperature": 0.0,
+                    "max_tokens": MAX_OUTPUT_TOKENS,
+                    "num_gpu": 99 if args.device == "cuda" else 0 if args.device == "cpu" else None,
+                },
                 "provider_observed": sorted({item["provider"] for scenario in scenarios for item in scenario["provider_model_deltas"]}),
                 "models_observed": sorted({item["model"] for scenario in scenarios for item in scenario["provider_model_deltas"] if item["successful_requests"] > 0}),
                 "execution_device_requested": args.device,
