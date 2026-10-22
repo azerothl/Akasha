@@ -45,7 +45,8 @@ pub(crate) fn catalog(router: &LLMRouter) -> Value {
                     json!({
                         "provider":provider,
                         "model":model,
-                        "context_window_tokens":context_window_tokens
+                        "context_window_tokens":context_window_tokens,
+                        "qualification":router.studio_model_qualification(&provider,&model)
                     })
                 })
         })
@@ -161,7 +162,7 @@ pub(crate) fn validate_model(
 // Never select one by randomized HashMap iteration order.
 fn configured_model_route(routes: std::collections::HashMap<String, akasha_llm::config::TaskTypeConfig>, model: &ModelChoice) -> Option<RouteEntry> {
     let mut routes = routes.into_iter().collect::<Vec<_>>();
-    routes.sort_by_key(|(name, _)| (name != "code_generation", name.clone()));
+    routes.sort_by_key(|(name, _)| (name != "studio", name != "code_generation", name.clone()));
     routes.into_iter().find_map(|(_, route)| route.primary.into_iter().chain(route.fallback)
         .find(|entry| entry.provider == model.provider && entry.model == model.model))
 }

@@ -519,7 +519,9 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .and_then(|t| t.parent_task_id)
         .is_some();
-    let router_task_type_early = if preferred_task_type_override.as_deref()
+    let router_task_type_early = if code_studio_disk_task && llm_router.primary_route_for_task_type("studio").is_some() {
+        "studio".to_string()
+    } else if preferred_task_type_override.as_deref()
         == Some("image_generation")
         || assigned_agent == "image_generation"
     {
@@ -2175,12 +2177,12 @@ pub(crate) async fn run_message_via_llm(
             let observer_bus = bus.clone();
             let observer: akasha_llm::AttemptObserver = std::sync::Arc::new(move |event| {
                 if let Ok(mut state) = observer_state.lock() {
-                    if matches!(event["phase"].as_str(), Some("started"|"retry"|"fallback")) {state.1=std::time::Instant::now();}
+                    if matches!(event["phase"].as_str(), Some("qualifying"|"started"|"retry"|"fallback")) {state.1=std::time::Instant::now();}
                     state.0=event.clone();
                 }
                 insert_task_tracking_event(&observer_store, task_id, "llm_provider_attempt", event.clone());
-                if matches!(event["phase"].as_str(), Some("started"|"retry"|"fallback")) {
-                    let action=match event["phase"].as_str() {Some("retry")=>"Nouvelle tentative",Some("fallback")=>"Repli automatique",_=>"Appel au modèle"};
+                if matches!(event["phase"].as_str(), Some("qualifying"|"started"|"retry"|"fallback")) {
+                    let action=match event["phase"].as_str() {Some("qualifying")=>"Qualification des outils (sans opération projet)",Some("retry")=>"Nouvelle tentative",Some("fallback")=>"Repli automatique",_=>"Appel au modèle"};
                     let message=format!("{action} : {} / {} · tentative {}/{}",event["provider"].as_str().unwrap_or("?"),event["model"].as_str().unwrap_or("?"),event["attempt"],event["max_attempts"]);
                     let _=observer_bus.send(EventEnvelope::new(EventType::ProgressUpdate,Some(serde_json::json!({"task_id":task_id,"progress_pct":24,"message":message}))).with_correlation(task_id));
                 }

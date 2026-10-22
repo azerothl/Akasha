@@ -23,6 +23,8 @@ pub(crate) async fn complete_stream(
     output: std::sync::mpsc::Sender<String>,
     budget: Duration,
     allow_same_retry: bool,
+    health: &crate::studio_health::StudioHealth,
+    explicit: bool,
     observe: AttemptObserver,
 ) -> Result<CompletionResponse, String> {
     let mut routes: Vec<_> =
@@ -67,7 +69,6 @@ pub(crate) async fn complete_stream(
                 "elapsed_ms":started.elapsed().as_millis() as u64,"detail":extra}),
             );
         };
-        event(phase, serde_json::Value::Null);
         let Some(provider) = resolve(&entry.provider) else {
             let detail = format!(
                 "{}/{}: fournisseur non enregistré",
@@ -85,6 +86,24 @@ pub(crate) async fn complete_stream(
         };
         let mut prepared = request.clone();
         prepare_ollama_request(entry, &mut prepared, model_options);
+        if prepared.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
+            event("qualifying", serde_json::Value::Null);
+            let qualification = match prepared.bounded_context() {
+                Ok(_) => health.ensure(entry,model_options,provider.as_ref(),allowance.min(Duration::from_secs(20)),explicit).await,
+                Err(error) => Err(error.to_string()),
+            };
+            match qualification {
+                Ok(record) => event("qualified",serde_json::json!({"qualification":record})),
+                Err(error) => {
+                    event("skipped",serde_json::json!({"error":error,"class":"qualification"}));
+                    failures.push(format!("{}/{}: {}",entry.provider,entry.model,error));
+                    if retry_same { break; }
+                    continue;
+                }
+            }
+        }
+        let allowance=allowance.saturating_sub(started.elapsed());
+        event(phase, serde_json::Value::Null);
         let (sender, receiver) = std::sync::mpsc::channel::<String>();
         let receiver = std::sync::Mutex::new(receiver);
         let call = async {
@@ -102,7 +121,7 @@ pub(crate) async fn complete_stream(
         let mut chunks = Vec::new();
         let mut bytes = 0usize;
         let mut saw_token = false;
-        let mut drain = || -> Result<(), ProviderError> {
+        let mut drain = || -> Result<bool, ProviderError> {
             let receiver = receiver
                 .lock()
                 .map_err(|_| ProviderError::Api("generation buffer unavailable".into()))?;
@@ -119,14 +138,21 @@ pub(crate) async fn complete_stream(
                 }
                 chunks.push(chunk);
             }
-            Ok(())
+            Ok(bytes > 0)
         };
+        let first_token_limit = allowance.min(Duration::from_secs(60));
+        let generation_started = tokio::time::Instant::now();
         let result = tokio::time::timeout(allowance, async {
             let mut tick = tokio::time::interval(Duration::from_millis(50));
             loop {
                 tokio::select! {
                     result = &mut call => { drain()?; break result; }
-                    _ = tick.tick() => { drain()?; }
+                    _ = tick.tick() => {
+                        let received = drain()?;
+                        if !received && generation_started.elapsed() >= first_token_limit {
+                            return Err(ProviderError::Api("studio_first_token_timeout: aucun premier résultat reçu dans la limite de 60 s maximum ; la route est mise en quarantaine temporaire".into()));
+                        }
+                    }
                 }
             }
         })
@@ -212,13 +238,16 @@ pub(crate) async fn complete_stream(
                 );
                 metrics.record_failure(&entry.provider, &entry.model);
                 failures.push(detail);
+                if prepared.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
+                    health.quarantine(entry,model_options,format_provider_error(&entry.provider,&error));
+                }
                 if retry_same && !matches!(class, RetryClass::Transient | RetryClass::RateLimited) {
                     break;
                 }
             }
         }
     }
-    Err(format!("provider_generation_failed: {}. Les tentatives automatiques sont épuisées dans le budget de {} s. Vérifiez que le fournisseur répond, que le modèle est installé et que la mémoire disponible suffit ; choisissez un modèle configuré plus léger si nécessaire, puis reprenez la tâche depuis son checkpoint.", failures.join(" ; "), budget.as_secs()))
+    Err(format!("studio_routes_exhausted: provider_generation_failed: {}. Aucune route Studio utilisable après les tentatives bornées (budget maximum : {} s). Le scheduler ne répétera pas cette demande inchangée. Vérifiez les outils du modèle depuis son sélecteur. Pour reprendre depuis le checkpoint, rétablissez cette route ou modifiez le profil Studio automatique ; sélectionner un autre modèle dans le chat s’applique à une nouvelle demande. Une erreur de protocole nécessite un modèle compatible avec les outils ; un délai dépassé nécessite de vérifier le service et sa latence. La mémoire disponible n'a pas été mesurée.", failures.join(" ; "), budget.as_secs()))
 }
 
 #[cfg(test)]
@@ -264,12 +293,19 @@ mod tests {
         }
         async fn complete_stream(
             &self,
-            _: &CompletionRequest,
+            request: &CompletionRequest,
             _: Duration,
             model: Option<&str>,
             tx: std::sync::mpsc::Sender<String>,
         ) -> Result<CompletionResponse, ProviderError> {
             let model = model.unwrap();
+            if request.prompt.contains("STUDIO_TOOL_PROBE") {
+                self.calls.lock().unwrap().push(format!("probe:{model}"));
+                let text=if model=="unqualified" {"prose without native call".to_string()} else {
+                    format!("TOOL_JSON: {}",serde_json::json!({"schema_version":1,"tool":"studio_probe","arguments":{"nonce":"akasha-studio-tool-probe-v1"}}))
+                };
+                return Ok(serde_json::from_value(serde_json::json!({"text":text,"model_used":model})).unwrap());
+            }
             let count = {
                 let mut calls = self.calls.lock().unwrap();
                 calls.push(model.into());
@@ -338,6 +374,29 @@ mod tests {
             serde_json::json!({"prompt":"create a file","preferred_task_type":"code_generation"}),
         )
         .unwrap()
+    }
+    #[tokio::test]
+    async fn unqualified_tool_route_is_quarantined_and_falls_back_without_any_operation() {
+        let (router,calls,_)=setup("unqualified",Some("ok"),true);
+        let mut request=request();
+        request.tools=Some(vec![serde_json::json!({"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}})]);
+        for _ in 0..2 {
+            let (tx,_)=std::sync::mpsc::channel();
+            let response=router.complete_stream_bounded(&request,None,None,tx,Duration::from_secs(2),Arc::new(|_|{})).await.unwrap();
+            assert_eq!(response.model_used,"ok");
+        }
+        assert_eq!(*calls.lock().unwrap(),vec!["probe:unqualified","probe:ok","ok","ok"]);
+        assert_eq!(router.studio_model_qualification("mock","unqualified").unwrap().status,"quarantined");
+    }
+    #[tokio::test]
+    async fn pinned_unqualified_tool_model_fails_without_switching_models() {
+        let (router,calls,_)=setup("unqualified",Some("ok"),true);
+        let mut request=request();request.tools=Some(vec![serde_json::json!({"type":"function","function":{"name":"read_file"}})]);
+        let (tx,rx)=std::sync::mpsc::channel();
+        let error=router.complete_stream_bounded(&request,Some(&route("unqualified")),None,tx,Duration::from_secs(2),Arc::new(|_|{})).await.unwrap_err();
+        assert!(error.contains("studio_tool_protocol_unqualified"));
+        assert!(!calls.lock().unwrap().iter().any(|name|name.contains("ok")));
+        assert!(rx.try_iter().collect::<String>().is_empty());
     }
     #[tokio::test]
     async fn bounded_fallback_discards_partial_tool_text_and_cancels_the_attempt() {

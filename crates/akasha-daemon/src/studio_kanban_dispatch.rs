@@ -498,11 +498,9 @@ fn ticket_can_be_retried(
         if attempts >= MAX_AUTOMATIC_FAILURE_ATTEMPTS {
             return false;
         }
-        // A local preflight rejection proves no model call or tool ran. The
-        // task input is unchanged when the scheduler sees it again, so retrying
-        // would submit the same oversized request. Leave it blocked for an
-        // explicit model/context change instead of looping.
-        if is_local_context_preflight_failure(ticket, task_statuses, store_path) {
+        // Exhausted Studio routes and local context rejection require a route
+        // change or explicit resume, rather than another identical dispatch.
+        if requires_route_change(ticket, task_statuses, store_path) {
             return false;
         }
     }
@@ -540,7 +538,7 @@ fn ticket_can_be_retried(
     retry_cooldown_elapsed(last_dispatch, now, effective_cooldown)
 }
 
-fn is_local_context_preflight_failure(
+fn requires_route_change(
     ticket: &StudioTicket,
     task_statuses: &HashMap<String, TaskStatus>,
     store_path: &Path,
@@ -563,9 +561,8 @@ fn is_local_context_preflight_failure(
         .ok()
         .and_then(|store| store.get_outcome(task_id).ok().flatten())
         .is_some_and(|outcome| {
-            outcome
-                .to_string()
-                .contains("context_window_preflight_rejected")
+            let reason=outcome.to_string();
+            reason.contains("context_window_preflight_rejected") || reason.contains("studio_routes_exhausted")
         })
 }
 
@@ -1413,6 +1410,7 @@ mod tests {
                 false,
             ),
             ("provider context_window_exceeded: request rejected", false, true),
+            ("studio_routes_exhausted: provider_generation_failed: invalid native tools", false, false),
         ] {
             let dir = tempfile::tempdir().expect("project root");
             let root = dir.path().join("project");
