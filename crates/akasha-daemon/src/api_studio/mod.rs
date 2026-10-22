@@ -758,6 +758,44 @@ fn project_summary_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
     ))
 }
 
+fn normalized_prompt_fragment(raw: &str) -> String {
+    raw.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn prompt_contains_context(message: &str, context: Option<&str>) -> bool {
+    let Some(context) = context.map(str::trim).filter(|value| value.chars().count() >= 32) else {
+        return false;
+    };
+    let message = normalized_prompt_fragment(message);
+    let context = normalized_prompt_fragment(context);
+    !context.is_empty() && message.contains(&context)
+}
+
+/// Avoid adding project metadata a second time when the initial request already
+/// contains it (project creation commonly submits both the summary and stack).
+pub fn studio_meta_prefixes_for_request(
+    project_root: &Path,
+    request: &str,
+) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    let Some(meta) = load_studio_meta(project_root) else {
+        return (None, None, None, None);
+    };
+    let project_summary = (!prompt_contains_context(request, meta.project_summary.as_deref()))
+        .then(|| project_summary_prefix_from_meta(&meta))
+        .flatten();
+    let evolution_summary = (!prompt_contains_context(request, meta.evolution_summary.as_deref()))
+        .then(|| evolution_summary_prefix_from_meta(&meta))
+        .flatten();
+    let policy_notes = policy_notes_prefix_from_meta(&meta);
+    let tech_stack = (!prompt_contains_context(request, meta.tech_stack.as_deref()))
+        .then(|| tech_stack_prefix_from_meta(&meta))
+        .flatten();
+    (project_summary, evolution_summary, policy_notes, tech_stack)
+}
+
 /// Load `.akasha-studio.json` once and return `(evolution_summary, policy_notes, tech_stack)` prefixes.
 /// Avoids redundant disk I/O when the caller needs all three in the same request.
 pub fn studio_meta_prefixes(project_root: &Path) -> (Option<String>, Option<String>, Option<String>) {
@@ -781,8 +819,8 @@ pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
 /// before the first agent turn. This distinguishes a new empty workspace from
 /// an inaccessible repository without asking the model to guess paths.
 pub fn studio_workspace_inventory_message_prefix(project_root: &Path) -> String {
-    const MAX_ENTRIES: usize = 80;
-    const MAX_CHARS: usize = 5_000;
+    const MAX_ENTRIES: usize = 40;
+    const MAX_CHARS: usize = 2_000;
     const MANIFESTS: [&str; 8] = [
         "package.json",
         "pyproject.toml",
@@ -1731,6 +1769,12 @@ pub fn studio_user_message_suggests_project_creation(message: &str) -> bool {
         "concevoir ",
         "créer un nouveau projet",
         "creer un nouveau projet",
+        "crée le projet",
+        "cree le projet",
+        "créer le projet",
+        "creer le projet",
+        "create the project",
+        "create this project",
         "crée une application",
         "cree une application",
         "créer une application",
@@ -4937,6 +4981,9 @@ Try `npm i --save-dev @types/jest`";
         assert!(studio_user_message_suggests_project_creation(
             "I need a small website for my portfolio."
         ));
+        assert!(studio_user_message_suggests_project_creation(
+            "Crée le projet « Todo — observation autonome » selon ce résumé : Crée une webapp de todo list."
+        ));
         assert!(!studio_user_message_suggests_project_creation(
             "Please fix the bug in the existing project."
         ));
@@ -5269,5 +5316,52 @@ Try `npm i --save-dev @types/jest`";
             studio_get_ticket(dir.path(), &id).unwrap().status,
             "done"
         );
+    }
+
+    #[test]
+    fn project_creation_form_request_seeds_kanban_before_the_agent_turn() {
+        use super::{
+            save_studio_meta, studio_create_evolution_ticket_from_chat, studio_get_ticket,
+            studio_list_tickets, StudioMeta,
+        };
+
+        let dir = tempfile::tempdir().expect("temporary project");
+        let summary = "Crée une webapp Todo en français, avec ajout, complétion, suppression, filtres et persistance locale. L'interface doit rester responsive et accessible au clavier.";
+        save_studio_meta(
+            dir.path(),
+            &StudioMeta {
+                id: "todo-first-request".to_string(),
+                name: "Todo first request".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evolutions: Vec::new(),
+                tech_stack: Some("Vite + React + TypeScript strict; tests Vitest".to_string()),
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
+                evolution_summary: Some(summary.to_string()),
+                policy_notes: None,
+                project_summary: Some(summary.to_string()),
+                ticket_enforcement_mode: None,
+            },
+        )
+        .expect("save project metadata");
+
+        let request = format!(
+            "Crée le projet « Todo — observation autonome » selon ce résumé :\n\n{summary}\n\nStack demandée : Vite + React + TypeScript strict; tests Vitest"
+        );
+        let id = studio_create_evolution_ticket_from_chat(dir.path(), &request)
+            .expect("create initial ticket and seed backlog");
+        let root = studio_get_ticket(dir.path(), &id).expect("initial request ticket");
+        assert!(root
+            .acceptance_criteria
+            .iter()
+            .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog")));
+        let tickets = studio_list_tickets(dir.path());
+        assert_eq!(tickets.len(), 5, "root request plus four seeded work tickets");
+        let (project, evolution, _policy, stack) =
+            super::studio_meta_prefixes_for_request(dir.path(), &request);
+        assert!(project.is_none(), "the summary is already in the submitted request");
+        assert!(evolution.is_none(), "the evolution summary repeats the project brief");
+        assert!(stack.is_none(), "the selected stack is already in the submitted request");
     }
 }

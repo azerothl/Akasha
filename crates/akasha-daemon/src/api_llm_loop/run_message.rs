@@ -821,6 +821,8 @@ pub(crate) async fn run_message_via_llm(
              ",
         };
         if code_studio_disk_task {
+            let native_studio_tools =
+                std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref() != Some("0");
             let skills_part_studio = match &skill_registry {
                 Some(reg) => {
                     let list = reg.for_agent(&assigned_agent).await;
@@ -853,13 +855,18 @@ pub(crate) async fn run_message_via_llm(
                  Si aucun outil n’est nécessaire, répondre en texte.",
                 base, skills_part_studio, run_command_os_rule
             );
-            if std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
+            if native_studio_tools {
                 code_studio_system_tools_block = tools_executor_snapshot.as_ref()
                     .map(|executor| crate::studio_capabilities::native_prompt(&executor.policy,&assigned_agent))
                     .unwrap_or_default();
                 code_studio_system_tools_block.push_str(&skills_part_studio);
             }
-            format!(
+            if native_studio_tools {
+                // The native system block and function schemas already contain the
+                // available names, argument contracts, and file safety rules. Repeating
+                // the legacy catalogue here wastes context on the first Code Studio turn.
+                "\n\nFollow the Code Studio native tool contract and the advertised function schemas. Use only tools needed for the current task, wait for each result, and never replay an operation with an unknown result.\n".to_string()
+            } else { format!(
                 "\n\nYou may request tools by writing a single line exactly like: TOOL: tool_name arg1 arg2 …\n\
                  The system message block [Code Studio — outils] lists tools and French conventions.\n\
                  Available: {}{}.\n\
@@ -873,7 +880,7 @@ pub(crate) async fn run_message_via_llm(
                  - If no tool is needed, answer normally.\n\
                  {}\n",
                 base, skills_part_studio, run_command_os_rule
-            )
+            ) }
         } else {
         let (skills_part, skills_rule) = match &skill_registry {
             Some(reg) => {

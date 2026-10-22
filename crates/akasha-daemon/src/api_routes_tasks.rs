@@ -914,17 +914,32 @@ pub(crate) fn code_studio_suggested_actions(
                 .map(str::to_string)
                 .or_else(|| last_progress.map(|e| e.message.clone()))
                 .unwrap_or_default();
+            let context_window_failure = {
+                let lower = hint.to_ascii_lowercase();
+                lower.contains("context_window_exceeded")
+                    || lower.contains("maximum context length")
+                    || (lower.contains("context") && lower.contains("too many tokens"))
+            };
             let truncated = if hint.chars().count() > 500 {
                 hint.chars().take(500).collect::<String>() + "…"
             } else {
                 hint
             };
+            if context_window_failure {
+                v.push(serde_json::json!({
+                    "id": "retry_compacted_context",
+                    "label": "Reprendre avec un contexte allégé",
+                    "kind": "ui",
+                    "ui_action": "retry_compacted_context"
+                }));
+            }
             v.push(serde_json::json!({
                 "id": "analyze_failure",
-                "label": "Demander une analyse de l’échec",
+                "label": if context_window_failure { "Comprendre l’erreur de contexte" } else { "Demander une analyse de l’échec" },
                 "kind": "message",
                 "message": format!(
-                    "La dernière tâche a échoué ou été annulée. Contexte:\n{}\n\nPropose un plan de correction ciblé (fichiers et étapes) sans refaire toute l’implémentation.",
+                    "{}\nContexte:\n{}\n\nPropose un plan de correction ciblé sans répéter l’implémentation. Si la cause est un contexte trop volumineux, identifie les résumés ou historiques redondants à compacter tout en conservant la demande, les règles et les résultats récents nécessaires.",
+                    if context_window_failure { "Le modèle a refusé la requête car le contexte dépasse sa fenêtre. Une reprise compacte est disponible." } else { "La dernière tâche a échoué ou été annulée." },
                     truncated
                 )
             }));
@@ -2423,10 +2438,20 @@ if method == "POST" && path == "/api/message" {
         // every Code Studio run. This makes Kanban review part of task routing instead of
         // relying on a one-time, best-effort bootstrap message.
         let tickets = crate::api_studio::studio_list_tickets(root);
+        let current_ticket = studio_ticket_id
+            .as_deref()
+            .and_then(|ticket_id| crate::api_studio::studio_get_ticket(root, ticket_id));
+        let initial_backlog_task = current_ticket.as_ref().is_some_and(|ticket| {
+            ticket
+                .acceptance_criteria
+                .iter()
+                .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog"))
+        });
         let open: Vec<_> = tickets
             .iter()
             .filter(|ticket| !ticket.status.eq_ignore_ascii_case("done"))
-            .take(40)
+            .filter(|ticket| Some(ticket.id.as_str()) != studio_ticket_id.as_deref())
+            .take(12)
             .map(|ticket| {
                 serde_json::json!({
                     "id": ticket.id,
@@ -2434,37 +2459,56 @@ if method == "POST" && path == "/api/message" {
                     "status": ticket.status,
                     "assigned_agent": ticket.assigned_agent,
                     "depends_on_ticket_ids": ticket.depends_on_ticket_ids,
-                    "acceptance_criteria": ticket.acceptance_criteria,
-                    "description": ticket.description.chars().take(360).collect::<String>(),
+                    "acceptance_criteria": ticket.acceptance_criteria.iter().take(3).map(|criterion| {
+                        serde_json::json!({
+                            "id": criterion.id,
+                            "text": criterion.text.chars().take(180).collect::<String>(),
+                        })
+                    }).collect::<Vec<_>>(),
                 })
             })
             .collect();
         let kanban_snapshot = serde_json::json!({
             "unfinished_total": tickets.iter().filter(|ticket| !ticket.status.eq_ignore_ascii_case("done")).count(),
             "included": open.len(),
+            "current_ticket_included_below": current_ticket.as_ref().map(|ticket| ticket.id.as_str()),
             "tickets": open,
         });
         message_for_llm = format!(
-            "[Kanban — instantané des tickets non terminés du projet; vérifie les prérequis et réconcilie les statuts avant toute délégation.\n{}\n]\n\n{}",
+            "[Kanban — instantané compact des tickets non terminés; les détails du ticket courant sont fournis séparément. Vérifie les prérequis avant toute délégation.\n{}\n]\n\n{}",
             kanban_snapshot,
             message_for_llm
         );
+        if initial_backlog_task {
+            message_for_llm = format!(
+                "[Code Studio — première demande : planifier le backlog initial avant toute implémentation. Le ticket courant et la demande utilisateur sont la source de vérité. Les résumés du projet déjà présents dans cette demande ne doivent pas être répétés.]\n\n{}",
+                message_for_llm
+            );
+        }
 
         let direct_files=studio_delegate_single_level && studio_code_mode.as_deref()!=Some("plan")
             && !matches!(composer_mode.as_deref(),Some("ask"|"architect")) && studio_ticket_id.is_none()
             && studio_evolution_branch.is_none()
             && crate::api_llm_loop::scoped_file_request(&raw_user_message);
-        let plan=if direct_files {crate::api_studio::scoped_file_plan_context(root)} else {crate::api_studio::studio_code_plan_message_prefix(root)};
+        let plan=if direct_files {
+            crate::api_studio::scoped_file_plan_context(root)
+        } else if initial_backlog_task {
+            // The initial project plan mostly repeats the creation request. Keep the
+            // request and selected stack; workers can read the full plan when needed.
+            None
+        } else {
+            crate::api_studio::studio_code_plan_message_prefix(root)
+        };
         let prune_plan_chunks=direct_files && plan.as_deref().is_some_and(|prefix|prefix.starts_with(crate::api_llm_loop::DIRECT_FILE_TASK_MARKER));
         if let Some(plan) = plan {
             message_for_llm = format!("{plan}{message_for_llm}");
         }
-        if let Some(s) = crate::api_studio::studio_project_summary_prefix(root) {
+        let (project_summary_prefix, evol_prefix, policy_prefix, tech_prefix) =
+            crate::api_studio::studio_meta_prefixes_for_request(root, &raw_user_message);
+        if let Some(s) = project_summary_prefix.filter(|_| !initial_backlog_task) {
             message_for_llm = format!("{s}{message_for_llm}");
         }
-        let (evol_prefix, policy_prefix, tech_prefix) =
-            crate::api_studio::studio_meta_prefixes(root);
-        if let Some(p) = evol_prefix {
+        if let Some(p) = evol_prefix.filter(|_| !initial_backlog_task) {
             message_for_llm = format!("{p}{message_for_llm}");
         }
         if let Some(p) = policy_prefix {
@@ -2489,18 +2533,26 @@ if method == "POST" && path == "/api/message" {
                 message_for_llm = format!("{p}{message_for_llm}");
             }
         }
-        if let Some(ref ticket_id) = studio_ticket_id {
-            if let Some(ticket) = crate::api_studio::studio_get_ticket(root, ticket_id) {
+        if let Some(ticket) = current_ticket.as_ref() {
+                let criteria = ticket.acceptance_criteria.iter().take(4).map(|criterion| {
+                    format!("- {}", criterion.text.chars().take(180).collect::<String>())
+                }).collect::<Vec<_>>().join("\n");
+                let dependencies = if ticket.depends_on_ticket_ids.is_empty() {
+                    "aucune".to_string()
+                } else {
+                    ticket.depends_on_ticket_ids.join(", ")
+                };
                 message_for_llm = format!(
-                    "[Ticket Kanban obligatoire]\n- ticket_id: {}\n- titre: {}\n- assigned_agent: {}\n- review_agent: {}\n- status: {}\n- contraintes: ne pas clôturer en done; produire un résultat exécutable et laisser le ticket en review pour validation.\n\n{}",
+                    "[Ticket Kanban obligatoire]\n- ticket_id: {}\n- titre: {}\n- assigned_agent: {}\n- review_agent: {}\n- status: {}\n- dépendances: {}\n- critères:\n{}\n- contraintes: ne pas clôturer en done; produire un résultat exécutable et laisser le ticket en review pour validation.\n\n{}",
                     ticket.id,
                     ticket.title,
                     ticket.assigned_agent,
                     ticket.review_agent,
                     ticket.status,
+                    dependencies,
+                    if criteria.is_empty() { "- Aucun critère enregistré" } else { &criteria },
                     message_for_llm
                 );
-            }
         }
         if let Some(ref h) = studio_design_hint {
             if let Some(p) = crate::api_studio::studio_design_hint_prefix(h) {
@@ -2977,6 +3029,30 @@ mod tests {
         assert!(!should_create_studio_chat_ticket(
             false, false, false, None, request
         ));
+    }
+
+    #[test]
+    fn context_window_failures_offer_same_task_retry_with_compacted_context() {
+        let actions = code_studio_suggested_actions(
+            &akasha_store::TaskStatus::Failed,
+            Some("context_window_exceeded: protected instructions do not fit"),
+            None,
+            None,
+        );
+        assert_eq!(actions[0]["ui_action"], "retry_compacted_context");
+        assert_eq!(actions[0]["label"], "Reprendre avec un contexte allégé");
+        assert!(actions[1]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("dépasse sa fenêtre"));
+
+        let generic = code_studio_suggested_actions(
+            &akasha_store::TaskStatus::Failed,
+            Some("provider unavailable"),
+            None,
+            None,
+        );
+        assert!(generic.iter().all(|action| action["ui_action"] != "retry_compacted_context"));
     }
 
     #[test]
