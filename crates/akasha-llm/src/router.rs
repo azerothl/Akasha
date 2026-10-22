@@ -1,7 +1,7 @@
 //! LLM Router — classifier + config + fallback engine + provider registry.
 
 use crate::classifier::classify_task_type;
-use crate::config::{prepare_ollama_request, RoutingConfig, TaskTypeConfig};
+use crate::config::{prepare_ollama_request, resolve_ollama_num_ctx, RoutingConfig, TaskTypeConfig};
 use crate::fallback::{FallbackEngine, ProviderResolver};
 use crate::metrics::{MetricsCollector, MetricsPersistence};
 use crate::provider::{
@@ -219,6 +219,33 @@ impl LLMRouter {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .list_models_by_provider()
+    }
+
+    /// Return the effective configured context window for a selectable model.
+    /// For Ollama this follows the same route override and model/default policy
+    /// used when preparing a completion request. Other providers do not expose
+    /// a reliable configured window through the routing contract.
+    pub fn effective_context_window(&self, provider: &str, model: &str) -> Option<u32> {
+        if !provider.eq_ignore_ascii_case("ollama") {
+            return None;
+        }
+        let config = self.config.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut routes = config.task_types.into_iter().collect::<Vec<_>>();
+        routes.sort_by_key(|(name, _)| (name != "code_generation", name.clone()));
+        let route_context = routes
+            .into_iter()
+            .flat_map(|(_, route)| route.primary.into_iter().chain(route.fallback))
+            .filter(|entry| entry.provider.eq_ignore_ascii_case(provider) && entry.model == model)
+            .find_map(|entry| {
+                entry.config.and_then(|value| match value {
+                    serde_json::Value::Object(map) => map.get("num_ctx").and_then(|value| value.as_u64()),
+                    serde_json::Value::Array(items) => items.iter().find_map(|item| item.get("num_ctx").and_then(|value| value.as_u64())),
+                    _ => None,
+                })
+            })
+            .filter(|value| *value > 0)
+            .map(|value| value.min(u32::MAX as u64) as u32);
+        route_context.or_else(|| resolve_ollama_num_ctx(provider, model, &config.model_options))
     }
 
     /// Routes by category (primary + fallback) for GET /api/router/routes and CLI/TUI.
@@ -778,6 +805,22 @@ mod tests {
             assert_eq!(agent_task_type_and_fallbacks(role).0, "code_generation");
         }
         assert_eq!(agent_task_type_and_fallbacks("conversation").0, "conversation");
+    }
+
+    #[test]
+    fn effective_context_window_uses_the_code_route_override() {
+        let mut config = RoutingConfig::default_config();
+        config.set_primary_route(
+            "code_generation",
+            RouteEntry {
+                provider: "ollama".into(),
+                model: "qwen3.5:9b".into(),
+                config: Some(serde_json::json!({"num_ctx": 12288})),
+            },
+        );
+        let router = LLMRouter::new(config);
+        assert_eq!(router.effective_context_window("ollama", "qwen3.5:9b"), Some(12288));
+        assert_eq!(router.effective_context_window("openai", "gpt-x"), None);
     }
 
     /// Mock local provider for tests: returns a fixed response without calling any real model.

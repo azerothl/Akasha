@@ -1779,14 +1779,25 @@ pub fn studio_user_message_suggests_project_creation(message: &str) -> bool {
         "creer un nouveau projet",
         "crée le projet",
         "cree le projet",
+        "crée dans ce projet",
+        "cree dans ce projet",
+        "créer dans ce projet",
+        "creer dans ce projet",
         "créer le projet",
         "creer le projet",
         "create the project",
         "create this project",
+        "create in this project",
         "crée une application",
         "cree une application",
         "créer une application",
         "creer une application",
+        "crée une webapp",
+        "cree une webapp",
+        "créer une webapp",
+        "creer une webapp",
+        "create a web app",
+        "create a webapp",
         "créer un jeu",
         "creer un jeu",
         "crée un jeu",
@@ -1889,7 +1900,6 @@ pub(crate) fn studio_seed_initial_backlog(
         return Ok(Vec::new());
     }
 
-    let request = root_ticket.description.chars().take(2500).collect::<String>();
     let phases = [
         (
             "Établir le socle du projet",
@@ -1969,7 +1979,7 @@ pub(crate) fn studio_seed_initial_backlog(
             project_id: root_ticket.project_id.clone(),
             title: (*title).to_string(),
             description: format!(
-                "{phase_description}\n\nDemande initiale à traiter:\n{request}\n\nCe ticket fait partie du backlog initial du ticket {root_ticket_id}. Tous les fichiers de cette application restent sous la racine canonique `workspace:/`; inspecte et réutilise la stack existante au lieu de créer un projet imbriqué. Ne modifie pas le suivi directement: rapporte les fichiers et les résultats au chef de projet via Code Studio."
+                "{phase_description}\n\nCe ticket fait partie du backlog initial du ticket racine {root_ticket_id}; lis sa description pour connaître la demande complète. Tous les fichiers de cette application restent sous la racine canonique `workspace:/`; inspecte et réutilise la stack existante au lieu de créer un projet imbriqué. Ne modifie pas le suivi directement: rapporte les fichiers et les résultats au chef de projet via Code Studio."
             ),
             status: "todo".to_string(),
             requested_by: "system_initial_backlog".to_string(),
@@ -5063,6 +5073,12 @@ Try `npm i --save-dev @types/jest`";
         assert!(studio_user_message_suggests_project_creation(
             "Crée le projet « Todo — observation autonome » selon ce résumé : Crée une webapp de todo list."
         ));
+        assert!(studio_user_message_suggests_project_creation(
+            "Crée dans ce projet une webapp Todo avec ajout, complétion et filtres."
+        ));
+        assert!(studio_user_message_suggests_project_creation(
+            "Create a web app for a personal todo list."
+        ));
         assert!(!studio_user_message_suggests_project_creation(
             "Please fix the bug in the existing project."
         ));
@@ -5473,9 +5489,7 @@ Try `npm i --save-dev @types/jest`";
         )
         .expect("save project metadata");
 
-        let request = format!(
-            "Crée le projet « Todo — observation autonome » selon ce résumé :\n\n{summary}"
-        );
+        let request = format!("Crée dans ce projet une webapp Todo selon ce résumé :\n\n{summary}");
         let id = studio_create_evolution_ticket_from_chat(dir.path(), &request)
             .expect("create initial ticket and seed backlog");
         let root = studio_get_ticket(dir.path(), &id).expect("initial request ticket");

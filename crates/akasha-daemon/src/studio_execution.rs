@@ -40,7 +40,14 @@ pub(crate) fn catalog(router: &LLMRouter) -> Value {
         .flat_map(|(provider, models)| {
             models
                 .into_iter()
-                .map(move |model| json!({"provider":provider,"model":model}))
+                .map(move |model| {
+                    let context_window_tokens = router.effective_context_window(&provider, &model);
+                    json!({
+                        "provider":provider,
+                        "model":model,
+                        "context_window_tokens":context_window_tokens
+                    })
+                })
         })
         .collect::<Vec<_>>();
     models.sort_by_key(|entry| entry.to_string());

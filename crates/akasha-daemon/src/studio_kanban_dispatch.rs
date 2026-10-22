@@ -497,11 +497,12 @@ fn ticket_can_be_retried(
         if attempts >= MAX_AUTOMATIC_FAILURE_ATTEMPTS {
             return false;
         }
-        // The local context guard rejects before contacting the provider or
-        // running tools. Retry promptly with the compact Kanban planning prompt;
-        // normal provider/tool failures still use the cooldown below.
+        // A local preflight rejection proves no model call or tool ran. The
+        // task input is unchanged when the scheduler sees it again, so retrying
+        // would submit the same oversized request. Leave it blocked for an
+        // explicit model/context change instead of looping.
         if is_local_context_preflight_failure(ticket, task_statuses, store_path) {
-            return true;
+            return false;
         }
     }
     let related_task_terminal = ticket
@@ -1369,13 +1370,14 @@ mod tests {
     }
 
     #[test]
-    fn local_context_preflight_retries_immediately_but_provider_errors_wait() {
-        for (reason, expected_retry) in [
+    fn local_context_preflight_does_not_repeat_the_same_request() {
+        for (reason, expected_now, expected_after_cooldown) in [
             (
                 "context_window_preflight_rejected: nothing was sent",
-                true,
+                false,
+                false,
             ),
-            ("provider context_window_exceeded: request rejected", false),
+            ("provider context_window_exceeded: request rejected", false, true),
         ] {
             let dir = tempfile::tempdir().expect("project root");
             let root = dir.path().join("project");
@@ -1433,8 +1435,19 @@ mod tests {
                     &store_path,
                     chrono::Utc::now()
                 ),
-                expected_retry,
-                "unexpected retry decision for {reason}"
+                expected_now,
+                "unexpected immediate retry decision for {reason}"
+            );
+            assert_eq!(
+                ticket_can_be_retried(
+                    &blocked,
+                    &root,
+                    &statuses,
+                    &store_path,
+                    chrono::Utc::now() + chrono::Duration::hours(1)
+                ),
+                expected_after_cooldown,
+                "unexpected cooldown retry decision for {reason}"
             );
         }
     }
