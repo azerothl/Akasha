@@ -126,6 +126,7 @@ pub struct LLMRouter {
     metrics: Arc<MetricsCollector>,
     providers: HashMap<String, Arc<dyn LLMProvider>>,
     degraded_mode: bool,
+    studio_health: crate::studio_health::StudioHealth,
 }
 
 impl LLMRouter {
@@ -157,6 +158,7 @@ impl LLMRouter {
             metrics,
             providers: HashMap::new(),
             degraded_mode: false,
+            studio_health: crate::studio_health::StudioHealth::default(),
         }
     }
 
@@ -231,7 +233,7 @@ impl LLMRouter {
         }
         let config = self.config.read().unwrap_or_else(|e| e.into_inner()).clone();
         let mut routes = config.task_types.into_iter().collect::<Vec<_>>();
-        routes.sort_by_key(|(name, _)| (name != "code_generation", name.clone()));
+        routes.sort_by_key(|(name, _)| (name != "studio", name != "code_generation", name.clone()));
         let route_context = routes
             .into_iter()
             .flat_map(|(_, route)| route.primary.into_iter().chain(route.fallback))
@@ -453,6 +455,7 @@ impl LLMRouter {
     /// Replace in-memory routing config (task_types, providers metadata, global) from disk or API reload.
     /// Registered provider clients (Ollama, OpenRouter, etc.) are unchanged — route/model switches take effect immediately.
     pub fn reload_routing_config(&self, config: RoutingConfig) {
+        self.studio_health.clear();
         match self.config.write() {
             Ok(mut cfg) => *cfg = config,
             Err(poisoned) => *poisoned.into_inner() = config,
@@ -460,6 +463,27 @@ impl LLMRouter {
     }
 
     /// Complete using a single route entry — no fallback chain (model compare slots).
+    fn studio_route(&self, provider: &str, model: &str) -> Result<crate::config::RouteEntry,String> {
+        let config=self.config.read().unwrap_or_else(|e|e.into_inner());
+        let mut routes=config.task_types.iter().collect::<Vec<_>>();
+        routes.sort_by_key(|(name,_)| (*name!="studio",*name!="code_generation",(*name).clone()));
+        routes.into_iter().flat_map(|(_,route)|route.primary.iter().chain(route.fallback.iter()))
+            .find(|entry|entry.provider==provider && entry.model==model).cloned()
+            .ok_or_else(||"studio_model_not_configured: choisissez une route existante du catalogue".into())
+    }
+    pub fn studio_model_qualification(&self, provider: &str, model: &str) -> Option<crate::Qualification> {
+        let route=self.studio_route(provider,model).ok()?;
+        let options=self.config.read().unwrap_or_else(|e|e.into_inner()).model_options.clone();
+        self.studio_health.snapshot(&route,&options)
+    }
+    /// Explicit setup check: no user files or project tools are executed.
+    pub async fn qualify_studio_model(&self, provider: &str, model: &str) -> Result<crate::Qualification,String> {
+        let route=self.studio_route(provider,model)?;
+        let options=self.config.read().unwrap_or_else(|e|e.into_inner()).model_options.clone();
+        let client=self.providers.get(provider).ok_or("studio_provider_not_registered")?;
+        if self.degraded_mode && !client.is_local() {return Err("mode dégradé : qualification distante désactivée".into());}
+        self.studio_health.ensure(&route,&options,client.as_ref(),std::time::Duration::from_secs(20),true).await
+    }
     pub async fn complete_for_entry(
         &self,
         request: &CompletionRequest,
@@ -646,6 +670,41 @@ impl LLMRouter {
             )
             .instrument(span)
             .await
+    }
+
+    /// Studio's outer task deadline is shared by all provider attempts. Only
+    /// configured alternatives are used; a selected route never changes models.
+    pub async fn complete_stream_bounded(
+        &self,
+        request: &CompletionRequest,
+        selected: Option<&crate::config::RouteEntry>,
+        recovered: Option<&crate::config::RouteEntry>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+        budget: std::time::Duration,
+        observe: crate::AttemptObserver,
+    ) -> Result<CompletionResponse, String> {
+        let (mut routes, options, allow_same_retry) = {
+            let config = self.config.read().unwrap_or_else(|e|e.into_inner());
+            let routes = if let Some(entry) = selected { vec![entry.clone()] } else {
+                let task_type = request.preferred_task_type.as_deref().map(|t|resolve_preferred_task_type(t, &config))
+                    .unwrap_or_else(||classify_task_type(&request.prompt).0.as_str().to_string());
+                let route = config.get_route("studio").or_else(||config.get_route(&task_type)).cloned().unwrap_or_else(||crate::config::TaskTypeConfig {
+                    primary: Some(crate::config::RouteEntry {provider:"akasha_embedded".into(),model:"default".into(),config:None}),
+                    fallback:vec![],constraints:None,
+                });
+                let route = task_config_for_completion(&route, config.global.enable_fallback.unwrap_or(true));
+                route.primary.into_iter().chain(route.fallback).collect()
+            };
+            (routes, config.model_options.clone(), config.global.default_max_retries.unwrap_or(2)>0)
+        };
+        if selected.is_none() {
+            if let Some(index)=recovered.and_then(|preferred|routes.iter().position(|entry|entry.provider==preferred.provider && entry.model==preferred.model)) {
+                let preferred=routes.remove(index);routes.insert(0,preferred);
+            }
+        }
+        let resolve = self.resolve();
+        let routes = routes.into_iter().filter(|entry| !self.degraded_mode || resolve(&entry.provider).is_some_and(|provider|provider.is_local())).collect();
+        crate::bounded::complete_stream(request, routes, &resolve, &options, &self.metrics, chunk_tx, budget, allow_same_retry, &self.studio_health, selected.is_some(), observe).await
     }
 
     /// Complete with streaming: chunks are sent to `chunk_tx`. Uses preferred_task_type if set, else classifier.

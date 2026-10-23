@@ -21,7 +21,7 @@ use crate::api::{
     studio_semantic_acceptance_review, studio_verify_analyzing_progress_line,
     studio_verify_build_excerpt_label, studio_verify_detect_user_language,
     studio_verify_explain_failure_to_user, studio_verify_failure_banner,
-    studio_verify_run_llm_autofix_rounds, studio_verify_summary_heading_markdown, tool_scope_key,
+    studio_verify_summary_heading_markdown, tool_scope_key,
     vision_inject_max_chars, vision_payload_within_cap, web_followup_tools_configured,
     workspace_lineage_root_task_id, AgentProfile, AgentProfileCache, DelegationRequest, HumanInputStore,
     MemoryProfile, PendingHumanInput, ProcessRegistry,
@@ -90,7 +90,7 @@ fn auto_extend_studio_round_budget(
     outcome: &crate::task_outcome::RunOutcome,
 ) -> Result<bool, String> {
     const STUDIO_TOOL_ROUND_HARD_CAP: u32 = 96;
-    if *max_tool_rounds >= STUDIO_TOOL_ROUND_HARD_CAP {
+    if *max_tool_rounds >= STUDIO_TOOL_ROUND_HARD_CAP || !crate::studio_progress::may_extend(outcome, round) {
         return Ok(false);
     }
     let previous_limit = *max_tool_rounds;
@@ -456,10 +456,11 @@ pub(crate) async fn run_message_via_llm(
              et une creation_key stable. Relis le Kanban après chaque mise à jour; ne modifie aucun fichier source\
              et ne délègue pas avant la fin de ce backlog.\n",
         );
+        studio_disk_system_append.push_str(&format!("\n[Références du plan liées à cette tâche]\n{}\n",crate::studio_planning::context(&tool_disk_workspace_root,&task_id.to_string())));
     } else if code_studio_disk_task && assigned_agent.eq_ignore_ascii_case("studio_project_manager") {
         studio_disk_system_append.push_str(
             "\n\n[Kanban workflow — required]\n\
-            Before implementation delegation, read the whole Kanban. When the linked ticket has the initial-kanban-backlog criterion, refine the seeded work tickets before creating missing ones. Ensure at least three focused work tickets with non-empty, verifiable acceptance criteria cover the foundation, requested features, integration, and validation, with at least one real dependency between work tickets. Each work ticket uses parent_ticket_id for the global tracker and a stable creation_key; parent-child tracking does not block dispatch. Use depends_on_ticket_ids only for real execution prerequisites, never for the global tracker. Before creating work, reread the Kanban and reuse the existing canonical ticket ID; repeated requests must not create duplicates. Do not delegate implementation until this backlog exists. Every user evolution has an automatically linked global ticket; do not duplicate it. Before editing source, create or reuse at least one actionable child ticket under that tracker: exactly one for a small change, multiple for independent or sequential work. Give each child observable acceptance criteria, an owner, and a reviewer. A queued follow-up has its own linked tracker and follows the same rule. After every worker result and on every scheduled Kanban pass, compare open tickets with task states, update blockers and dispatch one ready ticket per pass in dependency order. If verification finds a confirmed bug outside the current ticket, create a distinct bug ticket with expected result, observed result, and a reproducible check; do not duplicate a bug already covered by the current ticket. Never mark a ticket done without observed validation evidence."
+            Before implementation delegation, read the whole Kanban. When the linked ticket has host-owned initial_backlog_root=true, refine the seeded work tickets before creating missing ones. A copied acceptance criterion never changes a work ticket into a coordinator. Ensure at least three focused work tickets with non-empty, verifiable acceptance criteria cover the foundation, requested features, integration, and validation, with at least one real dependency between work tickets. Each work ticket uses parent_ticket_id for the global tracker and a stable creation_key; parent-child tracking does not block dispatch. Use depends_on_ticket_ids only for real execution prerequisites, never for the global tracker. Before creating work, reread the Kanban and reuse the existing canonical ticket ID; repeated requests must not create duplicates. Do not delegate implementation until this backlog exists. Every user evolution has an automatically linked global ticket; do not duplicate it. Before editing source, create or reuse at least one actionable child ticket under that tracker: exactly one for a small change, multiple for independent or sequential work. Give each child observable acceptance criteria, an owner, and a reviewer. A queued follow-up has its own linked tracker and follows the same rule. After every worker result and on every scheduled Kanban pass, compare open tickets with task states, update blockers and dispatch one ready ticket per pass in dependency order. If verification finds a confirmed bug outside the current ticket, create a distinct bug ticket with expected result, observed result, and a reproducible check; do not duplicate a bug already covered by the current ticket. Never mark a ticket done without observed validation evidence."
         );
     } else if code_studio_disk_task
         && matches!(
@@ -519,7 +520,9 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .and_then(|t| t.parent_task_id)
         .is_some();
-    let router_task_type_early = if preferred_task_type_override.as_deref()
+    let router_task_type_early = if code_studio_disk_task && llm_router.primary_route_for_task_type("studio").is_some() {
+        "studio".to_string()
+    } else if preferred_task_type_override.as_deref()
         == Some("image_generation")
         || assigned_agent == "image_generation"
     {
@@ -1826,6 +1829,8 @@ pub(crate) async fn run_message_via_llm(
         }
         if let Some(saved)=recovery_checkpoint.as_ref().and_then(|checkpoint|checkpoint.max_tool_rounds) {max_tool_rounds=saved;}
         let mut round = recovery_checkpoint.as_ref().map(|checkpoint|checkpoint.round).unwrap_or(0);
+        let mut recovered_model_route=run_outcome.checks.iter().rev().find(|check|check["kind"]=="provider_route_recovered")
+            .and_then(|check|Some(akasha_llm::config::RouteEntry{provider:check["provider"].as_str()?.into(),model:check["model"].as_str()?.into(),config:None}));
         // Tours d'affilée avec uniquement des outils d'exploration (Code Studio).
         let mut studio_read_only_streak_rounds: u32 = 0;
         let mut studio_goal_failure_seen = goal_tracker.as_ref().is_some_and(|goal|goal.state.cycles>0);
@@ -1919,7 +1924,11 @@ pub(crate) async fn run_message_via_llm(
                         &run_outcome,
                     ) {
                         Ok(true) => continue 'tool_rounds,
-                        Ok(false) => {}
+                        Ok(false) => {
+                            run_outcome.termination=TerminationReason::ToolRoundLimit;
+                            reply_text="studio_round_budget_exhausted: budget atteint sans nouveau jalon vérifié justifiant une prolongation. Changements conservés ; consultez les diagnostics avant une reprise explicite.".into();
+                            break 'tool_rounds;
+                        }
                         Err(error) => {
                             run_outcome.termination = TerminationReason::ContextUnavailable;
                             reply_text = error;
@@ -2037,9 +2046,10 @@ pub(crate) async fn run_message_via_llm(
             } else {
                 Some(merged_image_urls)
             };
-            if let Some((provider, model)) = preferred_task_type
-                .as_deref()
-                .and_then(|tt| llm_router.primary_route_for_task_type(tt))
+            if let Some((provider, model)) = selected_model_route.as_ref()
+                .or(recovered_model_route.as_ref())
+                .map(|route|(route.provider.clone(),route.model.clone()))
+                .or_else(||preferred_task_type.as_deref().and_then(|tt|llm_router.primary_route_for_task_type(tt)))
             {
                 insert_task_tracking_event(
                     store_path.as_path(),
@@ -2075,9 +2085,40 @@ pub(crate) async fn run_message_via_llm(
                 if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
             }
             if round>=max_tool_rounds {run_outcome.termination=TerminationReason::ToolRoundLimit;reply_text="Tool round budget already exhausted at checkpoint; start a new scoped task to continue.".into();break 'tool_rounds;}
+            let execution_worker = code_studio_disk_task && matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code");
+            if execution_worker && crate::studio_progress::inspection_exhausted(&run_outcome) {
+                run_outcome.termination=TerminationReason::ToolLoop;
+                reply_text="studio_no_verified_progress: repeated inspection persisted after the action boundary. No additional reads were executed. The inspected content and diagnostics are preserved; use a qualified model or an explicit scoped resume.".into();
+                break 'tool_rounds;
+            }
             let literal_only=focused_file_task && scope_unchanged && active_repository_rules.is_empty() && super::studio_completion::literal_file_operations_only(&task_scope);
-            let repair_focus_this_turn = studio_repair_focus_next_turn;
-            if repair_focus_this_turn {
+            // Rebuild the repair control every turn, including after checkpoint resume.
+            let build_repair = code_studio_disk_task.then(|| crate::studio_progress::repair_instruction(&run_outcome)).flatten();
+            if let Some(instruction) = build_repair.as_ref() {
+                current_prompt.push_str(instruction);
+            }
+            let build_repair_focus = code_studio_disk_task && crate::studio_progress::repair_needs_focus(&run_outcome);
+            let compiler_repair = (code_studio_disk_task && !literal_only && matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code"))
+                .then(|| crate::studio_progress::compiler_repair(&run_outcome)).flatten();
+            if let Some(repair) = compiler_repair.as_ref() { current_prompt.push_str(&repair.instruction()); }
+            let foundation_ticket=crate::studio_vite_scaffold::foundation_ticket(&tool_disk_workspace_root,&lineage_for_studio.to_string(),&assigned_agent);
+            let foundation_command=foundation_ticket.as_ref().and_then(|_|crate::api_studio::studio_verification_argv(&tool_disk_workspace_root).ok().flatten()).map(|argv|{let mut a=vec!["--cwd".into(),"workspace:/".into()];a.extend(argv);a});
+            let foundation_ready=foundation_command.as_ref().is_some_and(|a|crate::studio_progress::project_check_fresh(&run_outcome,a));
+            let foundation_boundary=foundation_ticket.as_ref().zip(foundation_command.as_ref()).filter(|_|compiler_repair.is_none() && build_repair.is_none());
+            if let Some((ticket,command))=foundation_boundary {
+                current_prompt.push_str(&format!("\n[Supplied foundation boundary] Code Studio already provided the infrastructure in STUDIO_SCAFFOLD.md, including DOM tests configuration. This persisted foundation ticket is {ticket}. Do not implement product features, add product tests or rebuild the skeleton here. {}. Other product tickets remain open; this is not app acceptance.\n",if foundation_ready {"The configured build has a fresh successful receipt. Call studio_update_ticket for this ticket with status review and observed build evidence".to_string()}else{format!("Execute ONLY the configured verification now: {}. Dependencies are prepared automatically. A failure returns to the native repair loop",serde_json::json!(command))}));
+            }
+            let inspection_focus=execution_worker && !literal_only && foundation_boundary.is_none() && compiler_repair.is_none() && crate::studio_progress::inspection_needs_action(&run_outcome);
+            if inspection_focus {current_prompt.push_str("\n[Inspection action boundary] Repeated inspection produced no file or verification milestone. The content is already available above. Choose one permitted source change implementing this ticket, its finite verification, or a precise final blocker. Survey tools are temporarily unavailable; do not rewrite unchanged content to reset the guard.\n");}
+
+            let build_missing_target = (!literal_only && build_repair_focus)
+                .then(|| crate::studio_progress::missing_entrypoint(&run_outcome)).flatten()
+                .filter(|path| !crate::api::resolve_tool_disk_path(path,Some(&tool_disk_workspace_root)).exists());
+            if let Some(target)=build_missing_target.as_ref() {
+                current_prompt.push_str(&format!("\n[Missing entrypoint repair boundary] The recorded build requires {target}, which is still absent. Inspection has not repaired it. This turn must generate that exact file using the advertised write tool; application content is your responsibility. Do not create a similar path under public/ or rerun a command before this file exists. Existing policy and file guards still apply.\n"));
+            }
+            let repair_focus_this_turn = studio_repair_focus_next_turn || build_repair_focus;
+            if repair_focus_this_turn && build_repair.is_none() {
                 current_prompt.push_str("\n[Stalled goal repair phase] Repeated surveys or failed checks have not changed the project. This turn prioritizes already permitted repair functions and retains source reads and verification commands needed for the repair. Read an implicated file when needed, then prefer one small targeted correction with search_replace, edit_file or apply_patch using the inspected current version. Preserve unrelated code and avoid a whole-file rewrite when a patch suffices, unless the original request explicitly requires a full rewrite. Do not repeat the failed command. No completed write is implied by a plan. If the recorded blocker is truly irreparable with these permissions, report that precise blocker.\n");
             }
             let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
@@ -2087,29 +2128,39 @@ pub(crate) async fn run_message_via_llm(
                         crate::studio_capabilities::select_initial_kanban_names(names)
                     } else {
                         crate::studio_capabilities::select_native_names(names,
-                            run_outcome.checks.iter().any(|check|check["kind"]=="native_catalogue_discovery"))
+                            run_outcome.checks.iter().rev().find(|check|check["kind"]=="native_catalogue_discovery").and_then(|check|check["tool"].as_str()))
                     };
                     if repair_focus_this_turn && !literal_only {
                         names=crate::studio_capabilities::select_repair_names(names);
+                        if build_repair_focus {
+                            names.retain(|name| !matches!(name.as_str(), "list_tools" | "list_directory" | "search_files" | "search_code" | "find_files" | "list_files" | "grep_content" | "file_diff"));
+                        }
                         insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"stalled_goal_repair","tools":names}));
                     }
+                    if build_missing_target.is_some() {
+                        names.retain(|name|name=="write_file");
+                    }
+                    if let Some(repair) = compiler_repair.as_ref() { names.retain(|name|repair.names().contains(&name.as_str())); }
+                    if foundation_boundary.is_some() {names.retain(|name|name==if foundation_ready {"studio_update_ticket"}else{"run_command"});}
+                    if inspection_focus {names.retain(|name|crate::studio_tool_contract::is_file_mutation(name)||matches!(name.as_str(),"run_command"|"run_terminal"));}
+
                     if literal_only {
                         names.retain(|name|matches!(name.as_str(),"read_file"|"write_file"|"write_code"));
                         insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"literal_file_only","literal_values_bound":true,"tools":names}));
                     }
-                    (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else{crate::studio_tool_contract::native_definition(names)}])
+                    (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else if let Some(repair)=compiler_repair.as_ref() {repair.definition(names)}else if let Some(target)=build_missing_target.as_ref() {crate::studio_tool_contract::missing_entrypoint_definition(names,target)}else if let Some((ticket,command))=foundation_boundary {crate::studio_vite_scaffold::foundation_definition(names,ticket,command,foundation_ready)}else{crate::studio_tool_contract::native_definition(names)}])
                 })
             }else{None};
             let mut turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             // Workflow tools use the text protocol. Include their effective
             // announced names for ordinary turns, without widening literal-only turns.
-            if !literal_only && !studio_initial_kanban_planning {
+            if !literal_only && !studio_initial_kanban_planning && build_missing_target.is_none() && compiler_repair.is_none() && foundation_boundary.is_none() && !inspection_focus {
                 if let (Some(names),Some(exec))=(turn_tool_names.as_mut(),tools_executor_snapshot.as_ref()) {
                     names.extend(crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && !crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name));
                 }
             }
             let request = CompletionRequest {
-                require_tool: code_studio_disk_task && (goal_tracker.is_some() || (run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation())
+                require_tool: compiler_repair.is_some() || foundation_boundary.is_some() || inspection_focus || code_studio_disk_task && (build_missing_target.is_some() || goal_tracker.is_some() || (run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation())
                     || (!explicit_file_goals.is_empty() && super::studio_completion::requires_tool_retry(&current_prompt,&run_outcome.checks)))
                     && (matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code")
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
@@ -2144,6 +2195,7 @@ pub(crate) async fn run_message_via_llm(
             // handing off to that bounded wait is real worker activity, not a
             // claim that files changed or the goal succeeded.
             if code_studio_disk_task && request.tools.as_ref().is_some_and(|tools|!tools.is_empty()) {
+                crate::api::cancel_progress_watchdog(&mut watchdog_cancel);
                 crate::studio_execution::mark_bounded_native_wait(&meaningful_progress_flag,llm_timeout_secs);
                 insert_task_tracking_event(&store_path,task_id,"bounded_native_model_wait",serde_json::json!({"round":round+1,"timeout_secs":llm_timeout_secs,"files_changed":false}));
             }
@@ -2163,14 +2215,42 @@ pub(crate) async fn run_message_via_llm(
                 .ok();
             let router = llm_router.clone();
             let selected_route = selected_model_route.clone();
-            let stream_join = tokio::spawn(async move {
-                if let Some(route) = selected_route { router.complete_stream_for_entry(&request, &route, stream_tx).await }
+            let recovered_route = recovered_model_route.clone();
+            let turn_budget = std::time::Duration::from_secs(goal_tracker.as_ref().map(|goal|llm_timeout_secs.min(goal.goal.max_seconds.saturating_sub(goal.state.elapsed_ms/1000).max(1))).unwrap_or(llm_timeout_secs));
+            let attempt_state = std::sync::Arc::new(std::sync::Mutex::new((serde_json::Value::Null, std::time::Instant::now())));
+            let observer_state = attempt_state.clone();
+            let observer_store = store_path.clone();
+            let observer_bus = bus.clone();
+            let observer: akasha_llm::AttemptObserver = std::sync::Arc::new(move |event| {
+                if let Ok(mut state) = observer_state.lock() {
+                    if matches!(event["phase"].as_str(), Some("qualifying"|"started"|"retry"|"fallback")) {state.1=std::time::Instant::now();}
+                    state.0=event.clone();
+                }
+                insert_task_tracking_event(&observer_store, task_id, "llm_provider_attempt", event.clone());
+                if matches!(event["phase"].as_str(), Some("qualifying"|"started"|"retry"|"fallback")) {
+                    let action=match event["phase"].as_str() {Some("qualifying")=>"Qualification des outils (sans opération projet)",Some("retry")=>"Nouvelle tentative",Some("fallback")=>"Repli automatique",_=>"Appel au modèle"};
+                    let message=format!("{action} : {} / {} · tentative {}/{}",event["provider"].as_str().unwrap_or("?"),event["model"].as_str().unwrap_or("?"),event["attempt"],event["max_attempts"]);
+                    let _=observer_bus.send(EventEnvelope::new(EventType::ProgressUpdate,Some(serde_json::json!({"task_id":task_id,"progress_pct":24,"message":message}))).with_correlation(task_id));
+                }
+            });
+            let mut stream_join = tokio::spawn(async move {
+                if code_studio_disk_task {
+                    router.complete_stream_bounded(&request,selected_route.as_ref(),recovered_route.as_ref(),stream_tx,turn_budget.saturating_sub(std::time::Duration::from_millis(100)),observer).await
+                } else if let Some(route) = selected_route { router.complete_stream_for_entry(&request, &route, stream_tx).await }
                 else { router.complete_stream(&request, stream_tx).await }
             });
             let mut accumulated = String::new();
             let mut first_wait = true;
-            let overall_deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_secs(goal_tracker.as_ref().map(|goal|llm_timeout_secs.min(goal.goal.max_seconds.saturating_sub(goal.state.elapsed_ms/1000).max(1))).unwrap_or(llm_timeout_secs));
+            let overall_deadline = tokio::time::Instant::now() + turn_budget;
+            let timeout_message=|| {
+                if code_studio_disk_task {
+                    let state=attempt_state.lock().ok();
+                    let route=state.as_ref().map(|state|format!("{} / {}",state.0["provider"].as_str().unwrap_or("inconnu"),state.0["model"].as_str().unwrap_or("inconnu"))).unwrap_or_else(||"fournisseur inconnu".into());
+                    format!("provider_generation_failed: {route} : délai de génération dépassé après {} s. Vérifiez que le service répond et que la mémoire disponible suffit, puis reprenez cette tâche depuis son checkpoint. Les événements conservent les tentatives et les modèles appelés.",turn_budget.as_secs())
+                } else {format!("LLM response timed out after {} seconds.",llm_timeout_secs)}
+            };
+            let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+            heartbeat.tick().await;
             loop {
                 // Check the overall deadline before waiting for a chunk to avoid spurious zero-duration timeouts.
                 if tokio::time::Instant::now() >= overall_deadline {
@@ -2180,20 +2260,40 @@ pub(crate) async fn run_message_via_llm(
                     );
                     stream_join.abort();
                     run_outcome.termination = TerminationReason::Timeout;
-                    reply_text = if accumulated.is_empty() {
-                        format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                    reply_text = if code_studio_disk_task || accumulated.is_empty() {
+                        timeout_message()
                     } else {
                         accumulated
                     };
                     break 'tool_rounds;
                 }
-                let idle = if first_wait {
+                let idle = if code_studio_disk_task {
+                    overall_deadline.saturating_duration_since(tokio::time::Instant::now())
+                } else if first_wait {
                     first_wait = false;
                     std::time::Duration::from_secs(first_chunk_timeout_secs)
                 } else {
                     std::time::Duration::from_secs(idle_timeout_secs)
                 };
-                match tokio::time::timeout(idle.min(overall_deadline.saturating_duration_since(tokio::time::Instant::now())), tok_rx.recv()).await {
+                let receive = tokio::time::timeout(idle.min(overall_deadline.saturating_duration_since(tokio::time::Instant::now())), tok_rx.recv());
+                tokio::pin!(receive);
+                let received = loop {
+                    tokio::select! {
+                        result = &mut receive => break result,
+                        _ = heartbeat.tick(), if code_studio_disk_task => {
+                            if let Ok(state)=attempt_state.lock() {
+                                let event=&state.0;
+                                if event.is_null() {continue;}
+                                let elapsed=state.1.elapsed().as_secs();
+                                let activity=if event["phase"]=="first_token" {"génération en cours"}else{"attente de réponse"};
+                                let message=format!("{} / {} : {activity} depuis {elapsed} s · tentative {}/{}.",event["provider"].as_str().unwrap_or("?"),event["model"].as_str().unwrap_or("?"),event["attempt"],event["max_attempts"]);
+                                insert_task_tracking_event(&store_path,task_id,"llm_wait_heartbeat",serde_json::json!({"provider":event["provider"],"model":event["model"],"attempt":event["attempt"],"elapsed_secs":elapsed,"phase":event["phase"],"files_changed":false}));
+                                let _=bus.send(EventEnvelope::new(EventType::ProgressUpdate,Some(serde_json::json!({"task_id":task_id,"progress_pct":24,"message":message}))).with_correlation(task_id));
+                            }
+                        }
+                    }
+                };
+                match received {
                     Ok(Some(chunk)) => {
                         if !first_meaningful_progress_sent {
                             first_meaningful_progress_sent = true;
@@ -2296,19 +2396,20 @@ pub(crate) async fn run_message_via_llm(
             // Wrap stream_join.await with remaining overall budget; guard against zero remaining.
             let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
             let response = if remaining.is_zero() {
+                stream_join.abort();
                 run_outcome.termination = TerminationReason::Timeout;
                 tracing::warn!(
                     timeout_secs = llm_timeout_secs,
                     "Overall LLM timeout on stream completion"
                 );
-                reply_text = if accumulated.is_empty() {
-                    format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                reply_text = if code_studio_disk_task || accumulated.is_empty() {
+                    timeout_message()
                 } else {
                     accumulated
                 };
                 break;
             } else {
-                match tokio::time::timeout(remaining, stream_join).await {
+                match tokio::time::timeout(remaining, &mut stream_join).await {
                     Ok(Ok(Ok(resp))) => {
                         if let Some(goal)=goal_tracker.as_mut() {
                             let used=resp.usage.as_ref().map(|usage|usage.prompt_tokens.saturating_add(usage.completion_tokens)).filter(|count|*count>0).unwrap_or(estimated_request_tokens.saturating_add(resp.text.len() as u64));
@@ -2316,6 +2417,15 @@ pub(crate) async fn run_message_via_llm(
                             if let Err(error)=goal.save(&store_path,task_id,"active","Réponse modèle reçue; consommation enregistrée") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
                         }
                         last_llm_model_used = Some(resp.model_used.clone());
+                        if code_studio_disk_task && selected_model_route.is_none() {
+                            if let Some(provider)=resp.provider_used.as_ref() {
+                                let route=akasha_llm::config::RouteEntry{provider:provider.clone(),model:resp.model_used.clone(),config:None};
+                                if recovered_model_route.as_ref().is_none_or(|old|old.provider!=route.provider || old.model!=route.model) {
+                                    run_outcome.checks.push(serde_json::json!({"kind":"provider_route_recovered","provider":route.provider,"model":route.model,"status":"passed","detail":"Le fournisseur a retourné une génération complète; cette route configurée est préférée pour les tours suivants."}));
+                                }
+                                recovered_model_route=Some(route);
+                            }
+                        }
                         insert_task_tracking_event(
                             store_path.as_path(),
                             task_id,
@@ -2414,9 +2524,11 @@ pub(crate) async fn run_message_via_llm(
                             current_prompt.push_str(&format!("\n[Transport rejection — no tool call from this response was executed] {retry_detail} Regenerate one complete operation using an advertised function and its literal keyword arguments. Do not mix formats or use legacy TOOL lines. Keep the arguments small and valid JSON. Re-read current ticket and file state before making any assumptions about earlier operations. Continue the requested implementation only after the repaired call succeeds.\n"));
                             continue 'tool_rounds;
                         }
-                        run_outcome.termination = TerminationReason::ProviderError;
+                        run_outcome.termination = if error_text.to_ascii_lowercase().contains("timeout") {TerminationReason::Timeout}else{TerminationReason::ProviderError};
                         reply_text = if provider_parse_error {
                             "Le fournisseur LLM a rejeté le JSON d’un appel d’outil. La tâche s’est arrêtée et cet appel n’a pas été exécuté. Des opérations précédentes peuvent avoir abouti : vérifiez l’état du projet avant de relancer ou choisissez un autre modèle.".to_string()
+                        } else if error_text.starts_with("provider_generation_failed:") {
+                            error_text.chars().take(2000).collect()
                         } else {
                             format!("Sorry, I couldn't get a response (error: {}).", safe_error)
                         };
@@ -2433,13 +2545,14 @@ pub(crate) async fn run_message_via_llm(
                         break;
                     }
                     Err(_timeout) => {
+                        stream_join.abort();
                         run_outcome.termination = TerminationReason::Timeout;
                         tracing::warn!(
                             timeout_secs = llm_timeout_secs,
                             "Overall LLM timeout on stream completion"
                         );
-                        reply_text = if accumulated.is_empty() {
-                            format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                        reply_text = if code_studio_disk_task || accumulated.is_empty() {
+                            timeout_message()
                         } else {
                             accumulated
                         };
@@ -2491,7 +2604,7 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
 
-            let parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
+            let mut parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
                 let calls = if code_studio_disk_task {super::studio_conversation::parse_calls_for_turn(&response,turn_tool_names.as_deref())} else {parse_tool_calls(&response)};
                 if calls.is_empty() {
                     None
@@ -2532,7 +2645,95 @@ pub(crate) async fn run_message_via_llm(
                     }
                 }
             }
-            let no_parseable_tools_this_round = parsed_tool_calls.is_none();
+            let mut no_parseable_tools_this_round = parsed_tool_calls.is_none();
+            if studio_initial_kanban_planning && no_parseable_tools_this_round {
+                match crate::studio_planning::finish(&tool_disk_workspace_root, &task_id.to_string()) {
+                    Ok(check) => {
+                        run_outcome.checks.push(check);
+                        reply_text = "Planification vérifiée. Le Kanban est prêt pour les agents d'implémentation ; l'application reste à créer et valider.".into();
+                        break 'tool_rounds;
+                    }
+                    Err(error) => {
+                        let repairs = run_outcome.checks.iter().filter(|c| c["kind"] == "kanban_plan_repair").count();
+                        if repairs < 2 {
+                            run_outcome.checks.push(serde_json::json!({"kind":"kanban_plan_repair","status":"retried","detail":error}));
+                            current_prompt = format!("{delivered_prompt}\n[Planning verification failed]\n{error}\nUse the existing ticket IDs and studio_update_ticket to resolve these problems. Do not delegate, create duplicate phase tickets or claim project completion.");
+                            continue;
+                        }
+                        run_outcome.termination = TerminationReason::VerificationFailed;
+                        run_outcome.checks.push(serde_json::json!({"kind":"kanban_plan","status":"failed","detail":error}));
+                        reply_text = format!("Planification Kanban incomplète : {error}");
+                        break 'tool_rounds;
+                    }
+                }
+            }
+            let mut runtime_commands_added=false;
+            // Completion runs the configured check through this SAME tracked
+            // tool loop. A failure returns to its native repair controller.
+            if code_studio_disk_task && no_parseable_tools_this_round && !restricted_studio_role && !studio_initial_kanban_planning {
+                match crate::api_studio::studio_verification_argv(&tool_disk_workspace_root) {
+                    Ok(Some(argv)) => {
+                        let mut args=vec!["--cwd".into(),"workspace:/".into()];args.extend(argv);
+                        crate::studio_progress::register_project_check(&mut run_outcome,&args);
+                        if !crate::studio_progress::project_check_fresh(&run_outcome,&args)
+                            && !run_outcome.checks.iter().any(|c|c["kind"]=="command"&&c["verification"]==true&&c["status"]=="failed") {
+                            parsed_tool_calls=Some(vec![("run_command".into(),args)]);
+                            runtime_commands_added=true;
+                            no_parseable_tools_this_round=false;
+                            insert_task_tracking_event(&store_path,task_id,"studio_verification_scheduled",serde_json::json!({"engine":"main_tool_loop"}));
+                        }
+                    },
+                    Ok(None)=>{},
+                    Err(error)=>{run_outcome.termination=TerminationReason::VerificationFailed;reply_text=error;break 'tool_rounds;}
+                }
+            }
+            if no_parseable_tools_this_round && foundation_ready && compiler_repair.is_none() {
+                if let Some(ticket)=foundation_ticket.as_ref() {
+                    parsed_tool_calls=Some(vec![("studio_update_ticket".into(),vec![serde_json::json!({"ticket_id":ticket,"status":"review","evidence":{"summary":"Supplied infrastructure verified by the configured build in the main tool loop. Product features remain on their own tickets."}}).to_string()])]);
+                    runtime_commands_added=true;no_parseable_tools_this_round=false;
+                }
+            }
+            let mut automatic_dependency_installs=Vec::<Vec<String>>::new();
+            if code_studio_disk_task && !restricted_studio_role {
+                if let (Some(calls),Some(exec))=(parsed_tool_calls.as_mut(),tools_executor_snapshot.as_ref()) {
+                    let mut expanded=Vec::new();
+                    for (name,args) in calls.drain(..) {
+                        let decoded=if name=="studio_call" {crate::studio_tool_contract::decode(&args.join(" ")).ok()}else{None};
+                        let tool=decoded.as_ref().map(|call|call.envelope.tool.as_str()).unwrap_or(&name);
+                        let argv=decoded.as_ref().map(|call|call.argv.as_slice()).unwrap_or(&args);
+                        match crate::studio_dependencies::preparation(&tool_disk_workspace_root,tool,argv,&exec.policy) {
+                            Ok(Some(install))=>{
+                                if !automatic_dependency_installs.contains(&install) {
+                                    automatic_dependency_installs.push(install.clone());
+                                    runtime_commands_added=true;
+                                    expanded.push(("run_command".into(),install));
+                                    insert_task_tracking_event(&store_path,task_id,"studio_dependencies_scheduled",serde_json::json!({"engine":"main_tool_loop","before":tool}));
+                                }
+                            },
+                            Ok(None)=>{},
+                            Err(error)=>{run_outcome.termination=TerminationReason::VerificationFailed;reply_text=error;break 'tool_rounds;}
+                        }
+                        expanded.push((name,args));
+                    }
+                    *calls=expanded;
+                }
+            }
+            if code_studio_disk_task && no_parseable_tools_this_round && !studio_initial_kanban_planning {
+                let pending=if explicit_file_goals.is_empty() {crate::studio_progress::pending_delivery_checks(&run_outcome)} else {crate::studio_progress::pending_checks(&run_outcome)};
+                if !pending.is_empty() {
+                    let retries=run_outcome.checks.iter().filter(|c|c["kind"]=="command_verification_retry").count();
+                    if retries>=2 {
+                        run_outcome.termination=TerminationReason::VerificationFailed;
+                        reply_text=format!("studio_command_verification_failed: vérifications en échec ou périmées après des modifications : {}. Aucun succès de livraison n'est confirmé.",pending.join("; "));
+                        break 'tool_rounds;
+                    }
+                    run_outcome.checks.push(serde_json::json!({"kind":"command_verification_retry","status":"retried","attempt":retries+1,"pending":pending}));
+                    if !delivered_prompt.is_empty(){conversation.push(akasha_llm::ConversationMessage::runtime_control(delivered_prompt.clone()));}
+                    conversation.push(akasha_llm::ConversationMessage::assistant(response.clone()));
+                    current_prompt=format!("[Fresh verification required] The final response is premature. Repair the first failed prerequisite, then rerun these exact checks against the current files: {}. Writing files later does not turn an earlier failed command into a pass. Never weaken checks or claim completion without the actual successful result.",pending.join("; "));
+                    continue;
+                }
+            }
             // Targeted missing-file recovery follows verified progress; a zero-effect claim still fails as a tool error.
             if code_studio_disk_task && no_parseable_tools_this_round && !explicit_file_goals.is_empty() && run_outcome.has_file_effect_progress() {
                 let current=if let Some(executor)=tools_executor.as_ref(){Some(crate::studio_policy::executor(executor.read().await.clone(), studio_policy_root))}else{tools_executor_snapshot.clone()};
@@ -2763,7 +2964,7 @@ pub(crate) async fn run_message_via_llm(
                 continue;
             }
 
-            if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
+            if let (Some(exec), Some(mut calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
             {
                 round += 1;
                 let mut tool_results = Vec::new();
@@ -2793,7 +2994,7 @@ pub(crate) async fn run_message_via_llm(
                 let mut previous_batch_call_succeeded = true;
                 let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
-                for (lane, lane_calls) in scheduled_lanes {
+                for (lane, mut lane_calls) in scheduled_lanes {
                     let lane_name = match lane {
                         akasha_tools::ToolExecutionLane::ParallelSafe => "parallel_safe",
                         akasha_tools::ToolExecutionLane::SerialExclusive => "serial_exclusive",
@@ -2809,7 +3010,10 @@ pub(crate) async fn run_message_via_llm(
                     )
                     .with_correlation(task_id),
                 );
-                    for (name, args) in &lane_calls {
+                    let mut lane_call_index=0;
+                    while let Some((owned_name,owned_args))=lane_calls.get(lane_call_index).cloned() {
+                        lane_call_index+=1;
+                        let (name,args)=(&owned_name,&owned_args);
                         tool_result_starts.push(tool_results.len());
                         if literal_batch_rejected {
                             let index=tool_result_starts.len()-1;
@@ -2833,9 +3037,7 @@ pub(crate) async fn run_message_via_llm(
                         let native_envelope_args=args;
                         let name=typed_call.as_ref().map(|call|&call.envelope.tool).unwrap_or(name);
                         let args=typed_call.as_ref().map(|call|&call.argv).unwrap_or(args);
-                        if name=="list_tools" && !run_outcome.checks.iter().any(|check|check["kind"]=="native_catalogue_discovery") {
-                            run_outcome.checks.push(serde_json::json!({"kind":"native_catalogue_discovery","status":"expanded","detail":"Subsequent turns advertise the full currently permitted native catalogue; permissions are still checked at invocation."}));
-                        }
+
 
 
                         // Hot-reloaded permissions must constrain the next invocation of an active task.
@@ -2864,6 +3066,41 @@ pub(crate) async fn run_message_via_llm(
                         let effective_role_tool = if actual_tool.is_empty() {
                             if tool_args.is_empty() { "read_skill" } else { "run_command" }
                         } else { actual_tool.as_str() };
+                        if let Some(repair)=compiler_repair.as_ref().and_then(|_|crate::studio_progress::compiler_repair(&run_outcome)) {
+                            if !repair.accepts(effective_role_tool,tool_args) && !automatic_dependency_installs.iter().any(|args|args.as_slice()==tool_args) {
+                                run_outcome.failed_tool_calls+=1;
+                                tool_results.push(format!("typescript_repair_required: no operation started. {}",repair.instruction()));
+                                continue;
+                            }
+                        }
+                        if let Some((ticket,command))=foundation_boundary {
+                            if !automatic_dependency_installs.iter().any(|a|a.as_slice()==tool_args)
+                                && !crate::studio_vite_scaffold::foundation_action_allowed(ticket,command,crate::studio_progress::project_check_fresh(&run_outcome,command),effective_role_tool,tool_args) {
+                                run_outcome.failed_tool_calls+=1;
+                                tool_results.push("foundation_scope_requires_verification: no operation started; verify the supplied infrastructure, then move only this ticket to review. Product work belongs to the next ticket.".into());
+                                continue;
+                            }
+                        }
+                        if execution_worker && !literal_only && compiler_repair.is_none() && foundation_boundary.is_none() {
+                            crate::studio_progress::record_inspection_attempt(&mut run_outcome,effective_role_tool,tool_args);
+                            if let Some(reason)=crate::studio_progress::reject_stalled_inspection(&mut run_outcome,effective_role_tool) {
+                                run_outcome.failed_tool_calls+=1;tool_results.push(reason);continue;
+                            }
+                        }
+                        if let Some(target)=build_missing_target.as_ref() {
+                            if let Err(reason)=crate::studio_progress::validate_missing_repair_action(target,effective_role_tool,tool_args) {
+                                run_outcome.failed_tool_calls+=1;
+                                tool_results.push(reason);
+                                continue;
+                            }
+                        }
+                        if code_studio_disk_task {
+                            if let Some(reason)=crate::studio_progress::reject_unchanged_verification(&mut run_outcome,effective_role_tool,tool_args) {
+                                run_outcome.failed_tool_calls+=1;
+                                tool_results.push(reason);
+                                continue;
+                            }
+                        }
                         let role_check = invocation_role.as_deref().ok_or_else(|| "[studio] cannot resolve task role".to_string())
                             .and_then(|role| crate::studio_role_policy::check(role, effective_role_tool, tool_args, Some(&tool_disk_workspace_root)));
                         if let Err(reason) = role_check {
@@ -3961,6 +4198,10 @@ pub(crate) async fn run_message_via_llm(
                                 if let (Some(path),Some(hash))=(rule["path"].as_str(),rule["sha256"].as_str()) {active_repository_rules.insert(format!("{path}:{hash}"));}
                             }}
                         }
+                        if success && actual_tool == "list_tools" && !tool_args.is_empty() {
+                            run_outcome.checks.retain(|check|check["kind"]!="native_catalogue_discovery");
+                            run_outcome.checks.push(serde_json::json!({"kind":"native_catalogue_discovery","status":"passed","tool":tool_args[0]}));
+                        }
                         previous_batch_call_succeeded = success;
                         if success {
                             run_outcome.successful_tool_calls += 1;
@@ -3977,9 +4218,22 @@ pub(crate) async fn run_message_via_llm(
                         if serde_json::from_str::<serde_json::Value>(&res).ok().is_some_and(|value|value["result_unknown"]==true){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Operation result unknown; inspect effects and use explicit recovery before continuing. {res}");break 'tool_rounds;}
 
                         if success {if let Err(error)=crate::studio_file_effects::after(&store_path,task_id,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
-                        if matches!(effective_role_tool, "run_command" | "run_terminal" | "run_in_container") {
+                        if code_studio_disk_task {
+                            crate::studio_progress::observe(&mut run_outcome,&actual_tool,tool_args,&res,success,round);
+                            if crate::studio_dependencies::is_install(&actual_tool,tool_args) {
+                                if success {crate::studio_dependencies::record_install(&tool_disk_workspace_root,&actual_tool,tool_args,&exec.policy);}
+                                else if !crate::studio_dependencies::record_conflict(&mut run_outcome,&actual_tool,tool_args,&res,round) {
+                                    run_outcome.termination=TerminationReason::VerificationFailed;
+                                    reply_text=crate::studio_dependencies::installation_failure(&res);
+                                    run_outcome.checks.push(serde_json::json!({"kind":"dependency_installation","status":"failed","detail":reply_text}));
+                                    break 'tool_rounds;
+                                }
+                            }
+
+                        } else if matches!(effective_role_tool, "run_command" | "run_terminal" | "run_in_container") {
                             run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":effective_role_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }
+
                         if let Some(img) = captured_image {
                             // Studio browser PNGs are persisted and displayed by the
                             // task evidence viewer. Keep vision input separate from
@@ -4170,8 +4424,22 @@ pub(crate) async fn run_message_via_llm(
                             }
                         }
                         tool_results.push(res);
+                        // A fresh foundation receipt authorizes one mechanical
+                        // handoff, through the ordinary policy/ledger lane. No
+                        // second model generation is needed for bookkeeping.
+                        if success && actual_tool=="run_command" {
+                            if let Some(ticket)=foundation_ticket.as_ref() {
+                                if foundation_command.as_ref().is_some_and(|a|crate::studio_progress::project_check_fresh(&run_outcome,a))
+                                    && !calls.iter().any(|(name,_)|name=="studio_update_ticket") {
+                                    let update=("studio_update_ticket".to_string(),vec![serde_json::json!({"ticket_id":ticket,"status":"review","evidence":{"summary":"Supplied foundation verified by the configured build in the main tool loop; product work remains open."}}).to_string()]);
+                                    lane_calls.push(update.clone());calls.push(update);runtime_commands_added=true;
+                                    insert_task_tracking_event(&store_path,task_id,"studio_foundation_handoff_scheduled",serde_json::json!({"engine":"main_tool_loop","ticket_id":ticket,"product_acceptance":false}));
+                                }
+                            }
+                        }
                     }
                 }
+                let execution_response=runtime_commands_added.then(||super::studio_conversation::scheduled_execution_response(&calls)).flatten();
                 let results_blob = tool_results.join("\n");
                 if code_studio_disk_task {
                     let per_call:Vec<String>=tool_result_starts.iter().enumerate().map(|(index,start)| {
@@ -4180,11 +4448,41 @@ pub(crate) async fn run_message_via_llm(
                         if recorded.is_empty(){"No execution result recorded; do not assume success.".into()}else{recorded}
                     }).collect();
                     if !delivered_prompt.trim().is_empty() {conversation.push(if !conversation.is_empty() && (delivered_prompt.trim_start().starts_with("[Active goal") || delivered_prompt.trim_start().starts_with("[Repair the FIRST") || delivered_prompt.trim_start().starts_with("[STUDIO_READ_ONLY_STREAK]")) {akasha_llm::ConversationMessage::runtime_control(delivered_prompt.clone())} else {akasha_llm::ConversationMessage::user(delivered_prompt.clone())});}
-                    conversation.extend(super::studio_conversation::tool_turn_with_results(&response, &results_blob, &per_call, round, if scope_unchanged && goal_tracker.is_none() {&task_scope}else{""}));
+                    conversation.extend(super::studio_conversation::tool_turn_with_results(execution_response.as_deref().unwrap_or(&response), &results_blob, &per_call, round, if scope_unchanged && goal_tracker.is_none() {&task_scope}else{""}));
                     // Current policy/context is reloaded on resume, then kept once in the transcript.
                     resume_overlay.clear();
                 }
+                // Planning is a host-validated milestone too. Do not ask the
+                // model for a ceremonial final reply after the board is ready:
+                // an unadvertised delegation there used to fail valid plans.
+                if studio_initial_kanban_planning {
+                    if let Ok(check)=crate::studio_planning::finish(&tool_disk_workspace_root,&task_id.to_string()) {
+                        run_outcome.checks.push(check);
+                        reply_text="Planification vérifiée. Les tickets prêts seront confiés aux spécialistes ; l'application reste à créer et à valider.".into();
+                        break 'tool_rounds;
+                    }
+                }
+                if let Some((ticket,command))=foundation_ticket.as_ref().zip(foundation_command.as_ref()) {
+                    if crate::studio_progress::project_check_fresh(&run_outcome,command)
+                        && crate::api_studio::studio_list_tickets(&tool_disk_workspace_root).iter().any(|t|&t.id==ticket&&t.status=="review") {
+                        run_outcome.checks.push(serde_json::json!({"kind":"foundation_handoff","status":"passed","ticket_id":ticket,"source":"main_tool_loop","product_acceptance":false}));
+                        reply_text="Socle fourni vérifié et passé en revue. Les fonctionnalités restent à implémenter dans les tickets suivants.".into();
+                        break 'tool_rounds;
+                    }
+                }
                 let mut studio_readonly_nudge: Option<String> = None;
+                if code_studio_disk_task && !studio_initial_kanban_planning {
+                    let unverified=crate::studio_progress::unverified_rounds(&run_outcome,round);
+                    if crate::studio_progress::verification_budget_exhausted(&run_outcome,round) {
+                        run_outcome.termination=TerminationReason::ToolLoop;
+                        reply_text=format!("studio_no_verified_progress: aucune vérification réussie depuis {unverified} tours de modifications. La fenêtre bornée de travail et de réparation est épuisée. Les changements et diagnostics sont conservés ; le scheduler ne relance pas cette exécution inchangée.");
+                        break 'tool_rounds;
+                    }
+                    if unverified>=12 {
+                        studio_readonly_nudge=Some("[Verification milestone overdue] Source edits alone do not validate this project. Finish the current coherent change, then run the relevant finite build/tests now and repair the FIRST failing diagnostic. Do not rewrite already implemented files or repeat installation. The work window is bounded. A late first concrete build failure can receive one repair tail, capped at 36 unverified rounds; repeated failures cannot restart it.".into());
+                    }
+                }
+
                 if code_studio_disk_task && (goal_tracker.is_some() || run_outcome.requires_file_effect()) && !calls.is_empty() {
                     let only_survey = !round_non_survey_progress;
                     if only_survey {
@@ -4406,7 +4704,11 @@ pub(crate) async fn run_message_via_llm(
                             &run_outcome,
                         ) {
                             Ok(true) => continue 'tool_rounds,
-                            Ok(false) => {}
+                            Ok(false) => {
+                                run_outcome.termination=TerminationReason::ToolRoundLimit;
+                                reply_text="studio_round_budget_exhausted: budget atteint sans nouveau jalon vérifié justifiant une prolongation. Changements conservés ; consultez les diagnostics avant une reprise explicite.".into();
+                                break 'tool_rounds;
+                            }
                             Err(error) => {
                                 run_outcome.termination = TerminationReason::ContextUnavailable;
                                 reply_text = error;
@@ -4683,89 +4985,18 @@ pub(crate) async fn run_message_via_llm(
         )
     );
     let mut studio_verify_error: Option<String> = None;
-    let mut studio_autofix_applied = false;
-    // Planning/review must never execute project scripts or the mutating autofix path.
+    // No post-task mutation or second LLM repair loop. A successful configured
+    // check must already be present in the main loop's ledger at this revision.
     if !halted_user && code_studio_disk_task && !restricted_studio_role && !run_outcome.failed() {
-        let max_passes: u32 = if is_session_recall {
-            1
-        } else {
-            std::env::var("AKASHA_STUDIO_VERIFY_MAX_PASSES")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3)
-                .max(1)
-                .min(8)
-        };
-        for pass in 0..max_passes {
-            match crate::api_studio::studio_verify_after_agent_task(&tool_disk_workspace_root).await {
-                Ok(executed) => {
-                    run_outcome.checks.push(serde_json::json!({"kind":"project_build", "status":if executed {"passed"} else {"not_run"}, "exit_code":if executed {Some(0)} else {None::<i32>}}));
-                    studio_verify_error = None;
-                    break;
-                }
-                Err(e) => {
-                    run_outcome.checks.push(serde_json::json!({"kind":"project_build", "status":"failed", "detail":e.chars().take(2000).collect::<String>()}));
-                    studio_verify_error = Some(e.clone());
-                    if pass + 1 >= max_passes {
-                        break;
-                    }
-                    if let Some(ref exec_arc) = tools_executor {
-                        let denom = max_passes.saturating_sub(1).max(1);
-                        let _ = bus.send(
-                            EventEnvelope::new(
-                                EventType::ProgressUpdate,
-                                Some(serde_json::json!({
-                                    "task_id": task_id.to_string(),
-                                    "progress_pct": 55,
-                                    "message": format!(
-                                        "Compilation du projet en échec — correction automatique (tentative {}/{}).",
-                                        pass + 1,
-                                        denom
-                                    )
-                                })),
-                            )
-                            .with_correlation(timeline_correlation),
-                        );
-                        let llm_rounds = std::env::var("AKASHA_STUDIO_VERIFY_AUTOFIX_LLM_ROUNDS")
-                            .ok()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(6)
-                            .max(1)
-                            .min(16);
-                        let data_dir = store_path
-                            .parent()
-                            .unwrap_or_else(|| store_path.as_path());
-                        let did_write = studio_verify_run_llm_autofix_rounds(
-                            &bus,
-                            &llm_router,
-                            exec_arc,
-                            skill_registry.as_ref(),
-                            plugin_registry.as_ref(),
-                            process_registry.as_ref(),
-                            conv_tx.clone(),
-                            long_term_client.as_ref(),
-                            workspace_store.as_ref(),
-                            browser_registry.as_ref(),
-                            device_bridge.as_ref(),
-                            task_id,
-                            store_path.as_path(),
-                            data_dir,
-                            tool_disk_workspace_root.as_path(),
-                            &e,
-                            llm_rounds,
-                        )
-                        .await;
-                        if did_write {
-                            studio_autofix_applied = true;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        if studio_verify_error.is_none() && studio_autofix_applied {
-            reply_text.push_str("\n\n_(Compilation du projet Code Studio corrigée automatiquement après échec du build.)_");
+        match crate::api_studio::studio_verification_argv(&tool_disk_workspace_root) {
+            Ok(Some(argv))=>{
+                let mut args=vec!["--cwd".into(),"workspace:/".into()];args.extend(argv);
+                let passed=crate::studio_progress::project_check_fresh(&run_outcome,&args);
+                run_outcome.checks.push(serde_json::json!({"kind":"project_build","status":if passed {"passed"}else{"failed"},"source":"main_tool_loop"}));
+                if !passed {studio_verify_error=Some("Configured project verification has no fresh successful receipt in the main tool loop; no legacy autofix or weaker fallback was executed.".into());}
+            },
+            Ok(None)=>run_outcome.checks.push(serde_json::json!({"kind":"project_build","status":"not_run"})),
+            Err(error)=>studio_verify_error=Some(error),
         }
         if studio_verify_error.is_none() {
             if let Some(ref pay) = embedded_studio_acceptance {
@@ -4892,7 +5123,8 @@ pub(crate) async fn run_message_via_llm(
             }
         }
     }
-    if !first_meaningful_progress_sent && !reply_text.trim().is_empty() {
+    if !first_meaningful_progress_sent && !reply_text.trim().is_empty()
+        && run_outcome.termination == TerminationReason::Success {
         meaningful_progress_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         cancel_task_watchdogs(&mut watchdog_cancel, &mut stall_cancel);
         if emit_timeline_once_for_task(
@@ -5329,6 +5561,15 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     };
     if code_studio_disk_task {if let Ok(Some(mut checkpoint))=crate::studio_recovery::load(&store_path,task_id,false){checkpoint.phase=final_status.as_str().into();checkpoint.outcome=run_outcome.clone();let _=crate::studio_recovery::save(&store_path,&checkpoint);}}
     let final_status_str = final_status.as_str();
+    if code_studio_disk_task && matches!(final_status,TaskStatus::Failed|TaskStatus::Cancelled|TaskStatus::Interrupted) {
+        if let Some(project)=store.lineage_root_studio_project_id(task_id).ok().flatten() {
+            let lock=crate::studio_kanban_dispatch::project_dispatch_lock(&project);
+            let _reservation=lock.lock().await;
+            if let Ok(root)=crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags,&project) {
+                crate::studio_kanban_dispatch::reconcile_project_tickets(&root,&store_path);
+            }
+        }
+    }
 
     let mut final_payload = serde_json::json!({
         "task_id": task_id.to_string(),

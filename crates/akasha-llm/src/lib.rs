@@ -1,6 +1,10 @@
 //! Phase 6 — LLM Router: task type classifier, multi-provider, fallback, degraded mode.
 
 pub mod classifier;
+mod bounded;
+mod studio_health;
+pub use studio_health::Qualification;
+pub use bounded::AttemptObserver;
 pub mod config;
 mod conversation;
 mod lfm2;

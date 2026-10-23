@@ -178,6 +178,22 @@ pub(super) fn tool_turn(
     tool_turn_with_results(response,results,&[],round,request)
 }
 
+/// Include runtime-scheduled preparation in its actual execution order so an
+/// install receipt is never attached to the model's original build call.
+pub(super) fn scheduled_execution_response(calls:&[(String,Vec<String>)])->Option<String> {
+    let mut lines=vec!["[Runtime scheduled dependency preparation / verification, with original operations preserved in execution order]".to_owned()];
+    for (tool,args) in calls {
+        let envelope=if tool=="studio_call" {serde_json::from_str::<Value>(&args.join(" ")).ok()?}
+        else if matches!(tool.as_str(),"run_command"|"run_terminal") {
+            let (vault,cwd,program,argv)=crate::api_tool_dispatch::process_ops::parse_run_command_args(args);
+            if !vault.is_empty() {return None;}
+            json!({"schema_version":1,"tool":tool,"arguments":{"program":program,"args":argv,"cwd":cwd.unwrap_or_else(||"workspace:/".into())}})
+        } else {return None;};
+        lines.push(format!("TOOL_JSON: {envelope}"));
+    }
+    Some(lines.join("\n"))
+}
+
 pub(super) fn tool_turn_with_results(response:&str, results:&str, per_call:&[String], round:u32, request:&str) -> Vec<ConversationMessage> {
     // Keep the small original goal near the observed result, without issuing a new
     // user "continue" request or reinjecting the full project template/catalogue.
@@ -235,6 +251,16 @@ pub(super) fn tool_turn_with_results(response:&str, results:&str, per_call:&[Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_install_receipt_does_not_replace_the_original_build_result() {
+        let calls=vec![("run_command".into(),vec!["npm".into(),"ci".into()]),("studio_call".into(),vec![json!({"schema_version":1,"tool":"run_command","arguments":{"program":"npm","args":["run","build"],"cwd":"workspace:/"}}).to_string()])];
+        let response=scheduled_execution_response(&calls).unwrap();
+        let history=tool_turn_with_results(&response,"",&["installation succeeded".into(),"build failed TS2322".into()],1,"");
+        assert_eq!(history[0].tool_calls.len(),2);
+        assert!(history[1].content.contains("installation succeeded"));
+        assert!(history[2].content.contains("build failed TS2322"));
+        assert_eq!(history[0].tool_calls[1]["id"],history[2].tool_call_id.as_deref().unwrap());
+    }
     #[test]
     fn checkpoint_keeps_the_initial_context_mode_after_tool_rounds() {
         let initial="[Direct file task — explicit paths]\n[Current user request — task scope]\nCrée one.md.\n[End current user request]";

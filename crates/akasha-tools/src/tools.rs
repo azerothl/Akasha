@@ -75,15 +75,60 @@ fn validate_managed_manifest(path: &Path, content: &str, policy: &ToolsPolicy) -
     Ok(())
 }
 
-// Strict JSON manifests must remain parseable; reject before any disk effect.
-// JSONC configuration (tsconfig etc.) is intentionally excluded.
+// Validate the complete candidate before any disk effect, including partial edits.
 fn validate_json_candidate(path: &Path, content: &str) -> Result<()> {
-    if path.file_name().and_then(|v| v.to_str()).is_some_and(|v|
-        matches!(v, "package.json" | "package-lock.json" | "composer.json")) {
-        serde_json::from_str::<serde_json::Value>(content).with_context(||
-            format!("Invalid JSON candidate for {}; file unchanged. Read the current file, then use write_file with its version to replace the WHOLE document, or edit only the intended lines.", path.display()))?;
+    let name = path.file_name().and_then(|v| v.to_str()).unwrap_or_default();
+    let jsonc = (name.starts_with("tsconfig") || name.starts_with("jsconfig")) && name.ends_with(".json");
+    if jsonc || matches!(name, "package.json" | "package-lock.json" | "composer.json") {
+        let candidate = if jsonc { strip_jsonc(content)? } else { content.to_owned() };
+        let value = serde_json::from_str::<serde_json::Value>(&candidate).with_context(||
+            format!("Invalid {} candidate for {}; file unchanged. Read the current file, then use write_file with its version to replace the WHOLE document, or edit only the intended lines.", if jsonc {"JSONC"} else {"JSON"}, path.display()))?;
+        anyhow::ensure!(value.is_object(), "Configuration must have one object root: {}; file unchanged", path.display());
     }
     Ok(())
+}
+
+// Preserve byte positions/newlines and quoted strings; accept only JSON plus
+// comments and trailing commas, not JavaScript expressions or multiple roots.
+fn strip_jsonc(content: &str) -> Result<String> {
+    let mut bytes = content.trim_start_matches('\u{feff}').as_bytes().to_vec();
+    let mut i = 0;
+    let mut quoted = false;
+    while i < bytes.len() {
+        if quoted {
+            if bytes[i] == b'\\' { i += 2; continue; }
+            if bytes[i] == b'"' { quoted = false; }
+        } else if bytes[i] == b'"' { quoted = true; }
+        else if bytes[i] == b'/' && bytes.get(i+1) == Some(&b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' { bytes[i] = b' '; i += 1; }
+            continue;
+        } else if bytes[i] == b'/' && bytes.get(i+1) == Some(&b'*') {
+            bytes[i] = b' '; bytes[i+1] = b' '; i += 2;
+            while i+1 < bytes.len() && !(bytes[i] == b'*' && bytes[i+1] == b'/') {
+                if !matches!(bytes[i], b'\n' | b'\r') { bytes[i] = b' '; }
+                i += 1;
+            }
+            anyhow::ensure!(i+1 < bytes.len(), "Invalid JSONC: unterminated comment; file unchanged");
+            bytes[i] = b' '; bytes[i+1] = b' '; i += 2; continue;
+        }
+        i += 1;
+    }
+    i = 0; quoted = false;
+    while i < bytes.len() {
+        if quoted {
+            if bytes[i] == b'\\' { i += 2; continue; }
+            if bytes[i] == b'"' { quoted = false; }
+        } else if bytes[i] == b'"' { quoted = true; }
+        else if bytes[i] == b',' {
+            let mut next = i+1;
+            while next < bytes.len() && bytes[next].is_ascii_whitespace() { next += 1; }
+            let previous = bytes[..i].iter().rev().find(|v| !v.is_ascii_whitespace());
+            if previous.is_some_and(|v| !matches!(v, b'{' | b'[' | b':' | b','))
+                && bytes.get(next).is_some_and(|v| matches!(v, b'}' | b']')) { bytes[i] = b' '; }
+        }
+        i += 1;
+    }
+    Ok(String::from_utf8(bytes)?)
 }
 
 /// Write content to a file. Path must be allowed by policy for write.
@@ -1170,10 +1215,34 @@ mod unattended_command_tests {
         });
     }
     #[test]
+    fn invalid_jsonc_mutations_preserve_original_bytes() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let dir=std::env::temp_dir().join(format!("akasha-jsonc-{}",uuid_for_test()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path=dir.join("tsconfig.json");
+            let original="{\n  \"compilerOptions\": {\"strict\": true}, // valid JSONC\n}\n";
+            std::fs::write(&path,original).unwrap();
+            let policy=ToolsPolicy {allowed_read_paths:vec![dir.display().to_string()],allowed_write_paths:vec![dir.display().to_string()],studio_manifest_root:Some(dir.clone()),..Default::default()};
+            assert!(write_file(&path,"{} {}",&policy).await.is_err());
+            assert!(edit_file(&path,2,2,"{}",&policy).await.is_err());
+            assert!(search_replace(&path,"true","true {}",&policy).await.is_err());
+            assert!(apply_patch(&path,"@@ -2,1 +2,1 @@\n-  \"compilerOptions\": {\"strict\": true}, // valid JSONC\n+{}",&policy).await.is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(),original);
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+    }
+    fn uuid_for_test() -> u128 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() }
+    #[test]
     fn manifest_replacement_is_validated() {
         assert!(validate_json_candidate(Path::new("package.json"), r#"{"name":"ok"}"#).is_ok());
         assert!(validate_json_candidate(Path::new("package.json"), r#"{"name":"old", {"name":"new"}}"#).is_err());
         assert!(validate_json_candidate(Path::new("tsconfig.json"), "{/* comment */}").is_ok());
+        let path=Path::new("tsconfig.app.json");
+        assert!(validate_json_candidate(path, "{\"compilerOptions\":{\"strict\":true,},/* comment */\"include\":[\"src\",],}").is_ok());
+        assert!(validate_json_candidate(path, r#"{"url":"https://example.org/a/*b*/", "escaped":"\\\"",}"#).is_ok());
+        for invalid in ["{} {}", "[]", "{/* unclosed", "{\"strict\":true,,}", "{unquoted:true}", "{,}", "{\"x\":[,]}"] {
+            assert!(validate_json_candidate(path,invalid).is_err(),"{invalid}");
+        }
     }
     #[test]
     fn refuses_wizards_but_allows_finite_commands() {

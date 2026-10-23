@@ -763,6 +763,21 @@ pub(crate) fn native_definition(names: Vec<String>) -> Value {
     json!({"type":"function","function":{"name":"studio_call","description":"Execute one Studio tool. The runtime assigns operation IDs; do not invent one. The tool-specific argument schema is mandatory. Existing files must be read before mutation; if expected_version is omitted, the runtime uses this task's latest successful read and rejects stale edits. For new files, pass expected_version: missing.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}},"oneOf":variants}}})
 }
 
+/// Narrow a missing-entrypoint repair to its exact path, never its content.
+/// The model must still generate the file and the executor rechecks permissions,
+/// absence/version and the target before starting an operation.
+pub(crate) fn missing_entrypoint_definition(names: Vec<String>, target: &str) -> Value {
+    let mut definition=native_definition(names);
+    if let Some(variants)=definition.pointer_mut("/function/parameters/oneOf").and_then(Value::as_array_mut) {
+        for variant in variants {
+            let schema=&mut variant["properties"]["arguments"];
+            schema["properties"]["path"]["enum"]=json!([target]);
+            schema["properties"]["expected_version"]["enum"]=json!(["missing"]);
+        }
+    }
+    definition
+}
+
 /// Contextual constraints for literal-copy tasks. The model still emits the call;
 /// the executor never substitutes content or executes a schema example.
 pub(crate) fn literal_native_definition(names:Vec<String>,literals:&[(String,String)])->Value {
@@ -842,6 +857,11 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 pub(crate) fn bounded_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    let filename = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let clean = filename.trim();
+    if filename != clean && (matches!(clean,"package.json"|"package-lock.json") || clean.starts_with("tsconfig") && clean.ends_with(".json")) {
+        return Err("invalid_configuration_path: remove whitespace surrounding the configuration filename; no file operation started".into());
+    }
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let path = crate::api::resolve_tool_disk_path(raw, Some(&root));
     if path
@@ -1242,6 +1262,11 @@ impl Operation {
         };
         let (output,_,truncated) = crate::tool_output::truncate_utf8_by_bytes(plain, 64 * 1024);
         let mut value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
+        if let Some(command) = command_result.as_ref() {
+            for key in ["error_code", "retry_hint", "process_started"] {
+                if let Some(field) = command.get(key) {value[key] = field.clone();}
+            }
+        }
         if let Some(correction) = self.argument_correction {
             value["argument_correction"] = json!(correction);
         }

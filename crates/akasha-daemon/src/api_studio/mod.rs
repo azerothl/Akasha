@@ -41,7 +41,6 @@ const MAX_BUILD_OUTPUT_BYTES: usize = 512 * 1024;
 const DEFAULT_BUILD_TIMEOUT_SEC: u64 = 600;
 const NPM_INSTALL_TIMEOUT_SEC: u64 = 900;
 /// Plafond pour un `npm install` déclenché automatiquement après un build studio en échec.
-const AUTO_VERIFY_NPM_INSTALL_CAP_SEC: u64 = 480;
 /// Default range for Vite/webpack dev servers started by `POST .../preview/start`.
 const PREVIEW_PORT_MIN: u16 = 5180;
 const PREVIEW_PORT_MAX: u16 = 5279;
@@ -577,6 +576,9 @@ pub struct StudioTicketAcceptanceCriterion {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StudioTicketEvidence {
+    /// Lifecycle phase to restore after a failed execution, especially review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_status: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -587,6 +589,9 @@ pub struct StudioTicketEvidence {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StudioTicket {
+    /// Host-owned identity; never inferred from editable acceptance criteria.
+    #[serde(default)]
+    pub initial_backlog_root: bool,
     pub id: String,
     pub project_id: String,
     pub title: String,
@@ -1056,11 +1061,31 @@ fn load_studio_tickets_store(project_root: &Path) -> StudioTicketsStore {
     let Ok(s) = fs::read_to_string(p) else {
         return StudioTicketsStore::default();
     };
-    let mut store: StudioTicketsStore = serde_json::from_str(&s).unwrap_or_default();
+    let mut raw: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
+    // Migrate only legacy top-level chat requests. A copied criterion on a work
+    // ticket must never promote it to coordinator or bypass its prerequisites.
+    if let Some(tickets) = raw["tickets"].as_array_mut() {
+        for ticket in tickets {
+            if ticket.get("initial_backlog_root").is_none() {
+                let initial = ticket["requested_by"] == "user_chat"
+                    && ticket["parent_ticket_id"].is_null()
+                    && ticket["creation_key"].is_null()
+                    && ticket["acceptance_criteria"].as_array().is_some_and(|criteria|
+                        criteria.iter().any(|c| c["id"] == "initial-kanban-backlog"));
+                ticket["initial_backlog_root"] = json!(initial);
+            }
+        }
+    }
+    let mut store: StudioTicketsStore = serde_json::from_value(raw).unwrap_or_default();
     for t in &mut store.tickets {
         normalize_ticket_dependencies(t);
     }
     store
+}
+
+/// Union des prérequis (`depends_on_ticket_ids` + ancien champ singleton).
+pub(crate) fn is_initial_backlog_root(ticket: &StudioTicket) -> bool {
+    ticket.initial_backlog_root && ticket.parent_ticket_id.is_none() && ticket.creation_key.is_none()
 }
 
 /// Union des prérequis (`depends_on_ticket_ids` + ancien champ singleton).
@@ -1313,7 +1338,6 @@ pub(crate) fn studio_initial_backlog_preflight(
     task_id: &str,
     task_message: &str,
 ) -> Result<(), String> {
-    const INITIAL_BACKLOG_MARKER: &str = "initial-kanban-backlog";
     let tickets = studio_list_tickets(project_root);
     let prompt_ticket_id = task_message.lines().find_map(|line| {
         line.trim()
@@ -1326,19 +1350,13 @@ pub(crate) fn studio_initial_backlog_preflight(
         .or_else(|| {
             tickets.iter().find(|ticket| {
                 ticket.related_task_id.as_deref() == Some(task_id)
-                    && ticket
-                        .acceptance_criteria
-                        .iter()
-                        .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+                    && is_initial_backlog_root(ticket)
             })
         });
     let Some(root_ticket) = root_ticket else {
         return Ok(());
     };
-    if !root_ticket
-        .acceptance_criteria
-        .iter()
-        .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+    if !is_initial_backlog_root(root_ticket)
     {
         return Ok(());
     }
@@ -1384,17 +1402,10 @@ pub(crate) fn studio_initial_backlog_is_ready(
     work_tickets.len() >= 3 && has_internal_dependency
 }
 
-fn is_initial_backlog_template_ticket(ticket: &StudioTicket) -> bool {
-    const TEMPLATE_TITLES: &[&str] = &[
-        "Établir le socle du projet",
-        "Implémenter les fonctionnalités demandées",
-        "Intégrer les fonctionnalités dans l'application",
-        "Valider le projet et le parcours utilisateur",
-    ];
-    let title = ticket.title.trim();
-    let generic_criterion = ticket.acceptance_criteria.iter().any(|criterion| {
+pub(crate) fn is_initial_backlog_template_ticket(ticket: &StudioTicket) -> bool {
+    let has_specific_criterion = ticket.acceptance_criteria.iter().any(|criterion| {
         let text = criterion.text.trim().to_lowercase();
-        [
+        !text.is_empty() && !criterion.id.as_deref().is_some_and(|id| id.starts_with("request-behavior-")) && ![
             "examiner le dépôt et sa stack, réutiliser la structure existante",
             "implémenter les comportements et fonctionnalités décrits dans la demande",
             "relier les fonctionnalités à l'interface, à l'état et aux services",
@@ -1403,10 +1414,7 @@ fn is_initial_backlog_template_ticket(ticket: &StudioTicket) -> bool {
         .iter()
         .any(|template| text.starts_with(template))
     });
-    TEMPLATE_TITLES
-        .iter()
-        .any(|template| title.eq_ignore_ascii_case(template))
-        || generic_criterion
+    !has_specific_criterion
 }
 
 pub(crate) fn studio_initial_backlog_is_ready_for_project(
@@ -1446,10 +1454,8 @@ pub fn studio_ticket_prerequisite_done(project_root: &Path, ticket: &StudioTicke
         // The initial request ticket is an umbrella tracker that is closed only
         // after its work tickets finish. It must never be a prerequisite for
         // those tickets, or the Kanban creates a circular dispatch deadlock.
-        if dep.requested_by == "user_chat"
-            || dep.acceptance_criteria.iter().any(|criterion| {
-                criterion.id.as_deref() == Some("initial-kanban-backlog")
-            })
+        if (dep.requested_by == "user_chat" && dep.parent_ticket_id.is_none())
+            || is_initial_backlog_root(&dep)
         {
             continue;
         }
@@ -1540,7 +1546,8 @@ pub fn studio_attach_task_to_ticket(
         return Err("ticket_not_found".to_string());
     };
     if ticket.status == "todo" || ticket.status == "blocked" {
-        ticket.status = "in_progress".to_string();
+        ticket.status = if ticket.evidence.resume_status.as_deref()==Some("review") {"review"}else{"in_progress"}.to_string();
+        ticket.evidence.resume_status=None;
         // A new execution is a deliberate retry of the previous blocked attempt.
         // Keep the diagnostic in the event timeline, but don't show it as the
         // current result while a new run is active.
@@ -1828,7 +1835,6 @@ pub(crate) fn studio_seed_initial_backlog(
     project_root: &Path,
     root_ticket_id: &str,
 ) -> Result<Vec<String>, String> {
-    const INITIAL_BACKLOG_MARKER: &str = "initial-kanban-backlog";
     let Some(root_ticket) = studio_get_ticket(project_root, root_ticket_id) else {
         return Err("initial_request_ticket_not_found".to_string());
     };
@@ -1872,10 +1878,7 @@ pub(crate) fn studio_seed_initial_backlog(
             }
         }
     }
-    if !root_ticket
-        .acceptance_criteria
-        .iter()
-        .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+    if !is_initial_backlog_root(&root_ticket)
         || seeded_event.is_some()
     {
         return Ok(Vec::new());
@@ -1975,11 +1978,12 @@ pub(crate) fn studio_seed_initial_backlog(
             .filter_map(|key| phase_ids.get(key).cloned())
             .collect();
         let ticket = StudioTicket {
+            initial_backlog_root: false,
             id: ticket_id.clone(),
             project_id: root_ticket.project_id.clone(),
             title: (*title).to_string(),
             description: format!(
-                "{phase_description}\n\nCe ticket fait partie du backlog initial du ticket racine {root_ticket_id}; lis sa description pour connaître la demande complète. Tous les fichiers de cette application restent sous la racine canonique `workspace:/`; inspecte et réutilise la stack existante au lieu de créer un projet imbriqué. Ne modifie pas le suivi directement: rapporte les fichiers et les résultats au chef de projet via Code Studio."
+                "{phase_description}\n\nCe ticket fait partie du backlog initial du ticket racine {root_ticket_id}; lis sa description pour connaître la demande complète. Tous les fichiers de cette application restent sous la racine canonique `workspace:/`; inspecte et réutilise la stack existante au lieu de créer un projet imbriqué. Consigne les fichiers et les vérifications observées dans ce ticket avec studio_update_ticket; passe-le en review uniquement après vérification de ses critères, sans fermer le parent ni les autres tickets."
             ),
             status: "todo".to_string(),
             requested_by: "system_initial_backlog".to_string(),
@@ -1990,13 +1994,17 @@ pub(crate) fn studio_seed_initial_backlog(
             depends_on_ticket_ids: dependencies,
             depends_on_ticket_id: None,
             related_task_id: None,
-            acceptance_criteria: vec![StudioTicketAcceptanceCriterion {
+            acceptance_criteria: {
+                let mut criteria=vec![StudioTicketAcceptanceCriterion {
                 id: Some(format!("initial-phase-{key}")),
                 text: phase_description.to_string(),
                 kind: None,
                 path: None,
                 argv: None,
-            }],
+                }];
+                if key > 0 {criteria.extend(studio_request_criteria(&root_ticket.description));}
+                criteria
+            },
             evidence: StudioTicketEvidence::default(),
             review_outcome: None,
             review_notes: None,
@@ -2038,14 +2046,10 @@ pub(crate) fn studio_seed_initial_backlog(
 pub(crate) fn studio_complete_initial_backlog_if_ready(
     project_root: &Path,
 ) -> Result<Vec<String>, String> {
-    const INITIAL_BACKLOG_MARKER: &str = "initial-kanban-backlog";
     let tickets = studio_list_tickets(project_root);
     let mut completed_roots = Vec::new();
     for root in tickets.iter().filter(|ticket| {
-        ticket
-            .acceptance_criteria
-            .iter()
-            .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+        is_initial_backlog_root(ticket)
     }) {
         let mut root = root.clone();
         if !studio_initial_backlog_is_ready_for_project(project_root, &root, &tickets) {
@@ -2140,7 +2144,8 @@ pub(crate) fn studio_complete_initial_backlog_if_ready(
 
 fn studio_chat_ticket_title(message: &str) -> String {
     const MAX_CHARS: usize = 84;
-    let first_line = message
+    let title_source=message.split_once("selon ce résumé :").map(|(_,summary)|summary).unwrap_or(message);
+    let first_line = title_source
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
@@ -2162,6 +2167,85 @@ fn studio_chat_ticket_title(message: &str) -> String {
     }
 }
 
+fn studio_request_criteria(message:&str)->Vec<StudioTicketAcceptanceCriterion> {
+    let request=message.split_once("selon ce résumé :").map(|(_,summary)|summary).unwrap_or(message);
+    request.lines().map(str::trim).filter(|line|!line.is_empty()).take(12).enumerate().map(|(index,line)| {
+        StudioTicketAcceptanceCriterion {id:Some(format!("request-behavior-{index}")),text:format!("Résultat à démontrer : {}",line.chars().take(900).collect::<String>()),kind:None,path:None,argv:None}
+    }).collect()
+}
+
+#[cfg(test)]
+mod initial_request_recovery_tests {
+    use super::*;
+    fn project()->tempfile::TempDir {
+        let dir=tempfile::tempdir().unwrap();
+        let meta=serde_json::from_value(json!({"id":"todo-test","name":"Todo","created_at":chrono::Utc::now().to_rfc3339(),"evolutions":[],"verify_skip":false})).unwrap();
+        save_studio_meta(dir.path(),&meta).unwrap();
+        dir
+    }
+    const REQUEST:&str="Crée le projet « Todo E2E — 2026-10-22 » selon ce résumé :\n\nPetit outil Todo en français, responsive et accessible, avec tâches à ajouter, terminer, rouvrir et supprimer, filtres et persistance locale.";
+    #[test]
+    fn observed_creation_request_seeds_specific_criteria_and_preserves_the_ticket_on_retry() {
+        let dir=project();
+        let id=studio_create_evolution_ticket_from_chat(dir.path(),REQUEST).unwrap();
+        let mut root=studio_get_ticket(dir.path(),&id).unwrap();
+        assert_eq!(root.assigned_agent,"studio_project_manager");
+        assert!(root.title.starts_with("Petit outil Todo"));
+        let children:Vec<_>=studio_list_tickets(dir.path()).into_iter().filter(|ticket|ticket.parent_ticket_id.as_deref()==Some(&id)).collect();
+        assert_eq!(children.len(),4);
+        assert!(children.iter().filter(|ticket|!ticket.depends_on_ticket_ids.is_empty()).count()>=3);
+        assert!(children.iter().filter(|ticket|ticket.creation_key.as_deref().is_some_and(|key|key.ends_with(":features"))).all(|ticket|ticket.acceptance_criteria.iter().any(|criterion|criterion.text.contains("persistance locale"))));
+        root.status="blocked".into();
+        studio_upsert_ticket(dir.path(),root).unwrap();
+        assert_eq!(studio_create_evolution_ticket_from_chat(dir.path(),REQUEST).unwrap(),id);
+        assert_eq!(studio_list_tickets(dir.path()).len(),5);
+    }
+    #[test]
+    fn legacy_single_ticket_is_upgraded_once_without_erasing_the_failed_run() {
+        let dir=project();
+        let id=studio_create_evolution_ticket_from_chat(dir.path(),REQUEST).unwrap();
+        let mut root=studio_get_ticket(dir.path(),&id).unwrap();
+        root.acceptance_criteria.retain(|criterion|matches!(criterion.id.as_deref(),Some("request-scope"|"verification")));
+        root.status="blocked".into();root.related_task_id=Some("original-run".into());root.evidence.summary=Some("timeout".into());
+        let mut legacy = serde_json::to_value(root).unwrap();
+        legacy.as_object_mut().unwrap().remove("initial_backlog_root");
+        std::fs::write(dir.path().join(STUDIO_TICKETS_FILE),json!({"tickets":[legacy],"events":[]}).to_string()).unwrap();
+        studio_upgrade_initial_request(dir.path()).unwrap();studio_upgrade_initial_request(dir.path()).unwrap();
+        let root=studio_get_ticket(dir.path(),&id).unwrap();
+        assert_eq!(studio_list_tickets(dir.path()).len(),5);
+        assert_eq!(root.related_task_id.as_deref(),Some("original-run"));
+        assert_eq!(root.status,"blocked");assert_eq!(root.evidence.summary.as_deref(),Some("timeout"));
+    }
+    #[test]
+    fn resuming_a_blocked_review_restores_review_without_duplicate_task_evidence() {
+        let dir=project();let id=studio_create_evolution_ticket_from_chat(dir.path(),REQUEST).unwrap();
+        let mut root=studio_get_ticket(dir.path(),&id).unwrap();
+        root.status="blocked".into();root.evidence.resume_status=Some("review".into());root.evidence.summary=Some("timeout".into());
+        studio_upsert_ticket(dir.path(),root).unwrap();
+        studio_attach_task_to_ticket(dir.path(),&id,"same-run","test").unwrap();
+        studio_attach_task_to_ticket(dir.path(),&id,"same-run","test").unwrap();
+        let root=studio_get_ticket(dir.path(),&id).unwrap();
+        assert_eq!(root.status,"review");assert_eq!(root.evidence.summary,None);assert_eq!(root.evidence.task_ids,vec!["same-run"]);
+    }
+}
+
+/// Upgrade a legacy creation ticket in place, preserving its task history.
+pub(crate) fn studio_upgrade_initial_request(project_root:&Path)->Result<(),String> {
+    let tickets=studio_list_tickets(project_root);
+    if tickets.iter().any(is_initial_backlog_root) {return Ok(());}
+    let roots:Vec<_>=tickets.iter().filter(|ticket|ticket.requested_by=="user_chat" && ticket.parent_ticket_id.is_none()).collect();
+    if roots.len()!=1 || roots[0].status=="done" || !studio_user_message_suggests_project_creation(&roots[0].description) {return Ok(());}
+    let mut root=roots[0].clone();
+    root.initial_backlog_root=true;
+    root.assigned_agent="studio_project_manager".into();
+    root.title=studio_chat_ticket_title(&root.description);
+    root.acceptance_criteria.extend(studio_request_criteria(&root.description));
+    root.acceptance_criteria.push(StudioTicketAcceptanceCriterion{id:Some("initial-kanban-backlog".into()),text:"Décomposer la demande en tickets spécifiques avec critères vérifiables et dépendances avant toute implémentation.".into(),kind:None,path:None,argv:None});
+    studio_upsert_ticket(project_root,root.clone())?;
+    studio_seed_initial_backlog(project_root,&root.id)?;
+    Ok(())
+}
+
 /// Auto-register an actionable chat request and seed an initial project backlog
 /// when this is the first request to create a project or application.
 pub fn studio_create_evolution_ticket_from_chat(
@@ -2173,7 +2257,6 @@ pub fn studio_create_evolution_ticket_from_chat(
     if let Some(existing) = studio_list_tickets(project_root).into_iter().find(|ticket| {
         ticket.requested_by == "user_chat"
             && ticket.status != "done"
-            && ticket.status != "blocked"
             && normalize_ticket_identity(&ticket.description) == normalized_message
     }) {
         let _ = studio_append_ticket_event(
@@ -2183,6 +2266,7 @@ pub fn studio_create_evolution_ticket_from_chat(
             "system",
             Some(json!({ "source": "chat_evolution_auto", "title": existing.title })),
         );
+        studio_upgrade_initial_request(project_root)?;
         return Ok(existing.id);
     }
     let is_first_project_creation = studio_list_tickets(project_root).is_empty()
@@ -2191,13 +2275,14 @@ pub fn studio_create_evolution_ticket_from_chat(
     let new_ticket_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let ticket = StudioTicket {
+        initial_backlog_root: is_first_project_creation,
         id: new_ticket_id.clone(),
         project_id: meta.id.clone(),
         title,
         description: message.trim().to_string(),
         status: "todo".to_string(),
         requested_by: "user_chat".to_string(),
-        assigned_agent: "studio_fullstack".to_string(),
+        assigned_agent: if is_first_project_creation {"studio_project_manager"}else{"studio_fullstack"}.to_string(),
         review_agent: "studio_reviewer".to_string(),
         parent_ticket_id: None,
         creation_key: None,
@@ -2222,6 +2307,7 @@ pub fn studio_create_evolution_ticket_from_chat(
                 },
             ];
             if is_first_project_creation {
+                criteria.extend(studio_request_criteria(message));
                 criteria.push(StudioTicketAcceptanceCriterion {
                     id: Some("initial-kanban-backlog".to_string()),
                     text: "Avant l'implémentation, la première demande est décomposée dans le Kanban en tickets de portée claire, avec critères vérifiables et dépendances explicites pour le socle, les fonctionnalités demandées, l'intégration et la validation.".to_string(),
@@ -2261,6 +2347,9 @@ pub fn studio_tool_create_ticket_json(
     project_root: &Path,
     body: &serde_json::Value,
 ) -> Result<StudioTicket, String> {
+    if body.get("initial_backlog_root").is_some() {
+        return Err("initial_backlog_root_is_host_owned".into());
+    }
     let meta = load_studio_meta(project_root).ok_or_else(|| "studio_meta_missing".to_string())?;
     let title = body
         .get("title")
@@ -2425,6 +2514,7 @@ pub fn studio_tool_create_ticket_json(
 
     let now = chrono::Utc::now().to_rfc3339();
     let ticket = StudioTicket {
+        initial_backlog_root: false,
         id: new_ticket_id,
         project_id: meta.id.clone(),
         title: title.to_string(),
@@ -2512,6 +2602,9 @@ pub fn studio_tool_apply_ticket_patch_json(
     project_root: &Path,
     body: &serde_json::Value,
 ) -> Result<StudioTicket, String> {
+    if body.get("initial_backlog_root").is_some() {
+        return Err("initial_backlog_root_is_host_owned".into());
+    }
     let ticket_id = body
         .get("ticket_id")
         .or_else(|| body.get("id"))
@@ -2522,7 +2615,46 @@ pub fn studio_tool_apply_ticket_patch_json(
     let Some(mut ticket) = studio_get_ticket(project_root, ticket_id) else {
         return Err("ticket_not_found".to_string());
     };
-    let body_v = body;
+    let mut guarded_body = body.clone();
+    if ticket.initial_backlog_root && guarded_body.get("parent_ticket_id").is_some_and(|v| !v.is_null()) {
+        return Err("initial_backlog_root_cannot_be_reparented".into());
+    }
+    if ticket.requested_by == "system_initial_backlog" {
+        if guarded_body.get("parent_ticket_id").is_some_and(|v| v.as_str() != ticket.parent_ticket_id.as_deref()) {
+            return Err("initial_phase_parent_is_host_owned".into());
+        }
+        if let (Some(parent), Some(key)) = (ticket.parent_ticket_id.as_deref(), ticket.creation_key.as_deref()) {
+            let prefix = format!("initial:{parent}:");
+            let previous = match key.strip_prefix(&prefix) {
+                Some("features") => Some("foundation"),
+                Some("integration") => Some("features"),
+                Some("validation") => Some("integration"),
+                _ => None,
+            };
+            if let Some(previous) = previous {
+                let required = studio_list_tickets(project_root).into_iter().find(|t|
+                    t.parent_ticket_id.as_deref() == Some(parent) && t.creation_key.as_deref() == Some(&format!("{prefix}{previous}")));
+                if let Some(required) = required {
+                    let mut deps: Vec<String> = match guarded_body.get("depends_on_ticket_ids") {
+                        Some(serde_json::Value::Null) => Vec::new(),
+                        Some(serde_json::Value::Array(values)) => values.iter().map(|v|
+                            v.as_str().map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned)
+                                .ok_or_else(|| "depends_on_ticket_ids_must_be_string_array".to_string())).collect::<Result<_,_>>()?,
+                        Some(_) => return Err("depends_on_ticket_ids_must_be_array_or_null".into()),
+                        None => match guarded_body.get("depends_on_ticket_id") {
+                            Some(serde_json::Value::Null) => Vec::new(),
+                            Some(serde_json::Value::String(value)) => if value.trim().is_empty() {Vec::new()} else {vec![value.trim().to_string()]},
+                            Some(_) => return Err("depends_on_ticket_id_invalid".into()),
+                            None => ticket_dependency_ids(&ticket),
+                        },
+                    };
+                    if !deps.contains(&required.id) { deps.push(required.id); }
+                    guarded_body["depends_on_ticket_ids"] = json!(deps);
+                }
+            }
+        }
+    }
+    let body_v = &guarded_body;
     if let Some(v) = body_v.get("title").and_then(|x| x.as_str()) {
         let t = v.trim();
         if t.is_empty() || t.chars().count() > 200 {
@@ -3018,19 +3150,6 @@ fn truncate_output(s: &str) -> String {
 }
 
 /// Motifs d’exclusion ajoutés automatiquement quand `tsc` compile des tests comme du code d’app (describe/it/expect).
-const TSC_EXCLUDE_TEST_PATTERNS: &[&str] = &[
-    "**/*.test.ts",
-    "**/*.test.tsx",
-    "**/*.test.js",
-    "**/*.test.jsx",
-    "**/*.spec.ts",
-    "**/*.spec.tsx",
-    "**/*.spec.js",
-    "**/*.spec.jsx",
-    "src/tests",
-    "src/test",
-    "src/__tests__",
-];
 
 fn format_verify_failure(code: Option<i32>, out: &str, err: &str) -> String {
     let code_str = match code {
@@ -3057,210 +3176,6 @@ fn format_verify_failure(code: Option<i32>, out: &str, err: &str) -> String {
     format!(
         "Vérification post-tâche échouée ({code_str}).\n--- stdout ---\n{out_s}\n--- stderr ---\n{err_s}{syntax_hint}"
     )
-}
-
-/// Détecte l’échec typique : fichiers `*.test.*` / `src/tests` passés dans `tsc` du build sans types Vitest/Jest.
-/// Erreurs du type « paquet non installé » / résolution de module.
-fn looks_like_missing_npm_module(stdout: &str, stderr: &str) -> bool {
-    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    combined.contains("cannot find module")
-        || combined.contains("cannot resolve")
-        || combined.contains("module not found")
-        || combined.contains("err_module_not_found")
-        || combined.contains("ts2307")
-        || combined.contains("failed to resolve import")
-        || (combined.contains("npm err!") && (combined.contains("enoent") || combined.contains("not found")))
-}
-
-/// Retire les commentaires de ligne `//` (lignes où, après espaces, le reste commence par `//`).
-/// Objectif : pouvoir fusionner des `tsconfig*.json` souvent en JSONC léger, sans dépendance jsonc.
-fn strip_tsconfig_line_comments(raw: &str) -> String {
-    let mut kept: Vec<&str> = Vec::new();
-    for line in raw.lines() {
-        let t = line.trim_start();
-        if t.starts_with("//") {
-            continue;
-        }
-        let t2 = t.trim();
-        if t2.starts_with("/*") && t2.ends_with("*/") && !t2.contains('\n') {
-            continue;
-        }
-        kept.push(line);
-    }
-    kept.join("\n")
-}
-
-/// Parse JSON de tsconfig : strict puis sans commentaires de ligne.
-fn parse_tsconfig_json_for_merge(raw: &str) -> Option<serde_json::Value> {
-    serde_json::from_str(raw)
-        .ok()
-        .or_else(|| serde_json::from_str(&strip_tsconfig_line_comments(raw)).ok())
-        .or_else(|| {
-            // Virgules finales simples avant `}` ou `]` (cas fréquent dans tsconfig Vite).
-            let relaxed = strip_tsconfig_line_comments(raw);
-            let re = Regex::new(r",(\s*[\]}])").ok()?;
-            let mut collapsed = relaxed;
-            for _ in 0..8 {
-                let next = re.replace_all(&collapsed, "$1").to_string();
-                if next == collapsed {
-                    break;
-                }
-                collapsed = next;
-            }
-            serde_json::from_str(&collapsed).ok()
-        })
-}
-
-fn looks_like_ts_tests_compiled_in_app_build(stdout: &str, stderr: &str) -> bool {
-    let combined = format!("{stdout}\n{stderr}");
-    let test_path = combined.contains(".test.")
-        || combined.contains(".spec.")
-        || combined.contains("src/tests/")
-        || combined.contains("src\\tests\\")
-        || combined.contains("/tests/")
-        || combined.contains("\\tests\\");
-    if !test_path {
-        return false;
-    }
-    let jest_hint = combined.contains("@types/jest")
-        || combined.contains("@types/mocha")
-        || combined.contains("vitest/globals")
-        || combined.contains("Try `npm i --save-dev @types/jest`");
-    let ts_runner = (combined.contains("TS2582") && combined.contains("describe"))
-        || (combined.contains("TS2582") && combined.contains("'it'"))
-        || (combined.contains("TS2582") && combined.contains("`it`"))
-        || (combined.contains("TS2304") && combined.contains("expect"));
-    let ts_noise_in_tests =
-        combined.contains("TS6196") || combined.contains("TS6133");
-    test_path && (ts_runner || jest_hint || ts_noise_in_tests)
-}
-
-/// Erreurs `tsc` typiques quand le code généré est partiellement incohérent (exports, props, imports) alors que Vite peut encore produire un bundle.
-fn looks_like_tsc_codegen_errors_for_vite_fallback(stdout: &str, stderr: &str) -> bool {
-    let c = format!("{stdout}\n{stderr}");
-    if !c.contains("error TS") {
-        return false;
-    }
-    c.contains("TS2305")
-        || c.contains("TS2613")
-        || c.contains("TS2339")
-        || c.contains("TS2459")
-        || c.contains("TS2322")
-        || c.contains("TS2345")
-        || c.contains("TS2741")
-        || c.contains("TS6133")
-}
-
-/// Ne pas modifier les `tsconfig.json` « solution » (références uniquement) : ils n’acceptent pas `exclude` utile pour les sous-projets.
-fn tsconfig_eligible_for_exclude_patch(v: &serde_json::Value) -> bool {
-    let Some(o) = v.as_object() else {
-        return false;
-    };
-    if o.contains_key("compilerOptions") {
-        return true;
-    }
-    if let Some(serde_json::Value::Array(a)) = o.get("include") {
-        return !a.is_empty();
-    }
-    false
-}
-
-/// Fusionne `exclude` pour retirer les tests du périmètre `tsc`. Retourne `true` si le fichier a été modifié.
-fn try_merge_exclude_into_tsconfig(path: &Path) -> Result<bool, String> {
-    if !path.is_file() {
-        return Ok(false);
-    }
-    let raw = fs::read_to_string(path).map_err(|e| format!("lecture {}: {e}", path.display()))?;
-    let mut v: serde_json::Value = match parse_tsconfig_json_for_merge(&raw) {
-        Some(v) => v,
-        None => return Ok(false),
-    };
-    if !tsconfig_eligible_for_exclude_patch(&v) {
-        return Ok(false);
-    }
-    let Some(obj) = v.as_object_mut() else {
-        return Ok(false);
-    };
-    let mut list: Vec<String> = match obj.get("exclude") {
-        Some(serde_json::Value::Array(a)) => a
-            .iter()
-            .filter_map(|x| x.as_str().map(str::to_string))
-            .collect(),
-        None => Vec::new(),
-        Some(_) => return Ok(false),
-    };
-    let mut changed = false;
-    for p in TSC_EXCLUDE_TEST_PATTERNS {
-        if !list.iter().any(|e| e == p) {
-            list.push((*p).to_string());
-            changed = true;
-        }
-    }
-    if !changed {
-        return Ok(false);
-    }
-    obj.insert("exclude".to_string(), json!(list));
-    let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
-    fs::write(path, format!("{pretty}\n"))
-        .map_err(|e| format!("écriture {}: {e}", path.display()))?;
-    Ok(true)
-}
-
-/// Tente de corriger les tsconfig pour exclure les tests, puis indique ce qui a été modifié (pour les messages d’erreur).
-fn try_autofix_tsconfig_exclude_tests_for_build(project_root: &Path) -> Result<Option<String>, String> {
-    let mut patched = Vec::new();
-    for name in ["tsconfig.app.json", "tsconfig.json", "tsconfig.node.json"] {
-        let p = project_root.join(name);
-        if try_merge_exclude_into_tsconfig(&p)? {
-            patched.push(name.to_string());
-        }
-    }
-    if patched.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(format!(
-            "fusion des exclusions de tests dans {}",
-            patched.join(", ")
-        )))
-    }
-}
-
-const AKASHA_TEST_SHIM_REL: &str = "src/akasha-studio-test-globals.d.ts";
-const AKASHA_TEST_SHIM_MARKER: &str = "akasha-studio-auto: test globals shim";
-
-/// Déclarations minimales pour que `tsc` du build d’application accepte les fichiers `*.test.*` sans @types/jest.
-fn try_write_test_globals_shim(project_root: &Path) -> Result<bool, String> {
-    let p = project_root.join(AKASHA_TEST_SHIM_REL);
-    if p.is_file() {
-        let existing = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-        if existing.contains(AKASHA_TEST_SHIM_MARKER) {
-            return Ok(false);
-        }
-        return Ok(false);
-    }
-    if let Some(parent) = p.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let body = format!(
-        "// {AKASHA_TEST_SHIM_MARKER}\n\
-         // Ajouté automatiquement par Akasha pour la vérification post-tâche (build) Code Studio.\n\
-         declare function describe(...args: unknown[]): void;\n\
-         declare function it(...args: unknown[]): void;\n\
-         declare function expect(...args: unknown[]): unknown;\n"
-    );
-    fs::write(&p, body).map_err(|e| e.to_string())?;
-    Ok(true)
-}
-
-async fn try_npm_install_autofix(project_root: &Path, timeout_sec: u64) {
-    let argv = vec!["npm".into(), "install".into()];
-    if !argv_looks_safe(&argv) {
-        return;
-    }
-    let cap = timeout_sec
-        .min(AUTO_VERIFY_NPM_INSTALL_CAP_SEC)
-        .max(90);
-    let _ = studio_run_command_capture(project_root, &argv, cap).await;
 }
 
 /// Sections canoniques du plan — si l’une apparaît plus d’une fois, c’est en général un second gabarit collé en bas.
@@ -3369,6 +3284,9 @@ pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> O
         return None;
     }
     let t = content.trim_start();
+    if ["--file_text", "--content", "--file-content"].iter().any(|prefix|t.starts_with(prefix)) {
+        return Some("rejected_tool_argument_leak: source begins with a command argument. Use a native write_file call with path/content fields; preserve source quotes and never include CLI flags in content.".into());
+    }
     if t.starts_with("```") {
         return Some(
             "rejected: fichier code commence par une barre markdown ``` — écrire uniquement le source, sans blocs markdown."
@@ -3407,159 +3325,29 @@ pub(crate) fn studio_project_verify_timeout_sec(project_root: &Path) -> u64 {
 
 /// Run the configured build/check. Ok(true) = command passed; Ok(false) = skipped;
 /// Err = configured verification failed, including when a weaker fallback bundles successfully.
-pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<bool, String> {
+pub(crate) fn studio_verification_argv(project_root: &Path) -> Result<Option<Vec<String>>, String> {
     let meta = load_studio_meta(project_root);
-    if meta.as_ref().map(|m| m.verify_skip).unwrap_or(false) {
-        return Ok(false);
-    }
-    let timeout_sec = meta
-        .as_ref()
-        .and_then(|m| m.verify_timeout_sec)
-        .unwrap_or(DEFAULT_BUILD_TIMEOUT_SEC)
-        .min(3600);
-    let argv: Vec<String> = if let Some(v) = meta.as_ref().and_then(|m| m.verify_argv.as_ref()) {
-        if v.is_empty() {
-            return Ok(false);
-        }
-        v.clone()
+    if meta.as_ref().is_some_and(|m|m.verify_skip) { return Ok(None); }
+    let argv = if let Some(argv)=meta.as_ref().and_then(|m|m.verify_argv.as_ref()) {
+        argv.clone()
     } else if project_root.join("package.json").is_file() {
-        vec!["npm".into(), "run".into(), "build".into()]
+        vec!["npm".into(),"run".into(),"build".into()]
     } else if project_root.join("Cargo.toml").is_file() {
-        vec!["cargo".into(), "check".into()]
-    } else {
-        return Ok(false);
-    };
-    if !argv_looks_safe(&argv) {
-        return Err("verify_argv in .akasha-studio.json is invalid or unsafe".into());
-    }
-    let is_npm_run_build =
-        argv.len() == 3 && argv[0] == "npm" && argv[1] == "run" && argv[2] == "build";
-    match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-        Ok((Some(0), _, _)) => Ok(true),
-        Ok((mut code, mut out, mut err)) => {
-            let first_err = format_verify_failure(code, &out, &err);
-            if !is_npm_run_build {
-                return Err(first_err);
-            }
+        vec!["cargo".into(),"check".into()]
+    } else {return Ok(None);};
+    if argv.is_empty() {return Ok(None);}
+    if !argv_looks_safe(&argv) {return Err("verify_argv in .akasha-studio.json is invalid or unsafe".into());}
+    Ok(Some(argv))
+}
 
-            let mut fix_notes: Vec<String> = Vec::new();
-
-            if looks_like_missing_npm_module(&out, &err) {
-                fix_notes.push("npm install (dépendances manquantes détectées)".to_string());
-                try_npm_install_autofix(project_root, timeout_sec).await;
-                match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                    Ok((Some(0), _, _)) => return Ok(true),
-                    Ok((c, o, e)) => {
-                        code = c;
-                        out = o;
-                        err = e;
-                    }
-                    Err(e2) => {
-                        return Err(format!(
-                            "{first_err}\n\n[Tentatives automatiques : {}]\nVérification post-tâche après npm install: {e2}",
-                            fix_notes.join(" ; ")
-                        ));
-                    }
-                }
-            }
-
-            if looks_like_ts_tests_compiled_in_app_build(&out, &err) {
-                match try_autofix_tsconfig_exclude_tests_for_build(project_root) {
-                    Ok(Some(note)) => {
-                        fix_notes.push(note.clone());
-                        match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                            Ok((Some(0), _, _)) => return Ok(true),
-                            Ok((c, o, e)) => {
-                                code = c;
-                                out = o;
-                                err = e;
-                            }
-                            Err(e2) => {
-                                return Err(format!(
-                                    "{first_err}\n\n[Tentatives automatiques : {}]\n{}",
-                                    fix_notes.join(" ; "),
-                                    e2
-                                ));
-                            }
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(fix_err) => fix_notes.push(format!("tsconfig exclude : {fix_err}")),
-                }
-
-                if looks_like_ts_tests_compiled_in_app_build(&out, &err) {
-                    match try_write_test_globals_shim(project_root) {
-                        Ok(true) => {
-                            fix_notes.push(format!(
-                                "fichier {AKASHA_TEST_SHIM_REL} (globals describe/it/expect)"
-                            ));
-                            match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                                Ok((Some(0), _, _)) => return Ok(true),
-                                Ok((c2, o2, e2)) => {
-                                    return Err(format!(
-                                        "{first_err}\n\n[Tentatives automatiques : {}]\n{}",
-                                        fix_notes.join(" ; "),
-                                        format_verify_failure(c2, &o2, &e2)
-                                    ));
-                                }
-                                Err(e2) => {
-                                    return Err(format!(
-                                        "{first_err}\n\n[Tentatives automatiques : {}]\nVérification post-tâche: {e2}",
-                                        fix_notes.join(" ; ")
-                                    ));
-                                }
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(shim_err) => fix_notes.push(format!("shim tests : {shim_err}")),
-                    }
-                }
-            }
-
-            // Dernier secours : le script `npm run build` enchaîne souvent `tsc` puis Vite ; si le code généré
-            // est incohérent pour TypeScript mais Vite peut encore bundler, on tente uniquement `vite build`
-            // (local, sans réseau — exige `node_modules/vite`).
-            if project_root.join("node_modules/vite/package.json").is_file()
-                && looks_like_tsc_codegen_errors_for_vite_fallback(&out, &err)
-            {
-                let vite_argv = vec![
-                    "npm".into(),
-                    "exec".into(),
-                    "--".into(),
-                    "vite".into(),
-                    "build".into(),
-                ];
-                if argv_looks_safe(&vite_argv) {
-                    fix_notes.push(
-                        "secours: npm exec -- vite build (sans étape tsc du script build)".into(),
-                    );
-                    match studio_run_command_capture(project_root, &vite_argv, timeout_sec).await {
-                        Ok((Some(0), _, _)) => return Err(format!("{}\n\n[Tentatives automatiques : {}]\nVite fallback passed, but the configured build still failed (TypeScript step not verified).",format_verify_failure(code,&out,&err),fix_notes.join(" ; "))),
-                        Ok((cv, ov, ev)) => {
-                            fix_notes.push(format!(
-                                "vite build secours — {}",
-                                format_verify_failure(cv, &ov, &ev)
-                                    .chars()
-                                    .take(900)
-                                    .collect::<String>()
-                            ));
-                        }
-                        Err(ve) => fix_notes.push(format!("vite build secours: {ve}")),
-                    }
-                }
-            }
-
-            let last = format_verify_failure(code, &out, &err);
-            if fix_notes.is_empty() {
-                Err(last)
-            } else {
-                Err(format!(
-                    "{last}\n\n[Tentatives automatiques : {}]",
-                    fix_notes.join(" ; ")
-                ))
-            }
-        }
-        Err(e) => Err(format!("Vérification post-tâche: {}", e)),
+/// Read-only verification helper. Repairs and installations are exclusively
+/// executed by the tracked main tool loop, never by a second repair engine.
+pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<bool, String> {
+    let Some(argv)=studio_verification_argv(project_root)? else {return Ok(false);};
+    match studio_run_command_capture(project_root,&argv,studio_project_verify_timeout_sec(project_root)).await {
+        Ok((Some(0),_,_))=>Ok(true),
+        Ok((code,out,err))=>Err(format_verify_failure(code,&out,&err)),
+        Err(error)=>Err(error),
     }
 }
 
@@ -4316,6 +4104,7 @@ mod tests {
         acceptance: &[(&str, &str)],
     ) -> super::StudioTicket {
         super::StudioTicket {
+            initial_backlog_root: acceptance.iter().any(|(id, _)| *id == "initial-kanban-backlog"),
             id: id.to_string(),
             project_id: "project".to_string(),
             title: id.to_string(),
@@ -4522,6 +4311,9 @@ mod tests {
             }),
         )
         .expect("create initial request ticket");
+        let mut root = root;
+        root.initial_backlog_root = true; // Host-owned fixture identity, not a tool argument.
+        super::studio_upsert_ticket(dir.path(), root.clone()).unwrap();
         let task_message = format!("[Ticket Kanban obligatoire]\n- ticket_id: {}", root.id);
         assert!(studio_initial_backlog_preflight(dir.path(), "task-1", &task_message).is_err());
 
@@ -4711,6 +4503,9 @@ mod tests {
         assert!(studio_reject_polluted_code_content(p, bad2).is_some());
         let ok = "function f() {}\n// **note** fichier.ts — pour humain\n";
         assert!(studio_reject_polluted_code_content(p, ok).is_none());
+        for prefix in ["--file_text '","--content '","--file-content '"] {
+            assert!(studio_reject_polluted_code_content(p,&format!("{prefix}import {{useState}} from 'react';")).is_some());
+        }
     }
 
     #[test]
@@ -4761,41 +4556,6 @@ mod tests {
     }
 
     #[test]
-    fn looks_like_ts_tests_in_app_build_detects_tsc_test_errors() {
-        use super::looks_like_ts_tests_compiled_in_app_build;
-        let sample = r"src/tests/AntiAIMode.test.tsx(8,1): error TS2582: Cannot find name 'describe'.
-Try `npm i --save-dev @types/jest`";
-        assert!(looks_like_ts_tests_compiled_in_app_build(sample, ""));
-        assert!(!looks_like_ts_tests_compiled_in_app_build(
-            "src/App.tsx(1,1): error TS2322: Type 'number' is not assignable to type 'string'.",
-            ""
-        ));
-    }
-
-    #[test]
-    fn strip_tsconfig_line_comments_drops_slash_slash_lines() {
-        use super::strip_tsconfig_line_comments;
-        let raw = "{\n  // hi\n  \"x\": 1\n}";
-        let s = strip_tsconfig_line_comments(raw);
-        assert!(serde_json::from_str::<serde_json::Value>(&s).is_ok());
-    }
-
-    #[test]
-    fn parse_tsconfig_json_for_merge_accepts_trailing_comma() {
-        use super::parse_tsconfig_json_for_merge;
-        let raw = r#"{"compilerOptions": { "strict": true, },}"#;
-        assert!(parse_tsconfig_json_for_merge(raw).is_some());
-    }
-
-    #[test]
-    fn looks_like_tsc_codegen_errors_for_vite_fallback_detects_export_mismatch() {
-        use super::looks_like_tsc_codegen_errors_for_vite_fallback;
-        let s = "src/ai.ts(6,15): error TS2305: Module '\"./gameLogic\"' has no exported member 'Player'.";
-        assert!(looks_like_tsc_codegen_errors_for_vite_fallback(s, ""));
-        assert!(!looks_like_tsc_codegen_errors_for_vite_fallback("no type errors here", ""));
-    }
-
-    #[test]
     fn npm_exec_vite_build_argv_is_whitelisted() {
         use super::{argv_looks_safe, npm_exec_argv_allowed_for_studio_verify};
         let v = vec![
@@ -4807,29 +4567,6 @@ Try `npm i --save-dev @types/jest`";
         ];
         assert!(npm_exec_argv_allowed_for_studio_verify(&v));
         assert!(argv_looks_safe(&v));
-    }
-
-    #[test]
-    fn merge_tsconfig_exclude_adds_test_globs() {
-        use super::try_merge_exclude_into_tsconfig;
-        let dir = std::env::temp_dir().join(format!(
-            "akasha_tsconfig_exclude_test_{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tsconfig.app.json");
-        std::fs::write(
-            &path,
-            r#"{"compilerOptions":{"strict":true},"include":["src"]}"#,
-        )
-        .unwrap();
-        assert!(try_merge_exclude_into_tsconfig(&path).unwrap());
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let ex = v["exclude"].as_array().unwrap();
-        assert!(ex.iter().any(|x| x == "**/*.test.tsx"));
-        assert!(!try_merge_exclude_into_tsconfig(&path).unwrap());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
@@ -5346,9 +5083,9 @@ Try `npm i --save-dev @types/jest`";
         assert_eq!(ticket.status, "todo");
         assert_eq!(ticket.requested_by, "user_chat");
         assert_eq!(ticket.description, message);
-        assert_eq!(ticket.acceptance_criteria.len(), 3);
+        assert_eq!(ticket.acceptance_criteria.len(), 4);
         assert_eq!(
-            ticket.acceptance_criteria[2].id.as_deref(),
+            ticket.acceptance_criteria.last().unwrap().id.as_deref(),
             Some("initial-kanban-backlog")
         );
         let tickets = studio_list_tickets(dir.path());

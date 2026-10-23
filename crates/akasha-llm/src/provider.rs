@@ -859,6 +859,9 @@ fn is_embedded_router_provider(provider: &str) -> bool {
 
 /// Formate une erreur fournisseur pour l'utilisateur (chat / API / compare).
 pub fn format_provider_error(provider: &str, err: &ProviderError) -> String {
+    if matches!(err, ProviderError::Timeout) && is_embedded_router_provider(provider) {
+        return format!("{provider}: délai d'inférence locale dépassé ; le moteur embarqué n'a pas terminé dans le budget alloué. Aucun diagnostic HTTP ne s'applique. Choisissez une route Studio qualifiée ou vérifiez le moteur local avant de reprendre.");
+    }
     if matches!(err, ProviderError::Unavailable) && is_embedded_router_provider(provider) {
         return EMBEDDED_UNAVAILABLE_FR.to_string();
     }

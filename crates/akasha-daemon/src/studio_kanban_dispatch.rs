@@ -132,12 +132,10 @@ async fn dispatch_idle_projects(
                 "Cannot migrate legacy Code Studio request-ticket relationships"
             );
         }
+        let _ = api_studio::studio_upgrade_initial_request(&root);
         let _ = api_studio::studio_complete_initial_backlog_if_ready(&root);
         let initial_ticket = studio_list_tickets(&root).into_iter().find(|ticket| {
-            ticket
-                .acceptance_criteria
-                .iter()
-                .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog"))
+            crate::api_studio::is_initial_backlog_root(ticket)
         });
         if let Some(ticket) = initial_ticket.as_ref() {
             if let Err(error) = api_studio::studio_seed_initial_backlog(&root, &ticket.id) {
@@ -158,10 +156,7 @@ async fn dispatch_idle_projects(
         // failures immediately instead of leaving stale in-progress tickets.
         let tickets = studio_list_tickets(&root);
         let initial_ticket = tickets.iter().find(|ticket| {
-            ticket
-                .acceptance_criteria
-                .iter()
-                .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog"))
+            crate::api_studio::is_initial_backlog_root(ticket)
         }).cloned();
         let needs_backlog_planning = initial_ticket
             .as_ref()
@@ -186,6 +181,7 @@ async fn dispatch_idle_projects(
             initial_ticket
                 .as_ref()
                 .filter(|ticket| ticket.status != "done")
+                .filter(|ticket| studio_ticket_prerequisite_done(&root, ticket))
                 .filter(|ticket| {
                     ticket_can_be_retried(ticket, &root, &task_statuses, store_path, now)
                 })
@@ -196,6 +192,7 @@ async fn dispatch_idle_projects(
             request_needing_planning
                 .or(request_needing_correction_planning)
                 .filter(|ticket| ticket.status != "done")
+                .filter(|ticket| studio_ticket_prerequisite_done(&root, ticket))
                 .filter(|ticket| {
                     ticket_can_be_retried(ticket, &root, &task_statuses, store_path, now)
                 })
@@ -249,6 +246,7 @@ async fn dispatch_idle_projects(
             serde_json::json!({
                 "id": ticket.id,
                 "title": ticket.title,
+                "initial_backlog_root": ticket.initial_backlog_root,
                 "status": ticket.status,
                 "parent_ticket_id": ticket.parent_ticket_id,
                 "creation_key": ticket.creation_key,
@@ -379,7 +377,7 @@ fn ticket_agent_for_dispatch<'a>(
             ticket.review_agent.as_str()
         };
     }
-    if ticket.status == "review" {
+    if ticket.status == "review" || ticket.evidence.resume_status.as_deref()==Some("review") {
         ticket.review_agent.as_str()
     } else {
         ticket.assigned_agent.as_str()
@@ -451,10 +449,10 @@ fn ticket_belongs_to_parent(ticket: &StudioTicket, parent_id: &str) -> bool {
 fn initial_backlog_needs_planning(
     project_root: &Path,
     summary: &StudioTicket,
-    tickets: &[StudioTicket],
+    _tickets: &[StudioTicket],
 ) -> bool {
     is_initial_backlog_summary(summary)
-        && !api_studio::studio_initial_backlog_is_ready_for_project(project_root, summary, tickets)
+        && crate::studio_planning::validate(project_root, summary).is_err()
 }
 
 pub(crate) fn project_has_active_task(store_path: &Path, project_id: &str) -> bool {
@@ -497,11 +495,9 @@ fn ticket_can_be_retried(
         if attempts >= MAX_AUTOMATIC_FAILURE_ATTEMPTS {
             return false;
         }
-        // A local preflight rejection proves no model call or tool ran. The
-        // task input is unchanged when the scheduler sees it again, so retrying
-        // would submit the same oversized request. Leave it blocked for an
-        // explicit model/context change instead of looping.
-        if is_local_context_preflight_failure(ticket, task_statuses, store_path) {
+        // Exhausted Studio routes and local context rejection require a route
+        // change or explicit resume, rather than another identical dispatch.
+        if requires_route_change(ticket, task_statuses, store_path) {
             return false;
         }
     }
@@ -539,7 +535,7 @@ fn ticket_can_be_retried(
     retry_cooldown_elapsed(last_dispatch, now, effective_cooldown)
 }
 
-fn is_local_context_preflight_failure(
+fn requires_route_change(
     ticket: &StudioTicket,
     task_statuses: &HashMap<String, TaskStatus>,
     store_path: &Path,
@@ -562,9 +558,9 @@ fn is_local_context_preflight_failure(
         .ok()
         .and_then(|store| store.get_outcome(task_id).ok().flatten())
         .is_some_and(|outcome| {
-            outcome
-                .to_string()
-                .contains("context_window_preflight_rejected")
+            let reason=outcome.to_string();
+            reason.contains("context_window_preflight_rejected") || reason.contains("studio_routes_exhausted")
+                || ["studio_no_verified_progress", "studio_command_verification_failed", "studio_round_budget_exhausted"].iter().any(|code| reason.contains(code))
         })
 }
 
@@ -771,6 +767,14 @@ fn record_completed_task_without_review(
     if task_statuses.get(task_id) != Some(&TaskStatus::Completed) {
         return;
     }
+    // A verified planning pass hands the still-open tracker to its children.
+    // It is not an incomplete implementation, and must not incur a retry cooldown.
+    if is_initial_backlog_summary(ticket)
+        && TaskStore::open(store_path).ok()
+            .and_then(|store| uuid::Uuid::parse_str(task_id).ok().and_then(|id|store.get_outcome(id).ok().flatten()))
+            .is_some_and(|outcome| outcome["planning_verified"]==true)
+        && crate::studio_planning::validate(project_root,ticket).is_ok()
+    { return; }
     let Some(context) = incomplete_task_context(ticket, task_statuses, store_path) else {
         return;
     };
@@ -833,6 +837,10 @@ fn record_terminal_task_failure(
     task_statuses: &HashMap<String, TaskStatus>,
     store_path: &Path,
 ) {
+    // A delayed event from an older run must not overwrite a newer assignment
+    // or a reviewed result.
+    let Some(current)=api_studio::studio_get_ticket(project_root,&ticket.id) else {return;};
+    if current.related_task_id != ticket.related_task_id || current.status == "done" {return;}
     let Some(task_id) = ticket.related_task_id.as_deref() else {
         return;
     };
@@ -844,6 +852,16 @@ fn record_terminal_task_failure(
     }) else {
         return;
     };
+    let context = terminal_failure_context(ticket, task_statuses, store_path);
+    if matches!(current.status.as_str(),"in_progress"|"review") {
+        let mut blocked=current;
+        blocked.evidence.resume_status=Some(blocked.status.clone());
+        blocked.status="blocked".into();
+        blocked.evidence.summary=Some(context.clone().unwrap_or_else(||format!("La tâche liée s’est terminée avec le statut {}.",status.as_str())));
+        blocked.updated_at=chrono::Utc::now().to_rfc3339();
+        if api_studio::studio_upsert_ticket(project_root,blocked).is_err() {return;}
+    }
+    let terminal_updated_at=uuid::Uuid::parse_str(task_id).ok().and_then(|id|TaskStore::open(store_path).ok()?.get(id).ok().flatten()).map(|task|task.updated_at.to_rfc3339());
     if studio_list_ticket_events(project_root, &ticket.id)
         .iter()
         .any(|event| {
@@ -854,19 +872,10 @@ fn record_terminal_task_failure(
                     .and_then(|payload| payload.get("task_id"))
                     .and_then(|value| value.as_str())
                     == Some(task_id)
+                && event.payload.as_ref().and_then(|payload|payload.get("task_updated_at")).and_then(|value|value.as_str()) == terminal_updated_at.as_deref()
         })
     {
         return;
-    }
-    let context = terminal_failure_context(ticket, task_statuses, store_path);
-    if ticket.status == "in_progress" {
-        let mut blocked = ticket.clone();
-        blocked.status = "blocked".to_string();
-        blocked.evidence.summary = Some(context.clone().unwrap_or_else(|| {
-            format!("La tâche liée s’est terminée avec le statut {}.", status.as_str())
-        }));
-        blocked.updated_at = chrono::Utc::now().to_rfc3339();
-        let _ = api_studio::studio_upsert_ticket(project_root, blocked);
     }
     let _ = api_studio::studio_append_ticket_event(
         project_root,
@@ -876,16 +885,29 @@ fn record_terminal_task_failure(
         Some(serde_json::json!({
             "task_id": task_id,
             "task_status": status.as_str(),
+            "task_updated_at": terminal_updated_at,
             "detail": context,
         })),
     );
 }
 
+/// Terminal task status is reconciled independently of automatic dispatch.
+/// Called on completion and when the board is read, including after a restart.
+pub(crate) fn reconcile_project_tickets(project_root:&Path,store_path:&Path) {
+    let Ok(store)=TaskStore::open(store_path) else {return;};
+    let tickets=studio_list_tickets(project_root);
+    let statuses:HashMap<String,TaskStatus>=tickets.iter().filter_map(|ticket| {
+        let id=ticket.related_task_id.as_ref()?;
+        let task=store.get(uuid::Uuid::parse_str(id).ok()?).ok()??;
+        Some((id.clone(),task.status))
+    }).collect();
+    for ticket in tickets {
+        record_terminal_task_failure(project_root,&ticket,&statuses,store_path);
+    }
+}
+
 fn is_initial_backlog_summary(ticket: &StudioTicket) -> bool {
-    ticket
-        .acceptance_criteria
-        .iter()
-        .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog"))
+    crate::api_studio::is_initial_backlog_root(ticket)
 }
 
 fn retry_cooldown_elapsed(
@@ -926,6 +948,7 @@ mod tests {
 
     fn ticket(status: &str, related_task_id: Option<&str>) -> StudioTicket {
         StudioTicket {
+            initial_backlog_root: false,
             id: "ticket-1".to_string(),
             project_id: "project-1".to_string(),
             title: "Implement feature".to_string(),
@@ -956,8 +979,19 @@ mod tests {
     }
 
     #[test]
+    fn copied_criterion_on_a_work_phase_keeps_its_specialist_owner() {
+        let mut phase = ticket("todo", None);
+        phase.requested_by = "system_initial_backlog".into();
+        phase.parent_ticket_id = Some("real-root".into());
+        phase.creation_key = Some("initial:real-root:validation".into());
+        phase.acceptance_criteria[0].id = Some("initial-kanban-backlog".into());
+        assert!(!is_initial_backlog_summary(&phase));
+        assert_eq!(ticket_agent_for_dispatch(&phase, &[phase.clone()]), "studio_fullstack");
+    }
+    #[test]
     fn initial_request_summary_is_not_dispatched_as_an_implementation_ticket() {
         let mut summary = ticket("in_progress", None);
+        summary.initial_backlog_root = true;
         summary.acceptance_criteria[0].id = Some("initial-kanban-backlog".to_string());
         assert!(is_initial_backlog_summary(&summary));
         assert!(!is_initial_backlog_summary(&ticket("todo", None)));
@@ -1153,6 +1187,7 @@ mod tests {
     fn incomplete_initial_backlog_schedules_the_project_manager_before_work() {
         let mut summary = ticket("in_progress", None);
         summary.id = "initial-request".to_string();
+        summary.initial_backlog_root = true;
         summary.acceptance_criteria[0].id = Some("initial-kanban-backlog".to_string());
         let mut generic = ticket("todo", None);
         generic.id = "generic-phase".to_string();
@@ -1183,7 +1218,11 @@ mod tests {
         validation.title = "Verify the playable Bomberman flow".to_string();
         validation.acceptance_criteria[0].id = Some("playable-validation".to_string());
         validation.depends_on_ticket_ids = vec![features.id.clone()];
-        let refined = vec![summary.clone(), foundation, features, validation];
+        let mut refined = vec![summary.clone(), foundation, features, validation];
+        for child in refined.iter_mut().skip(1) {
+            child.parent_ticket_id = Some(summary.id.clone());
+        }
+        for item in &refined { api_studio::studio_upsert_ticket(dir.path(), item.clone()).unwrap(); }
         assert!(!initial_backlog_needs_planning(
             dir.path(),
             &summary,
@@ -1340,7 +1379,19 @@ mod tests {
     }
 
     #[test]
-    fn failed_reviewer_attempt_keeps_the_ticket_in_review_for_the_next_review() {
+    fn reconciliation_works_without_scheduler_and_does_not_block_a_newer_assignment() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path().join("project");std::fs::create_dir_all(&root).unwrap();
+        let db=dir.path().join("tasks.db");let store=TaskStore::open(&db).unwrap();let id=uuid::Uuid::new_v4();let now=chrono::Utc::now();
+        store.insert(&akasha_store::Task{id,parent_task_id:None,status:TaskStatus::Failed,assigned_agent:"studio_project_manager".into(),created_at:now,updated_at:now,initial_message:None,studio_project_id:Some("project".into())}).unwrap();
+        let mut failed=ticket("in_progress",Some(&id.to_string()));failed.id="execution".into();api_studio::studio_upsert_ticket(&root,failed).unwrap();
+        reconcile_project_tickets(&root,&db);reconcile_project_tickets(&root,&db);
+        let mut blocked=api_studio::studio_get_ticket(&root,"execution").unwrap();assert_eq!(blocked.status,"blocked");
+        assert_eq!(studio_list_ticket_events(&root,"execution").iter().filter(|event|event.event_type=="ticket_execution_failed").count(),1);
+        blocked.related_task_id=Some(uuid::Uuid::new_v4().to_string());blocked.status="in_progress".into();api_studio::studio_upsert_ticket(&root,blocked).unwrap();
+        reconcile_project_tickets(&root,&db);assert_eq!(api_studio::studio_get_ticket(&root,"execution").unwrap().status,"in_progress");
+    }
+    #[test]
+    fn failed_reviewer_attempt_is_blocked_but_resumes_the_review_role() {
         let dir = tempfile::tempdir().expect("project root");
         let root = dir.path().join("project");
         std::fs::create_dir_all(&root).expect("create project root");
@@ -1358,7 +1409,8 @@ mod tests {
             .into_iter()
             .find(|candidate| candidate.id == review.id)
             .expect("review ticket remains available");
-        assert_eq!(saved.status, "review");
+        assert_eq!(saved.status, "blocked");
+        assert_eq!(saved.evidence.resume_status.as_deref(),Some("review"));
         assert_eq!(ticket_agent_for_dispatch(&saved, &[]), "studio_reviewer");
         assert!(ticket_can_be_retried(
             &saved,
@@ -1378,6 +1430,10 @@ mod tests {
                 false,
             ),
             ("provider context_window_exceeded: request rejected", false, true),
+            ("studio_routes_exhausted: provider_generation_failed: invalid native tools", false, false),
+            ("studio_no_verified_progress: repeated edits", false, false),
+            ("studio_command_verification_failed: npm build failed", false, false),
+            ("studio_round_budget_exhausted: no fresh milestone", false, false),
         ] {
             let dir = tempfile::tempdir().expect("project root");
             let root = dir.path().join("project");
@@ -1410,6 +1466,7 @@ mod tests {
 
             let mut failed = ticket("in_progress", Some(&task_id.to_string()));
             failed.id = "initial-request".to_string();
+            failed.initial_backlog_root = true;
             failed.acceptance_criteria[0].id = Some("initial-kanban-backlog".to_string());
             api_studio::studio_upsert_ticket(&root, failed.clone()).expect("save request ticket");
             let statuses = HashMap::from([(task_id.to_string(), TaskStatus::Failed)]);

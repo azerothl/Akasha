@@ -270,9 +270,10 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "list_tools" => {
             let Some(role) = assigned_agent_for_task.as_deref() else { return (false, "[list_tools] task role unavailable".into(), None); };
-            let tools = crate::studio_capabilities::catalogue(&executor.policy, role).into_iter()
-                .filter(|tool| args.first().map_or(tool.announced, |name| tool.name == *name)).collect::<Vec<_>>();
-            (true, serde_json::to_string(&tools).unwrap_or_default(), None)
+            match crate::studio_capabilities::discovery(&executor.policy, role, args.first().map(String::as_str)) {
+                Ok(value) => (true, value.to_string(), None),
+                Err(error) => (false, error, None),
+            }
         }
         "workspace_graph_search" => {
             let Some(sp) = store_path else {
@@ -574,10 +575,11 @@ pub(crate) async fn execute_tool_call_impl(
                     })
                 })
                 .collect();
-            let pretty = serde_json::to_string_pretty(&slim).unwrap_or_else(|_| "[]".to_string());
+            let pretty = serde_json::to_string(&slim).unwrap_or_else(|_| "[]".to_string());
             (
                 true,
-                format!("[studio_list_tickets]\n{}", pretty),
+                format!("[studio_list_tickets]\n{}\n[Planning context]\n{}", pretty,
+                    crate::studio_planning::context(&root, &task_id.to_string())),
                 None,
             )
         }
@@ -605,7 +607,14 @@ pub(crate) async fn execute_tool_call_impl(
                     );
                 }
             };
-            match crate::api_studio::studio_tool_create_ticket_json(&root, &v) {
+            let v = match crate::studio_planning::bind_arguments(&root, &task_id.to_string(), assigned_agent_for_task.as_deref().unwrap_or_default(), tool_name, &v) {
+                Ok(v) => v,
+                Err(error) => return (false, error, None),
+            };
+            let result = if v.get("ticket_id").is_some() {
+                crate::api_studio::studio_tool_apply_ticket_patch_json(&root, &v)
+            } else { crate::api_studio::studio_tool_create_ticket_json(&root, &v) };
+            match result {
                 Ok(ticket) => {
                     let enc = serde_json::to_string_pretty(&ticket).unwrap_or_default();
                     (true, format!("[studio_create_ticket]\n{}", enc), None)
@@ -636,6 +645,10 @@ pub(crate) async fn execute_tool_call_impl(
                         None,
                     );
                 }
+            };
+            let v = match crate::studio_planning::bind_arguments(&root, &task_id.to_string(), assigned_agent_for_task.as_deref().unwrap_or_default(), tool_name, &v) {
+                Ok(v) => v,
+                Err(error) => return (false, error, None),
             };
             match crate::api_studio::studio_tool_apply_ticket_patch_json(&root, &v) {
                 Ok(ticket) => {
@@ -880,16 +893,24 @@ pub(crate) async fn execute_tool_call_impl(
             let (vault_specs, cwd_flag, cmd, mut cmd_args) = parse_run_command_args(args);
             let removed_duplicate_program =
                 remove_repeated_executable_arg(&cmd, &mut cmd_args);
-            let correction_note = removed_duplicate_program.then(|| {
+            let mut correction_note = removed_duplicate_program.then(|| {
                 format!(
                     "[run_command] Corrected malformed arguments: `program` already names `{cmd}`, so its duplicate first entry was removed from `args`. The correct shape is program `{cmd}` with args {cmd_args:?}.\n"
                 )
             }).unwrap_or_default();
+            if is_studio_workspace && super::process_ops::normalize_studio_npm_script(&cmd, &mut cmd_args) {
+                correction_note.push_str(&format!("[Studio command correction] npm script shorthand normalized to `{cmd}` with args {cmd_args:?}; manifest and policy checks still apply.\n"));
+            }
             let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
                 Ok(c) => c,
                 Err(e) => return (false, format!("[run_command] {}", e), None),
             };
             let cwd_ref = cwd_resolved.as_deref();
+            if is_studio_workspace {
+                if let Err(error) = super::process_ops::npm_prerequisites(&cmd, &cmd_args, cwd_ref, &executor.policy) {
+                    return (false, error.to_string(), None);
+                }
+            }
             let extra_env = if vault_specs.is_empty() {
                 None
             } else {
@@ -972,16 +993,24 @@ pub(crate) async fn execute_tool_call_impl(
             let (_vault_specs, cwd_flag, cmd, mut cmd_args) = parse_run_command_args(args);
             let removed_duplicate_program =
                 remove_repeated_executable_arg(&cmd, &mut cmd_args);
-            let correction_note = removed_duplicate_program.then(|| {
+            let mut correction_note = removed_duplicate_program.then(|| {
                 format!(
                     "[run_terminal] Corrected malformed arguments: `program` already names `{cmd}`, so its duplicate first entry was removed from `args`. The correct shape is program `{cmd}` with args {cmd_args:?}.\n"
                 )
             }).unwrap_or_default();
+            if is_studio_workspace && super::process_ops::normalize_studio_npm_script(&cmd, &mut cmd_args) {
+                correction_note.push_str(&format!("[Studio command correction] npm script shorthand normalized to `{cmd}` with args {cmd_args:?}; manifest and policy checks still apply.\n"));
+            }
             let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
                 Ok(c) => c,
                 Err(e) => return (false, format!("[run_terminal] {}", e), None),
             };
             let cwd_ref = cwd_resolved.as_deref();
+            if is_studio_workspace {
+                if let Err(error) = super::process_ops::npm_prerequisites(&cmd, &cmd_args, cwd_ref, &executor.policy) {
+                    return (false, error.to_string(), None);
+                }
+            }
             match executor.run_command(&cmd, &cmd_args, cwd_ref, None).await {
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1023,15 +1052,23 @@ pub(crate) async fn execute_tool_call_impl(
             let (_vault_specs, cwd_flag, cmd, mut cmd_args) = parse_run_command_args(args);
             let removed_duplicate_program =
                 remove_repeated_executable_arg(&cmd, &mut cmd_args);
-            let correction_note = removed_duplicate_program.then(|| {
+            let mut correction_note = removed_duplicate_program.then(|| {
                 format!(
                     "[run_command_background] Corrected malformed arguments: `program` already names `{cmd}`, so its duplicate first entry was removed from `args`. The correct shape is program `{cmd}` with args {cmd_args:?}.\n"
                 )
             }).unwrap_or_default();
+            if is_studio_workspace && super::process_ops::normalize_studio_npm_script(&cmd, &mut cmd_args) {
+                correction_note.push_str(&format!("[Studio command correction] npm script shorthand normalized to `{cmd}` with args {cmd_args:?}; manifest and policy checks still apply.\n"));
+            }
             let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
                 Ok(c) => c,
                 Err(e) => return (false, format!("[run_command_background] {}", e), None),
             };
+            if is_studio_workspace {
+                if let Err(error) = super::process_ops::npm_prerequisites(&cmd, &cmd_args, cwd_resolved.as_deref(), &executor.policy) {
+                    return (false, error.to_string(), None);
+                }
+            }
             let cmd_display = format!("{} {}", cmd, cmd_args.join(" "));
             match process_registry {
                 Some(reg) => {

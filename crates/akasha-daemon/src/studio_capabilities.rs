@@ -256,8 +256,8 @@ pub(crate) fn prompt(policy: &ToolsPolicy, agent: &str) -> String {
 
 /// Progressive discovery keeps ordinary coding turns within local context
 /// windows. This only narrows advertisement, never runtime permissions.
-pub(crate) fn select_native_names(names: Vec<String>, expanded: bool) -> Vec<String> {
-    if expanded || !names.iter().any(|name|name=="list_tools") {return names;}
+pub(crate) fn select_native_names(names: Vec<String>, discovered: Option<&str>) -> Vec<String> {
+    if !names.iter().any(|name|name=="list_tools") {return names;}
     let core=names.iter().filter(|name|matches!(name.as_str(),
         "read_file"|"write_file"|"write_code"|"edit_file"|"search_replace"|"apply_patch"|
         "delete_file"|"rename_path"|"move_tree"|"search_files"|"grep_content"|"file_diff"|
@@ -266,9 +266,25 @@ pub(crate) fn select_native_names(names: Vec<String>, expanded: bool) -> Vec<Str
         // otherwise the mandatory Kanban/delegation prompt contradicts the
         // native function schema and small local models emit rejected calls.
         "delegate_to_agent"|"studio_list_tickets"|"studio_create_ticket"|"studio_update_ticket"|"studio_review_ticket"|
-        "git_status"|"git_diff"|"git_log")).cloned().collect::<Vec<_>>();
+        "git_status"|"git_diff"|"git_log") || discovered == Some(name.as_str())).cloned().collect::<Vec<_>>();
     // An explicitly configured non-coding/MCP-only profile must still work.
     if core.is_empty() {names} else {core}
+}
+
+pub(crate) fn discovery(policy: &ToolsPolicy, role: &str, name: Option<&str>) -> Result<serde_json::Value, String> {
+    let tools = catalogue(policy, role);
+    if let Some(name) = name {
+        let tool = tools.into_iter().find(|tool| tool.name == name && tool.announced)
+            .ok_or_else(|| format!("Tool {name} is not permitted for this role; use list_tools [] for available names."))?;
+        let value = serde_json::to_value(tool).map_err(|e| e.to_string())?;
+        if value.to_string().len() > 16_384 {
+            return Err("Tool schema exceeds the bounded discovery budget; use a smaller scoped capability or configure a larger context explicitly.".into());
+        }
+        Ok(value)
+    } else {
+        Ok(serde_json::json!({"tools":tools.into_iter().filter(|t|t.announced).map(|t|t.name).collect::<Vec<_>>(),
+            "next":"Call list_tools with argv [one_tool_name] for its schema. Only that additional tool is advertised on later turns."}))
+    }
 }
 
 /// Initial backlog planning is a bounded Kanban-only turn. Advertise only the
@@ -289,15 +305,15 @@ pub(crate) fn select_initial_kanban_names(names: Vec<String>) -> Vec<String> {
 /// Native schemas already carry argument descriptions. Repeating the legacy
 /// executable examples teaches models to print tutorials instead of calls.
 pub(crate) fn native_prompt(policy: &ToolsPolicy, agent: &str) -> String {
-    let names=select_native_names(announced_names(policy,agent),false).join(", ");
-    format!("[Code Studio native execution]\nExecute the requested changes with the provider's advertised native functions. Do not print tutorials, code blocks describing calls, or legacy TOOL lines for a native function. Request the next operation and observe its actual result before continuing. Initial capabilities: {names}. If additional capabilities are needed, call list_tools when available: discovery loads the complete currently permitted native catalogue for later turns.\nNew files require expected_version string missing; existing files require SHA-256 from read_file. Never send expected_version=missing for an existing file; use the latest SHA-256 from a successful read or omit expected_version when the runtime binds it safely. Read recovery: if read_file says the default result was partial/truncated or blocks a repeated default read, immediately use the native read_file function with full=true, or offset_line and limit_lines for successive windows. This is not a path or permission denial; do not ask the user for an absolute workspace path when workspace:/ access works. The runtime assigns operation IDs. Never replay unknown effects. Commands are unattended: no interactive wizards. For whole JSON documents, read then replace the complete file; never insert a complete document into a single line. For existing code, prefer small targeted edits with search_replace, edit_file or apply_patch; rewrite whole files only when necessary. Keep all requested functionality and checks in scope. Fix code when tests fail; never weaken acceptance tests. Finish only after the requested changes and validations really succeed.\n")
+    let names=select_native_names(announced_names(policy,agent),None).join(", ");
+    format!("[Code Studio native execution]\nExecute the requested changes with the provider's advertised native functions. Do not print tutorials, code blocks describing calls, or legacy TOOL lines for a native function. Request the next operation and observe its actual result before continuing. Initial capabilities: {names}. If additional capabilities are needed, call list_tools when available: use list_tools with an empty argv to list names only, then argv [tool_name] to inspect and advertise ONE additional permitted native tool. Discovery never loads the whole catalogue.\nNew files require expected_version string missing; existing files require SHA-256 from read_file. Never send expected_version=missing for an existing file; use the latest SHA-256 from a successful read or omit expected_version when the runtime binds it safely. Read recovery: if read_file says the default result was partial/truncated or blocks a repeated default read, immediately use the native read_file function with full=true, or offset_line and limit_lines for successive windows. This is not a path or permission denial; do not ask the user for an absolute workspace path when workspace:/ access works. The runtime assigns operation IDs. Never replay unknown effects. Commands are unattended: no interactive wizards. For whole JSON documents, read then replace the complete file; never insert a complete document into a single line. For existing code, prefer small targeted edits with search_replace, edit_file or apply_patch; rewrite whole files only when necessary. Keep all requested functionality and checks in scope. Fix code when tests fail; never weaken acceptance tests. Finish only after the requested changes and validations really succeed.\n")
 }
 #[cfg(test)]
 mod native_prompt_tests {
     #[test]
     fn default_project_manager_catalogue_exposes_typed_dispatch_and_kanban() {
         let announced = super::announced_names(&Default::default(), "studio_project_manager");
-        let native = super::select_native_names(announced, false);
+        let native = super::select_native_names(announced, None);
         for required in [
             "delegate_to_agent",
             "studio_list_tickets",
@@ -319,13 +335,25 @@ mod native_prompt_tests {
     }
 
     #[test]
-    fn discovery_expands_only_the_supplied_permitted_catalogue() {
+    fn discovery_expands_only_the_requested_permitted_tool() {
         let names=["read_file","write_file","run_command","list_tools","pdf_extract","mcp_custom"].map(String::from).to_vec();
-        assert_eq!(super::select_native_names(names.clone(),false),["read_file","write_file","run_command","list_tools"]);
-        assert_eq!(super::select_native_names(names.clone(),true),names);
-        assert_eq!(super::select_native_names(vec!["mcp_custom".into()],false),vec!["mcp_custom"]);
-        assert_eq!(super::select_native_names(vec!["read_file".into(),"mcp_custom".into()],false),vec!["read_file","mcp_custom"]);
+        assert_eq!(super::select_native_names(names.clone(),None),["read_file","write_file","run_command","list_tools"]);
+        assert_eq!(super::select_native_names(names.clone(),Some("pdf_extract")),["read_file","write_file","run_command","list_tools","pdf_extract"]);
+        assert_eq!(super::select_native_names(vec!["mcp_custom".into()],None),vec!["mcp_custom"]);
+        assert_eq!(super::select_native_names(vec!["read_file".into(),"mcp_custom".into()],None),vec!["read_file","mcp_custom"]);
     }
+    #[test]
+    fn default_discovery_is_a_compact_index_without_schemas() {
+        let value=super::discovery(&Default::default(),"studio_fullstack",None).unwrap();
+        assert!(value["tools"].as_array().is_some_and(|tools|!tools.is_empty()));
+        assert!(!value.to_string().contains("input_schema"));
+        assert!(value.to_string().len()<16_384);
+        assert!(super::discovery(&Default::default(),"studio_fullstack",Some("not_a_tool")).is_err());
+        let one=super::discovery(&Default::default(),"studio_fullstack",Some("read_file")).unwrap();
+        assert_eq!(one["name"],"read_file");
+        assert!(one["input_schema"].is_object());
+    }
+
     #[test]
     fn first_project_manager_turn_keeps_kanban_and_dispatch_tools() {
         let names = [
@@ -339,7 +367,7 @@ mod native_prompt_tests {
         ]
         .map(String::from)
         .to_vec();
-        assert_eq!(super::select_native_names(names.clone(), false), names);
+        assert_eq!(super::select_native_names(names.clone(), None), names);
     }
 
     #[test]
