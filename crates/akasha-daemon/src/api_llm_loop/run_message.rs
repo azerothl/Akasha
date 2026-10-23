@@ -2104,7 +2104,7 @@ pub(crate) async fn run_message_via_llm(
             let foundation_ticket=crate::studio_vite_scaffold::foundation_ticket(&tool_disk_workspace_root,&lineage_for_studio.to_string(),&assigned_agent);
             let foundation_command=foundation_ticket.as_ref().and_then(|_|crate::api_studio::studio_verification_argv(&tool_disk_workspace_root).ok().flatten()).map(|argv|{let mut a=vec!["--cwd".into(),"workspace:/".into()];a.extend(argv);a});
             let foundation_ready=foundation_command.as_ref().is_some_and(|a|crate::studio_progress::project_check_fresh(&run_outcome,a));
-            let foundation_boundary=foundation_ticket.as_ref().zip(foundation_command.as_ref()).filter(|_|compiler_repair.is_none());
+            let foundation_boundary=foundation_ticket.as_ref().zip(foundation_command.as_ref()).filter(|_|compiler_repair.is_none() && build_repair.is_none());
             if let Some((ticket,command))=foundation_boundary {
                 current_prompt.push_str(&format!("\n[Supplied foundation boundary] Code Studio already provided the infrastructure in STUDIO_SCAFFOLD.md, including DOM tests configuration. This persisted foundation ticket is {ticket}. Do not implement product features, add product tests or rebuild the skeleton here. {}. Other product tickets remain open; this is not app acceptance.\n",if foundation_ready {"The configured build has a fresh successful receipt. Call studio_update_ticket for this ticket with status review and observed build evidence".to_string()}else{format!("Execute ONLY the configured verification now: {}. Dependencies are prepared automatically. A failure returns to the native repair loop",serde_json::json!(command))}));
             }
@@ -2964,9 +2964,8 @@ pub(crate) async fn run_message_via_llm(
                 continue;
             }
 
-            if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
+            if let (Some(exec), Some(mut calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
             {
-                let execution_response=runtime_commands_added.then(||super::studio_conversation::scheduled_execution_response(&calls)).flatten();
                 round += 1;
                 let mut tool_results = Vec::new();
                 let mut goal_boundary_attempt = false;
@@ -2995,7 +2994,7 @@ pub(crate) async fn run_message_via_llm(
                 let mut previous_batch_call_succeeded = true;
                 let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
-                for (lane, lane_calls) in scheduled_lanes {
+                for (lane, mut lane_calls) in scheduled_lanes {
                     let lane_name = match lane {
                         akasha_tools::ToolExecutionLane::ParallelSafe => "parallel_safe",
                         akasha_tools::ToolExecutionLane::SerialExclusive => "serial_exclusive",
@@ -3011,7 +3010,10 @@ pub(crate) async fn run_message_via_llm(
                     )
                     .with_correlation(task_id),
                 );
-                    for (name, args) in &lane_calls {
+                    let mut lane_call_index=0;
+                    while let Some((owned_name,owned_args))=lane_calls.get(lane_call_index).cloned() {
+                        lane_call_index+=1;
+                        let (name,args)=(&owned_name,&owned_args);
                         tool_result_starts.push(tool_results.len());
                         if literal_batch_rejected {
                             let index=tool_result_starts.len()-1;
@@ -3073,7 +3075,7 @@ pub(crate) async fn run_message_via_llm(
                         }
                         if let Some((ticket,command))=foundation_boundary {
                             if !automatic_dependency_installs.iter().any(|a|a.as_slice()==tool_args)
-                                && !crate::studio_vite_scaffold::foundation_action_allowed(ticket,command,foundation_ready,effective_role_tool,tool_args) {
+                                && !crate::studio_vite_scaffold::foundation_action_allowed(ticket,command,crate::studio_progress::project_check_fresh(&run_outcome,command),effective_role_tool,tool_args) {
                                 run_outcome.failed_tool_calls+=1;
                                 tool_results.push("foundation_scope_requires_verification: no operation started; verify the supplied infrastructure, then move only this ticket to review. Product work belongs to the next ticket.".into());
                                 continue;
@@ -4422,8 +4424,22 @@ pub(crate) async fn run_message_via_llm(
                             }
                         }
                         tool_results.push(res);
+                        // A fresh foundation receipt authorizes one mechanical
+                        // handoff, through the ordinary policy/ledger lane. No
+                        // second model generation is needed for bookkeeping.
+                        if success && actual_tool=="run_command" {
+                            if let Some(ticket)=foundation_ticket.as_ref() {
+                                if foundation_command.as_ref().is_some_and(|a|crate::studio_progress::project_check_fresh(&run_outcome,a))
+                                    && !calls.iter().any(|(name,_)|name=="studio_update_ticket") {
+                                    let update=("studio_update_ticket".to_string(),vec![serde_json::json!({"ticket_id":ticket,"status":"review","evidence":{"summary":"Supplied foundation verified by the configured build in the main tool loop; product work remains open."}}).to_string()]);
+                                    lane_calls.push(update.clone());calls.push(update);runtime_commands_added=true;
+                                    insert_task_tracking_event(&store_path,task_id,"studio_foundation_handoff_scheduled",serde_json::json!({"engine":"main_tool_loop","ticket_id":ticket,"product_acceptance":false}));
+                                }
+                            }
+                        }
                     }
                 }
+                let execution_response=runtime_commands_added.then(||super::studio_conversation::scheduled_execution_response(&calls)).flatten();
                 let results_blob = tool_results.join("\n");
                 if code_studio_disk_task {
                     let per_call:Vec<String>=tool_result_starts.iter().enumerate().map(|(index,start)| {
@@ -4436,7 +4452,17 @@ pub(crate) async fn run_message_via_llm(
                     // Current policy/context is reloaded on resume, then kept once in the transcript.
                     resume_overlay.clear();
                 }
-                if let Some((ticket,command))=foundation_boundary {
+                // Planning is a host-validated milestone too. Do not ask the
+                // model for a ceremonial final reply after the board is ready:
+                // an unadvertised delegation there used to fail valid plans.
+                if studio_initial_kanban_planning {
+                    if let Ok(check)=crate::studio_planning::finish(&tool_disk_workspace_root,&task_id.to_string()) {
+                        run_outcome.checks.push(check);
+                        reply_text="Planification vérifiée. Les tickets prêts seront confiés aux spécialistes ; l'application reste à créer et à valider.".into();
+                        break 'tool_rounds;
+                    }
+                }
+                if let Some((ticket,command))=foundation_ticket.as_ref().zip(foundation_command.as_ref()) {
                     if crate::studio_progress::project_check_fresh(&run_outcome,command)
                         && crate::api_studio::studio_list_tickets(&tool_disk_workspace_root).iter().any(|t|&t.id==ticket&&t.status=="review") {
                         run_outcome.checks.push(serde_json::json!({"kind":"foundation_handoff","status":"passed","ticket_id":ticket,"source":"main_tool_loop","product_acceptance":false}));
