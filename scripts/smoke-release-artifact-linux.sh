@@ -214,8 +214,16 @@ smoke_desktop_ui() {
           while IFS= read -r window; do
             local geometry width height
             geometry="$(xdotool getwindowgeometry --shell "$window" 2>/dev/null || true)"
-            width="$(awk -F= '$1 == "WIDTH" { print $2 }' <<<"$geometry")"
-            height="$(awk -F= '$1 == "HEIGHT" { print $2 }' <<<"$geometry")"
+            if [[ "$geometry" =~ WIDTH=([0-9]+) ]]; then
+              width="${BASH_REMATCH[1]}"
+            else
+              width=""
+            fi
+            if [[ "$geometry" =~ HEIGHT=([0-9]+) ]]; then
+              height="${BASH_REMATCH[1]}"
+            else
+              height=""
+            fi
             if [[ "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ ]] && (( width >= 600 && width < 1200 && height >= 400 && height < 900 )); then
               printf "%s|%s|%s\n" "$window" "$width" "$height"
               return 0
