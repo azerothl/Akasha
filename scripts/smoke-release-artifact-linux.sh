@@ -32,7 +32,7 @@ PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); p
 cleanup() {
   if [[ -n "${SMOKE_EVIDENCE_DIR:-}" ]]; then
     mkdir -p "$SMOKE_EVIDENCE_DIR"
-    for evidence in "$LOG" "$WORK/task.json" "$WORK/doctor.log" "$WORK/embedded-status.json" "$WORK/ui.log" "$HOME/akasha/llm_router.yaml"; do
+    for evidence in "$LOG" "$WORK/task.json" "$WORK/doctor.log" "$WORK/embedded-status.json" "$WORK/ui.log" "$WORK/ui-screenshot.png" "$WORK/ui-screen.txt" "$HOME/akasha/llm_router.yaml"; do
       [[ ! -f "$evidence" ]] || cp -- "$evidence" "$SMOKE_EVIDENCE_DIR/"
     done
   fi
@@ -189,10 +189,14 @@ smoke_desktop_ui() {
       command -v xvfb-run >/dev/null || { log "::error::xvfb-run is required for the Linux desktop UI smoke"; return 1; }
       command -v xdotool >/dev/null || { log "::error::xdotool is required for the Linux desktop UI smoke"; return 1; }
       command -v openbox >/dev/null || { log "::error::openbox is required for the Linux desktop UI smoke"; return 1; }
+      command -v scrot >/dev/null || { log "::error::scrot is required for the Linux desktop UI smoke"; return 1; }
+      command -v tesseract >/dev/null || { log "::error::tesseract is required for the Linux desktop UI smoke"; return 1; }
       if ! xvfb-run -a bash -c '
         set -euo pipefail
         app="$1"
         log_file="$2"
+        screenshot="$3"
+        screen_text_file="$4"
         find_akasha_window() {
           while IFS= read -r window; do
             local title class window_pid
@@ -201,6 +205,19 @@ smoke_desktop_ui() {
             window_pid="$(xdotool getwindowpid "$window" 2>/dev/null || true)"
             if [[ "${title,,} ${class,,}" == *akasha* || "$window_pid" == "${pid:-}" ]]; then
               printf "%s|%s|%s|%s\n" "$window" "$window_pid" "$title" "$class"
+              return 0
+            fi
+          done < <(xdotool search --onlyvisible --name ".*" 2>/dev/null || true)
+          return 1
+        }
+        find_sized_window() {
+          while IFS= read -r window; do
+            local geometry width height
+            geometry="$(xdotool getwindowgeometry --shell "$window" 2>/dev/null || true)"
+            width="$(awk -F= '$1 == "WIDTH" { print $2 }' <<<"$geometry")"
+            height="$(awk -F= '$1 == "HEIGHT" { print $2 }' <<<"$geometry")"
+            if [[ "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ ]] && (( width >= 600 && width < 1200 && height >= 400 && height < 900 )); then
+              printf "%s|%s|%s\n" "$window" "$width" "$height"
               return 0
             fi
           done < <(xdotool search --onlyvisible --name ".*" 2>/dev/null || true)
@@ -253,23 +270,46 @@ smoke_desktop_ui() {
           wait "$wm_pid" 2>/dev/null || true
         }
         trap cleanup_ui EXIT
-        for _ in $(seq 1 60); do
+        window=""
+        for _ in $(seq 1 120); do
           if ! kill -0 "$pid" 2>/dev/null; then
             echo "Akasha UI exited before creating a window" >&2
             cat "$log_file" >&2 || true
             exit 1
           fi
           if window="$(find_akasha_window)"; then
-            echo "ui_window=$window"
-            exit 0
+            echo "ui_window=$window" >&2
+            break
+          fi
+          if window="$(find_sized_window)"; then
+            echo "ui_window_without_metadata=$window" >&2
+            break
           fi
           sleep 0.5
         done
-        echo "Akasha UI did not create a visible window" >&2
+        if [[ -z "$window" ]]; then
+          echo "Akasha UI did not create a visible window" >&2
+          list_visible_windows >&2 || true
+          cat "$log_file" >&2 || true
+          exit 1
+        fi
+        # A mapped X11 window alone can be an empty WebKit shell. Confirm that
+        # the first-run page rendered visible product text before passing smoke.
+        for _ in $(seq 1 10); do
+          scrot -o "$screenshot"
+          tesseract "$screenshot" stdout 2>/dev/null | tee "$screen_text_file" || true
+          if grep -Eiq "premier lancement|bienvenue|votre (message|demande)|welcome|your message" "$screen_text_file"; then
+            echo "ui_rendered_text=passed"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "Akasha UI window appeared but the first-run page text was not rendered" >&2
+        echo "ocr_text=$(tr "\n" " " < "$screen_text_file" 2>/dev/null || true)" >&2
         list_visible_windows >&2 || true
         cat "$log_file" >&2 || true
         exit 1
-      ' _ "$app" "$WORK/ui.log"; then
+      ' _ "$app" "$WORK/ui.log" "$WORK/ui-screenshot.png" "$WORK/ui-screen.txt"; then
         log "::error::Linux desktop UI launch failed"
         return 1
       fi
