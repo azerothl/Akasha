@@ -1,6 +1,7 @@
 //! Persisted progress and fresh command evidence for ordinary Studio workers.
 use crate::task_outcome::RunOutcome;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 fn command_key(tool: &str, args: &[String]) -> Option<String> {
     if !matches!(tool, "run_command" | "run_terminal") {
@@ -99,6 +100,9 @@ pub(crate) fn observe(
     });
     let mut state=outcome.checks.iter().find(|c|c["kind"]=="execution_progress").cloned().unwrap_or(json!({"kind":"execution_progress","status":"passed","revision":0,"last_verified_round":0}));
     if changed {
+        state["inspection_calls"]=json!(0);
+        state["identical_inspections"]=json!(0);
+        state["inspection_rejections"]=json!(0);
         if receipt["file_effects"].as_array().is_some_and(|effects| {
             effects.iter().any(|effect| {
                 if effect["before"] == effect["after"] {
@@ -173,6 +177,9 @@ pub(crate) fn observe(
         }
         outcome.checks.push(check);
         if fresh && pending_checks(outcome).is_empty() {
+            state["inspection_calls"]=json!(0);
+            state["identical_inspections"]=json!(0);
+            state["inspection_rejections"]=json!(0);
             state["first_verification_failure_round"]=Value::Null;
             state["verified_revision"] = state["revision"].clone();
             state["last_verified_round"] = json!(round);
@@ -211,9 +218,35 @@ pub(crate) fn observe(
     if success && tool == "read_file" {
         if let Some(repair) = compiler_before.filter(|r| r.phase == "read" && r.accepts(tool, args)) {
             outcome.checks.retain(|c| c["kind"] != "compiler_repair_read");
-            outcome.checks.push(json!({"kind":"compiler_repair_read","path":repair.path,"command_key":repair.command_key,"check_round":repair.check_round}));
+            outcome.checks.push(json!({"kind":"compiler_repair_read","status":"passed","path":repair.path,"command_key":repair.command_key,"check_round":repair.check_round}));
         }
     }
+}
+
+/// Record the attempt before read-file suppression or other early guards.
+/// Hash the request and source revision, not receipts containing operation IDs.
+pub(crate) fn record_inspection_attempt(outcome:&mut RunOutcome,tool:&str,args:&[String]) {
+    if !crate::api_studio::studio_survey_tool(tool) {return;}
+    let mut state=outcome.checks.iter().find(|c|c["kind"]=="execution_progress").cloned().unwrap_or(json!({"kind":"execution_progress","status":"passed","revision":0,"last_verified_round":0}));
+    state["inspection_calls"]=json!(state["inspection_calls"].as_u64().unwrap_or(0)+1);
+    let fingerprint=format!("{:x}",Sha256::digest(json!([tool,args,state["revision"]]).to_string().as_bytes()));
+    let repeats=if state["inspection_fingerprint"].as_str()==Some(&fingerprint) {state["identical_inspections"].as_u64().unwrap_or(0)+1}else{1};
+    state["inspection_fingerprint"]=json!(fingerprint);state["identical_inspections"]=json!(repeats);
+    outcome.checks.retain(|c|c["kind"]!="execution_progress");outcome.checks.push(state);
+}
+/// Inspection is bounded even before a mutation or failed build. This state is
+/// checkpointed, and no-op writes / unrelated commands cannot clear it.
+pub(crate) fn inspection_needs_action(outcome: &RunOutcome) -> bool {
+    outcome.checks.iter().any(|c|c["kind"]=="execution_progress" &&
+        (c["inspection_calls"].as_u64().unwrap_or(0)>=8 || c["identical_inspections"].as_u64().unwrap_or(0)>=3))
+}
+pub(crate) fn reject_stalled_inspection(outcome: &mut RunOutcome, tool: &str) -> Option<String> {
+    if !inspection_needs_action(outcome) || !crate::api_studio::studio_survey_tool(tool) {return None;}
+    for c in &mut outcome.checks {if c["kind"]=="execution_progress" {c["inspection_rejections"]=json!(c["inspection_rejections"].as_u64().unwrap_or(0)+1);}}
+    Some("studio_inspection_requires_action: no repeated survey executed. Use the already inspected content to implement the selected ticket, run its finite verification, or report the precise blocker. No-op writes and unrelated commands do not reset this boundary.".into())
+}
+pub(crate) fn inspection_exhausted(outcome: &RunOutcome) -> bool {
+    outcome.checks.iter().any(|c|c["kind"]=="execution_progress"&&c["inspection_rejections"].as_u64().unwrap_or(0)>=3)
 }
 
 /// A persisted read -> targeted mutation -> exact verification cycle. The
@@ -416,6 +449,33 @@ pub(crate) fn pending_delivery_checks(outcome: &RunOutcome) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inspections_before_first_mutation_are_bounded_and_checkpoint_safe() {
+        let mut outcome=RunOutcome::default();
+        for round in 1..=3 {record_inspection_attempt(&mut outcome,"read_file",&["workspace:/src/App.tsx".into()]);observe(&mut outcome,"read_file",&["workspace:/src/App.tsx".into()],r#"{"content":"unchanged"}"#,true,round);}
+        assert!(inspection_needs_action(&outcome));
+        let mut resumed:RunOutcome=serde_json::from_str(&serde_json::to_string(&outcome).unwrap()).unwrap();
+        for _ in 0..3 {assert!(reject_stalled_inspection(&mut resumed,"read_file").is_some());}
+        assert!(inspection_exhausted(&resumed));
+        // A no-op mutation cannot manufacture progression.
+        observe(&mut resumed,"write_file",&[],r#"{"file_effects":[{"before":"a","after":"a"}]}"#,true,4);
+        assert!(inspection_needs_action(&resumed));
+        observe(&mut resumed,"write_file",&[],r#"{"file_effects":[{"before":"a","after":"b"}]}"#,true,5);
+        assert!(!inspection_needs_action(&resumed));
+        assert!(!inspection_exhausted(&resumed));
+    }
+
+    #[test]
+    fn distinct_surveys_are_bounded_and_fresh_build_reopens_inspection() {
+        let mut o=RunOutcome::default();
+        for round in 1..=8 {record_inspection_attempt(&mut o,"read_file",&[format!("workspace:/{round}.ts")]);observe(&mut o,"read_file",&[format!("workspace:/{round}.ts")],"{}",true,round);}
+        assert!(inspection_needs_action(&o));
+        observe(&mut o,"run_command",&["npm".into(),"run".into(),"build".into()],r#"{"exit_code":0}"#,true,9);
+        assert!(!inspection_needs_action(&o));
+        for round in 10..=17 {record_inspection_attempt(&mut o,"read_file",&[format!("workspace:/{round}.ts")]);observe(&mut o,"read_file",&[format!("workspace:/{round}.ts")],"{}",true,round);}
+        observe(&mut o,"run_command",&["npm".into(),"run".into(),"build".into()],r#"{"exit_code":0}"#,true,18);
+        assert!(inspection_needs_action(&o),"Repeating a build on the same revision cannot reset exploration");
+    }
     use super::*;
     #[test]
     fn configured_custom_verification_is_fresh_only_at_the_checked_revision() {

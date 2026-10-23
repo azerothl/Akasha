@@ -2085,6 +2085,12 @@ pub(crate) async fn run_message_via_llm(
                 if let Err(error)=crate::studio_recovery::save(&store_path,&checkpoint){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
             }
             if round>=max_tool_rounds {run_outcome.termination=TerminationReason::ToolRoundLimit;reply_text="Tool round budget already exhausted at checkpoint; start a new scoped task to continue.".into();break 'tool_rounds;}
+            let execution_worker = code_studio_disk_task && matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code");
+            if execution_worker && crate::studio_progress::inspection_exhausted(&run_outcome) {
+                run_outcome.termination=TerminationReason::ToolLoop;
+                reply_text="studio_no_verified_progress: repeated inspection persisted after the action boundary. No additional reads were executed. The inspected content and diagnostics are preserved; use a qualified model or an explicit scoped resume.".into();
+                break 'tool_rounds;
+            }
             let literal_only=focused_file_task && scope_unchanged && active_repository_rules.is_empty() && super::studio_completion::literal_file_operations_only(&task_scope);
             // Rebuild the repair control every turn, including after checkpoint resume.
             let build_repair = code_studio_disk_task.then(|| crate::studio_progress::repair_instruction(&run_outcome)).flatten();
@@ -2095,6 +2101,16 @@ pub(crate) async fn run_message_via_llm(
             let compiler_repair = (code_studio_disk_task && !literal_only && matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code"))
                 .then(|| crate::studio_progress::compiler_repair(&run_outcome)).flatten();
             if let Some(repair) = compiler_repair.as_ref() { current_prompt.push_str(&repair.instruction()); }
+            let foundation_ticket=crate::studio_vite_scaffold::foundation_ticket(&tool_disk_workspace_root,&lineage_for_studio.to_string(),&assigned_agent);
+            let foundation_command=foundation_ticket.as_ref().and_then(|_|crate::api_studio::studio_verification_argv(&tool_disk_workspace_root).ok().flatten()).map(|argv|{let mut a=vec!["--cwd".into(),"workspace:/".into()];a.extend(argv);a});
+            let foundation_ready=foundation_command.as_ref().is_some_and(|a|crate::studio_progress::project_check_fresh(&run_outcome,a));
+            let foundation_boundary=foundation_ticket.as_ref().zip(foundation_command.as_ref()).filter(|_|compiler_repair.is_none());
+            if let Some((ticket,command))=foundation_boundary {
+                current_prompt.push_str(&format!("\n[Supplied foundation boundary] Code Studio already provided the infrastructure in STUDIO_SCAFFOLD.md, including DOM tests configuration. This persisted foundation ticket is {ticket}. Do not implement product features, add product tests or rebuild the skeleton here. {}. Other product tickets remain open; this is not app acceptance.\n",if foundation_ready {"The configured build has a fresh successful receipt. Call studio_update_ticket for this ticket with status review and observed build evidence".to_string()}else{format!("Execute ONLY the configured verification now: {}. Dependencies are prepared automatically. A failure returns to the native repair loop",serde_json::json!(command))}));
+            }
+            let inspection_focus=execution_worker && !literal_only && foundation_boundary.is_none() && compiler_repair.is_none() && crate::studio_progress::inspection_needs_action(&run_outcome);
+            if inspection_focus {current_prompt.push_str("\n[Inspection action boundary] Repeated inspection produced no file or verification milestone. The content is already available above. Choose one permitted source change implementing this ticket, its finite verification, or a precise final blocker. Survey tools are temporarily unavailable; do not rewrite unchanged content to reset the guard.\n");}
+
             let build_missing_target = (!literal_only && build_repair_focus)
                 .then(|| crate::studio_progress::missing_entrypoint(&run_outcome)).flatten()
                 .filter(|path| !crate::api::resolve_tool_disk_path(path,Some(&tool_disk_workspace_root)).exists());
@@ -2125,23 +2141,26 @@ pub(crate) async fn run_message_via_llm(
                         names.retain(|name|name=="write_file");
                     }
                     if let Some(repair) = compiler_repair.as_ref() { names.retain(|name|repair.names().contains(&name.as_str())); }
+                    if foundation_boundary.is_some() {names.retain(|name|name==if foundation_ready {"studio_update_ticket"}else{"run_command"});}
+                    if inspection_focus {names.retain(|name|crate::studio_tool_contract::is_file_mutation(name)||matches!(name.as_str(),"run_command"|"run_terminal"));}
+
                     if literal_only {
                         names.retain(|name|matches!(name.as_str(),"read_file"|"write_file"|"write_code"));
                         insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"literal_file_only","literal_values_bound":true,"tools":names}));
                     }
-                    (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else if let Some(repair)=compiler_repair.as_ref() {repair.definition(names)}else if let Some(target)=build_missing_target.as_ref() {crate::studio_tool_contract::missing_entrypoint_definition(names,target)}else{crate::studio_tool_contract::native_definition(names)}])
+                    (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else if let Some(repair)=compiler_repair.as_ref() {repair.definition(names)}else if let Some(target)=build_missing_target.as_ref() {crate::studio_tool_contract::missing_entrypoint_definition(names,target)}else if let Some((ticket,command))=foundation_boundary {crate::studio_vite_scaffold::foundation_definition(names,ticket,command,foundation_ready)}else{crate::studio_tool_contract::native_definition(names)}])
                 })
             }else{None};
             let mut turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             // Workflow tools use the text protocol. Include their effective
             // announced names for ordinary turns, without widening literal-only turns.
-            if !literal_only && !studio_initial_kanban_planning && build_missing_target.is_none() && compiler_repair.is_none() {
+            if !literal_only && !studio_initial_kanban_planning && build_missing_target.is_none() && compiler_repair.is_none() && foundation_boundary.is_none() && !inspection_focus {
                 if let (Some(names),Some(exec))=(turn_tool_names.as_mut(),tools_executor_snapshot.as_ref()) {
                     names.extend(crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && !crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name));
                 }
             }
             let request = CompletionRequest {
-                require_tool: compiler_repair.is_some() || code_studio_disk_task && (build_missing_target.is_some() || goal_tracker.is_some() || (run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation())
+                require_tool: compiler_repair.is_some() || foundation_boundary.is_some() || inspection_focus || code_studio_disk_task && (build_missing_target.is_some() || goal_tracker.is_some() || (run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation())
                     || (!explicit_file_goals.is_empty() && super::studio_completion::requires_tool_retry(&current_prompt,&run_outcome.checks)))
                     && (matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code")
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
@@ -2668,6 +2687,12 @@ pub(crate) async fn run_message_via_llm(
                     Err(error)=>{run_outcome.termination=TerminationReason::VerificationFailed;reply_text=error;break 'tool_rounds;}
                 }
             }
+            if no_parseable_tools_this_round && foundation_ready && compiler_repair.is_none() {
+                if let Some(ticket)=foundation_ticket.as_ref() {
+                    parsed_tool_calls=Some(vec![("studio_update_ticket".into(),vec![serde_json::json!({"ticket_id":ticket,"status":"review","evidence":{"summary":"Supplied infrastructure verified by the configured build in the main tool loop. Product features remain on their own tickets."}}).to_string()])]);
+                    runtime_commands_added=true;no_parseable_tools_this_round=false;
+                }
+            }
             let mut automatic_dependency_installs=Vec::<Vec<String>>::new();
             if code_studio_disk_task && !restricted_studio_role {
                 if let (Some(calls),Some(exec))=(parsed_tool_calls.as_mut(),tools_executor_snapshot.as_ref()) {
@@ -3044,6 +3069,20 @@ pub(crate) async fn run_message_via_llm(
                                 run_outcome.failed_tool_calls+=1;
                                 tool_results.push(format!("typescript_repair_required: no operation started. {}",repair.instruction()));
                                 continue;
+                            }
+                        }
+                        if let Some((ticket,command))=foundation_boundary {
+                            if !automatic_dependency_installs.iter().any(|a|a.as_slice()==tool_args)
+                                && !crate::studio_vite_scaffold::foundation_action_allowed(ticket,command,foundation_ready,effective_role_tool,tool_args) {
+                                run_outcome.failed_tool_calls+=1;
+                                tool_results.push("foundation_scope_requires_verification: no operation started; verify the supplied infrastructure, then move only this ticket to review. Product work belongs to the next ticket.".into());
+                                continue;
+                            }
+                        }
+                        if execution_worker && !literal_only && compiler_repair.is_none() && foundation_boundary.is_none() {
+                            crate::studio_progress::record_inspection_attempt(&mut run_outcome,effective_role_tool,tool_args);
+                            if let Some(reason)=crate::studio_progress::reject_stalled_inspection(&mut run_outcome,effective_role_tool) {
+                                run_outcome.failed_tool_calls+=1;tool_results.push(reason);continue;
                             }
                         }
                         if let Some(target)=build_missing_target.as_ref() {
@@ -4396,6 +4435,14 @@ pub(crate) async fn run_message_via_llm(
                     conversation.extend(super::studio_conversation::tool_turn_with_results(execution_response.as_deref().unwrap_or(&response), &results_blob, &per_call, round, if scope_unchanged && goal_tracker.is_none() {&task_scope}else{""}));
                     // Current policy/context is reloaded on resume, then kept once in the transcript.
                     resume_overlay.clear();
+                }
+                if let Some((ticket,command))=foundation_boundary {
+                    if crate::studio_progress::project_check_fresh(&run_outcome,command)
+                        && crate::api_studio::studio_list_tickets(&tool_disk_workspace_root).iter().any(|t|&t.id==ticket&&t.status=="review") {
+                        run_outcome.checks.push(serde_json::json!({"kind":"foundation_handoff","status":"passed","ticket_id":ticket,"source":"main_tool_loop","product_acceptance":false}));
+                        reply_text="Socle fourni vérifié et passé en revue. Les fonctionnalités restent à implémenter dans les tickets suivants.".into();
+                        break 'tool_rounds;
+                    }
                 }
                 let mut studio_readonly_nudge: Option<String> = None;
                 if code_studio_disk_task && !studio_initial_kanban_planning {

@@ -1983,7 +1983,7 @@ pub(crate) fn studio_seed_initial_backlog(
             project_id: root_ticket.project_id.clone(),
             title: (*title).to_string(),
             description: format!(
-                "{phase_description}\n\nCe ticket fait partie du backlog initial du ticket racine {root_ticket_id}; lis sa description pour connaître la demande complète. Tous les fichiers de cette application restent sous la racine canonique `workspace:/`; inspecte et réutilise la stack existante au lieu de créer un projet imbriqué. Ne modifie pas le suivi directement: rapporte les fichiers et les résultats au chef de projet via Code Studio."
+                "{phase_description}\n\nCe ticket fait partie du backlog initial du ticket racine {root_ticket_id}; lis sa description pour connaître la demande complète. Tous les fichiers de cette application restent sous la racine canonique `workspace:/`; inspecte et réutilise la stack existante au lieu de créer un projet imbriqué. Consigne les fichiers et les vérifications observées dans ce ticket avec studio_update_ticket; passe-le en review uniquement après vérification de ses critères, sans fermer le parent ni les autres tickets."
             ),
             status: "todo".to_string(),
             requested_by: "system_initial_backlog".to_string(),
