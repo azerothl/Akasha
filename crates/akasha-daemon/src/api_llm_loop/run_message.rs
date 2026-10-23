@@ -460,7 +460,7 @@ pub(crate) async fn run_message_via_llm(
     } else if code_studio_disk_task && assigned_agent.eq_ignore_ascii_case("studio_project_manager") {
         studio_disk_system_append.push_str(
             "\n\n[Kanban workflow — required]\n\
-            Before implementation delegation, read the whole Kanban. When the linked ticket has the initial-kanban-backlog criterion, refine the seeded work tickets before creating missing ones. Ensure at least three focused work tickets with non-empty, verifiable acceptance criteria cover the foundation, requested features, integration, and validation, with at least one real dependency between work tickets. Each work ticket uses parent_ticket_id for the global tracker and a stable creation_key; parent-child tracking does not block dispatch. Use depends_on_ticket_ids only for real execution prerequisites, never for the global tracker. Before creating work, reread the Kanban and reuse the existing canonical ticket ID; repeated requests must not create duplicates. Do not delegate implementation until this backlog exists. Every user evolution has an automatically linked global ticket; do not duplicate it. Before editing source, create or reuse at least one actionable child ticket under that tracker: exactly one for a small change, multiple for independent or sequential work. Give each child observable acceptance criteria, an owner, and a reviewer. A queued follow-up has its own linked tracker and follows the same rule. After every worker result and on every scheduled Kanban pass, compare open tickets with task states, update blockers and dispatch one ready ticket per pass in dependency order. If verification finds a confirmed bug outside the current ticket, create a distinct bug ticket with expected result, observed result, and a reproducible check; do not duplicate a bug already covered by the current ticket. Never mark a ticket done without observed validation evidence."
+            Before implementation delegation, read the whole Kanban. When the linked ticket has host-owned initial_backlog_root=true, refine the seeded work tickets before creating missing ones. A copied acceptance criterion never changes a work ticket into a coordinator. Ensure at least three focused work tickets with non-empty, verifiable acceptance criteria cover the foundation, requested features, integration, and validation, with at least one real dependency between work tickets. Each work ticket uses parent_ticket_id for the global tracker and a stable creation_key; parent-child tracking does not block dispatch. Use depends_on_ticket_ids only for real execution prerequisites, never for the global tracker. Before creating work, reread the Kanban and reuse the existing canonical ticket ID; repeated requests must not create duplicates. Do not delegate implementation until this backlog exists. Every user evolution has an automatically linked global ticket; do not duplicate it. Before editing source, create or reuse at least one actionable child ticket under that tracker: exactly one for a small change, multiple for independent or sequential work. Give each child observable acceptance criteria, an owner, and a reviewer. A queued follow-up has its own linked tracker and follows the same rule. After every worker result and on every scheduled Kanban pass, compare open tickets with task states, update blockers and dispatch one ready ticket per pass in dependency order. If verification finds a confirmed bug outside the current ticket, create a distinct bug ticket with expected result, observed result, and a reproducible check; do not duplicate a bug already covered by the current ticket. Never mark a ticket done without observed validation evidence."
         );
     } else if code_studio_disk_task
         && matches!(
@@ -2086,8 +2086,14 @@ pub(crate) async fn run_message_via_llm(
             }
             if round>=max_tool_rounds {run_outcome.termination=TerminationReason::ToolRoundLimit;reply_text="Tool round budget already exhausted at checkpoint; start a new scoped task to continue.".into();break 'tool_rounds;}
             let literal_only=focused_file_task && scope_unchanged && active_repository_rules.is_empty() && super::studio_completion::literal_file_operations_only(&task_scope);
-            let repair_focus_this_turn = studio_repair_focus_next_turn;
-            if repair_focus_this_turn {
+            // Rebuild the repair control every turn, including after checkpoint resume.
+            let build_repair = code_studio_disk_task.then(|| crate::studio_progress::repair_instruction(&run_outcome)).flatten();
+            if let Some(instruction) = build_repair.as_ref() {
+                current_prompt.push_str(instruction);
+            }
+            let build_repair_focus = code_studio_disk_task && crate::studio_progress::repair_needs_focus(&run_outcome);
+            let repair_focus_this_turn = studio_repair_focus_next_turn || build_repair_focus;
+            if repair_focus_this_turn && build_repair.is_none() {
                 current_prompt.push_str("\n[Stalled goal repair phase] Repeated surveys or failed checks have not changed the project. This turn prioritizes already permitted repair functions and retains source reads and verification commands needed for the repair. Read an implicated file when needed, then prefer one small targeted correction with search_replace, edit_file or apply_patch using the inspected current version. Preserve unrelated code and avoid a whole-file rewrite when a patch suffices, unless the original request explicitly requires a full rewrite. Do not repeat the failed command. No completed write is implied by a plan. If the recorded blocker is truly irreparable with these permissions, report that precise blocker.\n");
             }
             let native_tools=if code_studio_disk_task && std::env::var("AKASHA_STUDIO_NATIVE_TOOLS").ok().as_deref()!=Some("0") {
@@ -2101,6 +2107,9 @@ pub(crate) async fn run_message_via_llm(
                     };
                     if repair_focus_this_turn && !literal_only {
                         names=crate::studio_capabilities::select_repair_names(names);
+                        if build_repair_focus {
+                            names.retain(|name| !matches!(name.as_str(), "list_tools" | "list_directory" | "search_files" | "search_code" | "find_files" | "list_files" | "grep_content" | "file_diff"));
+                        }
                         insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"stalled_goal_repair","tools":names}));
                     }
                     if literal_only {

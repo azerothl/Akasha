@@ -2505,10 +2505,7 @@ if method == "POST" && path == "/api/message" {
             .as_deref()
             .and_then(|ticket_id| crate::api_studio::studio_get_ticket(root, ticket_id));
         let initial_backlog_task = current_ticket.as_ref().is_some_and(|ticket| {
-            ticket
-                .acceptance_criteria
-                .iter()
-                .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog"))
+            crate::api_studio::is_initial_backlog_root(ticket)
         });
         let open: Vec<_> = tickets
             .iter()

@@ -590,6 +590,9 @@ pub struct StudioTicketEvidence {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StudioTicket {
+    /// Host-owned identity; never inferred from editable acceptance criteria.
+    #[serde(default)]
+    pub initial_backlog_root: bool,
     pub id: String,
     pub project_id: String,
     pub title: String,
@@ -1059,11 +1062,31 @@ fn load_studio_tickets_store(project_root: &Path) -> StudioTicketsStore {
     let Ok(s) = fs::read_to_string(p) else {
         return StudioTicketsStore::default();
     };
-    let mut store: StudioTicketsStore = serde_json::from_str(&s).unwrap_or_default();
+    let mut raw: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
+    // Migrate only legacy top-level chat requests. A copied criterion on a work
+    // ticket must never promote it to coordinator or bypass its prerequisites.
+    if let Some(tickets) = raw["tickets"].as_array_mut() {
+        for ticket in tickets {
+            if ticket.get("initial_backlog_root").is_none() {
+                let initial = ticket["requested_by"] == "user_chat"
+                    && ticket["parent_ticket_id"].is_null()
+                    && ticket["creation_key"].is_null()
+                    && ticket["acceptance_criteria"].as_array().is_some_and(|criteria|
+                        criteria.iter().any(|c| c["id"] == "initial-kanban-backlog"));
+                ticket["initial_backlog_root"] = json!(initial);
+            }
+        }
+    }
+    let mut store: StudioTicketsStore = serde_json::from_value(raw).unwrap_or_default();
     for t in &mut store.tickets {
         normalize_ticket_dependencies(t);
     }
     store
+}
+
+/// Union des prérequis (`depends_on_ticket_ids` + ancien champ singleton).
+pub(crate) fn is_initial_backlog_root(ticket: &StudioTicket) -> bool {
+    ticket.initial_backlog_root && ticket.parent_ticket_id.is_none() && ticket.creation_key.is_none()
 }
 
 /// Union des prérequis (`depends_on_ticket_ids` + ancien champ singleton).
@@ -1316,7 +1339,6 @@ pub(crate) fn studio_initial_backlog_preflight(
     task_id: &str,
     task_message: &str,
 ) -> Result<(), String> {
-    const INITIAL_BACKLOG_MARKER: &str = "initial-kanban-backlog";
     let tickets = studio_list_tickets(project_root);
     let prompt_ticket_id = task_message.lines().find_map(|line| {
         line.trim()
@@ -1329,19 +1351,13 @@ pub(crate) fn studio_initial_backlog_preflight(
         .or_else(|| {
             tickets.iter().find(|ticket| {
                 ticket.related_task_id.as_deref() == Some(task_id)
-                    && ticket
-                        .acceptance_criteria
-                        .iter()
-                        .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+                    && is_initial_backlog_root(ticket)
             })
         });
     let Some(root_ticket) = root_ticket else {
         return Ok(());
     };
-    if !root_ticket
-        .acceptance_criteria
-        .iter()
-        .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+    if !is_initial_backlog_root(root_ticket)
     {
         return Ok(());
     }
@@ -1439,10 +1455,8 @@ pub fn studio_ticket_prerequisite_done(project_root: &Path, ticket: &StudioTicke
         // The initial request ticket is an umbrella tracker that is closed only
         // after its work tickets finish. It must never be a prerequisite for
         // those tickets, or the Kanban creates a circular dispatch deadlock.
-        if dep.requested_by == "user_chat"
-            || dep.acceptance_criteria.iter().any(|criterion| {
-                criterion.id.as_deref() == Some("initial-kanban-backlog")
-            })
+        if (dep.requested_by == "user_chat" && dep.parent_ticket_id.is_none())
+            || is_initial_backlog_root(&dep)
         {
             continue;
         }
@@ -1822,7 +1836,6 @@ pub(crate) fn studio_seed_initial_backlog(
     project_root: &Path,
     root_ticket_id: &str,
 ) -> Result<Vec<String>, String> {
-    const INITIAL_BACKLOG_MARKER: &str = "initial-kanban-backlog";
     let Some(root_ticket) = studio_get_ticket(project_root, root_ticket_id) else {
         return Err("initial_request_ticket_not_found".to_string());
     };
@@ -1866,10 +1879,7 @@ pub(crate) fn studio_seed_initial_backlog(
             }
         }
     }
-    if !root_ticket
-        .acceptance_criteria
-        .iter()
-        .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+    if !is_initial_backlog_root(&root_ticket)
         || seeded_event.is_some()
     {
         return Ok(Vec::new());
@@ -1969,6 +1979,7 @@ pub(crate) fn studio_seed_initial_backlog(
             .filter_map(|key| phase_ids.get(key).cloned())
             .collect();
         let ticket = StudioTicket {
+            initial_backlog_root: false,
             id: ticket_id.clone(),
             project_id: root_ticket.project_id.clone(),
             title: (*title).to_string(),
@@ -2036,14 +2047,10 @@ pub(crate) fn studio_seed_initial_backlog(
 pub(crate) fn studio_complete_initial_backlog_if_ready(
     project_root: &Path,
 ) -> Result<Vec<String>, String> {
-    const INITIAL_BACKLOG_MARKER: &str = "initial-kanban-backlog";
     let tickets = studio_list_tickets(project_root);
     let mut completed_roots = Vec::new();
     for root in tickets.iter().filter(|ticket| {
-        ticket
-            .acceptance_criteria
-            .iter()
-            .any(|criterion| criterion.id.as_deref() == Some(INITIAL_BACKLOG_MARKER))
+        is_initial_backlog_root(ticket)
     }) {
         let mut root = root.clone();
         if !studio_initial_backlog_is_ready_for_project(project_root, &root, &tickets) {
@@ -2201,7 +2208,9 @@ mod initial_request_recovery_tests {
         let mut root=studio_get_ticket(dir.path(),&id).unwrap();
         root.acceptance_criteria.retain(|criterion|matches!(criterion.id.as_deref(),Some("request-scope"|"verification")));
         root.status="blocked".into();root.related_task_id=Some("original-run".into());root.evidence.summary=Some("timeout".into());
-        std::fs::write(dir.path().join(STUDIO_TICKETS_FILE),json!({"tickets":[root],"events":[]}).to_string()).unwrap();
+        let mut legacy = serde_json::to_value(root).unwrap();
+        legacy.as_object_mut().unwrap().remove("initial_backlog_root");
+        std::fs::write(dir.path().join(STUDIO_TICKETS_FILE),json!({"tickets":[legacy],"events":[]}).to_string()).unwrap();
         studio_upgrade_initial_request(dir.path()).unwrap();studio_upgrade_initial_request(dir.path()).unwrap();
         let root=studio_get_ticket(dir.path(),&id).unwrap();
         assert_eq!(studio_list_tickets(dir.path()).len(),5);
@@ -2224,10 +2233,11 @@ mod initial_request_recovery_tests {
 /// Upgrade a legacy creation ticket in place, preserving its task history.
 pub(crate) fn studio_upgrade_initial_request(project_root:&Path)->Result<(),String> {
     let tickets=studio_list_tickets(project_root);
-    if tickets.iter().any(|ticket|ticket.acceptance_criteria.iter().any(|criterion|criterion.id.as_deref()==Some("initial-kanban-backlog"))) {return Ok(());}
+    if tickets.iter().any(is_initial_backlog_root) {return Ok(());}
     let roots:Vec<_>=tickets.iter().filter(|ticket|ticket.requested_by=="user_chat" && ticket.parent_ticket_id.is_none()).collect();
     if roots.len()!=1 || roots[0].status=="done" || !studio_user_message_suggests_project_creation(&roots[0].description) {return Ok(());}
     let mut root=roots[0].clone();
+    root.initial_backlog_root=true;
     root.assigned_agent="studio_project_manager".into();
     root.title=studio_chat_ticket_title(&root.description);
     root.acceptance_criteria.extend(studio_request_criteria(&root.description));
@@ -2266,6 +2276,7 @@ pub fn studio_create_evolution_ticket_from_chat(
     let new_ticket_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let ticket = StudioTicket {
+        initial_backlog_root: is_first_project_creation,
         id: new_ticket_id.clone(),
         project_id: meta.id.clone(),
         title,
@@ -2337,6 +2348,9 @@ pub fn studio_tool_create_ticket_json(
     project_root: &Path,
     body: &serde_json::Value,
 ) -> Result<StudioTicket, String> {
+    if body.get("initial_backlog_root").is_some() {
+        return Err("initial_backlog_root_is_host_owned".into());
+    }
     let meta = load_studio_meta(project_root).ok_or_else(|| "studio_meta_missing".to_string())?;
     let title = body
         .get("title")
@@ -2501,6 +2515,7 @@ pub fn studio_tool_create_ticket_json(
 
     let now = chrono::Utc::now().to_rfc3339();
     let ticket = StudioTicket {
+        initial_backlog_root: false,
         id: new_ticket_id,
         project_id: meta.id.clone(),
         title: title.to_string(),
@@ -2588,6 +2603,9 @@ pub fn studio_tool_apply_ticket_patch_json(
     project_root: &Path,
     body: &serde_json::Value,
 ) -> Result<StudioTicket, String> {
+    if body.get("initial_backlog_root").is_some() {
+        return Err("initial_backlog_root_is_host_owned".into());
+    }
     let ticket_id = body
         .get("ticket_id")
         .or_else(|| body.get("id"))
@@ -2598,7 +2616,46 @@ pub fn studio_tool_apply_ticket_patch_json(
     let Some(mut ticket) = studio_get_ticket(project_root, ticket_id) else {
         return Err("ticket_not_found".to_string());
     };
-    let body_v = body;
+    let mut guarded_body = body.clone();
+    if ticket.initial_backlog_root && guarded_body.get("parent_ticket_id").is_some_and(|v| !v.is_null()) {
+        return Err("initial_backlog_root_cannot_be_reparented".into());
+    }
+    if ticket.requested_by == "system_initial_backlog" {
+        if guarded_body.get("parent_ticket_id").is_some_and(|v| v.as_str() != ticket.parent_ticket_id.as_deref()) {
+            return Err("initial_phase_parent_is_host_owned".into());
+        }
+        if let (Some(parent), Some(key)) = (ticket.parent_ticket_id.as_deref(), ticket.creation_key.as_deref()) {
+            let prefix = format!("initial:{parent}:");
+            let previous = match key.strip_prefix(&prefix) {
+                Some("features") => Some("foundation"),
+                Some("integration") => Some("features"),
+                Some("validation") => Some("integration"),
+                _ => None,
+            };
+            if let Some(previous) = previous {
+                let required = studio_list_tickets(project_root).into_iter().find(|t|
+                    t.parent_ticket_id.as_deref() == Some(parent) && t.creation_key.as_deref() == Some(&format!("{prefix}{previous}")));
+                if let Some(required) = required {
+                    let mut deps: Vec<String> = match guarded_body.get("depends_on_ticket_ids") {
+                        Some(serde_json::Value::Null) => Vec::new(),
+                        Some(serde_json::Value::Array(values)) => values.iter().map(|v|
+                            v.as_str().map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned)
+                                .ok_or_else(|| "depends_on_ticket_ids_must_be_string_array".to_string())).collect::<Result<_,_>>()?,
+                        Some(_) => return Err("depends_on_ticket_ids_must_be_array_or_null".into()),
+                        None => match guarded_body.get("depends_on_ticket_id") {
+                            Some(serde_json::Value::Null) => Vec::new(),
+                            Some(serde_json::Value::String(value)) => if value.trim().is_empty() {Vec::new()} else {vec![value.trim().to_string()]},
+                            Some(_) => return Err("depends_on_ticket_id_invalid".into()),
+                            None => ticket_dependency_ids(&ticket),
+                        },
+                    };
+                    if !deps.contains(&required.id) { deps.push(required.id); }
+                    guarded_body["depends_on_ticket_ids"] = json!(deps);
+                }
+            }
+        }
+    }
+    let body_v = &guarded_body;
     if let Some(v) = body_v.get("title").and_then(|x| x.as_str()) {
         let t = v.trim();
         if t.is_empty() || t.chars().count() > 200 {
@@ -4392,6 +4449,7 @@ mod tests {
         acceptance: &[(&str, &str)],
     ) -> super::StudioTicket {
         super::StudioTicket {
+            initial_backlog_root: acceptance.iter().any(|(id, _)| *id == "initial-kanban-backlog"),
             id: id.to_string(),
             project_id: "project".to_string(),
             title: id.to_string(),
@@ -4598,6 +4656,9 @@ mod tests {
             }),
         )
         .expect("create initial request ticket");
+        let mut root = root;
+        root.initial_backlog_root = true; // Host-owned fixture identity, not a tool argument.
+        super::studio_upsert_ticket(dir.path(), root.clone()).unwrap();
         let task_message = format!("[Ticket Kanban obligatoire]\n- ticket_id: {}", root.id);
         assert!(studio_initial_backlog_preflight(dir.path(), "task-1", &task_message).is_err());
 

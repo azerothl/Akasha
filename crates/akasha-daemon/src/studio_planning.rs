@@ -4,10 +4,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 fn initial_root(ticket: &StudioTicket) -> bool {
-    ticket
-        .acceptance_criteria
-        .iter()
-        .any(|c| c.id.as_deref() == Some("initial-kanban-backlog"))
+    crate::api_studio::is_initial_backlog_root(ticket)
 }
 
 pub(crate) fn linked_root(root: &Path, task_id: &str) -> Option<StudioTicket> {
@@ -278,6 +275,49 @@ mod tests {
         .unwrap();
         api_studio::studio_attach_task_to_ticket(dir.path(), &id, "planner", "test").unwrap();
         (dir, id)
+    }
+    #[test]
+    fn copied_root_criterion_cannot_promote_validation_or_skip_dependencies() {
+        let (dir, root_id) = project();
+        let validation = api_studio::studio_list_tickets(dir.path()).into_iter().find(|t| t.creation_key.as_deref() == Some(&format!("initial:{root_id}:validation"))).unwrap();
+        let updated = api_studio::studio_tool_apply_ticket_patch_json(dir.path(), &json!({
+            "ticket_id":validation.id,"depends_on_ticket_ids":[],
+            "acceptance_criteria":[{"id":"initial-kanban-backlog","text":"Validate the requested Todo features"}]
+        })).unwrap();
+        assert!(!initial_root(&updated));
+        assert!(!api_studio::studio_ticket_prerequisite_done(dir.path(), &updated));
+        assert_eq!(api_studio::studio_seed_initial_backlog(dir.path(), &updated.id).unwrap().len(), 0);
+        assert_eq!(api_studio::studio_list_tickets(dir.path()).len(), 5);
+        assert_eq!(updated.depends_on_ticket_ids.len(), 1);
+        api_studio::studio_attach_task_to_ticket(dir.path(), &updated.id, "worker", "test").unwrap();
+        assert!(linked_root(dir.path(), "worker").is_none());
+        let mut blocked = updated.clone();
+        blocked.id = "dependent".into();
+        blocked.depends_on_ticket_ids = vec![updated.id.clone()];
+        blocked.depends_on_ticket_id = Some(updated.id.clone());
+        assert!(!api_studio::studio_ticket_prerequisite_done(dir.path(), &blocked));
+    }
+    #[test]
+    fn initial_identity_survives_editable_criteria_and_cannot_be_minted_by_tools() {
+        let (dir, id) = project();
+        let root = api_studio::studio_tool_apply_ticket_patch_json(dir.path(), &json!({"ticket_id":id,"acceptance_criteria":[{"text":"Plan the Todo"}]})).unwrap();
+        assert!(initial_root(&root));
+        assert!(api_studio::studio_tool_create_ticket_json(dir.path(), &json!({"title":"Fake root","initial_backlog_root":true})).is_err());
+        assert!(api_studio::studio_tool_apply_ticket_patch_json(dir.path(), &json!({"ticket_id":id,"initial_backlog_root":false})).is_err());
+        assert!(api_studio::studio_tool_apply_ticket_patch_json(dir.path(), &json!({"ticket_id":id,"parent_ticket_id":api_studio::studio_list_tickets(dir.path())[1].id})).is_err());
+    }
+    #[test]
+    fn legacy_migration_only_promotes_the_actual_top_level_request() {
+        let (dir, id) = project();
+        let path = dir.path().join(".akasha-studio-tickets.json");
+        let mut store: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for ticket in store["tickets"].as_array_mut().unwrap() {
+            ticket.as_object_mut().unwrap().remove("initial_backlog_root");
+            ticket["acceptance_criteria"] = json!([{"id":"initial-kanban-backlog","text":"Copied root criterion"}]);
+        }
+        std::fs::write(path, store.to_string()).unwrap();
+        let tickets = api_studio::studio_list_tickets(dir.path());
+        assert_eq!(tickets.iter().filter(|t| initial_root(t)).map(|t|t.id.as_str()).collect::<Vec<_>>(), vec![id.as_str()]);
     }
     #[test]
     fn task_binding_repairs_invented_parent_and_reuses_phase_without_duplicate() {

@@ -103,6 +103,11 @@ pub(crate) fn observe(
             && (state["verified_revision"].is_null()
                 || state["verified_revision"] != state["revision"]);
         let mut check = json!({"kind":"command","tool":tool,"status":if success{"passed"}else{"failed"},"exit_code":receipt["exit_code"],"source":"tool_executor","round":round,"verification":key.is_some(),"revision":state["revision"]});
+        if !success && key.is_some() {
+            let diagnostic = receipt["output"].as_str().unwrap_or(result);
+            check["diagnostic"] = json!(crate::tool_output::truncate_utf8_by_bytes(diagnostic, 4096).0);
+            check["retry_hint"] = receipt["retry_hint"].clone();
+        }
         if let Some(key) = key {
             // Keep the latest result for each exact check; the operation ledger
             // and failed_tool_calls retain failed attempts, never erase history.
@@ -113,6 +118,10 @@ pub(crate) fn observe(
                 .filter(|c| c["kind"] == "command" && c["command_key"] == check["command_key"])
                 .map(|c| c["attempts"].as_u64().unwrap_or(1))
                 .sum::<u64>();
+            let first_failed_round = outcome.checks.iter().find(|c|
+                c["kind"] == "command" && c["command_key"] == check["command_key"])
+                .and_then(|c| c["first_failed_round"].as_u64());
+            if !success {check["first_failed_round"] = json!(first_failed_round.unwrap_or(round as u64));}
             check["attempts"] = json!(attempts + 1);
             outcome
                 .checks
@@ -125,6 +134,12 @@ pub(crate) fn observe(
             state["first_unverified_round"] = Value::Null;
         }
     }
+    if outcome.checks.iter().any(|c| c["kind"] == "command" && c["verification"] == true && c["status"] == "failed") {
+        let non_repair = !changed && !matches!(tool, "run_command" | "run_terminal");
+        state["repair_inspections"] = json!(if non_repair {state["repair_inspections"].as_u64().unwrap_or(0) + 1} else {0});
+    } else {
+        state["repair_inspections"] = json!(0);
+    }
     if pending_checks(outcome).is_empty() {
         for check in &mut outcome.checks {
             if check["kind"] == "command_verification_retry" {
@@ -135,6 +150,28 @@ pub(crate) fn observe(
     }
     outcome.checks.retain(|c| c["kind"] != "execution_progress");
     outcome.checks.push(state);
+}
+
+/// Resume-safe control derived from the first still failing exact check.
+/// No application source is synthesized and no command is run by this controller.
+pub(crate) fn repair_instruction(outcome: &RunOutcome) -> Option<String> {
+    let failed = outcome.checks.iter().filter(|c| c["kind"] == "command" && c["verification"] == true && c["status"] == "failed")
+        .min_by_key(|c| c["first_failed_round"].as_u64().unwrap_or(u64::MAX))?;
+    let diagnostic = failed["diagnostic"].as_str().unwrap_or("Read the recorded command output.");
+    let lower = diagnostic.to_ascii_lowercase();
+    let action = if lower.contains("could not resolve") || lower.contains("failed to resolve") || lower.contains("module not found") || lower.contains("cannot find module") || lower.contains("enoent") {
+        "Resolve the EXACT missing path/import in this diagnostic relative to the command cwd. Read its importer/configuration once; inspect the referenced file if it exists. If this is a missing local entry point, implement that file using write_file/write_code now. Do not install a registry package for a local path."
+    } else if lower.contains("not recognized") || lower.contains("not found") || lower.contains("reconnu") || lower.contains("command not found") {
+        "Check package.json and whether the declared local dependencies are installed. If the required executable is a declared dependency, run the package manager install once, then rerun this exact check. Do not invent a replacement build script or bypass its compiler."
+    } else {
+        "Read the implicated source/configuration and correct the FIRST concrete diagnostic. Preserve the requested functionality and acceptance tests; do not weaken verification to turn a failure green."
+    };
+    Some(format!("[Repair the FIRST failing build/test dependency]\nCommand: {}\nDiagnostic: {}\nRecorded retry hint: {}\n{}\nDo not repeat broad repository surveys, enumerate tools again, or rerun an unchanged failing command. After a coherent source or documented environment repair, rerun THIS exact check. A different successful check does not resolve it. Report a precise blocker if it cannot be repaired with permitted tools.\n", failed["command_key"], diagnostic, failed["retry_hint"], action))
+}
+
+pub(crate) fn repair_needs_focus(outcome: &RunOutcome) -> bool {
+    repair_instruction(outcome).is_some() && outcome.checks.iter().any(|c|
+        c["kind"] == "execution_progress" && c["repair_inspections"].as_u64().unwrap_or(0) >= 2)
 }
 
 pub(crate) fn unverified_rounds(outcome: &RunOutcome, round: u32) -> u32 {
@@ -204,6 +241,32 @@ mod tests {
             success,
             round,
         );
+    }
+    #[test]
+    fn first_build_diagnostic_survives_reads_resume_and_unrelated_success() {
+        let mut o = RunOutcome::default();
+        let args = vec!["npm".into(), "run".into(), "build".into()];
+        observe(&mut o,"run_command",&args,r#"{"output":"Could not resolve \"./src/main.tsx\" from \"index.html\"","exit_code":1}"#,false,1);
+        observe(&mut o,"read_file",&[],"{}",true,2);
+        observe(&mut o,"list_tools",&[],"{}",true,3);
+        assert!(repair_needs_focus(&o));
+        let resumed: RunOutcome = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        assert!(repair_instruction(&resumed).unwrap().contains("src/main.tsx"));
+        observe(&mut o,"run_command",&["npm".into(),"test".into()],"{}",true,4);
+        assert!(repair_instruction(&o).is_some());
+        write(&mut o,5);
+        assert!(repair_instruction(&o).is_some());
+        observe(&mut o,"run_command",&args,"{}",true,6);
+        assert!(repair_instruction(&o).is_none());
+    }
+    #[test]
+    fn dependency_install_is_not_build_verification_or_diagnostic_erasure() {
+        let mut o = RunOutcome::default();
+        observe(&mut o,"run_command",&["npm".into(),"run".into(),"build".into()],r#"{"output":"vite: command not found","exit_code":127}"#,false,1);
+        assert!(repair_instruction(&o).unwrap().contains("install once"));
+        observe(&mut o,"run_command",&["npm".into(),"install".into()],"{}",true,2);
+        assert!(repair_instruction(&o).is_some());
+        assert_eq!(pending_checks(&o).len(),1);
     }
     #[test]
     fn a_generated_source_project_cannot_finish_without_a_check() {

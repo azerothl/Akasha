@@ -135,10 +135,7 @@ async fn dispatch_idle_projects(
         let _ = api_studio::studio_upgrade_initial_request(&root);
         let _ = api_studio::studio_complete_initial_backlog_if_ready(&root);
         let initial_ticket = studio_list_tickets(&root).into_iter().find(|ticket| {
-            ticket
-                .acceptance_criteria
-                .iter()
-                .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog"))
+            crate::api_studio::is_initial_backlog_root(ticket)
         });
         if let Some(ticket) = initial_ticket.as_ref() {
             if let Err(error) = api_studio::studio_seed_initial_backlog(&root, &ticket.id) {
@@ -159,10 +156,7 @@ async fn dispatch_idle_projects(
         // failures immediately instead of leaving stale in-progress tickets.
         let tickets = studio_list_tickets(&root);
         let initial_ticket = tickets.iter().find(|ticket| {
-            ticket
-                .acceptance_criteria
-                .iter()
-                .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog"))
+            crate::api_studio::is_initial_backlog_root(ticket)
         }).cloned();
         let needs_backlog_planning = initial_ticket
             .as_ref()
@@ -187,6 +181,7 @@ async fn dispatch_idle_projects(
             initial_ticket
                 .as_ref()
                 .filter(|ticket| ticket.status != "done")
+                .filter(|ticket| studio_ticket_prerequisite_done(&root, ticket))
                 .filter(|ticket| {
                     ticket_can_be_retried(ticket, &root, &task_statuses, store_path, now)
                 })
@@ -197,6 +192,7 @@ async fn dispatch_idle_projects(
             request_needing_planning
                 .or(request_needing_correction_planning)
                 .filter(|ticket| ticket.status != "done")
+                .filter(|ticket| studio_ticket_prerequisite_done(&root, ticket))
                 .filter(|ticket| {
                     ticket_can_be_retried(ticket, &root, &task_statuses, store_path, now)
                 })
@@ -250,6 +246,7 @@ async fn dispatch_idle_projects(
             serde_json::json!({
                 "id": ticket.id,
                 "title": ticket.title,
+                "initial_backlog_root": ticket.initial_backlog_root,
                 "status": ticket.status,
                 "parent_ticket_id": ticket.parent_ticket_id,
                 "creation_key": ticket.creation_key,
@@ -910,10 +907,7 @@ pub(crate) fn reconcile_project_tickets(project_root:&Path,store_path:&Path) {
 }
 
 fn is_initial_backlog_summary(ticket: &StudioTicket) -> bool {
-    ticket
-        .acceptance_criteria
-        .iter()
-        .any(|criterion| criterion.id.as_deref() == Some("initial-kanban-backlog"))
+    crate::api_studio::is_initial_backlog_root(ticket)
 }
 
 fn retry_cooldown_elapsed(
@@ -954,6 +948,7 @@ mod tests {
 
     fn ticket(status: &str, related_task_id: Option<&str>) -> StudioTicket {
         StudioTicket {
+            initial_backlog_root: false,
             id: "ticket-1".to_string(),
             project_id: "project-1".to_string(),
             title: "Implement feature".to_string(),
@@ -984,8 +979,19 @@ mod tests {
     }
 
     #[test]
+    fn copied_criterion_on_a_work_phase_keeps_its_specialist_owner() {
+        let mut phase = ticket("todo", None);
+        phase.requested_by = "system_initial_backlog".into();
+        phase.parent_ticket_id = Some("real-root".into());
+        phase.creation_key = Some("initial:real-root:validation".into());
+        phase.acceptance_criteria[0].id = Some("initial-kanban-backlog".into());
+        assert!(!is_initial_backlog_summary(&phase));
+        assert_eq!(ticket_agent_for_dispatch(&phase, &[phase.clone()]), "studio_fullstack");
+    }
+    #[test]
     fn initial_request_summary_is_not_dispatched_as_an_implementation_ticket() {
         let mut summary = ticket("in_progress", None);
+        summary.initial_backlog_root = true;
         summary.acceptance_criteria[0].id = Some("initial-kanban-backlog".to_string());
         assert!(is_initial_backlog_summary(&summary));
         assert!(!is_initial_backlog_summary(&ticket("todo", None)));
@@ -1181,6 +1187,7 @@ mod tests {
     fn incomplete_initial_backlog_schedules_the_project_manager_before_work() {
         let mut summary = ticket("in_progress", None);
         summary.id = "initial-request".to_string();
+        summary.initial_backlog_root = true;
         summary.acceptance_criteria[0].id = Some("initial-kanban-backlog".to_string());
         let mut generic = ticket("todo", None);
         generic.id = "generic-phase".to_string();
@@ -1459,6 +1466,7 @@ mod tests {
 
             let mut failed = ticket("in_progress", Some(&task_id.to_string()));
             failed.id = "initial-request".to_string();
+            failed.initial_backlog_root = true;
             failed.acceptance_criteria[0].id = Some("initial-kanban-backlog".to_string());
             api_studio::studio_upsert_ticket(&root, failed.clone()).expect("save request ticket");
             let statuses = HashMap::from([(task_id.to_string(), TaskStatus::Failed)]);

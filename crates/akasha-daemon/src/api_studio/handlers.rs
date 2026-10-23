@@ -1035,6 +1035,7 @@ pub async fn handle_studio_route(
 
             let now = chrono::Utc::now().to_rfc3339();
             let ticket = StudioTicket {
+                initial_backlog_root: false,
                 id: new_ticket_id,
                 project_id: id.to_string(),
                 title: title.to_string(),
