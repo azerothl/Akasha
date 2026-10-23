@@ -242,7 +242,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install gh (release download)
-        run: type gh >/dev/null 2>&1 || sudo apt-get update && sudo apt-get install -y gh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh libwebkit2gtk-4.1-0 libayatana-appindicator3-1 xvfb xdotool x11-utils openbox scrot tesseract-ocr
 
       - name: First-boot smoke (published Linux CPU zip)
         env:
