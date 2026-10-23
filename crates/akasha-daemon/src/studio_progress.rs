@@ -44,6 +44,28 @@ fn command_key(tool: &str, args: &[String]) -> Option<String> {
         .then(|| json!([program, cwd.unwrap_or_else(|| "workspace:/".into()), args]).to_string())
 }
 
+pub(crate) fn exact_command_key(tool:&str,args:&[String])->Option<String> {
+    if !matches!(tool,"run_command"|"run_terminal") {return None;}
+    let (_,cwd,program,mut argv)=crate::api_tool_dispatch::process_ops::parse_run_command_args(args);
+    crate::api_tool_dispatch::process_ops::remove_repeated_executable_arg(&program,&mut argv);
+    crate::api_tool_dispatch::process_ops::normalize_studio_npm_script(&program,&mut argv);
+    let program=program.rsplit(['/', '\\']).next()?.trim_end_matches(".cmd").trim_end_matches(".exe").to_ascii_lowercase();
+    Some(json!([program,cwd.unwrap_or_else(||"workspace:/".into()),argv]).to_string())
+}
+fn verification_key(outcome:&RunOutcome,tool:&str,args:&[String])->Option<String> {
+    command_key(tool,args).or_else(||exact_command_key(tool,args).filter(|key|outcome.checks.iter().any(|c|c["kind"]=="project_verification_plan"&&c["command_key"].as_str()==Some(key))))
+}
+pub(crate) fn register_project_check(outcome:&mut RunOutcome,args:&[String]) {
+    let Some(key)=exact_command_key("run_command",args) else {return;};
+    outcome.checks.retain(|c|c["kind"]!="project_verification_plan");
+    outcome.checks.push(json!({"kind":"project_verification_plan","status":"passed","command_key":key}));
+}
+pub(crate) fn project_check_fresh(outcome:&RunOutcome,args:&[String])->bool {
+    let Some(key)=exact_command_key("run_command",args) else {return false;};
+    let revision=outcome.checks.iter().find(|c|c["kind"]=="execution_progress").and_then(|c|c["revision"].as_u64()).unwrap_or(0);
+    outcome.checks.iter().any(|c|c["kind"]=="command"&&c["command_key"].as_str()==Some(&key)&&c["status"]=="passed"&&c["revision"].as_u64()==Some(revision))
+}
+
 pub(crate) fn observe(
     outcome: &mut RunOutcome,
     tool: &str,
@@ -115,7 +137,7 @@ pub(crate) fn observe(
         }
     }
     if matches!(tool, "run_command" | "run_terminal" | "run_in_container") {
-        let key = command_key(tool, args);
+        let key = verification_key(outcome,tool,args);
         let fresh = success
             && key.is_some()
             && (state["verified_revision"].is_null()
@@ -207,7 +229,7 @@ impl CompilerRepair {
     }
     pub fn accepts(&self, tool: &str, args: &[String]) -> bool {
         if !self.names().contains(&tool) { return false; }
-        if self.phase == "verify" { return command_key(tool,args).as_deref() == Some(&self.command_key); }
+        if self.phase == "verify" { return exact_command_key(tool,args).as_deref() == Some(&self.command_key); }
         crate::studio_tool_contract::paths_for_tool(tool,args).first().is_some_and(|path|
             path.trim_start_matches("workspace:/").trim_start_matches("./") == self.path.trim_start_matches("workspace:/"))
     }
@@ -288,7 +310,7 @@ pub(crate) fn missing_entrypoint(outcome: &RunOutcome) -> Option<String> {
 /// Reject the same failed finite check before spawning another process when no
 /// source mutation or documented dependency installation has happened since it.
 pub(crate) fn reject_unchanged_verification(outcome: &mut RunOutcome, tool: &str, args: &[String]) -> Option<String> {
-    let key=command_key(tool,args)?;
+    let key=verification_key(outcome,tool,args)?;
     let state=outcome.checks.iter().find(|c|c["kind"]=="execution_progress")?;
     let unchanged=outcome.checks.iter().any(|c|c["kind"]=="command" && c["command_key"].as_str()==Some(&key)
         && c["status"]=="failed" && c["revision"]==state["revision"]
@@ -374,6 +396,19 @@ pub(crate) fn pending_delivery_checks(outcome: &RunOutcome) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn configured_custom_verification_is_fresh_only_at_the_checked_revision() {
+        let mut outcome=RunOutcome::default();
+        let args=vec!["--cwd".into(),"workspace:/".into(),"node".into(),"scripts/verify.mjs".into()];
+        register_project_check(&mut outcome,&args);
+        assert!(!project_check_fresh(&outcome,&args));
+        observe(&mut outcome,"run_command",&["npm".into(),"ci".into()],r#"{"exit_code":0}"#,true,1);
+        assert!(!project_check_fresh(&outcome,&args));
+        observe(&mut outcome,"run_command",&args,r#"{"exit_code":0}"#,true,2);
+        assert!(project_check_fresh(&outcome,&args));
+        write(&mut outcome,3);
+        assert!(!project_check_fresh(&outcome,&args));
+    }
     #[test]
     fn compiler_repair_targets_source_and_requires_fresh_exact_check() {
         let mut outcome = RunOutcome::default();

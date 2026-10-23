@@ -133,6 +133,7 @@ pub(crate) mod studio_lsp;
 pub(crate) mod studio_kanban_dispatch;
 pub(crate) mod studio_planning;
 pub(crate) mod studio_progress;
+pub(crate) mod studio_dependencies;
 pub(crate) mod studio_vite_scaffold;
 
 pub(crate) mod studio_delivery;

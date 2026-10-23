@@ -21,7 +21,7 @@ use crate::api::{
     studio_semantic_acceptance_review, studio_verify_analyzing_progress_line,
     studio_verify_build_excerpt_label, studio_verify_detect_user_language,
     studio_verify_explain_failure_to_user, studio_verify_failure_banner,
-    studio_verify_run_llm_autofix_rounds, studio_verify_summary_heading_markdown, tool_scope_key,
+    studio_verify_summary_heading_markdown, tool_scope_key,
     vision_inject_max_chars, vision_payload_within_cap, web_followup_tools_configured,
     workspace_lineage_root_task_id, AgentProfile, AgentProfileCache, DelegationRequest, HumanInputStore,
     MemoryProfile, PendingHumanInput, ProcessRegistry,
@@ -2585,7 +2585,7 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
 
-            let parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
+            let mut parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
                 let calls = if code_studio_disk_task {super::studio_conversation::parse_calls_for_turn(&response,turn_tool_names.as_deref())} else {parse_tool_calls(&response)};
                 if calls.is_empty() {
                     None
@@ -2626,7 +2626,7 @@ pub(crate) async fn run_message_via_llm(
                     }
                 }
             }
-            let no_parseable_tools_this_round = parsed_tool_calls.is_none();
+            let mut no_parseable_tools_this_round = parsed_tool_calls.is_none();
             if studio_initial_kanban_planning && no_parseable_tools_this_round {
                 match crate::studio_planning::finish(&tool_disk_workspace_root, &task_id.to_string()) {
                     Ok(check) => {
@@ -2646,6 +2646,51 @@ pub(crate) async fn run_message_via_llm(
                         reply_text = format!("Planification Kanban incomplète : {error}");
                         break 'tool_rounds;
                     }
+                }
+            }
+            let mut runtime_commands_added=false;
+            // Completion runs the configured check through this SAME tracked
+            // tool loop. A failure returns to its native repair controller.
+            if code_studio_disk_task && no_parseable_tools_this_round && !restricted_studio_role && !studio_initial_kanban_planning {
+                match crate::api_studio::studio_verification_argv(&tool_disk_workspace_root) {
+                    Ok(Some(argv)) => {
+                        let mut args=vec!["--cwd".into(),"workspace:/".into()];args.extend(argv);
+                        crate::studio_progress::register_project_check(&mut run_outcome,&args);
+                        if !crate::studio_progress::project_check_fresh(&run_outcome,&args)
+                            && !run_outcome.checks.iter().any(|c|c["kind"]=="command"&&c["verification"]==true&&c["status"]=="failed") {
+                            parsed_tool_calls=Some(vec![("run_command".into(),args)]);
+                            runtime_commands_added=true;
+                            no_parseable_tools_this_round=false;
+                            insert_task_tracking_event(&store_path,task_id,"studio_verification_scheduled",serde_json::json!({"engine":"main_tool_loop"}));
+                        }
+                    },
+                    Ok(None)=>{},
+                    Err(error)=>{run_outcome.termination=TerminationReason::VerificationFailed;reply_text=error;break 'tool_rounds;}
+                }
+            }
+            let mut automatic_dependency_installs=Vec::<Vec<String>>::new();
+            if code_studio_disk_task && !restricted_studio_role {
+                if let (Some(calls),Some(exec))=(parsed_tool_calls.as_mut(),tools_executor_snapshot.as_ref()) {
+                    let mut expanded=Vec::new();
+                    for (name,args) in calls.drain(..) {
+                        let decoded=if name=="studio_call" {crate::studio_tool_contract::decode(&args.join(" ")).ok()}else{None};
+                        let tool=decoded.as_ref().map(|call|call.envelope.tool.as_str()).unwrap_or(&name);
+                        let argv=decoded.as_ref().map(|call|call.argv.as_slice()).unwrap_or(&args);
+                        match crate::studio_dependencies::preparation(&tool_disk_workspace_root,tool,argv,&exec.policy) {
+                            Ok(Some(install))=>{
+                                if !automatic_dependency_installs.contains(&install) {
+                                    automatic_dependency_installs.push(install.clone());
+                                    runtime_commands_added=true;
+                                    expanded.push(("run_command".into(),install));
+                                    insert_task_tracking_event(&store_path,task_id,"studio_dependencies_scheduled",serde_json::json!({"engine":"main_tool_loop","before":tool}));
+                                }
+                            },
+                            Ok(None)=>{},
+                            Err(error)=>{run_outcome.termination=TerminationReason::VerificationFailed;reply_text=error;break 'tool_rounds;}
+                        }
+                        expanded.push((name,args));
+                    }
+                    *calls=expanded;
                 }
             }
             if code_studio_disk_task && no_parseable_tools_this_round && !studio_initial_kanban_planning {
@@ -2896,6 +2941,7 @@ pub(crate) async fn run_message_via_llm(
 
             if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
             {
+                let execution_response=runtime_commands_added.then(||super::studio_conversation::scheduled_execution_response(&calls)).flatten();
                 round += 1;
                 let mut tool_results = Vec::new();
                 let mut goal_boundary_attempt = false;
@@ -2994,7 +3040,7 @@ pub(crate) async fn run_message_via_llm(
                             if tool_args.is_empty() { "read_skill" } else { "run_command" }
                         } else { actual_tool.as_str() };
                         if let Some(repair)=compiler_repair.as_ref().and_then(|_|crate::studio_progress::compiler_repair(&run_outcome)) {
-                            if !repair.accepts(effective_role_tool,tool_args) {
+                            if !repair.accepts(effective_role_tool,tool_args) && !automatic_dependency_installs.iter().any(|args|args.as_slice()==tool_args) {
                                 run_outcome.failed_tool_calls+=1;
                                 tool_results.push(format!("typescript_repair_required: no operation started. {}",repair.instruction()));
                                 continue;
@@ -4133,6 +4179,16 @@ pub(crate) async fn run_message_via_llm(
                         if success {if let Err(error)=crate::studio_file_effects::after(&store_path,task_id,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                         if code_studio_disk_task {
                             crate::studio_progress::observe(&mut run_outcome,&actual_tool,tool_args,&res,success,round);
+                            if crate::studio_dependencies::is_install(&actual_tool,tool_args) {
+                                if success {crate::studio_dependencies::record_install(&tool_disk_workspace_root,&actual_tool,tool_args,&exec.policy);}
+                                else {
+                                    run_outcome.termination=TerminationReason::VerificationFailed;
+                                    reply_text=crate::studio_dependencies::installation_failure(&res);
+                                    run_outcome.checks.push(serde_json::json!({"kind":"dependency_installation","status":"failed","detail":reply_text}));
+                                    break 'tool_rounds;
+                                }
+                            }
+
                         } else if matches!(effective_role_tool, "run_command" | "run_terminal" | "run_in_container") {
                             run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":effective_role_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }
@@ -4337,7 +4393,7 @@ pub(crate) async fn run_message_via_llm(
                         if recorded.is_empty(){"No execution result recorded; do not assume success.".into()}else{recorded}
                     }).collect();
                     if !delivered_prompt.trim().is_empty() {conversation.push(if !conversation.is_empty() && (delivered_prompt.trim_start().starts_with("[Active goal") || delivered_prompt.trim_start().starts_with("[Repair the FIRST") || delivered_prompt.trim_start().starts_with("[STUDIO_READ_ONLY_STREAK]")) {akasha_llm::ConversationMessage::runtime_control(delivered_prompt.clone())} else {akasha_llm::ConversationMessage::user(delivered_prompt.clone())});}
-                    conversation.extend(super::studio_conversation::tool_turn_with_results(&response, &results_blob, &per_call, round, if scope_unchanged && goal_tracker.is_none() {&task_scope}else{""}));
+                    conversation.extend(super::studio_conversation::tool_turn_with_results(execution_response.as_deref().unwrap_or(&response), &results_blob, &per_call, round, if scope_unchanged && goal_tracker.is_none() {&task_scope}else{""}));
                     // Current policy/context is reloaded on resume, then kept once in the transcript.
                     resume_overlay.clear();
                 }
@@ -4856,89 +4912,18 @@ pub(crate) async fn run_message_via_llm(
         )
     );
     let mut studio_verify_error: Option<String> = None;
-    let mut studio_autofix_applied = false;
-    // Planning/review must never execute project scripts or the mutating autofix path.
+    // No post-task mutation or second LLM repair loop. A successful configured
+    // check must already be present in the main loop's ledger at this revision.
     if !halted_user && code_studio_disk_task && !restricted_studio_role && !run_outcome.failed() {
-        let max_passes: u32 = if is_session_recall {
-            1
-        } else {
-            std::env::var("AKASHA_STUDIO_VERIFY_MAX_PASSES")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3)
-                .max(1)
-                .min(8)
-        };
-        for pass in 0..max_passes {
-            match crate::api_studio::studio_verify_after_agent_task(&tool_disk_workspace_root).await {
-                Ok(executed) => {
-                    run_outcome.checks.push(serde_json::json!({"kind":"project_build", "status":if executed {"passed"} else {"not_run"}, "exit_code":if executed {Some(0)} else {None::<i32>}}));
-                    studio_verify_error = None;
-                    break;
-                }
-                Err(e) => {
-                    run_outcome.checks.push(serde_json::json!({"kind":"project_build", "status":"failed", "detail":e.chars().take(2000).collect::<String>()}));
-                    studio_verify_error = Some(e.clone());
-                    if pass + 1 >= max_passes {
-                        break;
-                    }
-                    if let Some(ref exec_arc) = tools_executor {
-                        let denom = max_passes.saturating_sub(1).max(1);
-                        let _ = bus.send(
-                            EventEnvelope::new(
-                                EventType::ProgressUpdate,
-                                Some(serde_json::json!({
-                                    "task_id": task_id.to_string(),
-                                    "progress_pct": 55,
-                                    "message": format!(
-                                        "Compilation du projet en échec — correction automatique (tentative {}/{}).",
-                                        pass + 1,
-                                        denom
-                                    )
-                                })),
-                            )
-                            .with_correlation(timeline_correlation),
-                        );
-                        let llm_rounds = std::env::var("AKASHA_STUDIO_VERIFY_AUTOFIX_LLM_ROUNDS")
-                            .ok()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(6)
-                            .max(1)
-                            .min(16);
-                        let data_dir = store_path
-                            .parent()
-                            .unwrap_or_else(|| store_path.as_path());
-                        let did_write = studio_verify_run_llm_autofix_rounds(
-                            &bus,
-                            &llm_router,
-                            exec_arc,
-                            skill_registry.as_ref(),
-                            plugin_registry.as_ref(),
-                            process_registry.as_ref(),
-                            conv_tx.clone(),
-                            long_term_client.as_ref(),
-                            workspace_store.as_ref(),
-                            browser_registry.as_ref(),
-                            device_bridge.as_ref(),
-                            task_id,
-                            store_path.as_path(),
-                            data_dir,
-                            tool_disk_workspace_root.as_path(),
-                            &e,
-                            llm_rounds,
-                        )
-                        .await;
-                        if did_write {
-                            studio_autofix_applied = true;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        if studio_verify_error.is_none() && studio_autofix_applied {
-            reply_text.push_str("\n\n_(Compilation du projet Code Studio corrigée automatiquement après échec du build.)_");
+        match crate::api_studio::studio_verification_argv(&tool_disk_workspace_root) {
+            Ok(Some(argv))=>{
+                let mut args=vec!["--cwd".into(),"workspace:/".into()];args.extend(argv);
+                let passed=crate::studio_progress::project_check_fresh(&run_outcome,&args);
+                run_outcome.checks.push(serde_json::json!({"kind":"project_build","status":if passed {"passed"}else{"failed"},"source":"main_tool_loop"}));
+                if !passed {studio_verify_error=Some("Configured project verification has no fresh successful receipt in the main tool loop; no legacy autofix or weaker fallback was executed.".into());}
+            },
+            Ok(None)=>run_outcome.checks.push(serde_json::json!({"kind":"project_build","status":"not_run"})),
+            Err(error)=>studio_verify_error=Some(error),
         }
         if studio_verify_error.is_none() {
             if let Some(ref pay) = embedded_studio_acceptance {

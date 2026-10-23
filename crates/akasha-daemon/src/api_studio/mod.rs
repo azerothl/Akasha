@@ -41,7 +41,6 @@ const MAX_BUILD_OUTPUT_BYTES: usize = 512 * 1024;
 const DEFAULT_BUILD_TIMEOUT_SEC: u64 = 600;
 const NPM_INSTALL_TIMEOUT_SEC: u64 = 900;
 /// Plafond pour un `npm install` déclenché automatiquement après un build studio en échec.
-const AUTO_VERIFY_NPM_INSTALL_CAP_SEC: u64 = 480;
 /// Default range for Vite/webpack dev servers started by `POST .../preview/start`.
 const PREVIEW_PORT_MIN: u16 = 5180;
 const PREVIEW_PORT_MAX: u16 = 5279;
@@ -3151,19 +3150,6 @@ fn truncate_output(s: &str) -> String {
 }
 
 /// Motifs d’exclusion ajoutés automatiquement quand `tsc` compile des tests comme du code d’app (describe/it/expect).
-const TSC_EXCLUDE_TEST_PATTERNS: &[&str] = &[
-    "**/*.test.ts",
-    "**/*.test.tsx",
-    "**/*.test.js",
-    "**/*.test.jsx",
-    "**/*.spec.ts",
-    "**/*.spec.tsx",
-    "**/*.spec.js",
-    "**/*.spec.jsx",
-    "src/tests",
-    "src/test",
-    "src/__tests__",
-];
 
 fn format_verify_failure(code: Option<i32>, out: &str, err: &str) -> String {
     let code_str = match code {
@@ -3190,210 +3176,6 @@ fn format_verify_failure(code: Option<i32>, out: &str, err: &str) -> String {
     format!(
         "Vérification post-tâche échouée ({code_str}).\n--- stdout ---\n{out_s}\n--- stderr ---\n{err_s}{syntax_hint}"
     )
-}
-
-/// Détecte l’échec typique : fichiers `*.test.*` / `src/tests` passés dans `tsc` du build sans types Vitest/Jest.
-/// Erreurs du type « paquet non installé » / résolution de module.
-fn looks_like_missing_npm_module(stdout: &str, stderr: &str) -> bool {
-    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    combined.contains("cannot find module")
-        || combined.contains("cannot resolve")
-        || combined.contains("module not found")
-        || combined.contains("err_module_not_found")
-        || combined.contains("ts2307")
-        || combined.contains("failed to resolve import")
-        || (combined.contains("npm err!") && (combined.contains("enoent") || combined.contains("not found")))
-}
-
-/// Retire les commentaires de ligne `//` (lignes où, après espaces, le reste commence par `//`).
-/// Objectif : pouvoir fusionner des `tsconfig*.json` souvent en JSONC léger, sans dépendance jsonc.
-fn strip_tsconfig_line_comments(raw: &str) -> String {
-    let mut kept: Vec<&str> = Vec::new();
-    for line in raw.lines() {
-        let t = line.trim_start();
-        if t.starts_with("//") {
-            continue;
-        }
-        let t2 = t.trim();
-        if t2.starts_with("/*") && t2.ends_with("*/") && !t2.contains('\n') {
-            continue;
-        }
-        kept.push(line);
-    }
-    kept.join("\n")
-}
-
-/// Parse JSON de tsconfig : strict puis sans commentaires de ligne.
-fn parse_tsconfig_json_for_merge(raw: &str) -> Option<serde_json::Value> {
-    serde_json::from_str(raw)
-        .ok()
-        .or_else(|| serde_json::from_str(&strip_tsconfig_line_comments(raw)).ok())
-        .or_else(|| {
-            // Virgules finales simples avant `}` ou `]` (cas fréquent dans tsconfig Vite).
-            let relaxed = strip_tsconfig_line_comments(raw);
-            let re = Regex::new(r",(\s*[\]}])").ok()?;
-            let mut collapsed = relaxed;
-            for _ in 0..8 {
-                let next = re.replace_all(&collapsed, "$1").to_string();
-                if next == collapsed {
-                    break;
-                }
-                collapsed = next;
-            }
-            serde_json::from_str(&collapsed).ok()
-        })
-}
-
-fn looks_like_ts_tests_compiled_in_app_build(stdout: &str, stderr: &str) -> bool {
-    let combined = format!("{stdout}\n{stderr}");
-    let test_path = combined.contains(".test.")
-        || combined.contains(".spec.")
-        || combined.contains("src/tests/")
-        || combined.contains("src\\tests\\")
-        || combined.contains("/tests/")
-        || combined.contains("\\tests\\");
-    if !test_path {
-        return false;
-    }
-    let jest_hint = combined.contains("@types/jest")
-        || combined.contains("@types/mocha")
-        || combined.contains("vitest/globals")
-        || combined.contains("Try `npm i --save-dev @types/jest`");
-    let ts_runner = (combined.contains("TS2582") && combined.contains("describe"))
-        || (combined.contains("TS2582") && combined.contains("'it'"))
-        || (combined.contains("TS2582") && combined.contains("`it`"))
-        || (combined.contains("TS2304") && combined.contains("expect"));
-    let ts_noise_in_tests =
-        combined.contains("TS6196") || combined.contains("TS6133");
-    test_path && (ts_runner || jest_hint || ts_noise_in_tests)
-}
-
-/// Erreurs `tsc` typiques quand le code généré est partiellement incohérent (exports, props, imports) alors que Vite peut encore produire un bundle.
-fn looks_like_tsc_codegen_errors_for_vite_fallback(stdout: &str, stderr: &str) -> bool {
-    let c = format!("{stdout}\n{stderr}");
-    if !c.contains("error TS") {
-        return false;
-    }
-    c.contains("TS2305")
-        || c.contains("TS2613")
-        || c.contains("TS2339")
-        || c.contains("TS2459")
-        || c.contains("TS2322")
-        || c.contains("TS2345")
-        || c.contains("TS2741")
-        || c.contains("TS6133")
-}
-
-/// Ne pas modifier les `tsconfig.json` « solution » (références uniquement) : ils n’acceptent pas `exclude` utile pour les sous-projets.
-fn tsconfig_eligible_for_exclude_patch(v: &serde_json::Value) -> bool {
-    let Some(o) = v.as_object() else {
-        return false;
-    };
-    if o.contains_key("compilerOptions") {
-        return true;
-    }
-    if let Some(serde_json::Value::Array(a)) = o.get("include") {
-        return !a.is_empty();
-    }
-    false
-}
-
-/// Fusionne `exclude` pour retirer les tests du périmètre `tsc`. Retourne `true` si le fichier a été modifié.
-fn try_merge_exclude_into_tsconfig(path: &Path) -> Result<bool, String> {
-    if !path.is_file() {
-        return Ok(false);
-    }
-    let raw = fs::read_to_string(path).map_err(|e| format!("lecture {}: {e}", path.display()))?;
-    let mut v: serde_json::Value = match parse_tsconfig_json_for_merge(&raw) {
-        Some(v) => v,
-        None => return Ok(false),
-    };
-    if !tsconfig_eligible_for_exclude_patch(&v) {
-        return Ok(false);
-    }
-    let Some(obj) = v.as_object_mut() else {
-        return Ok(false);
-    };
-    let mut list: Vec<String> = match obj.get("exclude") {
-        Some(serde_json::Value::Array(a)) => a
-            .iter()
-            .filter_map(|x| x.as_str().map(str::to_string))
-            .collect(),
-        None => Vec::new(),
-        Some(_) => return Ok(false),
-    };
-    let mut changed = false;
-    for p in TSC_EXCLUDE_TEST_PATTERNS {
-        if !list.iter().any(|e| e == p) {
-            list.push((*p).to_string());
-            changed = true;
-        }
-    }
-    if !changed {
-        return Ok(false);
-    }
-    obj.insert("exclude".to_string(), json!(list));
-    let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
-    fs::write(path, format!("{pretty}\n"))
-        .map_err(|e| format!("écriture {}: {e}", path.display()))?;
-    Ok(true)
-}
-
-/// Tente de corriger les tsconfig pour exclure les tests, puis indique ce qui a été modifié (pour les messages d’erreur).
-fn try_autofix_tsconfig_exclude_tests_for_build(project_root: &Path) -> Result<Option<String>, String> {
-    let mut patched = Vec::new();
-    for name in ["tsconfig.app.json", "tsconfig.json", "tsconfig.node.json"] {
-        let p = project_root.join(name);
-        if try_merge_exclude_into_tsconfig(&p)? {
-            patched.push(name.to_string());
-        }
-    }
-    if patched.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(format!(
-            "fusion des exclusions de tests dans {}",
-            patched.join(", ")
-        )))
-    }
-}
-
-const AKASHA_TEST_SHIM_REL: &str = "src/akasha-studio-test-globals.d.ts";
-const AKASHA_TEST_SHIM_MARKER: &str = "akasha-studio-auto: test globals shim";
-
-/// Déclarations minimales pour que `tsc` du build d’application accepte les fichiers `*.test.*` sans @types/jest.
-fn try_write_test_globals_shim(project_root: &Path) -> Result<bool, String> {
-    let p = project_root.join(AKASHA_TEST_SHIM_REL);
-    if p.is_file() {
-        let existing = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-        if existing.contains(AKASHA_TEST_SHIM_MARKER) {
-            return Ok(false);
-        }
-        return Ok(false);
-    }
-    if let Some(parent) = p.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let body = format!(
-        "// {AKASHA_TEST_SHIM_MARKER}\n\
-         // Ajouté automatiquement par Akasha pour la vérification post-tâche (build) Code Studio.\n\
-         declare function describe(...args: unknown[]): void;\n\
-         declare function it(...args: unknown[]): void;\n\
-         declare function expect(...args: unknown[]): unknown;\n"
-    );
-    fs::write(&p, body).map_err(|e| e.to_string())?;
-    Ok(true)
-}
-
-async fn try_npm_install_autofix(project_root: &Path, timeout_sec: u64) {
-    let argv = vec!["npm".into(), "install".into()];
-    if !argv_looks_safe(&argv) {
-        return;
-    }
-    let cap = timeout_sec
-        .min(AUTO_VERIFY_NPM_INSTALL_CAP_SEC)
-        .max(90);
-    let _ = studio_run_command_capture(project_root, &argv, cap).await;
 }
 
 /// Sections canoniques du plan — si l’une apparaît plus d’une fois, c’est en général un second gabarit collé en bas.
@@ -3502,6 +3284,9 @@ pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> O
         return None;
     }
     let t = content.trim_start();
+    if ["--file_text", "--content", "--file-content"].iter().any(|prefix|t.starts_with(prefix)) {
+        return Some("rejected_tool_argument_leak: source begins with a command argument. Use a native write_file call with path/content fields; preserve source quotes and never include CLI flags in content.".into());
+    }
     if t.starts_with("```") {
         return Some(
             "rejected: fichier code commence par une barre markdown ``` — écrire uniquement le source, sans blocs markdown."
@@ -3540,159 +3325,29 @@ pub(crate) fn studio_project_verify_timeout_sec(project_root: &Path) -> u64 {
 
 /// Run the configured build/check. Ok(true) = command passed; Ok(false) = skipped;
 /// Err = configured verification failed, including when a weaker fallback bundles successfully.
-pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<bool, String> {
+pub(crate) fn studio_verification_argv(project_root: &Path) -> Result<Option<Vec<String>>, String> {
     let meta = load_studio_meta(project_root);
-    if meta.as_ref().map(|m| m.verify_skip).unwrap_or(false) {
-        return Ok(false);
-    }
-    let timeout_sec = meta
-        .as_ref()
-        .and_then(|m| m.verify_timeout_sec)
-        .unwrap_or(DEFAULT_BUILD_TIMEOUT_SEC)
-        .min(3600);
-    let argv: Vec<String> = if let Some(v) = meta.as_ref().and_then(|m| m.verify_argv.as_ref()) {
-        if v.is_empty() {
-            return Ok(false);
-        }
-        v.clone()
+    if meta.as_ref().is_some_and(|m|m.verify_skip) { return Ok(None); }
+    let argv = if let Some(argv)=meta.as_ref().and_then(|m|m.verify_argv.as_ref()) {
+        argv.clone()
     } else if project_root.join("package.json").is_file() {
-        vec!["npm".into(), "run".into(), "build".into()]
+        vec!["npm".into(),"run".into(),"build".into()]
     } else if project_root.join("Cargo.toml").is_file() {
-        vec!["cargo".into(), "check".into()]
-    } else {
-        return Ok(false);
-    };
-    if !argv_looks_safe(&argv) {
-        return Err("verify_argv in .akasha-studio.json is invalid or unsafe".into());
-    }
-    let is_npm_run_build =
-        argv.len() == 3 && argv[0] == "npm" && argv[1] == "run" && argv[2] == "build";
-    match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-        Ok((Some(0), _, _)) => Ok(true),
-        Ok((mut code, mut out, mut err)) => {
-            let first_err = format_verify_failure(code, &out, &err);
-            if !is_npm_run_build {
-                return Err(first_err);
-            }
+        vec!["cargo".into(),"check".into()]
+    } else {return Ok(None);};
+    if argv.is_empty() {return Ok(None);}
+    if !argv_looks_safe(&argv) {return Err("verify_argv in .akasha-studio.json is invalid or unsafe".into());}
+    Ok(Some(argv))
+}
 
-            let mut fix_notes: Vec<String> = Vec::new();
-
-            if looks_like_missing_npm_module(&out, &err) {
-                fix_notes.push("npm install (dépendances manquantes détectées)".to_string());
-                try_npm_install_autofix(project_root, timeout_sec).await;
-                match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                    Ok((Some(0), _, _)) => return Ok(true),
-                    Ok((c, o, e)) => {
-                        code = c;
-                        out = o;
-                        err = e;
-                    }
-                    Err(e2) => {
-                        return Err(format!(
-                            "{first_err}\n\n[Tentatives automatiques : {}]\nVérification post-tâche après npm install: {e2}",
-                            fix_notes.join(" ; ")
-                        ));
-                    }
-                }
-            }
-
-            if looks_like_ts_tests_compiled_in_app_build(&out, &err) {
-                match try_autofix_tsconfig_exclude_tests_for_build(project_root) {
-                    Ok(Some(note)) => {
-                        fix_notes.push(note.clone());
-                        match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                            Ok((Some(0), _, _)) => return Ok(true),
-                            Ok((c, o, e)) => {
-                                code = c;
-                                out = o;
-                                err = e;
-                            }
-                            Err(e2) => {
-                                return Err(format!(
-                                    "{first_err}\n\n[Tentatives automatiques : {}]\n{}",
-                                    fix_notes.join(" ; "),
-                                    e2
-                                ));
-                            }
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(fix_err) => fix_notes.push(format!("tsconfig exclude : {fix_err}")),
-                }
-
-                if looks_like_ts_tests_compiled_in_app_build(&out, &err) {
-                    match try_write_test_globals_shim(project_root) {
-                        Ok(true) => {
-                            fix_notes.push(format!(
-                                "fichier {AKASHA_TEST_SHIM_REL} (globals describe/it/expect)"
-                            ));
-                            match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                                Ok((Some(0), _, _)) => return Ok(true),
-                                Ok((c2, o2, e2)) => {
-                                    return Err(format!(
-                                        "{first_err}\n\n[Tentatives automatiques : {}]\n{}",
-                                        fix_notes.join(" ; "),
-                                        format_verify_failure(c2, &o2, &e2)
-                                    ));
-                                }
-                                Err(e2) => {
-                                    return Err(format!(
-                                        "{first_err}\n\n[Tentatives automatiques : {}]\nVérification post-tâche: {e2}",
-                                        fix_notes.join(" ; ")
-                                    ));
-                                }
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(shim_err) => fix_notes.push(format!("shim tests : {shim_err}")),
-                    }
-                }
-            }
-
-            // Dernier secours : le script `npm run build` enchaîne souvent `tsc` puis Vite ; si le code généré
-            // est incohérent pour TypeScript mais Vite peut encore bundler, on tente uniquement `vite build`
-            // (local, sans réseau — exige `node_modules/vite`).
-            if project_root.join("node_modules/vite/package.json").is_file()
-                && looks_like_tsc_codegen_errors_for_vite_fallback(&out, &err)
-            {
-                let vite_argv = vec![
-                    "npm".into(),
-                    "exec".into(),
-                    "--".into(),
-                    "vite".into(),
-                    "build".into(),
-                ];
-                if argv_looks_safe(&vite_argv) {
-                    fix_notes.push(
-                        "secours: npm exec -- vite build (sans étape tsc du script build)".into(),
-                    );
-                    match studio_run_command_capture(project_root, &vite_argv, timeout_sec).await {
-                        Ok((Some(0), _, _)) => return Err(format!("{}\n\n[Tentatives automatiques : {}]\nVite fallback passed, but the configured build still failed (TypeScript step not verified).",format_verify_failure(code,&out,&err),fix_notes.join(" ; "))),
-                        Ok((cv, ov, ev)) => {
-                            fix_notes.push(format!(
-                                "vite build secours — {}",
-                                format_verify_failure(cv, &ov, &ev)
-                                    .chars()
-                                    .take(900)
-                                    .collect::<String>()
-                            ));
-                        }
-                        Err(ve) => fix_notes.push(format!("vite build secours: {ve}")),
-                    }
-                }
-            }
-
-            let last = format_verify_failure(code, &out, &err);
-            if fix_notes.is_empty() {
-                Err(last)
-            } else {
-                Err(format!(
-                    "{last}\n\n[Tentatives automatiques : {}]",
-                    fix_notes.join(" ; ")
-                ))
-            }
-        }
-        Err(e) => Err(format!("Vérification post-tâche: {}", e)),
+/// Read-only verification helper. Repairs and installations are exclusively
+/// executed by the tracked main tool loop, never by a second repair engine.
+pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<bool, String> {
+    let Some(argv)=studio_verification_argv(project_root)? else {return Ok(false);};
+    match studio_run_command_capture(project_root,&argv,studio_project_verify_timeout_sec(project_root)).await {
+        Ok((Some(0),_,_))=>Ok(true),
+        Ok((code,out,err))=>Err(format_verify_failure(code,&out,&err)),
+        Err(error)=>Err(error),
     }
 }
 
@@ -4848,6 +4503,9 @@ mod tests {
         assert!(studio_reject_polluted_code_content(p, bad2).is_some());
         let ok = "function f() {}\n// **note** fichier.ts — pour humain\n";
         assert!(studio_reject_polluted_code_content(p, ok).is_none());
+        for prefix in ["--file_text '","--content '","--file-content '"] {
+            assert!(studio_reject_polluted_code_content(p,&format!("{prefix}import {{useState}} from 'react';")).is_some());
+        }
     }
 
     #[test]
@@ -4898,41 +4556,6 @@ mod tests {
     }
 
     #[test]
-    fn looks_like_ts_tests_in_app_build_detects_tsc_test_errors() {
-        use super::looks_like_ts_tests_compiled_in_app_build;
-        let sample = r"src/tests/AntiAIMode.test.tsx(8,1): error TS2582: Cannot find name 'describe'.
-Try `npm i --save-dev @types/jest`";
-        assert!(looks_like_ts_tests_compiled_in_app_build(sample, ""));
-        assert!(!looks_like_ts_tests_compiled_in_app_build(
-            "src/App.tsx(1,1): error TS2322: Type 'number' is not assignable to type 'string'.",
-            ""
-        ));
-    }
-
-    #[test]
-    fn strip_tsconfig_line_comments_drops_slash_slash_lines() {
-        use super::strip_tsconfig_line_comments;
-        let raw = "{\n  // hi\n  \"x\": 1\n}";
-        let s = strip_tsconfig_line_comments(raw);
-        assert!(serde_json::from_str::<serde_json::Value>(&s).is_ok());
-    }
-
-    #[test]
-    fn parse_tsconfig_json_for_merge_accepts_trailing_comma() {
-        use super::parse_tsconfig_json_for_merge;
-        let raw = r#"{"compilerOptions": { "strict": true, },}"#;
-        assert!(parse_tsconfig_json_for_merge(raw).is_some());
-    }
-
-    #[test]
-    fn looks_like_tsc_codegen_errors_for_vite_fallback_detects_export_mismatch() {
-        use super::looks_like_tsc_codegen_errors_for_vite_fallback;
-        let s = "src/ai.ts(6,15): error TS2305: Module '\"./gameLogic\"' has no exported member 'Player'.";
-        assert!(looks_like_tsc_codegen_errors_for_vite_fallback(s, ""));
-        assert!(!looks_like_tsc_codegen_errors_for_vite_fallback("no type errors here", ""));
-    }
-
-    #[test]
     fn npm_exec_vite_build_argv_is_whitelisted() {
         use super::{argv_looks_safe, npm_exec_argv_allowed_for_studio_verify};
         let v = vec![
@@ -4944,29 +4567,6 @@ Try `npm i --save-dev @types/jest`";
         ];
         assert!(npm_exec_argv_allowed_for_studio_verify(&v));
         assert!(argv_looks_safe(&v));
-    }
-
-    #[test]
-    fn merge_tsconfig_exclude_adds_test_globs() {
-        use super::try_merge_exclude_into_tsconfig;
-        let dir = std::env::temp_dir().join(format!(
-            "akasha_tsconfig_exclude_test_{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tsconfig.app.json");
-        std::fs::write(
-            &path,
-            r#"{"compilerOptions":{"strict":true},"include":["src"]}"#,
-        )
-        .unwrap();
-        assert!(try_merge_exclude_into_tsconfig(&path).unwrap());
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let ex = v["exclude"].as_array().unwrap();
-        assert!(ex.iter().any(|x| x == "**/*.test.tsx"));
-        assert!(!try_merge_exclude_into_tsconfig(&path).unwrap());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
