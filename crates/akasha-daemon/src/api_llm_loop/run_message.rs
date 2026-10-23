@@ -2119,7 +2119,7 @@ pub(crate) async fn run_message_via_llm(
                         insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"stalled_goal_repair","tools":names}));
                     }
                     if build_missing_target.is_some() {
-                        names.retain(|name|matches!(name.as_str(),"write_file"|"write_code"));
+                        names.retain(|name|name=="write_file");
                     }
                     if literal_only {
                         names.retain(|name|matches!(name.as_str(),"read_file"|"write_file"|"write_code"));
@@ -4333,13 +4333,13 @@ pub(crate) async fn run_message_via_llm(
                 let mut studio_readonly_nudge: Option<String> = None;
                 if code_studio_disk_task && !studio_initial_kanban_planning {
                     let unverified=crate::studio_progress::unverified_rounds(&run_outcome,round);
-                    if unverified>=24 {
+                    if crate::studio_progress::verification_budget_exhausted(&run_outcome,round) {
                         run_outcome.termination=TerminationReason::ToolLoop;
-                        reply_text="studio_no_verified_progress: l'agent modifie le projet depuis 24 tours sans vérification réussie. Les changements sont conservés ; examinez le diagnostic du build avant une reprise. Aucun tour supplémentaire n'a été accordé.".into();
+                        reply_text=format!("studio_no_verified_progress: aucune vérification réussie depuis {unverified} tours de modifications. La fenêtre bornée de travail et de réparation est épuisée. Les changements et diagnostics sont conservés ; le scheduler ne relance pas cette exécution inchangée.");
                         break 'tool_rounds;
                     }
                     if unverified>=12 {
-                        studio_readonly_nudge=Some("[Verification milestone overdue] Source edits alone do not validate this project. Finish the current coherent change, then run the relevant finite build/tests now and repair the FIRST failing diagnostic. Do not rewrite already implemented files or repeat installation. The run stops after 24 rounds without a successful verification.".into());
+                        studio_readonly_nudge=Some("[Verification milestone overdue] Source edits alone do not validate this project. Finish the current coherent change, then run the relevant finite build/tests now and repair the FIRST failing diagnostic. Do not rewrite already implemented files or repeat installation. The work window is bounded. A late first concrete build failure can receive one repair tail, capped at 36 unverified rounds; repeated failures cannot restart it.".into());
                     }
                 }
 

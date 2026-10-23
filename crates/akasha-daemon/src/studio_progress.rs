@@ -120,6 +120,10 @@ pub(crate) fn observe(
             && (state["verified_revision"].is_null()
                 || state["verified_revision"] != state["revision"]);
         let mut check = json!({"kind":"command","tool":tool,"status":if success{"passed"}else{"failed"},"exit_code":receipt["exit_code"],"source":"tool_executor","round":round,"verification":key.is_some(),"revision":state["revision"],"environment_revision":state["environment_revision"].as_u64().unwrap_or(0)});
+        if !success && key.is_some() && receipt["exit_code"].as_i64().is_some_and(|code|code!=0)
+            && state["first_verification_failure_round"].is_null() {
+            state["first_verification_failure_round"]=json!(round);
+        }
         if !success && key.is_some() {
             let diagnostic = receipt["output"].as_str().unwrap_or(result);
             check["diagnostic"] = json!(crate::tool_output::truncate_utf8_by_bytes(diagnostic, 4096).0);
@@ -145,7 +149,8 @@ pub(crate) fn observe(
                 .retain(|c| !(c["kind"] == "command" && c["command_key"] == check["command_key"]));
         }
         outcome.checks.push(check);
-        if fresh {
+        if fresh && pending_checks(outcome).is_empty() {
+            state["first_verification_failure_round"]=Value::Null;
             state["verified_revision"] = state["revision"].clone();
             state["last_verified_round"] = json!(round);
             state["first_unverified_round"] = Value::Null;
@@ -247,6 +252,18 @@ pub(crate) fn unverified_rounds(outcome: &RunOutcome, round: u32) -> u32 {
         .map(|first| round.saturating_sub(first as u32))
         .unwrap_or(0)
 }
+/// A late first concrete build failure receives one bounded repair tail. Reads,
+/// repeated failures and new diagnostics cannot restart that tail. A successful
+/// complete verification milestone is required before another work window.
+pub(crate) fn verification_budget_exhausted(outcome: &RunOutcome, round: u32) -> bool {
+    let Some(state)=outcome.checks.iter().find(|c|c["kind"]=="execution_progress") else {return false;};
+    let Some(first)=state["first_unverified_round"].as_u64() else {return false;};
+    let base=first.saturating_add(24);
+    let deadline=state["first_verification_failure_round"].as_u64()
+        .map(|failure|base.max(failure.saturating_add(12)).min(first.saturating_add(36))).unwrap_or(base);
+    u64::from(round)>=deadline
+}
+
 pub(crate) fn may_extend(outcome: &RunOutcome, round: u32) -> bool {
     outcome
         .checks
@@ -305,6 +322,27 @@ mod tests {
             success,
             round,
         );
+    }
+    #[test]
+    fn late_build_failure_reserves_a_bounded_tail_that_retries_cannot_renew() {
+        let mut o=RunOutcome::default();write(&mut o,6);
+        let args=vec!["npm".into(),"run".into(),"build".into()];
+        observe(&mut o,"run_command",&args,r#"{"exit_code":1,"output":"Could not resolve entry module \"index.html\"."}"#,false,25);
+        assert!(!verification_budget_exhausted(&o,30));
+        observe(&mut o,"read_file",&[],"{}",true,31);
+        observe(&mut o,"run_command",&args,r#"{"exit_code":1}"#,false,35);
+        assert!(!verification_budget_exhausted(&o,36));
+        assert!(verification_budget_exhausted(&o,37));
+        observe(&mut o,"run_command",&["npm".into(),"test".into()],"{}",true,36);
+        assert!(verification_budget_exhausted(&o,37),"A different passing check cannot reset an unresolved build budget");
+        observe(&mut o,"run_command",&args,"{}",true,36);
+        assert!(!verification_budget_exhausted(&o,50));
+    }
+    #[test]
+    fn late_repair_never_exceeds_36_unverified_rounds() {
+        let mut o=RunOutcome::default();write(&mut o,1);
+        observe(&mut o,"run_command",&["npm".into(),"run".into(),"build".into()],r#"{"exit_code":1}"#,false,35);
+        assert!(verification_budget_exhausted(&o,37));
     }
     #[test]
     fn unchanged_failed_build_is_not_reexecuted_until_source_or_dependencies_change() {
