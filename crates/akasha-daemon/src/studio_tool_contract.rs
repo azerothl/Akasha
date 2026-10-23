@@ -857,6 +857,11 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 pub(crate) fn bounded_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    let filename = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let clean = filename.trim();
+    if filename != clean && (matches!(clean,"package.json"|"package-lock.json") || clean.starts_with("tsconfig") && clean.ends_with(".json")) {
+        return Err("invalid_configuration_path: remove whitespace surrounding the configuration filename; no file operation started".into());
+    }
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let path = crate::api::resolve_tool_disk_path(raw, Some(&root));
     if path

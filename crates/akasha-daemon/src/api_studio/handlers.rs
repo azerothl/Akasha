@@ -258,6 +258,9 @@ pub async fn handle_studio_route(
             meta.project_summary.as_deref(),
         );
         let _ = write_initial_design_md(&dir, &meta.name, meta.project_summary.as_deref());
+        if let Err(error) = crate::studio_vite_scaffold::initialize(&dir, meta.tech_stack.as_deref()) {
+            return Some(json_response("500 Internal Server Error", &serde_json::json!({"error":format!("Vite scaffold initialization failed: {error}"),"project_id":id}).to_string()));
+        }
         let specs_dir = dir.join("specs");
         if let Err(e) = fs::create_dir_all(&specs_dir) {
             tracing::warn!(

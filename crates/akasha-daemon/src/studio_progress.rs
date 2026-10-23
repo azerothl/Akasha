@@ -52,6 +52,7 @@ pub(crate) fn observe(
     success: bool,
     round: u32,
 ) {
+    let compiler_before = compiler_repair(outcome);
     // Reconcile legacy npm shorthand keys on checkpoint resume. Raw operation
     // history remains unchanged; a fresh canonical check replaces either spelling.
     for check in &mut outcome.checks {
@@ -179,6 +180,76 @@ pub(crate) fn observe(
     }
     outcome.checks.retain(|c| c["kind"] != "execution_progress");
     outcome.checks.push(state);
+    if success && tool == "read_file" {
+        if let Some(repair) = compiler_before.filter(|r| r.phase == "read" && r.accepts(tool, args)) {
+            outcome.checks.retain(|c| c["kind"] != "compiler_repair_read");
+            outcome.checks.push(json!({"kind":"compiler_repair_read","path":repair.path,"command_key":repair.command_key,"check_round":repair.check_round}));
+        }
+    }
+}
+
+/// A persisted read -> targeted mutation -> exact verification cycle. The
+/// controller binds locations and commands, never generates application code.
+pub(crate) struct CompilerRepair {
+    pub path: String,
+    pub line: u64,
+    pub code: String,
+    pub phase: &'static str,
+    pub command_key: String,
+    check_round: Value,
+}
+impl CompilerRepair {
+    pub fn names(&self) -> &'static [&'static str] {
+        match self.phase { "read" => &["read_file"], "verify" => &["run_command"], _ => &["search_replace", "edit_file", "write_file", "apply_patch"] }
+    }
+    pub fn instruction(&self) -> String {
+        format!("\n[TypeScript repair boundary] {} at {} line {}. Phase: {}. Read a short window around this diagnostic, then correct this file without weakening checks. After one mutation, rerun exact command {} before using an old diagnostic again. The next compiler output determines the next repair.\n", self.code,self.path,self.line,self.phase,self.command_key)
+    }
+    pub fn accepts(&self, tool: &str, args: &[String]) -> bool {
+        if !self.names().contains(&tool) { return false; }
+        if self.phase == "verify" { return command_key(tool,args).as_deref() == Some(&self.command_key); }
+        crate::studio_tool_contract::paths_for_tool(tool,args).first().is_some_and(|path|
+            path.trim_start_matches("workspace:/").trim_start_matches("./") == self.path.trim_start_matches("workspace:/"))
+    }
+    pub fn definition(&self, names: Vec<String>) -> Value {
+        let mut definition = crate::studio_tool_contract::native_definition(names);
+        if let Some(variants) = definition.pointer_mut("/function/parameters/oneOf").and_then(Value::as_array_mut) {
+            for variant in variants {
+                let schema = &mut variant["properties"]["arguments"];
+                if self.phase == "verify" {
+                    let parts: Value = serde_json::from_str(&self.command_key).expect("validated command key");
+                    for (field,value) in [("program",parts[0].clone()),("cwd",parts[1].clone()),("args",parts[2].clone())] {
+                        schema["properties"][field]["enum"] = json!([value]);
+                    }
+                    schema["required"] = json!(["program","args","cwd"]);
+                } else { schema["properties"]["path"]["enum"] = json!([self.path]); }
+            }
+        }
+        definition
+    }
+}
+
+pub(crate) fn compiler_repair(outcome: &RunOutcome) -> Option<CompilerRepair> {
+    let failed = outcome.checks.iter().filter(|c| c["kind"] == "command" && c["verification"] == true && c["status"] == "failed")
+        .min_by_key(|c| c["first_failed_round"].as_u64().unwrap_or(u64::MAX))?;
+    // tsc --pretty false (and the non-TTY default): src/App.tsx(47,44): error TS2367: ...
+    let diagnostic = failed["diagnostic"].as_str()?;
+    // Missing dependencies/types require installation or import investigation,
+    // not a forced source rewrite (JSX errors can precede the missing module).
+    if ["TS2307:","TS2688:","TS7016:"].iter().any(|code|diagnostic.contains(code)) { return None; }
+    let re = regex::Regex::new(r"(?m)(?:^|\n)([^\r\n():]+)\((\d+),\d+\):\s*error (TS\d+):").ok()?;
+    let capture = re.captures(diagnostic)?;
+    let relative = capture[1].trim().replace('\\', "/");
+    if relative.contains(':') || relative.starts_with('/') || relative.split('/').any(|p|p.is_empty() || p == "..") { return None; }
+    let command_key = failed["command_key"].as_str()?.to_owned();
+    let parts: Value = serde_json::from_str(&command_key).ok()?;
+    let cwd = parts[1].as_str()?.strip_prefix("workspace:/")?;
+    if cwd.contains([':', '\\']) || cwd.split('/').any(|p|p == "..") { return None; }
+    let path = format!("workspace:/{}{}{}",cwd,if cwd.is_empty() || cwd.ends_with('/') {""} else {"/"},relative.trim_start_matches("./"));
+    let revision = outcome.checks.iter().find(|c|c["kind"] == "execution_progress").map(|c| &c["revision"]);
+    let phase = if revision.is_some_and(|v| *v != failed["revision"]) { "verify" }
+        else if outcome.checks.iter().any(|c| c["kind"] == "compiler_repair_read" && c["path"] == path && c["command_key"] == command_key && c["check_round"] == failed["round"]) { "edit" } else { "read" };
+    Some(CompilerRepair {path,line:capture[2].parse().ok()?,code:capture[3].into(),phase,command_key,check_round:failed["round"].clone()})
 }
 
 /// Resume-safe control derived from the first still failing exact check.
@@ -303,6 +374,45 @@ pub(crate) fn pending_delivery_checks(outcome: &RunOutcome) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compiler_repair_targets_source_and_requires_fresh_exact_check() {
+        let mut outcome = RunOutcome::default();
+        let args = vec!["--cwd".into(),"workspace:/".into(),"npm".into(),"run".into(),"build".into()];
+        write(&mut outcome,1);
+        observe(&mut outcome,"run_command",&args,r#"{"exit_code":2,"output":"src/App.tsx(47,44): error TS2367: types have no overlap.\nsrc/App.tsx(130,3): error TS1117: duplicate property."}"#,false,2);
+        let repair = compiler_repair(&outcome).unwrap();
+        assert_eq!((repair.path.as_str(),repair.line,repair.code.as_str(),repair.phase),("workspace:/src/App.tsx",47,"TS2367","read"));
+        assert!(!repair.accepts("read_file",&["workspace:/tsconfig.json".into()]));
+        observe(&mut outcome,"read_file",&["workspace:/src/App.tsx".into()],"{}",true,3);
+        assert_eq!(compiler_repair(&outcome).unwrap().phase,"edit");
+        write(&mut outcome,4);
+        let repair = compiler_repair(&outcome).unwrap();
+        assert_eq!(repair.phase,"verify");
+        assert!(repair.accepts("run_command",&args));
+        assert!(!repair.accepts("run_command",&["npm".into(),"test".into()]));
+        assert!(!repair.accepts("write_file",&["workspace:/src/App.tsx".into(),"new".into()]));
+        let resumed:RunOutcome=serde_json::from_value(serde_json::to_value(&outcome).unwrap()).unwrap();
+        assert_eq!(compiler_repair(&resumed).unwrap().phase,"verify");
+        observe(&mut outcome,"run_command",&args,r#"{"exit_code":2,"output":"src/App.tsx(130,3): error TS1117: duplicate property."}"#,false,5);
+        let repair=compiler_repair(&outcome).unwrap();
+        assert_eq!((repair.line,repair.phase),(130,"read"));
+        observe(&mut outcome,"run_command",&args,r#"{"exit_code":0}"#,true,6);
+        assert!(compiler_repair(&outcome).is_none());
+    }
+    #[test]
+    fn compiler_diagnostics_cannot_escape_the_workspace() {
+        for path in ["../private.ts", "C:/private.ts", "/private.ts"] {
+            let mut outcome=RunOutcome::default();
+            let args=vec!["npm".into(),"run".into(),"build".into()];
+            let receipt=json!({"exit_code":2,"output":format!("{path}(1,1): error TS2322: invalid")});
+            observe(&mut outcome,"run_command",&args,&receipt.to_string(),false,1);
+            assert!(compiler_repair(&outcome).is_none());
+        }
+        let mut outcome=RunOutcome::default();
+        observe(&mut outcome,"run_command",&["npm".into(),"run".into(),"build".into()],
+            r#"{"exit_code":2,"output":"src/App.tsx(2,1): error TS7026: no JSX types.\nsrc/App.tsx(2,1): error TS2307: Cannot find module 'react/jsx-runtime'."}"#,false,1);
+        assert!(compiler_repair(&outcome).is_none(),"Dependency installation must remain possible");
+    }
     fn write(outcome: &mut RunOutcome, round: u32) {
         observe(
             outcome,
