@@ -8,6 +8,14 @@ fn bytes(request: &CompletionRequest) -> usize {
         + request.conversation.iter().flatten().map(|m| m.content.len() + m.tool_calls.iter().map(|c| c.to_string().len()).sum::<usize>() + 128).sum::<usize>()
         + serde_json::to_vec(&request.tools).map_or(0, |v| v.len()) + 2048
 }
+fn preflight_error(ctx: u32, bytes: usize, margin: u32) -> ProviderError {
+    let estimated_input_tokens = bytes.div_ceil(3);
+    let estimated_input_tokens_u32 = u32::try_from(estimated_input_tokens).unwrap_or(u32::MAX);
+    let remaining = ctx.saturating_sub(margin).saturating_sub(estimated_input_tokens_u32);
+    ProviderError::Api(format!(
+        "context_window_exceeded: context_window_preflight_rejected: local context guard stopped this request before contacting the model; estimated input is about {estimated_input_tokens} tokens for a configured {ctx}-token window, leaving {remaining} tokens after the safety margin, below the 512-token minimum response budget. The estimate includes protected system/user instructions, tool schemas, and recent execution. Nothing was sent and no instructions were discarded. Workaround: choose a model with a larger context window, raise this provider's effective context setting (for Ollama, model_options.<model>.num_ctx or AKASHA_OLLAMA_NUM_CTX) if available memory permits, or reduce optional prompt/tool context."
+    ))
+}
 fn receipt(content: &str) -> Option<Value> {
     let start = content.find('{')?;
     serde_json::Deserializer::from_str(&content[start..]).into_iter::<Value>().next()?.ok()
@@ -71,13 +79,21 @@ fn failed_command_group(group:&[ConversationMessage])->bool {
 impl CompletionRequest {
     pub(crate) fn bounded_context(&self) -> Result<Self, ProviderError> {
         let Some(ctx) = self.num_ctx else {return Ok(self.clone());};
-        let Some(history) = &self.conversation else {return Ok(self.clone());};
         let reserve = self.max_tokens.unwrap_or(4096);
         let margin = (ctx / 8).clamp(512,4096);
         // Compact stale receipts before the hard limit to keep coding turns focused.
         // Protected recent input may exceed this soft target within the real context.
-        let budget = ctx.saturating_sub(reserve + margin).min(16_384) as usize * 3;
+        let budget = ctx.saturating_sub(reserve.saturating_add(margin)).min(16_384) as usize * 3;
         if bytes(self) <= budget {return Ok(self.clone());}
+        let Some(history) = &self.conversation else {
+            let available = ctx.saturating_sub(margin).saturating_sub(bytes(self).div_ceil(3) as u32);
+            if available >= 512 {
+                let mut result = self.clone();
+                result.max_tokens = Some(reserve.min(available));
+                return Ok(result);
+            }
+            return Err(preflight_error(ctx, bytes(self), margin));
+        };
         let mut groups: Vec<Vec<ConversationMessage>> = vec![];
         for message in history {
             if matches!(message.role, MessageRole::Tool) && groups.last().is_some_and(|g| matches!(g[0].role,MessageRole::Assistant) && !g[0].tool_calls.is_empty()) {
@@ -120,12 +136,7 @@ impl CompletionRequest {
             tracing::info!(before_bytes=bytes(self),after_bytes=bytes(&result),max_tokens=result.max_tokens,"Reduced response reservation to retain protected context");
             return Ok(result);
         }
-        let estimated_input_tokens = bytes(&result).div_ceil(3);
-        let estimated_input_tokens_u32 = u32::try_from(estimated_input_tokens).unwrap_or(u32::MAX);
-        let remaining = ctx.saturating_sub(margin).saturating_sub(estimated_input_tokens_u32);
-        Err(ProviderError::Api(format!(
-            "context_window_exceeded: context_window_preflight_rejected: local context guard stopped this request before contacting the model; estimated input is about {estimated_input_tokens} tokens for a configured {ctx}-token window, leaving {remaining} tokens after the safety margin, below the 512-token minimum response budget. The estimate includes protected system/user instructions, tool schemas, and recent execution. Nothing was sent and no instructions were discarded. Workaround: choose a model with a larger context window, raise this provider's effective context setting (for Ollama, model_options.<model>.num_ctx or AKASHA_OLLAMA_NUM_CTX) if available memory permits, or reduce optional prompt/tool context."
-        )))
+        Err(preflight_error(ctx, bytes(&result), margin))
     }
 }
 
@@ -168,6 +179,24 @@ mod tests {
         assert!(error.contains("context_window_preflight_rejected"));
         assert!(error.contains("before contacting the model"));
         assert!(error.contains("AKASHA_OLLAMA_NUM_CTX"));
+    }
+    #[test]
+    fn single_turn_requests_reserve_output_and_reject_oversized_prompts() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "prompt":"P".repeat(15000),"system_prompt":"S".repeat(2000),
+            "num_ctx":8192,"max_tokens":4096
+        })).unwrap();
+        let bounded = request.bounded_context().expect("response budget is reduced safely");
+        assert!(bounded.max_tokens.unwrap() < 4096);
+        assert_eq!(bounded.prompt, request.prompt);
+
+        let oversized: CompletionRequest = serde_json::from_value(json!({
+            "prompt":"P".repeat(40000),"system_prompt":"protected instructions",
+            "num_ctx":8192,"max_tokens":1024
+        })).unwrap();
+        let error = oversized.bounded_context().unwrap_err().to_string();
+        assert!(error.contains("context_window_preflight_rejected"));
+        assert!(error.contains("before contacting the model"));
     }
     #[test]
     fn large_recent_batch_reduces_output_without_dropping_files() {

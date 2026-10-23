@@ -931,7 +931,14 @@ pub(crate) fn code_studio_suggested_actions(
             } else {
                 hint
             };
-            if context_window_failure && !local_context_preflight {
+            if local_context_preflight {
+                v.push(serde_json::json!({
+                    "id": "choose_model_for_context",
+                    "label": "Choisir un modèle adapté",
+                    "kind": "ui",
+                    "ui_action": "focus_model_selector"
+                }));
+            } else if context_window_failure {
                 v.push(serde_json::json!({
                     "id": "retry_compacted_context",
                     "label": "Reprendre avec un contexte allégé",
@@ -945,7 +952,7 @@ pub(crate) fn code_studio_suggested_actions(
                 "kind": "message",
                 "message": format!(
                     "{}\nContexte:\n{}\n\nPropose un plan de correction ciblé sans répéter l’implémentation. Si la cause est un contexte trop volumineux, identifie les résumés ou historiques redondants à compacter tout en conservant la demande, les règles et les résultats récents nécessaires.",
-                    if local_context_preflight { "Le précontrôle local a arrêté la requête avant de contacter le fournisseur. Aucun appel au modèle ni outil n'a été exécuté. Choisissez un modèle avec une fenêtre plus grande ou augmentez le contexte configuré (par exemple Ollama model_options.<modèle>.num_ctx / AKASHA_OLLAMA_NUM_CTX) si la mémoire disponible le permet." } else if context_window_failure { "Le fournisseur du modèle a refusé la requête car le contexte dépasse sa fenêtre. Choisissez un modèle à fenêtre plus grande, augmentez le contexte configuré si les ressources le permettent, ou réduisez le contexte facultatif." } else { "La dernière tâche a échoué ou été annulée." },
+                    if local_context_preflight { "Le précontrôle local a arrêté la requête avant de contacter le fournisseur : le contexte protégé dépasse la fenêtre configurée. Aucun appel au modèle ni outil n'a été exécuté. La reprise automatique est arrêtée pour éviter de soumettre la même requête. Choisissez un modèle avec une fenêtre plus grande ou augmentez le contexte configuré (par exemple Ollama model_options.<modèle>.num_ctx / AKASHA_OLLAMA_NUM_CTX) si la mémoire disponible le permet; réduisez les pièces jointes ou l'historique facultatifs si nécessaire." } else if context_window_failure { "Le fournisseur du modèle a refusé la requête car le contexte dépasse sa fenêtre. Choisissez un modèle à fenêtre plus grande, augmentez le contexte configuré si les ressources le permettent, ou réduisez le contexte facultatif." } else { "La dernière tâche a échoué ou été annulée." },
                     truncated
                 )
             }));
@@ -3083,11 +3090,13 @@ mod tests {
             None,
             None,
         );
+        assert_eq!(actions[0]["ui_action"], "focus_model_selector");
         assert!(actions.iter().all(|action| action["ui_action"] != "retry_compacted_context"));
-        let solution = actions[0]["message"].as_str().unwrap_or_default();
+        let solution = actions[1]["message"].as_str().unwrap_or_default();
         assert!(solution.contains("avant de contacter le fournisseur"));
         assert!(solution.contains("AKASHA_OLLAMA_NUM_CTX"));
         assert!(solution.contains("Aucun appel au modèle ni outil"));
+        assert!(solution.contains("éviter de soumettre la même requête"));
     }
 
     #[test]
