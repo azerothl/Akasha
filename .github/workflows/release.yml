@@ -308,6 +308,13 @@ jobs:
                   fi
                   chmod +x "$path"
                 done
+                # The artifact service also strips execute bits from WebKit's child processes.
+                mapfile -d '' webkit_processes < <(find "$appdir" -type f -name 'WebKit*Process' -print0)
+                if [ "${#webkit_processes[@]}" -eq 0 ]; then
+                  echo "::error::No WebKit subprocesses found under $appdir"
+                  exit 1
+                fi
+                chmod +x "${webkit_processes[@]}"
                 ;;
               akasha-ui-macos-*)
                 binary="$dir/macos/Akasha.app/Contents/MacOS/akasha-ui"
@@ -359,6 +366,13 @@ jobs:
                   fi
                   chmod +x "$path"
                 done
+                # The artifact service also strips execute bits from WebKit's child processes.
+                mapfile -d '' webkit_processes < <(find "$appdir" -type f -name 'WebKit*Process' -print0)
+                if [ "${#webkit_processes[@]}" -eq 0 ]; then
+                  echo "::error::No WebKit subprocesses found under $appdir"
+                  exit 1
+                fi
+                chmod +x "${webkit_processes[@]}"
                 ;;
               macos-x86_64|macos-aarch64)
                 binary="$RELEASE_DIR/${full_name}/ui/macos/Akasha.app/Contents/MacOS/akasha-ui"
