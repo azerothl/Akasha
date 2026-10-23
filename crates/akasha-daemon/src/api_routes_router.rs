@@ -37,6 +37,19 @@ pub async fn try_handle(
 if method == "GET" && path == "/api/router/studio-options" {
     return Some(json_response("200 OK", &crate::studio_execution::catalog(llm_router).to_string()));
 }
+if method == "POST" && path == "/api/router/studio-qualify" {
+    let input=body.and_then(|bytes|serde_json::from_slice::<serde_json::Value>(bytes).ok());
+    let provider=input.as_ref().and_then(|value|value["provider"].as_str());
+    let model=input.as_ref().and_then(|value|value["model"].as_str());
+    let (Some(provider),Some(model))=(provider,model) else {
+        return Some(json_response("400 Bad Request",r#"{"error":"provider and model are required"}"#));
+    };
+    let response=match llm_router.qualify_studio_model(provider,model).await {
+        Ok(qualification)=>serde_json::json!({"provider":provider,"model":model,"qualification":qualification}),
+        Err(error)=>serde_json::json!({"provider":provider,"model":model,"error":error,"qualification":llm_router.studio_model_qualification(provider,model)}),
+    };
+    return Some(json_response("200 OK",&response.to_string()));
+}
 if method == "GET" && path == "/api/voice/status" {
     let config = crate::voice::load_voice_config(data_dir);
     let body = serde_json::json!({
@@ -589,7 +602,7 @@ if method == "POST" && path == "/api/router/route" {
             let entry = akasha_llm::config::RouteEntry {
                 provider: prov.clone(),
                 model: modl.clone(),
-                config: None,
+                config: body_json.as_ref().and_then(|body|body.get("config")).cloned(),
             };
             let router_path = data_dir.join("llm_router.yaml");
             let mut config = akasha_llm::config::RoutingConfig::load_from_path(&router_path)

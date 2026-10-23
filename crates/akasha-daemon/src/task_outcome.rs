@@ -41,6 +41,7 @@ impl RunOutcome {
             "successful_tool_calls": self.successful_tool_calls,
             "failed_tool_calls": self.failed_tool_calls,
             "confirmed_file_mutation": self.confirmed_file_mutation(),
+            "planning_verified": !self.failed() && self.checks.iter().any(|c|c["kind"]=="kanban_plan" && c["status"]=="passed"),
             "verification": self.checks,
             // A normal model termination is never itself evidence of acceptance.
             "acceptance_verified": !self.failed() && !self.checks.is_empty()

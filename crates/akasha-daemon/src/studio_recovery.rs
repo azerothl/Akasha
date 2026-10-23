@@ -153,7 +153,7 @@ pub(crate) fn request_resume(db: &Path, task: Uuid) -> Result<Checkpoint, String
     if checkpoint.workspace.canonicalize().map_err(|_|"recorded workspace unavailable; restore it before retrying resume")?!=workspace {return Err("recorded workspace differs from current task workspace".into());}
     if !matches!(
         current.status,
-        akasha_store::TaskStatus::Paused | akasha_store::TaskStatus::Interrupted
+        akasha_store::TaskStatus::Paused | akasha_store::TaskStatus::Interrupted | akasha_store::TaskStatus::Failed
     ) {
         return Err("task is not resumable".into());
     }

@@ -258,6 +258,9 @@ pub async fn handle_studio_route(
             meta.project_summary.as_deref(),
         );
         let _ = write_initial_design_md(&dir, &meta.name, meta.project_summary.as_deref());
+        if let Err(error) = crate::studio_vite_scaffold::initialize(&dir, meta.tech_stack.as_deref()) {
+            return Some(json_response("500 Internal Server Error", &serde_json::json!({"error":format!("Vite scaffold initialization failed: {error}"),"project_id":id}).to_string()));
+        }
         let specs_dir = dir.join("specs");
         if let Err(e) = fs::create_dir_all(&specs_dir) {
             tracing::warn!(
@@ -784,6 +787,9 @@ pub async fn handle_studio_route(
                     r#"{"error":"project_not_found"}"#,
                 ));
             }
+            let project_lock=crate::studio_kanban_dispatch::project_dispatch_lock(id);
+            let _reservation=project_lock.lock().await;
+            crate::studio_kanban_dispatch::reconcile_project_tickets(&root,&data_dir.join("akasha.db"));
             let mut items = studio_list_tickets(&root);
             if let Some(status) = query_param(query_str, "status") {
                 let s = status.trim().to_ascii_lowercase();
@@ -1032,6 +1038,7 @@ pub async fn handle_studio_route(
 
             let now = chrono::Utc::now().to_rfc3339();
             let ticket = StudioTicket {
+                initial_backlog_root: false,
                 id: new_ticket_id,
                 project_id: id.to_string(),
                 title: title.to_string(),
