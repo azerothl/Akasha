@@ -563,6 +563,7 @@ fn requires_route_change(
         .is_some_and(|outcome| {
             let reason=outcome.to_string();
             reason.contains("context_window_preflight_rejected") || reason.contains("studio_routes_exhausted")
+                || ["studio_no_verified_progress", "studio_command_verification_failed", "studio_round_budget_exhausted"].iter().any(|code| reason.contains(code))
         })
 }
 
@@ -1423,6 +1424,9 @@ mod tests {
             ),
             ("provider context_window_exceeded: request rejected", false, true),
             ("studio_routes_exhausted: provider_generation_failed: invalid native tools", false, false),
+            ("studio_no_verified_progress: repeated edits", false, false),
+            ("studio_command_verification_failed: npm build failed", false, false),
+            ("studio_round_budget_exhausted: no fresh milestone", false, false),
         ] {
             let dir = tempfile::tempdir().expect("project root");
             let root = dir.path().join("project");

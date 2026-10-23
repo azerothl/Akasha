@@ -144,3 +144,131 @@ pub(crate) fn resolve_run_command_working_dir(
     Ok(None)
 }
 
+/// Validate local npm prerequisites before starting a child process. The agent
+/// must create the manifest itself; a failed preflight never scaffolds files.
+pub(crate) fn npm_prerequisites(
+    command: &str,
+    args: &[String],
+    cwd: Option<&std::path::Path>,
+    policy: &akasha_tools::ToolsPolicy,
+) -> Result<(), serde_json::Value> {
+    let executable = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    if !matches!(executable.as_str(), "npm" | "npm.cmd" | "npm.exe") {
+        return Ok(());
+    }
+    let action_index = args
+        .iter()
+        .position(|arg| !arg.starts_with('-'))
+        .unwrap_or(args.len());
+    let action = args.get(action_index).map(String::as_str).unwrap_or("");
+    if !matches!(
+        action,
+        "install" | "i" | "ci" | "run" | "run-script" | "test" | "t" | "start"
+    ) || args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-g" | "--global"))
+    {
+        return Ok(());
+    }
+    let fail = |code: &str, error: String, hint: &str| serde_json::json!({"success":false,"error_code":code,"error":error,"output":format!("{error} {hint}"),"retry_hint":hint,"process_started":false,"exit_code":null});
+    // A custom prefix changes npm's project. Let the agent choose the explicit
+    // checked cwd instead, rather than validating a different manifest.
+    if args
+        .iter()
+        .any(|arg| arg == "--prefix" || arg.starts_with("--prefix="))
+    {
+        return Err(fail(
+            "npm_project_cwd_required",
+            "Use cwd to select the npm project instead of --prefix.".into(),
+            "Set cwd to the existing workspace subdirectory and retry.",
+        ));
+    }
+    let root = cwd.ok_or_else(|| {
+        fail(
+            "npm_project_cwd_required",
+            "No registered npm working directory.".into(),
+            "Use cwd workspace:/ or an existing project subdirectory.",
+        )
+    })?;
+    let manifest = root.join("package.json");
+    let checked=manifest.canonicalize().map_err(|_|fail("npm_manifest_missing",format!("No package.json in {}.",root.display()),"Create the requested project's package.json and source files first, then install dependencies and run its checks. This is not an npm installation failure or a workspace access denial."))?;
+    if !policy.can_read(&checked) {
+        return Err(fail(
+            "npm_manifest_denied",
+            "package.json is outside the permitted project.".into(),
+            "Use the registered workspace; do not bypass its policy.",
+        ));
+    }
+    let text = std::fs::read_to_string(&checked).map_err(|e| {
+        fail(
+            "npm_manifest_unreadable",
+            format!("Cannot read package.json: {e}"),
+            "Read and repair the manifest in the registered project.",
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        fail(
+            "npm_manifest_invalid",
+            format!("Invalid package.json: {e}"),
+            "Read and repair the JSON before running npm.",
+        )
+    })?;
+    let script = match action {
+        "run" | "run-script" => args.get(action_index + 1).map(String::as_str),
+        "test" | "t" => Some("test"),
+        "start" => Some("start"),
+        _ => None,
+    };
+    if let Some(script) = script {
+        if !value["scripts"][script].is_string() {
+            let available = value["scripts"]
+                .as_object()
+                .map(|scripts| scripts.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            return Err(fail("npm_script_missing",format!("Script {script} is not defined in package.json. Available: {}.",available.join(", ")),"Create the appropriate finite verification script for the requested project, then retry. Do not weaken acceptance checks."));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod npm_tests {
+    #[test]
+    fn npm_requires_a_readable_valid_manifest_and_requested_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy =
+            crate::studio_policy::for_workspace(&akasha_tools::ToolsPolicy::default(), temp.path());
+        let args = vec!["run".into(), "build".into()];
+        let check = || super::npm_prerequisites("npm.cmd", &args, Some(temp.path()), &policy);
+        let missing = check().unwrap_err();
+        assert_eq!(missing["error_code"], "npm_manifest_missing");
+        assert_eq!(missing["process_started"], false);
+        std::fs::write(temp.path().join("package.json"), "{").unwrap();
+        assert_eq!(check().unwrap_err()["error_code"], "npm_manifest_invalid");
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"scripts":{"test":"node --test"}}"#,
+        )
+        .unwrap();
+        assert_eq!(check().unwrap_err()["error_code"], "npm_script_missing");
+        assert!(super::npm_prerequisites(
+            "npm",
+            &["run".into(), "build".into(), "--if-present".into()],
+            Some(temp.path()),
+            &policy
+        )
+        .is_err());
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build"}}"#,
+        )
+        .unwrap();
+        assert!(check().is_ok());
+        assert!(super::npm_prerequisites("node", &args, None, &policy).is_ok());
+        assert!(super::npm_prerequisites("npm", &["--version".into()], None, &policy).is_ok());
+    }
+}

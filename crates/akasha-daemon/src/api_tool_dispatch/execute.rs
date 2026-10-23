@@ -270,9 +270,10 @@ pub(crate) async fn execute_tool_call_impl(
         }
         "list_tools" => {
             let Some(role) = assigned_agent_for_task.as_deref() else { return (false, "[list_tools] task role unavailable".into(), None); };
-            let tools = crate::studio_capabilities::catalogue(&executor.policy, role).into_iter()
-                .filter(|tool| args.first().map_or(tool.announced, |name| tool.name == *name)).collect::<Vec<_>>();
-            (true, serde_json::to_string(&tools).unwrap_or_default(), None)
+            match crate::studio_capabilities::discovery(&executor.policy, role, args.first().map(String::as_str)) {
+                Ok(value) => (true, value.to_string(), None),
+                Err(error) => (false, error, None),
+            }
         }
         "workspace_graph_search" => {
             let Some(sp) = store_path else {
@@ -902,6 +903,11 @@ pub(crate) async fn execute_tool_call_impl(
                 Err(e) => return (false, format!("[run_command] {}", e), None),
             };
             let cwd_ref = cwd_resolved.as_deref();
+            if is_studio_workspace {
+                if let Err(error) = super::process_ops::npm_prerequisites(&cmd, &cmd_args, cwd_ref, &executor.policy) {
+                    return (false, error.to_string(), None);
+                }
+            }
             let extra_env = if vault_specs.is_empty() {
                 None
             } else {
@@ -994,6 +1000,11 @@ pub(crate) async fn execute_tool_call_impl(
                 Err(e) => return (false, format!("[run_terminal] {}", e), None),
             };
             let cwd_ref = cwd_resolved.as_deref();
+            if is_studio_workspace {
+                if let Err(error) = super::process_ops::npm_prerequisites(&cmd, &cmd_args, cwd_ref, &executor.policy) {
+                    return (false, error.to_string(), None);
+                }
+            }
             match executor.run_command(&cmd, &cmd_args, cwd_ref, None).await {
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1044,6 +1055,11 @@ pub(crate) async fn execute_tool_call_impl(
                 Ok(c) => c,
                 Err(e) => return (false, format!("[run_command_background] {}", e), None),
             };
+            if is_studio_workspace {
+                if let Err(error) = super::process_ops::npm_prerequisites(&cmd, &cmd_args, cwd_resolved.as_deref(), &executor.policy) {
+                    return (false, error.to_string(), None);
+                }
+            }
             let cmd_display = format!("{} {}", cmd, cmd_args.join(" "));
             match process_registry {
                 Some(reg) => {

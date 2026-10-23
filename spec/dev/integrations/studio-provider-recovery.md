@@ -39,3 +39,16 @@ Les routes embarquées `akasha_core` / `akasha_embedded` n'exposent pas ce trans
 Une génération sans premier contenu est bornée à 60 s maximum dans le budget existant. Les erreurs de transport mettent aussi la route en quarantaine. Un appel invalide pour un rôle reste une erreur de protocole récupérable par la boucle de réparation sémantique ; il ne disqualifie pas globalement un transport ayant réussi son probe. Les routes embarquées incompatibles sont filtrées avant la limite de trois tentatives, afin qu'elles ne masquent pas une alternative compatible placée plus loin dans la configuration. Le diagnostic final conserve l'action de reprise avant les détails abrégés ; les événements gardent les erreurs détaillées.
 
 Lorsque toutes les routes sont épuisées (`studio_routes_exhausted`), le ticket reste bloqué et le scheduler ne redispatche pas la demande inchangée après son délai. Une modification du profil ou une reprise explicite permet un nouvel essai. Choisir un autre modèle dans le composeur s'applique à une nouvelle demande : cela ne réécrit pas silencieusement le contrat d'une tâche existante.
+
+
+## Contexte et jalons techniques bornés
+
+La découverte `list_tools []` publie uniquement les noms autorisés. `list_tools [nom]` charge le schéma d'un seul outil (16 Kio maximum) et ne remplace pas le catalogue natif de base par le catalogue complet. Seule la dernière découverte ciblée réussie ajoute un outil au tour suivant. Les contrôles de rôle/policy demeurent actifs.
+
+Les commandes npm Studio (`run_command`, `run_terminal`, `run_command_background`) contrôlent le manifeste du cwd et le script invoqué avant création du processus. Le diagnostic structuré conserve `error_code`, `retry_hint`, `process_started: false`. Le moteur ne crée pas le manifeste. Une commande npm install sans manifeste n'est pas assimilée à une panne du service de modèle.
+
+`studio_progress` conserve dans le checkpoint la révision observée des fichiers et les résultats courants des vérifications reconnues (build/test/check/typecheck/lint npm et équivalents directs). Une modification attestée par les reçus rend les anciennes réussites périmées. Réexécuter avec succès une commande remplace son résultat courant et incrémente `attempts` ; le registre d'opérations et les compteurs conservent les échecs antérieurs. Les tentatives de finalisation avec des commandes échouées/périmées provoquent deux réparations bornées, puis `verification_failed`.
+
+Après une modification, 12 tours sans vérification réussie déclenchent un rappel et 24 tours arrêtent la tâche avec `studio_no_verified_progress`. Prolonger le budget exige une nouvelle révision vérifiée il y a moins de 10 tours et aucun contrôle reconnu en échec/périmé. Répéter une réussite sur les mêmes fichiers ne constitue pas un nouveau jalon. Un refus de prolongation est terminal (`studio_round_budget_exhausted`) sans attente utilisateur artificielle. Le scheduler conserve le ticket et ne redispatche pas ces blocages inchangés, ni `studio_command_verification_failed`.
+
+Limites : les commandes arbitraires de shell/conteneur et les processus de fond ne sont pas attestés comme validations techniques par cette classification. La réussite d'un build n'est pas une validation fonctionnelle de l'application.

@@ -1242,6 +1242,11 @@ impl Operation {
         };
         let (output,_,truncated) = crate::tool_output::truncate_utf8_by_bytes(plain, 64 * 1024);
         let mut value = json!({"schema_version":1,"operation_id":self.id,"tool":self.tool,"success":success,"error":error,"output":output,"file_version":after,"exit_code":serde_json::from_str::<Value>(text).ok().and_then(|v|v.get("exit_code").cloned())});
+        if let Some(command) = command_result.as_ref() {
+            for key in ["error_code", "retry_hint", "process_started"] {
+                if let Some(field) = command.get(key) {value[key] = field.clone();}
+            }
+        }
         if let Some(correction) = self.argument_correction {
             value["argument_correction"] = json!(correction);
         }

@@ -90,7 +90,7 @@ fn auto_extend_studio_round_budget(
     outcome: &crate::task_outcome::RunOutcome,
 ) -> Result<bool, String> {
     const STUDIO_TOOL_ROUND_HARD_CAP: u32 = 96;
-    if *max_tool_rounds >= STUDIO_TOOL_ROUND_HARD_CAP {
+    if *max_tool_rounds >= STUDIO_TOOL_ROUND_HARD_CAP || !crate::studio_progress::may_extend(outcome, round) {
         return Ok(false);
     }
     let previous_limit = *max_tool_rounds;
@@ -1924,7 +1924,11 @@ pub(crate) async fn run_message_via_llm(
                         &run_outcome,
                     ) {
                         Ok(true) => continue 'tool_rounds,
-                        Ok(false) => {}
+                        Ok(false) => {
+                            run_outcome.termination=TerminationReason::ToolRoundLimit;
+                            reply_text="studio_round_budget_exhausted: budget atteint sans nouveau jalon vérifié justifiant une prolongation. Changements conservés ; consultez les diagnostics avant une reprise explicite.".into();
+                            break 'tool_rounds;
+                        }
                         Err(error) => {
                             run_outcome.termination = TerminationReason::ContextUnavailable;
                             reply_text = error;
@@ -2093,7 +2097,7 @@ pub(crate) async fn run_message_via_llm(
                         crate::studio_capabilities::select_initial_kanban_names(names)
                     } else {
                         crate::studio_capabilities::select_native_names(names,
-                            run_outcome.checks.iter().any(|check|check["kind"]=="native_catalogue_discovery"))
+                            run_outcome.checks.iter().rev().find(|check|check["kind"]=="native_catalogue_discovery").and_then(|check|check["tool"].as_str()))
                     };
                     if repair_focus_this_turn && !literal_only {
                         names=crate::studio_capabilities::select_repair_names(names);
@@ -2622,6 +2626,22 @@ pub(crate) async fn run_message_via_llm(
                     }
                 }
             }
+            if code_studio_disk_task && no_parseable_tools_this_round && !studio_initial_kanban_planning {
+                let pending=if explicit_file_goals.is_empty() {crate::studio_progress::pending_delivery_checks(&run_outcome)} else {crate::studio_progress::pending_checks(&run_outcome)};
+                if !pending.is_empty() {
+                    let retries=run_outcome.checks.iter().filter(|c|c["kind"]=="command_verification_retry").count();
+                    if retries>=2 {
+                        run_outcome.termination=TerminationReason::VerificationFailed;
+                        reply_text=format!("studio_command_verification_failed: vérifications en échec ou périmées après des modifications : {}. Aucun succès de livraison n'est confirmé.",pending.join("; "));
+                        break 'tool_rounds;
+                    }
+                    run_outcome.checks.push(serde_json::json!({"kind":"command_verification_retry","status":"retried","attempt":retries+1,"pending":pending}));
+                    if !delivered_prompt.is_empty(){conversation.push(akasha_llm::ConversationMessage::runtime_control(delivered_prompt.clone()));}
+                    conversation.push(akasha_llm::ConversationMessage::assistant(response.clone()));
+                    current_prompt=format!("[Fresh verification required] The final response is premature. Repair the first failed prerequisite, then rerun these exact checks against the current files: {}. Writing files later does not turn an earlier failed command into a pass. Never weaken checks or claim completion without the actual successful result.",pending.join("; "));
+                    continue;
+                }
+            }
             // Targeted missing-file recovery follows verified progress; a zero-effect claim still fails as a tool error.
             if code_studio_disk_task && no_parseable_tools_this_round && !explicit_file_goals.is_empty() && run_outcome.has_file_effect_progress() {
                 let current=if let Some(executor)=tools_executor.as_ref(){Some(crate::studio_policy::executor(executor.read().await.clone(), studio_policy_root))}else{tools_executor_snapshot.clone()};
@@ -2922,9 +2942,7 @@ pub(crate) async fn run_message_via_llm(
                         let native_envelope_args=args;
                         let name=typed_call.as_ref().map(|call|&call.envelope.tool).unwrap_or(name);
                         let args=typed_call.as_ref().map(|call|&call.argv).unwrap_or(args);
-                        if name=="list_tools" && !run_outcome.checks.iter().any(|check|check["kind"]=="native_catalogue_discovery") {
-                            run_outcome.checks.push(serde_json::json!({"kind":"native_catalogue_discovery","status":"expanded","detail":"Subsequent turns advertise the full currently permitted native catalogue; permissions are still checked at invocation."}));
-                        }
+
 
 
                         // Hot-reloaded permissions must constrain the next invocation of an active task.
@@ -4050,6 +4068,10 @@ pub(crate) async fn run_message_via_llm(
                                 if let (Some(path),Some(hash))=(rule["path"].as_str(),rule["sha256"].as_str()) {active_repository_rules.insert(format!("{path}:{hash}"));}
                             }}
                         }
+                        if success && actual_tool == "list_tools" && !tool_args.is_empty() {
+                            run_outcome.checks.retain(|check|check["kind"]!="native_catalogue_discovery");
+                            run_outcome.checks.push(serde_json::json!({"kind":"native_catalogue_discovery","status":"passed","tool":tool_args[0]}));
+                        }
                         previous_batch_call_succeeded = success;
                         if success {
                             run_outcome.successful_tool_calls += 1;
@@ -4066,9 +4088,12 @@ pub(crate) async fn run_message_via_llm(
                         if serde_json::from_str::<serde_json::Value>(&res).ok().is_some_and(|value|value["result_unknown"]==true){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Operation result unknown; inspect effects and use explicit recovery before continuing. {res}");break 'tool_rounds;}
 
                         if success {if let Err(error)=crate::studio_file_effects::after(&store_path,task_id,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
-                        if matches!(effective_role_tool, "run_command" | "run_terminal" | "run_in_container") {
+                        if code_studio_disk_task {
+                            crate::studio_progress::observe(&mut run_outcome,&actual_tool,tool_args,&res,success,round);
+                        } else if matches!(effective_role_tool, "run_command" | "run_terminal" | "run_in_container") {
                             run_outcome.checks.push(serde_json::json!({"kind":"command", "tool":effective_role_tool, "status":if success {"passed"} else {"failed"}, "exit_code":serde_json::from_str::<serde_json::Value>(&res).ok().and_then(|value|value.get("exit_code").cloned()).unwrap_or(serde_json::Value::Null), "source":"tool_executor"}));
                         }
+
                         if let Some(img) = captured_image {
                             // Studio browser PNGs are persisted and displayed by the
                             // task evidence viewer. Keep vision input separate from
@@ -4274,6 +4299,18 @@ pub(crate) async fn run_message_via_llm(
                     resume_overlay.clear();
                 }
                 let mut studio_readonly_nudge: Option<String> = None;
+                if code_studio_disk_task && !studio_initial_kanban_planning {
+                    let unverified=crate::studio_progress::unverified_rounds(&run_outcome,round);
+                    if unverified>=24 {
+                        run_outcome.termination=TerminationReason::ToolLoop;
+                        reply_text="studio_no_verified_progress: l'agent modifie le projet depuis 24 tours sans vérification réussie. Les changements sont conservés ; examinez le diagnostic du build avant une reprise. Aucun tour supplémentaire n'a été accordé.".into();
+                        break 'tool_rounds;
+                    }
+                    if unverified>=12 {
+                        studio_readonly_nudge=Some("[Verification milestone overdue] Source edits alone do not validate this project. Finish the current coherent change, then run the relevant finite build/tests now and repair the FIRST failing diagnostic. Do not rewrite already implemented files or repeat installation. The run stops after 24 rounds without a successful verification.".into());
+                    }
+                }
+
                 if code_studio_disk_task && (goal_tracker.is_some() || run_outcome.requires_file_effect()) && !calls.is_empty() {
                     let only_survey = !round_non_survey_progress;
                     if only_survey {
@@ -4495,7 +4532,11 @@ pub(crate) async fn run_message_via_llm(
                             &run_outcome,
                         ) {
                             Ok(true) => continue 'tool_rounds,
-                            Ok(false) => {}
+                            Ok(false) => {
+                                run_outcome.termination=TerminationReason::ToolRoundLimit;
+                                reply_text="studio_round_budget_exhausted: budget atteint sans nouveau jalon vérifié justifiant une prolongation. Changements conservés ; consultez les diagnostics avant une reprise explicite.".into();
+                                break 'tool_rounds;
+                            }
                             Err(error) => {
                                 run_outcome.termination = TerminationReason::ContextUnavailable;
                                 reply_text = error;
