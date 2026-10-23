@@ -180,6 +180,12 @@ pub(crate) fn observe(
         }
     }
     if success && matches!(tool,"run_command"|"run_terminal") {
+        let key=exact_command_key(tool,args);
+        for check in &mut outcome.checks {
+            if check["kind"]=="dependency_installation" && check["command_key"].as_str()==key.as_deref() {
+                check["status"]=json!("passed");check["resolved_round"]=json!(round);
+            }
+        }
         let (_,_,program,args)=crate::api_tool_dispatch::process_ops::parse_run_command_args(args);
         if program.rsplit(['/', '\\']).next().unwrap_or(&program).trim_end_matches(".cmd").eq_ignore_ascii_case("npm")
             && args.first().is_some_and(|s| matches!(s.as_str(),"install"|"ci"|"rebuild")) {
@@ -219,12 +225,16 @@ pub(crate) struct CompilerRepair {
     pub phase: &'static str,
     pub command_key: String,
     check_round: Value,
+    diagnostic: String,
 }
 impl CompilerRepair {
     pub fn names(&self) -> &'static [&'static str] {
         match self.phase { "read" => &["read_file"], "verify" => &["run_command"], _ => &["search_replace", "edit_file", "write_file", "apply_patch"] }
     }
     pub fn instruction(&self) -> String {
+        if self.code=="NPM_ERESOLVE" {
+            return format!("\n[Dependency repair boundary] npm ERESOLVE peer dependency conflict. Target: {}. Phase: {}. Read this manifest, then align incompatible package versions using the recorded peer requirements. Preserve build scripts and test assertions. Never use --force, --legacy-peer-deps or disable checks. After one manifest mutation retry exact install {} before another edit. Installation is not build verification. Diagnostic: {}\n",self.path,self.phase,self.command_key,self.diagnostic);
+        }
         format!("\n[TypeScript repair boundary] {} at {} line {}. Phase: {}. Read a short window around this diagnostic, then correct this file without weakening checks. After one mutation, rerun exact command {} before using an old diagnostic again. The next compiler output determines the next repair.\n", self.code,self.path,self.line,self.phase,self.command_key)
     }
     pub fn accepts(&self, tool: &str, args: &[String]) -> bool {
@@ -252,6 +262,17 @@ impl CompilerRepair {
 }
 
 pub(crate) fn compiler_repair(outcome: &RunOutcome) -> Option<CompilerRepair> {
+    if let Some(failed)=outcome.checks.iter().rev().find(|c|c["kind"]=="dependency_installation"&&c["status"]=="failed"&&c["repairable"]==true) {
+        let key=failed["command_key"].as_str()?.to_owned();
+        let parts:Value=serde_json::from_str(&key).ok()?;
+        let cwd=parts[1].as_str()?.strip_prefix("workspace:/")?;
+        if cwd.contains([':', '\\'])||cwd.split('/').any(|p|p=="..") {return None;}
+        let path=format!("workspace:/{}{}package.json",cwd,if cwd.is_empty()||cwd.ends_with('/') {""}else{"/"});
+        let revision=outcome.checks.iter().find(|c|c["kind"]=="execution_progress").map(|c|&c["revision"]);
+        let phase=if revision.is_some_and(|v|*v!=failed["revision"]) {"verify"}
+            else if outcome.checks.iter().any(|c|c["kind"]=="compiler_repair_read"&&c["path"]==path&&c["command_key"]==key&&c["check_round"]==failed["round"]) {"edit"}else{"read"};
+        return Some(CompilerRepair{path,line:1,code:"NPM_ERESOLVE".into(),phase,command_key:key,check_round:failed["round"].clone(),diagnostic:crate::tool_output::truncate_utf8_by_bytes(failed["diagnostic"].as_str().unwrap_or(""),2500).0.to_string()});
+    }
     let failed = outcome.checks.iter().filter(|c| c["kind"] == "command" && c["verification"] == true && c["status"] == "failed")
         .min_by_key(|c| c["first_failed_round"].as_u64().unwrap_or(u64::MAX))?;
     // tsc --pretty false (and the non-TTY default): src/App.tsx(47,44): error TS2367: ...
@@ -271,7 +292,7 @@ pub(crate) fn compiler_repair(outcome: &RunOutcome) -> Option<CompilerRepair> {
     let revision = outcome.checks.iter().find(|c|c["kind"] == "execution_progress").map(|c| &c["revision"]);
     let phase = if revision.is_some_and(|v| *v != failed["revision"]) { "verify" }
         else if outcome.checks.iter().any(|c| c["kind"] == "compiler_repair_read" && c["path"] == path && c["command_key"] == command_key && c["check_round"] == failed["round"]) { "edit" } else { "read" };
-    Some(CompilerRepair {path,line:capture[2].parse().ok()?,code:capture[3].into(),phase,command_key,check_round:failed["round"].clone()})
+    Some(CompilerRepair {path,line:capture[2].parse().ok()?,code:capture[3].into(),phase,command_key,check_round:failed["round"].clone(),diagnostic:String::new()})
 }
 
 /// Resume-safe control derived from the first still failing exact check.

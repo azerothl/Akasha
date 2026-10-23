@@ -82,13 +82,29 @@ pub(crate) fn record_install(root:&Path,tool:&str,args:&[String],policy:&akasha_
 }
 pub(crate) fn installation_failure(result:&str)->String {
     let lower=result.to_ascii_lowercase();
-    let workaround=if ["enotfound","eai_again","etimedout","econnrefused","econnreset"].iter().any(|s|lower.contains(s)) {
+    let workaround=if lower.contains("eresolve") {
+        "Aligner les versions des paquets et leurs peerDependencies dans package.json, sans --force ni --legacy-peer-deps, puis reprendre le checkpoint."
+    } else if ["enotfound","eai_again","etimedout","econnrefused","econnreset"].iter().any(|s|lower.contains(s)) {
         "Vérifier la connexion, le proxy et le registre npm configuré, puis reprendre le checkpoint."
     } else if lower.contains("e401")||lower.contains("e403") {"Rétablir l'accès au registre privé ou ses identifiants npm, puis reprendre le checkpoint."}
     else if lower.contains("enospc") {"Libérer de l'espace disque puis reprendre le checkpoint."}
     else if lower.contains("eusage")||lower.contains("lockfile")||lower.contains("package-lock") {"Synchroniser le manifeste et son verrou avec npm install dans ce projet, puis reprendre le checkpoint."}
     else {"Consulter le diagnostic npm, vérifier Node et les droits du dossier projet, corriger la cause puis reprendre le checkpoint."};
     format!("studio_dependency_installation_failed: installation des dépendances impossible ; le build n'a pas été lancé et aucune réparation de source n'est autorisée pour masquer cet échec. {workaround}\n{}",crate::tool_output::truncate_utf8_by_bytes(result,4000).0)
+}
+
+/// A bounded package conflict is a project repair, not an external outage.
+/// Only the inspected manifest may change before the exact install is retried.
+pub(crate) fn record_conflict(outcome:&mut crate::task_outcome::RunOutcome,tool:&str,args:&[String],result:&str,round:u32)->bool {
+    if !result.to_ascii_lowercase().contains("eresolve") {return false;}
+    let Some(key)=crate::studio_progress::exact_command_key(tool,args) else {return false;};
+    let receipt:Value=serde_json::from_str(result).unwrap_or(Value::Null);
+    let attempts=outcome.checks.iter().filter(|c|c["kind"]=="dependency_installation"&&c["command_key"].as_str()==Some(&key)).map(|c|c["attempts"].as_u64().unwrap_or(0)).max().unwrap_or(0)+1;
+    if attempts>3 {return false;}
+    let revision=outcome.checks.iter().find(|c|c["kind"]=="execution_progress").map(|c|c["revision"].clone()).unwrap_or(serde_json::json!(0));
+    outcome.checks.retain(|c|!(c["kind"]=="dependency_installation"&&c["command_key"].as_str()==Some(&key)));
+    outcome.checks.push(serde_json::json!({"kind":"dependency_installation","status":"failed","repairable":true,"command_key":key,"round":round,"revision":revision,"attempts":attempts,"diagnostic":receipt["output"].as_str().unwrap_or(result)}));
+    true
 }
 
 #[cfg(test)]
@@ -139,5 +155,27 @@ mod tests {
         let error=installation_failure("npm error code ENOTFOUND registry.example.invalid");
         assert!(error.contains("ENOTFOUND"));assert!(error.contains("proxy"));assert!(error.contains("checkpoint"));
         assert!(error.contains("le build n'a pas été lancé"));
+    }
+    #[test]
+    fn peer_conflict_repairs_only_manifest_and_retries_install_without_attesting_build() {
+        let mut outcome=crate::task_outcome::RunOutcome::default();
+        let args=vec!["--cwd".into(),"workspace:/".into(),"npm".into(),"install".into(),"--include=dev".into(),"--no-audit".into(),"--no-fund".into()];
+        let error=r#"{"exit_code":1,"output":"npm error ERESOLVE: @vitest/ui@3 requires vitest@3, found vitest@5"}"#;
+        crate::studio_progress::observe(&mut outcome,"run_command",&args,error,false,1);
+        assert!(record_conflict(&mut outcome,"run_command",&args,error,1));
+        let repair=crate::studio_progress::compiler_repair(&outcome).unwrap();
+        assert_eq!((repair.path.as_str(),repair.phase),("workspace:/package.json","read"));
+        assert!(!repair.accepts("read_file",&["workspace:/src/App.tsx".into()]));
+        crate::studio_progress::observe(&mut outcome,"read_file",&["workspace:/package.json".into()],"{}",true,2);
+        assert_eq!(crate::studio_progress::compiler_repair(&outcome).unwrap().phase,"edit");
+        crate::studio_progress::observe(&mut outcome,"write_file",&[],r#"{"file_effects":[{"path":"package.json","before":"old","after":"new"}]}"#,true,3);
+        let repair=crate::studio_progress::compiler_repair(&outcome).unwrap();
+        assert_eq!(repair.phase,"verify");assert!(repair.accepts("run_command",&args));
+        assert!(!repair.accepts("run_command",&["npm".into(),"run".into(),"build".into()]));
+        crate::studio_progress::observe(&mut outcome,"run_command",&args,r#"{"exit_code":0}"#,true,4);
+        assert!(crate::studio_progress::compiler_repair(&outcome).is_none());
+        assert!(!crate::studio_progress::pending_delivery_checks(&outcome).is_empty(),"Install is not build verification");
+        for round in 5..=6 {assert!(record_conflict(&mut outcome,"run_command",&args,error,round));}
+        assert!(!record_conflict(&mut outcome,"run_command",&args,error,7));
     }
 }

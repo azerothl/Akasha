@@ -4181,7 +4181,7 @@ pub(crate) async fn run_message_via_llm(
                             crate::studio_progress::observe(&mut run_outcome,&actual_tool,tool_args,&res,success,round);
                             if crate::studio_dependencies::is_install(&actual_tool,tool_args) {
                                 if success {crate::studio_dependencies::record_install(&tool_disk_workspace_root,&actual_tool,tool_args,&exec.policy);}
-                                else {
+                                else if !crate::studio_dependencies::record_conflict(&mut run_outcome,&actual_tool,tool_args,&res,round) {
                                     run_outcome.termination=TerminationReason::VerificationFailed;
                                     reply_text=crate::studio_dependencies::installation_failure(&res);
                                     run_outcome.checks.push(serde_json::json!({"kind":"dependency_installation","status":"failed","detail":reply_text}));
