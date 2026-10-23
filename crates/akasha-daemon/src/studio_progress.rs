@@ -9,6 +9,7 @@ fn command_key(tool: &str, args: &[String]) -> Option<String> {
     let (_, cwd, program, mut args) =
         crate::api_tool_dispatch::process_ops::parse_run_command_args(args);
     crate::api_tool_dispatch::process_ops::remove_repeated_executable_arg(&program, &mut args);
+    crate::api_tool_dispatch::process_ops::normalize_studio_npm_script(&program, &mut args);
     let program = program
         .rsplit(['/', '\\'])
         .next()
@@ -51,6 +52,22 @@ pub(crate) fn observe(
     success: bool,
     round: u32,
 ) {
+    // Reconcile legacy npm shorthand keys on checkpoint resume. Raw operation
+    // history remains unchanged; a fresh canonical check replaces either spelling.
+    for check in &mut outcome.checks {
+        if let Some(key)=check["command_key"].as_str() {
+            if let Ok(mut parts)=serde_json::from_str::<Value>(key) {
+                if parts.as_array().is_some_and(|a|a.len()==3) {
+                    if let (Some(program),Some(values))=(parts[0].as_str(),parts[2].as_array()) {
+                        let mut args:Vec<String>=values.iter().filter_map(|v|v.as_str().map(str::to_owned)).collect();
+                        if crate::api_tool_dispatch::process_ops::normalize_studio_npm_script(program,&mut args) {
+                            parts[2]=json!(args);check["command_key"]=json!(parts.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
     let receipt: Value = serde_json::from_str(result).unwrap_or(Value::Null);
     let changed = receipt["file_effects"].as_array().is_some_and(|effects| {
         effects
@@ -102,7 +119,7 @@ pub(crate) fn observe(
             && key.is_some()
             && (state["verified_revision"].is_null()
                 || state["verified_revision"] != state["revision"]);
-        let mut check = json!({"kind":"command","tool":tool,"status":if success{"passed"}else{"failed"},"exit_code":receipt["exit_code"],"source":"tool_executor","round":round,"verification":key.is_some(),"revision":state["revision"]});
+        let mut check = json!({"kind":"command","tool":tool,"status":if success{"passed"}else{"failed"},"exit_code":receipt["exit_code"],"source":"tool_executor","round":round,"verification":key.is_some(),"revision":state["revision"],"environment_revision":state["environment_revision"].as_u64().unwrap_or(0)});
         if !success && key.is_some() {
             let diagnostic = receipt["output"].as_str().unwrap_or(result);
             check["diagnostic"] = json!(crate::tool_output::truncate_utf8_by_bytes(diagnostic, 4096).0);
@@ -132,6 +149,13 @@ pub(crate) fn observe(
             state["verified_revision"] = state["revision"].clone();
             state["last_verified_round"] = json!(round);
             state["first_unverified_round"] = Value::Null;
+        }
+    }
+    if success && matches!(tool,"run_command"|"run_terminal") {
+        let (_,_,program,args)=crate::api_tool_dispatch::process_ops::parse_run_command_args(args);
+        if program.rsplit(['/', '\\']).next().unwrap_or(&program).trim_end_matches(".cmd").eq_ignore_ascii_case("npm")
+            && args.first().is_some_and(|s| matches!(s.as_str(),"install"|"ci"|"rebuild")) {
+            state["environment_revision"]=json!(state["environment_revision"].as_u64().unwrap_or(0)+1);
         }
     }
     if outcome.checks.iter().any(|c| c["kind"] == "command" && c["verification"] == true && c["status"] == "failed") {
@@ -167,6 +191,46 @@ pub(crate) fn repair_instruction(outcome: &RunOutcome) -> Option<String> {
         "Read the implicated source/configuration and correct the FIRST concrete diagnostic. Preserve the requested functionality and acceptance tests; do not weaken verification to turn a failure green."
     };
     Some(format!("[Repair the FIRST failing build/test dependency]\nCommand: {}\nDiagnostic: {}\nRecorded retry hint: {}\n{}\nDo not repeat broad repository surveys, enumerate tools again, or rerun an unchanged failing command. After a coherent source or documented environment repair, rerun THIS exact check. A different successful check does not resolve it. Report a precise blocker if it cannot be repaired with permitted tools.\n", failed["command_key"], diagnostic, failed["retry_hint"], action))
+}
+
+/// Extract only a bounded relative entrypoint from a concrete bundler error.
+/// No arbitrary prose path or parent traversal can become a repair target.
+pub(crate) fn missing_entrypoint(outcome: &RunOutcome) -> Option<String> {
+    for check in outcome.checks.iter().filter(|c|c["kind"]=="command" && c["verification"]==true && c["status"]=="failed") {
+        let diagnostic=check["diagnostic"].as_str().unwrap_or("");
+        let pattern=regex::Regex::new(r#"(?i)(?:could not resolve(?: entry module)?|failed to resolve)\s+["']?([^\s"']+)["']?(?:\s+from|\.|$)"#).ok()?;
+        let Some(capture)=pattern.captures(diagnostic) else {continue;};
+        let raw=capture.get(1)?.as_str().trim_end_matches('.');
+        let relative=raw.trim_start_matches("./").trim_start_matches('/');
+        if relative.is_empty() || relative.contains([':', '\\']) || relative.split('/').any(|part|part==".." || part.is_empty()) {continue;}
+        if ![".html",".tsx",".ts",".jsx",".js",".css"].iter().any(|suffix|relative.ends_with(suffix)) {continue;}
+        return Some(format!("workspace:/{relative}"));
+    }
+    None
+}
+
+/// Reject the same failed finite check before spawning another process when no
+/// source mutation or documented dependency installation has happened since it.
+pub(crate) fn reject_unchanged_verification(outcome: &mut RunOutcome, tool: &str, args: &[String]) -> Option<String> {
+    let key=command_key(tool,args)?;
+    let state=outcome.checks.iter().find(|c|c["kind"]=="execution_progress")?;
+    let unchanged=outcome.checks.iter().any(|c|c["kind"]=="command" && c["command_key"].as_str()==Some(&key)
+        && c["status"]=="failed" && c["revision"]==state["revision"]
+        && c["environment_revision"].as_u64().unwrap_or(0)==state["environment_revision"].as_u64().unwrap_or(0));
+    if !unchanged {return None;}
+    for state in &mut outcome.checks {
+        if state["kind"]=="execution_progress" {state["repair_inspections"]=json!(state["repair_inspections"].as_u64().unwrap_or(0)+1);}
+    }
+    Some(json!({"success":false,"error_code":"verification_requires_repair","process_started":false,
+        "command_key":key,"retry_hint":repair_instruction(outcome)}).to_string())
+}
+
+pub(crate) fn validate_missing_repair_action(target: &str, tool: &str, args: &[String]) -> Result<(), String> {
+    if matches!(tool,"write_file"|"write_code") && crate::api::parse_write_file_request(args).is_some_and(|(path,_)|
+        path.strip_prefix("workspace:/").unwrap_or(&path).trim_start_matches("./") == target.trim_start_matches("workspace:/")) {
+        return Ok(());
+    }
+    Err(format!("missing_entrypoint_repair_required: create only {target} with a permitted write_file/write_code call and generated application content before repeating commands or surveys. No process or file operation was started."))
 }
 
 pub(crate) fn repair_needs_focus(outcome: &RunOutcome) -> bool {
@@ -241,6 +305,37 @@ mod tests {
             success,
             round,
         );
+    }
+    #[test]
+    fn unchanged_failed_build_is_not_reexecuted_until_source_or_dependencies_change() {
+        let mut o=RunOutcome::default();let args=vec!["npm".into(),"run".into(),"build".into()];
+        build(&mut o,false,1);
+        assert!(reject_unchanged_verification(&mut o,"run_command",&args).is_some());
+        write(&mut o,2);
+        assert!(reject_unchanged_verification(&mut o,"run_command",&args).is_none());
+        build(&mut o,false,3);
+        observe(&mut o,"run_command",&["npm".into(),"install".into()],"{}",true,4);
+        assert!(reject_unchanged_verification(&mut o,"run_command",&args).is_none());
+        build(&mut o,false,5);
+        assert!(reject_unchanged_verification(&mut o,"run_command",&args).is_some());
+    }
+    #[test]
+    fn npm_build_and_npm_run_build_share_one_verification_identity() {
+        assert_eq!(command_key("run_command",&["npm".into(),"build".into()]),command_key("run_command",&["npm".into(),"run".into(),"build".into()]));
+    }
+    #[test]
+    fn missing_entrypoints_are_relative_and_require_the_exact_write() {
+        for diagnostic in ["Could not resolve entry module \"index.html\".", "Could not resolve \"./src/main.tsx\" from \"index.html\"", "Failed to resolve /src/main.tsx from workspace/index.html"] {
+            let mut o=RunOutcome::default();
+            observe(&mut o,"run_command",&["npm".into(),"run".into(),"build".into()],&json!({"output":diagnostic}).to_string(),false,1);
+            let target=missing_entrypoint(&o).unwrap();
+            assert!(validate_missing_repair_action(&target,"write_file",&[target.clone(),"generated content".into()]).is_ok());
+            assert!(validate_missing_repair_action(&target,"run_command",&["npm".into(),"build".into()]).is_err());
+            assert!(validate_missing_repair_action(&target,"write_file",&["workspace:/public/index.html".into(),"wrong".into()]).is_err());
+        }
+        let mut o=RunOutcome::default();
+        observe(&mut o,"run_command",&["npm".into(),"run".into(),"build".into()],r#"{"output":"Could not resolve \"../outside.ts\" from \"index.html\""}"#,false,1);
+        assert!(missing_entrypoint(&o).is_none());
     }
     #[test]
     fn first_build_diagnostic_survives_reads_resume_and_unrelated_success() {

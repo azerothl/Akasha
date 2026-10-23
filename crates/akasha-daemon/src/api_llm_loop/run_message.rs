@@ -2092,6 +2092,12 @@ pub(crate) async fn run_message_via_llm(
                 current_prompt.push_str(instruction);
             }
             let build_repair_focus = code_studio_disk_task && crate::studio_progress::repair_needs_focus(&run_outcome);
+            let build_missing_target = (!literal_only && build_repair_focus)
+                .then(|| crate::studio_progress::missing_entrypoint(&run_outcome)).flatten()
+                .filter(|path| !crate::api::resolve_tool_disk_path(path,Some(&tool_disk_workspace_root)).exists());
+            if let Some(target)=build_missing_target.as_ref() {
+                current_prompt.push_str(&format!("\n[Missing entrypoint repair boundary] The recorded build requires {target}, which is still absent. Inspection has not repaired it. This turn must generate that exact file using the advertised write tool; application content is your responsibility. Do not create a similar path under public/ or rerun a command before this file exists. Existing policy and file guards still apply.\n"));
+            }
             let repair_focus_this_turn = studio_repair_focus_next_turn || build_repair_focus;
             if repair_focus_this_turn && build_repair.is_none() {
                 current_prompt.push_str("\n[Stalled goal repair phase] Repeated surveys or failed checks have not changed the project. This turn prioritizes already permitted repair functions and retains source reads and verification commands needed for the repair. Read an implicated file when needed, then prefer one small targeted correction with search_replace, edit_file or apply_patch using the inspected current version. Preserve unrelated code and avoid a whole-file rewrite when a patch suffices, unless the original request explicitly requires a full rewrite. Do not repeat the failed command. No completed write is implied by a plan. If the recorded blocker is truly irreparable with these permissions, report that precise blocker.\n");
@@ -2112,23 +2118,26 @@ pub(crate) async fn run_message_via_llm(
                         }
                         insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"stalled_goal_repair","tools":names}));
                     }
+                    if build_missing_target.is_some() {
+                        names.retain(|name|matches!(name.as_str(),"write_file"|"write_code"));
+                    }
                     if literal_only {
                         names.retain(|name|matches!(name.as_str(),"read_file"|"write_file"|"write_code"));
                         insert_task_tracking_event(&store_path,task_id,"studio_native_tool_catalog",serde_json::json!({"selection":"literal_file_only","literal_values_bound":true,"tools":names}));
                     }
-                    (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else{crate::studio_tool_contract::native_definition(names)}])
+                    (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else if let Some(target)=build_missing_target.as_ref() {crate::studio_tool_contract::missing_entrypoint_definition(names,target)}else{crate::studio_tool_contract::native_definition(names)}])
                 })
             }else{None};
             let mut turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             // Workflow tools use the text protocol. Include their effective
             // announced names for ordinary turns, without widening literal-only turns.
-            if !literal_only && !studio_initial_kanban_planning {
+            if !literal_only && !studio_initial_kanban_planning && build_missing_target.is_none() {
                 if let (Some(names),Some(exec))=(turn_tool_names.as_mut(),tools_executor_snapshot.as_ref()) {
                     names.extend(crate::studio_capabilities::catalogue(&exec.policy,&assigned_agent).into_iter().filter(|row|row.announced && !crate::studio_tool_contract::supports_typed(&row.name)).map(|row|row.name));
                 }
             }
             let request = CompletionRequest {
-                require_tool: code_studio_disk_task && (goal_tracker.is_some() || (run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation())
+                require_tool: code_studio_disk_task && (build_missing_target.is_some() || goal_tracker.is_some() || (run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation())
                     || (!explicit_file_goals.is_empty() && super::studio_completion::requires_tool_retry(&current_prompt,&run_outcome.checks)))
                     && (matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code")
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
@@ -2980,6 +2989,20 @@ pub(crate) async fn run_message_via_llm(
                         let effective_role_tool = if actual_tool.is_empty() {
                             if tool_args.is_empty() { "read_skill" } else { "run_command" }
                         } else { actual_tool.as_str() };
+                        if let Some(target)=build_missing_target.as_ref() {
+                            if let Err(reason)=crate::studio_progress::validate_missing_repair_action(target,effective_role_tool,tool_args) {
+                                run_outcome.failed_tool_calls+=1;
+                                tool_results.push(reason);
+                                continue;
+                            }
+                        }
+                        if code_studio_disk_task {
+                            if let Some(reason)=crate::studio_progress::reject_unchanged_verification(&mut run_outcome,effective_role_tool,tool_args) {
+                                run_outcome.failed_tool_calls+=1;
+                                tool_results.push(reason);
+                                continue;
+                            }
+                        }
                         let role_check = invocation_role.as_deref().ok_or_else(|| "[studio] cannot resolve task role".to_string())
                             .and_then(|role| crate::studio_role_policy::check(role, effective_role_tool, tool_args, Some(&tool_disk_workspace_root)));
                         if let Err(reason) = role_check {

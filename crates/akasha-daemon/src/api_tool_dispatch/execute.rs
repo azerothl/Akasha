@@ -893,11 +893,14 @@ pub(crate) async fn execute_tool_call_impl(
             let (vault_specs, cwd_flag, cmd, mut cmd_args) = parse_run_command_args(args);
             let removed_duplicate_program =
                 remove_repeated_executable_arg(&cmd, &mut cmd_args);
-            let correction_note = removed_duplicate_program.then(|| {
+            let mut correction_note = removed_duplicate_program.then(|| {
                 format!(
                     "[run_command] Corrected malformed arguments: `program` already names `{cmd}`, so its duplicate first entry was removed from `args`. The correct shape is program `{cmd}` with args {cmd_args:?}.\n"
                 )
             }).unwrap_or_default();
+            if is_studio_workspace && super::process_ops::normalize_studio_npm_script(&cmd, &mut cmd_args) {
+                correction_note.push_str(&format!("[Studio command correction] npm script shorthand normalized to `{cmd}` with args {cmd_args:?}; manifest and policy checks still apply.\n"));
+            }
             let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
                 Ok(c) => c,
                 Err(e) => return (false, format!("[run_command] {}", e), None),
@@ -990,11 +993,14 @@ pub(crate) async fn execute_tool_call_impl(
             let (_vault_specs, cwd_flag, cmd, mut cmd_args) = parse_run_command_args(args);
             let removed_duplicate_program =
                 remove_repeated_executable_arg(&cmd, &mut cmd_args);
-            let correction_note = removed_duplicate_program.then(|| {
+            let mut correction_note = removed_duplicate_program.then(|| {
                 format!(
                     "[run_terminal] Corrected malformed arguments: `program` already names `{cmd}`, so its duplicate first entry was removed from `args`. The correct shape is program `{cmd}` with args {cmd_args:?}.\n"
                 )
             }).unwrap_or_default();
+            if is_studio_workspace && super::process_ops::normalize_studio_npm_script(&cmd, &mut cmd_args) {
+                correction_note.push_str(&format!("[Studio command correction] npm script shorthand normalized to `{cmd}` with args {cmd_args:?}; manifest and policy checks still apply.\n"));
+            }
             let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
                 Ok(c) => c,
                 Err(e) => return (false, format!("[run_terminal] {}", e), None),
@@ -1046,11 +1052,14 @@ pub(crate) async fn execute_tool_call_impl(
             let (_vault_specs, cwd_flag, cmd, mut cmd_args) = parse_run_command_args(args);
             let removed_duplicate_program =
                 remove_repeated_executable_arg(&cmd, &mut cmd_args);
-            let correction_note = removed_duplicate_program.then(|| {
+            let mut correction_note = removed_duplicate_program.then(|| {
                 format!(
                     "[run_command_background] Corrected malformed arguments: `program` already names `{cmd}`, so its duplicate first entry was removed from `args`. The correct shape is program `{cmd}` with args {cmd_args:?}.\n"
                 )
             }).unwrap_or_default();
+            if is_studio_workspace && super::process_ops::normalize_studio_npm_script(&cmd, &mut cmd_args) {
+                correction_note.push_str(&format!("[Studio command correction] npm script shorthand normalized to `{cmd}` with args {cmd_args:?}; manifest and policy checks still apply.\n"));
+            }
             let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
                 Ok(c) => c,
                 Err(e) => return (false, format!("[run_command_background] {}", e), None),

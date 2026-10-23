@@ -763,6 +763,21 @@ pub(crate) fn native_definition(names: Vec<String>) -> Value {
     json!({"type":"function","function":{"name":"studio_call","description":"Execute one Studio tool. The runtime assigns operation IDs; do not invent one. The tool-specific argument schema is mandatory. Existing files must be read before mutation; if expected_version is omitted, the runtime uses this task's latest successful read and rejects stale edits. For new files, pass expected_version: missing.","parameters":{"type":"object","additionalProperties":false,"required":["schema_version","tool","arguments"],"properties":{"schema_version":{"type":"integer","enum":[1]},"tool":{"type":"string","enum":names},"arguments":{"type":"object"}},"oneOf":variants}}})
 }
 
+/// Narrow a missing-entrypoint repair to its exact path, never its content.
+/// The model must still generate the file and the executor rechecks permissions,
+/// absence/version and the target before starting an operation.
+pub(crate) fn missing_entrypoint_definition(names: Vec<String>, target: &str) -> Value {
+    let mut definition=native_definition(names);
+    if let Some(variants)=definition.pointer_mut("/function/parameters/oneOf").and_then(Value::as_array_mut) {
+        for variant in variants {
+            let schema=&mut variant["properties"]["arguments"];
+            schema["properties"]["path"]["enum"]=json!([target]);
+            schema["properties"]["expected_version"]["enum"]=json!(["missing"]);
+        }
+    }
+    definition
+}
+
 /// Contextual constraints for literal-copy tasks. The model still emits the call;
 /// the executor never substitutes content or executes a schema example.
 pub(crate) fn literal_native_definition(names:Vec<String>,literals:&[(String,String)])->Value {

@@ -64,10 +64,32 @@ pub(crate) fn remove_repeated_executable_arg(command: &str, args: &mut Vec<Strin
     }
 }
 
+/// Correct unambiguous npm script shorthand in Studio only. The caller still
+/// checks the manifest, script, cwd and current policy before any process starts.
+pub(crate) fn normalize_studio_npm_script(command: &str, args: &mut Vec<String>) -> bool {
+    let name = command.rsplit(['/', '\\']).next().unwrap_or(command).trim_end_matches(".cmd").trim_end_matches(".exe");
+    if name.eq_ignore_ascii_case("npm") && args.first().is_some_and(|s| matches!(s.as_str(), "build" | "check" | "typecheck" | "lint")) {
+        args.insert(0, "run".into());
+        true
+    } else { false }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_run_command_args, remove_repeated_executable_arg};
 
+    #[test]
+    fn studio_npm_shorthand_maps_to_a_script_without_changing_other_commands() {
+        for program in ["npm", "npm.cmd"] {
+            let mut args=vec!["build".into(),"--".into(),"--mode".into(),"test".into()];
+            assert!(super::normalize_studio_npm_script(program,&mut args));
+            assert_eq!(args,["run","build","--","--mode","test"]);
+            assert!(!super::normalize_studio_npm_script(program,&mut args));
+        }
+        for (program,arg) in [("npm","test"),("npm","install"),("npm","rebuild"),("yarn","build"),("cargo","build")] {
+            let mut args=vec![arg.into()]; assert!(!super::normalize_studio_npm_script(program,&mut args));
+        }
+    }
     #[test]
     fn removes_only_an_exact_duplicate_of_the_executable() {
         let (_, _, program, mut args) = parse_run_command_args(&[
