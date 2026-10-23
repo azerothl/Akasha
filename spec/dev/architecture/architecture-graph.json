@@ -2,7 +2,7 @@
   "meta": {
     "product": "Akasha",
     "version": "0.12.0",
-    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, MCP stdio, Companion LAN pairing, GET /api/capabilities evidence flags, and Tauri/TUI clients (v0.12.0).",
+    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, MCP stdio, Companion LAN pairing, Code Studio project workflows, and Tauri/TUI clients (v0.12.0).",
     "defaultPort": 3876,
     "dataDir": "~/akasha (or AKASHA_DATA_DIR)",
     "sources": [
@@ -22,7 +22,15 @@
       "docs/COMPANION_SPEC.md",
       "docs/user/companion-lan.md",
       "crates/akasha-daemon/src/api_routes_companion.rs",
-      "crates/akasha-daemon/src/companion_discovery.rs"
+      "crates/akasha-daemon/src/companion_discovery.rs",
+      "crates/akasha-daemon/src/api_studio/",
+      "crates/akasha-daemon/src/studio_planning.rs",
+      "crates/akasha-daemon/src/studio_progress.rs",
+      "crates/akasha-daemon/src/studio_kanban_dispatch.rs",
+      "crates/akasha-daemon/src/studio_vite_scaffold.rs",
+      "crates/akasha-daemon/src/studio_dependencies.rs",
+      "crates/akasha-llm/src/studio_health.rs",
+      "docs/user/nouveautes.md"
     ]
   },
   "nodes": [
@@ -350,6 +358,26 @@
       "layer": "data",
       "crate": "akasha-store",
       "description": "Bundled rusqlite persistence for tasks, memory, facts, episodic events, schedules, metrics."
+    },
+    {
+      "id": "ui-code-studio",
+      "label": "Code Studio",
+      "layer": "clients",
+      "crate": "Akasha-code-studio (separate repository)",
+      "description": "Web client for project-scoped coding work: model selection, conversation, Kanban, editor, preview, and task recovery. Uses the Akasha daemon on port 3876.",
+      "apis": [
+        "POST /api/studio/projects",
+        "GET /api/studio/projects/:id/tickets",
+        "POST /api/message",
+        "GET /api/router/studio-options"
+      ]
+    },
+    {
+      "id": "studio-project-store",
+      "label": "Studio Projects & Kanban",
+      "layer": "data",
+      "crate": "akasha-daemon/api_studio",
+      "description": "Project-scoped metadata, ticket relationships, prerequisites, acceptance evidence, and task links persisted by the daemon."
     }
   ],
   "edges": [
@@ -676,6 +704,24 @@
       "from": "http-api",
       "to": "ch-companion-lan",
       "label": "discovery JSON / paired token / snapshot"
+    },
+    {
+      "id": "e55",
+      "from": "ui-code-studio",
+      "to": "http-api",
+      "label": "Studio HTTP API"
+    },
+    {
+      "id": "e56",
+      "from": "http-api",
+      "to": "studio-project-store",
+      "label": "project and ticket routes"
+    },
+    {
+      "id": "e57",
+      "from": "scheduler",
+      "to": "studio-project-store",
+      "label": "ready tickets and recorded outcomes"
     }
   ],
   "flows": [
@@ -913,6 +959,26 @@
         "ch-companion-lan",
         "http-api",
         "ch-companion-lan"
+      ]
+    },
+    {
+      "id": "flow-code-studio",
+      "name": "Code Studio project planning and execution",
+      "description": "Code Studio registers a project and its Kanban backlog with the daemon, submits a task, and follows the ticket scheduler, scoped tools, verification outcomes, and recovery through the same project workspace.",
+      "steps": [
+        "ui-code-studio",
+        "http-api",
+        "studio-project-store",
+        "main-agent",
+        "supervisor",
+        "scheduler",
+        "specialists",
+        "tools",
+        "tools-policy",
+        "studio-project-store",
+        "event-bus",
+        "http-api",
+        "ui-code-studio"
       ]
     }
   ]

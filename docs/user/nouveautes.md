@@ -1,3 +1,13 @@
+## Nouveautés 0.12.0
+
+- **Code Studio et Kanban** : les demandes de développement sont suivies par des tickets liés au projet. Le daemon peut planifier les phases, dispatcher les tickets prêts et conserver leur état lors d'une reprise.
+- **Exécution plus vérifiable** : contrôles des effets des outils, permissions mieux limitées au projet, progression et résultats de vérification conservés. Les blocages et reprises sont présentés sans les confondre avec une tâche terminée.
+- **Socle web** : création d'applications Vite, React et TypeScript strict avec dépendances verrouillées et configuration Vitest ; installation et réparation des dépendances et du build dans la boucle de travail de l'agent.
+- **Fournisseurs LLM** : qualification des routes d'outils, récupération bornée après erreurs de contexte et meilleure séparation entre une erreur de modèle et une indisponibilité de service.
+- **Companion LAN** : appairage protégé par un secret et authentification des appareils.
+- **Recherche et maintenance** : citations de recherche mieux contrôlées, diagnostics `akasha doctor` plus fidèles et dépendances mises à jour.
+
+---
 # Nouveautés
 
 ## Nouveautés 0.11.0
