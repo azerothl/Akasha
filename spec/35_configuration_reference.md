@@ -58,6 +58,29 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 
 **Note sur les valeurs entières** : les champs `max_tokens`, `top_k`, `num_ctx`, `num_gpu` acceptent des valeurs `u64` dans le YAML mais sont transmis comme `u32` aux providers. Les valeurs supérieures à `u32::MAX` (4 294 967 295) sont automatiquement limitées à `u32::MAX` (pas de troncature silencieuse).
 
+### Mode gratuit strict
+
+Dans **Routeur → Modèles gratuits**, activer **Activer le mode gratuit strict**. Le réglage est enregistré dans `llm_router.yaml` et prend effet sans redémarrage :
+
+```yaml
+free_models:
+  enabled: true
+```
+
+Une clé OpenRouter reste nécessaire : `providers.openrouter.api_key_ref: vault://openrouter_api_key` ou `OPENROUTER_API_KEY`. Après ajout d'une clé, redémarrer le daemon pour enregistrer le client. Le catalogue public est consultable sans clé et n'exécute aucune génération.
+
+Quand le mode est actif, Akasha actualise les catalogues OpenRouter et Hugging Face au démarrage si nécessaire, puis toutes les heures. Un cache local `free-models-cache.json` permet de conserver les résultats entre redémarrages ; les données vieilles d'une heure ne sont plus sélectionnées. Le daemon vérifie l'échéance chaque minute et avant une sélection ; une découverte échouée n'est retentée automatiquement qu'après 60 secondes. Le bouton d'actualisation permet une nouvelle lecture immédiate. Les téléchargements sont limités à 8 Mio par service et à dix secondes ; un échec n'efface pas le dernier catalogue valide.
+
+OpenRouter : seuls les modèles dont tous les tarifs publiés sont explicitement nuls sont retenus. Les tarifs absents ou inconnus ne prouvent pas la gratuité. La sélection vérifie la fenêtre de contexte estimée, le budget de sortie, les outils et la vision. Les réussites et la latence observées ordonnent les candidats ; un modèle récemment en échec est temporairement écarté. Les requêtes passent par un client distinct `openrouter_free`, sur l'origine officielle OpenRouter, avec `provider.max_price` fixé à zéro pour prompt, complétion, requête, image et audio. Aucun modèle payant n'est ajouté à ses secours et aucun plugin payant n'est activé par ce client.
+
+Hugging Face : les offres `is_free: true` d'un fournisseur `live` sont affichées. L'utilisation automatique reste bloquée car l'API ne fournit pas de plafond tarifaire nul vérifiable équivalent. Les crédits gratuits d'un compte ne sont pas traités comme un tarif nul. Un modèle téléchargeable sur le Hub ne signifie pas que son inférence distante est gratuite.
+
+Les appels classiques, le streaming, les appels internes et les choix explicites de modèles du routeur respectent cette politique. Un choix explicite payant est refusé plutôt que remplacé silencieusement. Les routes locales déjà configurées peuvent servir de secours. Sans candidat compatible ni route locale, Akasha renvoie une erreur `free_mode_no_compatible_model` et ne contacte aucun fournisseur payant. Désactiver le mode depuis l'interface exige une confirmation explicite du retour aux routes habituelles ; aucune autorisation n'est déduite d'un quota épuisé ou d'une panne. Les appels déjà partis avant l'activation ne peuvent pas être annulés par ce réglage. Les outils/services facturés séparément (par exemple la génération d'images via un connecteur) ont leurs propres réglages ; ce mode gouverne les complétions du routeur LLM.
+
+API : `GET /api/router/free-models`, `POST /api/router/free-models/refresh`, `POST /api/router/free-models` avec `{"enabled":true}`. Pour désactiver un mode actif, fournir explicitement `{"enabled":false,"confirm_paid_routes":true}` ; sinon le serveur renvoie `409`.
+
+Vérifications reproductibles : `cargo test --locked -p akasha-llm --lib`, `npm run test` et `npm run test:e2e:free-models` depuis `apps/akasha-ui` pour les deux dernières commandes. Le test ignoré `live_catalog_discovery_without_generation` peut être lancé explicitement pour relire les catalogues publics ; il ne lance aucune inférence.
+
 ### Fenêtre de contexte Ollama et sources volumineuses
 
 Avant une complétion Ollama, Akasha lit `/api/show` (capacité native du modèle et paramètre `num_ctx`) et `/api/ps` (fenêtre du modèle chargé). Ces métadonnées sont conservées 30 secondes, avec un délai de découverte maximal de deux secondes. La fenêtre effective suit cet ordre : allocation explicite de la requête/route, `model_options.<modele>.num_ctx`, `AKASHA_OLLAMA_NUM_CTX`, allocation du modèle chargé, valeur du Modelfile, puis repli prudent à 8 192 tokens. Elle reste bornée par la capacité native connue. Akasha ne demande pas automatiquement toute la capacité native, car cela peut dépasser la mémoire disponible.

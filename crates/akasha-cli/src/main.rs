@@ -3808,6 +3808,7 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     }
 
     let router_config = RoutingConfig {
+        free_models: Default::default(),
         global: GlobalConfig {
             enable_metrics: Some(true),
             enable_fallback: Some(true),

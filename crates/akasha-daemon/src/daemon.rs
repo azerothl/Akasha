@@ -425,13 +425,11 @@ impl Daemon {
             info!("OpenAI provider registered");
         }
         // Register OpenRouter if we have an API key (vault or env).
-        let openrouter_key = openrouter_cfg.as_ref().and_then(|c| {
-            crate::image_generation::resolve_api_key(
+        let openrouter_key = crate::image_generation::resolve_api_key(
                 vault_ref,
-                c.api_key_ref.as_ref(),
+                openrouter_cfg.as_ref().and_then(|c| c.api_key_ref.as_ref()),
                 "OPENROUTER_API_KEY",
-            )
-        });
+            );
         if openrouter_cfg.is_some() && openrouter_key.is_none() {
             warn!(
                 "providers.openrouter in llm_router.yaml but API key not resolved — OpenRouter will not be registered; routes will fall back (often to embedded). Check vault ref (use vault://openrouter_api_key) or OPENROUTER_API_KEY env, then restart daemon."
@@ -441,6 +439,9 @@ impl Daemon {
             let base_url = openrouter_cfg.as_ref().and_then(|c| c.base_url.clone());
             let site_url = openrouter_cfg.as_ref().and_then(|c| c.site_url.clone());
             let app_title = openrouter_cfg.as_ref().and_then(|c| c.app_title.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::OpenRouterProvider::new(
+                Some(k.clone()), None, site_url.clone(), app_title.clone(),
+            ).free_only()));
             llm_router.register_provider(Arc::new(akasha_llm::OpenRouterProvider::new(
                 Some(k),
                 base_url,
@@ -510,6 +511,7 @@ impl Daemon {
             info!("LLM Router: degraded mode (local providers only)");
         }
         let llm_router = Arc::new(llm_router);
+        llm_router.start_free_model_refresh(self.data_dir.clone());
         llm_router.embedded_apply_runtime();
 
         // Preload embedded model only when explicitly opted in via AKASHA_EMBEDDED_PRELOAD=1.

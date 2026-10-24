@@ -121,6 +121,7 @@ fn task_config_for_completion(
 }
 
 pub struct LLMRouter {
+    free_catalog: crate::free_models::FreeCatalog,
     config: Arc<RwLock<RoutingConfig>>,
     fallback: FallbackEngine,
     metrics: Arc<MetricsCollector>,
@@ -154,6 +155,7 @@ impl LLMRouter {
         };
         Self {
             config: Arc::new(RwLock::new(config)),
+            free_catalog: Default::default(),
             fallback,
             metrics,
             providers: HashMap::new(),
@@ -479,6 +481,7 @@ impl LLMRouter {
     /// Explicit setup check: no user files or project tools are executed.
     pub async fn qualify_studio_model(&self, provider: &str, model: &str) -> Result<crate::Qualification,String> {
         let route=self.studio_route(provider,model)?;
+        if self.free_mode_enabled() { return Err("free_mode_qualification_blocked: la qualification distante doit être effectuée hors mode gratuit ; aucun appel envoyé".into()); }
         let options=self.config.read().unwrap_or_else(|e|e.into_inner()).model_options.clone();
         let client=self.providers.get(provider).ok_or("studio_provider_not_registered")?;
         if self.degraded_mode && !client.is_local() {return Err("mode dégradé : qualification distante désactivée".into());}
@@ -489,6 +492,8 @@ impl LLMRouter {
         request: &CompletionRequest,
         entry: &crate::config::RouteEntry,
     ) -> Result<CompletionResponse, String> {
+        let guarded = self.strict_entry(request, entry).await?;
+        let entry = &guarded;
         let resolve = self.resolve();
         let provider = resolve(entry.provider.as_str())
             .ok_or_else(|| format!("provider '{}' is not registered", entry.provider))?;
@@ -528,6 +533,8 @@ impl LLMRouter {
         entry: &crate::config::RouteEntry,
         chunk_tx: std::sync::mpsc::Sender<String>,
     ) -> Result<CompletionResponse, String> {
+        let guarded = self.strict_entry(request, entry).await?;
+        let entry = &guarded;
         let resolve = self.resolve();
         let provider = resolve(entry.provider.as_str()).ok_or_else(|| {
             format!(
@@ -593,7 +600,12 @@ impl LLMRouter {
 
     fn resolve(&self) -> ProviderResolver {
         let providers = self.providers.clone();
-        Arc::new(move |name: &str| providers.get(name).cloned())
+        let config = self.config.clone();
+        Arc::new(move |name: &str| {
+            if config.read().unwrap_or_else(|e|e.into_inner()).free_models.enabled
+                && !matches!(name,"openrouter_free"|"ollama"|"bitnet"|"akasha_core"|"akasha_embedded") { return None; }
+            providers.get(name).cloned()
+        })
     }
 
     /// Complete using preferred_task_type if set, else classifier on prompt; then routing config and fallback.
@@ -650,6 +662,7 @@ impl LLMRouter {
             .global
             .enable_fallback
             .unwrap_or(true);
+        let task_config = self.strict_task_config(request, &task_config).await?;
         let task_config = task_config_for_completion(&task_config, enable_fallback);
 
         let resolve = self.resolve();
@@ -702,6 +715,7 @@ impl LLMRouter {
                 let preferred=routes.remove(index);routes.insert(0,preferred);
             }
         }
+        let routes = self.strict_routes(request, routes, selected.is_some()).await?;
         let resolve = self.resolve();
         let routes = routes.into_iter().filter(|entry| !self.degraded_mode || resolve(&entry.provider).is_some_and(|provider|provider.is_local())).collect();
         crate::bounded::complete_stream(request, routes, &resolve, &options, &self.metrics, chunk_tx, budget, allow_same_retry, &self.studio_health, selected.is_some(), observe).await
@@ -754,6 +768,7 @@ impl LLMRouter {
             .global
             .enable_fallback
             .unwrap_or(true);
+        let task_config = self.strict_task_config(request, &task_config).await?;
         let task_config = task_config_for_completion(&task_config, enable_fallback);
 
         let resolve = self.resolve();
@@ -1148,3 +1163,6 @@ mod tests {
     }
 
 }
+
+#[path = "free_routing.rs"]
+mod free_routing;

@@ -1967,6 +1967,7 @@ impl LLMProvider for OpenAIProvider {
 
 // --- OpenRouter (cloud, unified API compatible with OpenAI format)
 pub struct OpenRouterProvider {
+    free_only: bool,
     api_key: String,
     base_url: String,
     /// HTTP-Referer header (optional; from config or OPENROUTER_SITE_URL env; default https://Akasha.local).
@@ -2006,7 +2007,16 @@ impl OpenRouterProvider {
                 .to_string(),
             site_url,
             app_title,
+            free_only: false,
         }
+    }
+
+    /// Separate registry identity so a strict route cannot resolve an ordinary paid client.
+    pub fn free_only(mut self) -> Self {
+        self.free_only = true;
+        // The zero-price contract belongs to OpenRouter, never an arbitrary compatible endpoint.
+        self.base_url = "https://openrouter.ai/api/v1".into();
+        self
     }
 
     fn build_chat_completions_body(
@@ -2066,6 +2076,10 @@ impl OpenRouterProvider {
                 body["tool_choice"] = serde_json::json!("required");
             }
         }
+        if self.free_only {
+            body["provider"] = serde_json::json!({"max_price":{"prompt":0,"completion":0,"request":0,"image":0,"audio":0},"require_parameters":true});
+        }
+
         body
     }
 }
@@ -2073,7 +2087,7 @@ impl OpenRouterProvider {
 #[async_trait]
 impl LLMProvider for OpenRouterProvider {
     fn name(&self) -> &str {
-        "openrouter"
+        if self.free_only { "openrouter_free" } else { "openrouter" }
     }
 
     fn is_available(&self) -> bool {
@@ -3539,6 +3553,66 @@ mod ollama_failure_detail_tests {
         assert!(error.to_string().contains("runner stopped"));
     }
 }
+
+#[cfg(test)]
+mod free_price_tests {
+    use super::*;
+    #[tokio::test]
+    async fn zero_price_caps_reach_http_for_both_completion_paths() {
+        use std::io::{Read,Write};
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address=listener.local_addr().unwrap();
+        let server=std::thread::spawn(move || {
+            for streaming in [false,true] {
+                let (mut socket,_)=listener.accept().unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut bytes=Vec::new();let mut buffer=[0;4096];
+                let end=loop {
+                    let n=socket.read(&mut buffer).unwrap(); assert!(n>0); bytes.extend_from_slice(&buffer[..n]);
+                    if let Some(index)=bytes.windows(4).position(|part|part==b"\r\n\r\n") {break index+4;}
+                };
+                let headers=String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                let length:usize=headers.lines().find_map(|line|line.strip_prefix("content-length:").and_then(|n|n.trim().parse().ok())).unwrap();
+                while bytes.len()<end+length {let n=socket.read(&mut buffer).unwrap();assert!(n>0);bytes.extend_from_slice(&buffer[..n]);}
+                let body:serde_json::Value=serde_json::from_slice(&bytes[end..end+length]).unwrap();
+                for key in ["prompt","completion","request","image","audio"] {assert_eq!(body["provider"]["max_price"][key],0);}
+                assert_eq!(body["model"],"example:free");
+                let response=if streaming {
+                    assert_eq!(body["stream"],true);
+                    format!("data: {}\n\ndata: [DONE]\n\n",serde_json::json!({"model":"example:free","choices":[{"delta":{"content":"free answer"},"finish_reason":"stop"}]}))
+                } else {
+                    serde_json::json!({"model":"example:free","choices":[{"message":{"content":"free answer"}}]}).to_string()
+                };
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",if streaming {"text/event-stream"} else {"application/json"},response.len()).unwrap();
+            }
+        });
+        let mut provider=OpenRouterProvider::new(Some("mock-key".into()),None,None,None).free_only();
+        // Test-only loopback endpoint; the public constructor pins the official origin.
+        provider.base_url=format!("http://{address}");
+        let request:CompletionRequest=serde_json::from_value(serde_json::json!({"prompt":"hello"})).unwrap();
+        let response=provider.complete(&request,Duration::from_secs(3),Some("example:free")).await.unwrap();
+        assert_eq!(response.text,"free answer");
+        let (tx,rx)=std::sync::mpsc::channel();
+        let response=provider.complete_stream(&request,Duration::from_secs(3),Some("example:free"),tx).await.unwrap();
+        assert_eq!(response.text,"free answer");
+        assert_eq!(rx.try_iter().collect::<String>(),"free answer");
+        server.join().unwrap();
+    }
+    #[test]
+    fn free_transport_caps_all_price_dimensions_on_the_real_openrouter_origin() {
+        let request: CompletionRequest = serde_json::from_value(serde_json::json!({"prompt":"hello"})).unwrap();
+        let provider = OpenRouterProvider::new(Some("test".into()),Some("https://untrusted.invalid".into()),None,None).free_only();
+        assert_eq!(provider.name(), "openrouter_free");
+        assert_eq!(provider.base_url,"https://openrouter.ai/api/v1");
+        let body = provider.build_chat_completions_body(&request,"example:free");
+        for key in ["prompt","completion","request","image","audio"] { assert_eq!(body["provider"]["max_price"][key],0); }
+        assert_eq!(body["provider"]["require_parameters"],true);
+        assert!(body.get("models").is_none() && body.get("plugins").is_none());
+        let ordinary=OpenRouterProvider::new(None,None,None,None);
+        assert!(ordinary.build_chat_completions_body(&request,"paid").get("provider").is_none());
+    }
+}
+
 #[cfg(test)]
 #[path = "adaptive_context_tests.rs"]
 mod adaptive_context_tests;
