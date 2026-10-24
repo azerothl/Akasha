@@ -6,6 +6,8 @@ mod studio_health;
 pub use studio_health::Qualification;
 pub use bounded::AttemptObserver;
 pub mod config;
+pub mod ollama_context;
+mod context_compaction;
 mod conversation;
 mod lfm2;
 mod qwen35;

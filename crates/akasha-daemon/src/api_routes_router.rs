@@ -789,33 +789,27 @@ if method == "GET" && path.starts_with("/api/router/ollama/show") {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
                 // Extract context_length from model_info (e.g. "gemma3.context_length": 131072)
-                let model_info = json.get("model_info").and_then(|m| m.as_object());
-                let context_length = model_info.and_then(|m| {
-                    m.iter()
-                        .find(|(k, _)| k.ends_with("context_length"))
-                        .and_then(|(_, v)| v.as_u64())
-                });
+                let running = client.get(format!("{base_url}/api/ps"))
+                    .timeout(std::time::Duration::from_secs(2)).send().await;
+                let running = match running { Ok(response) if response.status().is_success() => response.json::<serde_json::Value>().await.unwrap_or_default(), _ => serde_json::Value::Null };
+                let limits = akasha_llm::ollama_context::OllamaContextLimits::from_metadata(&json, &running, &model);
+                let configured = llm_router.effective_context_window("ollama", &model);
+                let (effective, context_source) = limits.effective(configured);
+                let context_length = limits.native_max;
                 // num_ctx from parameters string (e.g. "num_ctx 2048")
                 let parameters = json
                     .get("parameters")
                     .and_then(|p| p.as_str())
                     .unwrap_or("");
-                let num_ctx = parameters
-                    .lines()
-                    .find(|l| l.trim().starts_with("num_ctx"))
-                    .and_then(|l| {
-                        l.trim()
-                            .trim_start_matches("num_ctx")
-                            .trim()
-                            .split_whitespace()
-                            .next()
-                    })
-                    .and_then(|s| s.parse::<u64>().ok());
+                let num_ctx = limits.model_default;
                 let body = serde_json::json!({
                     "model": model,
                     "base_url": base_url,
                     "context_length_max": context_length,
                     "num_ctx": num_ctx,
+                    "running_context_length": limits.running_context,
+                    "effective_num_ctx": effective,
+                    "context_source": context_source,
                     "parameters_preview": if parameters.len() > 200 { format!("{}...", &parameters[..parameters.floor_char_boundary(200)]) } else { parameters.to_string() }
                 });
                 return Some(json_response("200 OK", &body.to_string()));

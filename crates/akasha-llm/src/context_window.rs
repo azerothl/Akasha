@@ -3,7 +3,7 @@ use crate::{CompletionRequest, ConversationMessage, MessageRole};
 use serde_json::{json, Value};
 use crate::provider::ProviderError;
 
-fn bytes(request: &CompletionRequest) -> usize {
+pub(crate) fn bytes(request: &CompletionRequest) -> usize {
     request.prompt.len() + request.system_prompt.as_ref().map_or(0, String::len)
         + request.conversation.iter().flatten().map(|m| m.content.len() + m.tool_calls.iter().map(|c| c.to_string().len()).sum::<usize>() + 128).sum::<usize>()
         + serde_json::to_vec(&request.tools).map_or(0, |v| v.len()) + 2048
