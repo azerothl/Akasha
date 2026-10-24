@@ -1,6 +1,7 @@
 //! Akasha CLI - start, stop, doctor
 
 mod embedded_spec;
+mod daemon_processes;
 
 use akasha_core::{env_file_line_entry, env_file_line_key, parse_env_file_content};
 use akasha_vault::Vault;
@@ -61,6 +62,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Show the configured daemon's state without starting it (alias: info)
+    #[command(alias = "info")]
+    Status {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// List local daemon instances or forcibly terminate a specific instance
+    Daemon {
+        #[command(subcommand)]
+        sub: DaemonSub,
+    },
     /// Ensure daemon is running (start if needed) and print status summary
     Up,
     /// Start the Akasha daemon (with watchdog supervision in background)
@@ -176,6 +190,15 @@ enum Commands {
         /// Service profile id (ollama, homeassistant). Omit to list profiles.
         service: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum DaemonSub {
+    /// List local Akasha daemon processes and their launchers
+    #[command(alias = "ps")]
+    List { #[arg(long)] json: bool },
+    /// Forcibly stop this PID and its associated Akasha supervisor/daemon
+    Kill { pid: u32 },
 }
 
 #[derive(Subcommand)]
@@ -794,6 +817,11 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Status { json, port } => daemon_processes::status(port, json),
+        Commands::Daemon { sub } => match sub {
+            DaemonSub::List { json } => daemon_processes::list(json),
+            DaemonSub::Kill { pid } => daemon_processes::kill(pid),
+        },
         Commands::Up => cmd_up(),
         Commands::Start { foreground } => cmd_start(foreground),
         Commands::Stop => cmd_stop(),
@@ -4243,63 +4271,7 @@ fn cmd_start(foreground: bool) -> anyhow::Result<()> {
 }
 
 fn cmd_stop() -> anyhow::Result<()> {
-    let mut stopped = false;
-
-    if let Ok(pid_str) = std::fs::read_to_string(supervisor_pid_path()) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            #[cfg(windows)]
-            {
-                let _ = Command::new("taskkill")
-                    .args(["/F", "/PID", &pid.to_string()])
-                    .status();
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = Command::new("kill").arg(pid.to_string()).status();
-            }
-            let _ = std::fs::remove_file(supervisor_pid_path());
-            stopped = true;
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        let output = Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq akasha-daemon.exe", "/FO", "CSV"])
-            .output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("akasha-daemon") {
-            Command::new("taskkill")
-                .args(["/F", "/IM", "akasha-daemon.exe"])
-                .status()?;
-            stopped = true;
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        let output = Command::new("pgrep")
-            .args(["-f", "akasha-daemon"])
-            .output()?;
-        if output.status.success() {
-            let pids: Vec<&str> = std::str::from_utf8(&output.stdout)?
-                .trim()
-                .split_whitespace()
-                .collect();
-            for pid in pids {
-                let _ = Command::new("kill").arg(pid).status();
-            }
-            stopped = true;
-        }
-    }
-
-    if stopped {
-        println!("Akasha daemon stopped");
-    } else {
-        println!("Akasha daemon is not running");
-    }
-
-    Ok(())
+    daemon_processes::stop_all()
 }
 
 /// Fix an existing env file: report invalid lines, add missing recommended keys with default values.

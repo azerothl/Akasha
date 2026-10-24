@@ -44,3 +44,29 @@ impl HealthState {
 }
 
 pub type HealthStatus = Arc<RwLock<HealthState>>;
+
+static RUNTIME_HEALTH: std::sync::OnceLock<HealthStatus> = std::sync::OnceLock::new();
+pub(crate) fn register_runtime(health: HealthStatus) { let _ = RUNTIME_HEALTH.set(health); }
+pub(crate) async fn runtime_status(data_dir: &std::path::Path) -> serde_json::Value {
+    let state = match RUNTIME_HEALTH.get() { Some(health) => Some(health.read().await.clone()), None => None };
+    serde_json::json!({
+        "status":"ok", "service":"akasha-daemon", "pid":std::process::id(),
+        "version":env!("CARGO_PKG_VERSION"), "data_dir":data_dir,
+        "uptime_seconds":state.as_ref().map(|state|state.started_at.elapsed().as_secs()),
+        "healthy":state.as_ref().map(|state|state.healthy),
+        "degraded":state.as_ref().map(|state|state.degraded),
+        "degraded_reason":state.as_ref().and_then(|state|state.degraded_reason.clone()),
+        "heartbeat_age_seconds":state.as_ref().map(|state|state.last_heartbeat.elapsed().as_secs()),
+    })
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    #[tokio::test]
+    async fn status_identifies_the_process_without_changing_legacy_status_field() {
+        let value=super::runtime_status(std::path::Path::new("data-dir")).await;
+        assert_eq!(value["status"],"ok");assert_eq!(value["service"],"akasha-daemon");
+        assert_eq!(value["pid"],std::process::id());assert_eq!(value["version"],env!("CARGO_PKG_VERSION"));
+        assert_eq!(value["data_dir"],"data-dir");
+    }
+}
