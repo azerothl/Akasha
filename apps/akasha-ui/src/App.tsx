@@ -3,6 +3,7 @@ import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary }
 import { invoke } from "@tauri-apps/api/core";
 import { E2E_WEB, e2eDaemonGetJson, e2eDaemonHttpUrl } from "./e2eDaemon";
 import { taskTitle, taskStatus } from "./tasks/presentation";
+import { useHumanReply } from "./tasks/useHumanReply";
 
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
 import {
@@ -2780,31 +2781,40 @@ function App() {
   }, [health?.ok]);
 
   // Fetch all pending human-input (agent questions) on load and periodically, so user sees them after relaunch or when popup was missed.
+  const humanInputSnapshotVersion = useRef(0);
   const fetchPendingHumanInput = useCallback(async () => {
     if (!health?.ok) return;
+    const version = ++humanInputSnapshotVersion.current;
     try {
       const data = await invoke<{ pending?: Array<{ task_id: string; question: string; context?: string; choices?: string[]; request_id?: string }> }>(
         "get_pending_human_input",
         { port: DAEMON_PORT }
       );
-      if (data?.pending?.length) {
-        setPendingHumanInput((prev) => {
-          const next = { ...prev };
-          for (const p of data.pending!) {
-            next[p.task_id] = {
-              question: p.question ?? "",
-              context: p.context ?? "",
-              choices: p.choices,
-              request_id: p.request_id,
-            };
-          }
-          return next;
-        });
+      if (version === humanInputSnapshotVersion.current && Array.isArray(data?.pending)) {
+        setPendingHumanInput(Object.fromEntries(data.pending.map((p) => [p.task_id, {
+          question: p.question ?? "", context: p.context ?? "", choices: p.choices, request_id: p.request_id,
+        }])));
       }
     } catch {
       /* ignore */
     }
   }, [health?.ok]);
+
+  const humanReply = useHumanReply({
+    pending: pendingHumanInput, port: DAEMON_PORT, english: locale === "en", refresh: fetchPendingHumanInput,
+    accepted: (taskId, requestId) => {
+      humanInputSnapshotVersion.current += 1;
+      setPendingHumanInput((prev) => {
+        if (prev[taskId]?.request_id !== requestId) return prev;
+        const next = { ...prev }; delete next[taskId]; return next;
+      });
+      setHumanInputFreeText("");
+      setInlineHumanReplyText("");
+    },
+  });
+  useEffect(() => {
+    if (humanInputModalTaskId && !pendingHumanInput[humanInputModalTaskId]) setHumanInputModalTaskId(null);
+  }, [humanInputModalTaskId, pendingHumanInput]);
 
   useEffect(() => {
     fetchPendingHumanInput();
@@ -6213,10 +6223,19 @@ function App() {
             </button>
           </div>
         )}
+        {humanReply.error && !humanInputModalTaskId && (
+          <div className="human-input-error" role="alert">
+            {humanReply.error}
+            <button type="button" onClick={() => { humanReply.clearError(); void fetchPendingHumanInput(); }}>
+              {locale === "en" ? "Refresh questions" : "Actualiser les questions"}
+            </button>
+          </div>
+        )}
         {humanInputModalTaskId && pendingHumanInput[humanInputModalTaskId] && (
           <div className="human-input-overlay" role="dialog" aria-labelledby="human-input-title" aria-modal="true">
             <div className="human-input-modal">
               <h2 id="human-input-title">{t("human_input.action_required")}</h2>
+              {humanReply.error && <p className="human-input-error" role="alert">{humanReply.error}</p>}
               <p className="human-input-question">{pendingHumanInput[humanInputModalTaskId].question}</p>
               {pendingHumanInput[humanInputModalTaskId].context && (
                 <p className="human-input-context">{pendingHumanInput[humanInputModalTaskId].context}</p>
@@ -6228,15 +6247,9 @@ function App() {
                       key={i}
                       type="button"
                       className="human-input-choice-btn"
+                      disabled={humanReply.busy}
                       onClick={async () => {
-                        try {
-                          await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, requestId: pendingHumanInput[humanInputModalTaskId]?.request_id, response: choice, port: DAEMON_PORT });
-                          setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
-                          setHumanInputModalTaskId(null);
-                          setHumanInputFreeText("");
-                        } catch (e) {
-                          console.error(e);
-                        }
+                        await humanReply.submit(humanInputModalTaskId, choice);
                       }}
                     >
                       {choice}
@@ -6250,6 +6263,7 @@ function App() {
                 ) : null}
                 <textarea
                   id="human-input-free-textarea"
+                  disabled={humanReply.busy}
                   rows={3}
                   value={humanInputFreeText}
                   onChange={(e) => setHumanInputFreeText(e.target.value)}
@@ -6257,21 +6271,15 @@ function App() {
                 />
                 <button
                   id="human-input-submit-btn"
+                  disabled={humanReply.busy}
                   type="button"
                   onClick={async () => {
                     const text = humanInputFreeText.trim();
                     if (!text) return;
-                    try {
-                      await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, requestId: pendingHumanInput[humanInputModalTaskId]?.request_id, response: text, port: DAEMON_PORT });
-                      setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
-                      setHumanInputModalTaskId(null);
-                      setHumanInputFreeText("");
-                    } catch (e) {
-                      console.error(e);
-                    }
+                    await humanReply.submit(humanInputModalTaskId, text);
                   }}
                 >
-                  {t("human_input.submit")}
+                  {humanReply.busy ? (locale === "en" ? "Sending…" : "Envoi…") : t("human_input.submit")}
                 </button>
               </div>
               <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label={t("common.close")}>
@@ -6342,6 +6350,7 @@ function App() {
                 <button
                   type="button"
                   className="human-input-choice-btn"
+                        disabled={humanReply.busy}
                   onClick={async () => {
                     const payload = { ...devicePendingRequest };
                     setDevicePendingRequest(null);
@@ -6464,6 +6473,7 @@ function App() {
                 <button
                   type="button"
                   className="human-input-choice-btn"
+                        disabled={humanReply.busy}
                   onClick={async () => {
                     try {
                       await invoke("post_device_result", {
@@ -6727,18 +6737,9 @@ function App() {
                         key={j}
                         type="button"
                         className="message-ask-user-choice-tag"
+                        disabled={humanReply.busy}
                         onClick={async () => {
-                          try {
-                            await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, requestId: pendingHumanInput[pendingTaskIdForReply]?.request_id, response: choice, port: DAEMON_PORT });
-                            setPendingHumanInput((prev) => {
-                              const next = { ...prev };
-                              delete next[pendingTaskIdForReply];
-                              return next;
-                            });
-                            setHumanInputModalTaskId((c) => (c === pendingTaskIdForReply ? null : c));
-                          } catch (e) {
-                            console.error(e);
-                          }
+                          await humanReply.submit(pendingTaskIdForReply, choice);
                         }}
                       >
                         {choice}
@@ -7029,15 +7030,9 @@ function App() {
                           key={i}
                           type="button"
                           className="chat-inline-human-reply-choice-btn"
+                        disabled={humanReply.busy}
                           onClick={async () => {
-                            try {
-                              await invoke("post_task_human_reply", { taskId: pendingTaskId, requestId: pendingHumanInput[pendingTaskId]?.request_id, response: choice, port: DAEMON_PORT });
-                              setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
-                              setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
-                              setInlineHumanReplyText("");
-                            } catch (e) {
-                              console.error(e);
-                            }
+                            await humanReply.submit(pendingTaskId, choice);
                           }}
                         >
                           {choice}
@@ -7058,6 +7053,7 @@ function App() {
                     <div className="chat-inline-human-reply-free-row">
                       <textarea
                         id="inline-human-reply-textarea"
+                        disabled={humanReply.busy}
                         rows={3}
                         value={inlineHumanReplyText}
                         onChange={(e) => setInlineHumanReplyText(e.target.value)}
@@ -7065,21 +7061,15 @@ function App() {
                       />
                       <button
                         id="inline-human-reply-submit"
+                  disabled={humanReply.busy}
                         type="button"
                         onClick={async () => {
                           const text = inlineHumanReplyText.trim();
                           if (!text) return;
-                          try {
-                            await invoke("post_task_human_reply", { taskId: pendingTaskId, requestId: pendingHumanInput[pendingTaskId]?.request_id, response: text, port: DAEMON_PORT });
-                            setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
-                            setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
-                            setInlineHumanReplyText("");
-                          } catch (e) {
-                            console.error(e);
-                          }
+                          await humanReply.submit(pendingTaskId, text);
                         }}
                       >
-                        {t("human_input.submit")}
+                        {humanReply.busy ? (locale === "en" ? "Sending…" : "Envoi…") : t("human_input.submit")}
                       </button>
                     </div>
                   </div>

@@ -1633,12 +1633,13 @@ async fn post_task_human_reply(task_id: String, response: String, request_id: Op
     let url = format!("{}/api/tasks/{}/human-reply", daemon_base_url(port), task_id);
     let client = http_client();
     let body = serde_json::json!({ "response": response, "request_id": request_id });
-    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("{}", resp.status()));
+    let resp = client.post(&url).json(&body).timeout(std::time::Duration::from_secs(15)).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json = resp.json::<serde_json::Value>().await;
+    if !status.is_success() {
+        return Err(format!("{}: {}", status, json.as_ref().ok().and_then(|value| value.get("error")).and_then(|e| e.as_str()).unwrap_or("human_reply_failed")));
     }
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(json)
+    json.map_err(|e| e.to_string())
 }
 
 /// Schedules: GET /api/schedules (FR-028, Calendrier).
