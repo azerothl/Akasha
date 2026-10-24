@@ -16,6 +16,7 @@ import { useI18n } from "./useI18n";
 
 
 import { AppNavigation } from "./components/AppNavigation";
+import { FreeModelsPanel } from "./components/FreeModelsPanel";
 import { PermissionsBell } from "./components/PermissionsBell";
 import { SteeringQueueBell } from "./components/SteeringQueueBell";
 import { OnboardingWizard, readSetupWizardPending } from "./components/OnboardingWizard";
@@ -7444,6 +7445,7 @@ function App() {
             className="panel router-panel"
           >
             <h2 className="panel-title">Métriques du routeur LLM</h2>
+            <FreeModelsPanel port={DAEMON_PORT} />
             {routerLoading && (
               <p className="panel-loading" aria-busy="true">
                 <span className="panel-loading-spinner" aria-hidden />

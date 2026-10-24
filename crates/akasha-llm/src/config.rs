@@ -22,6 +22,8 @@ pub struct ModelOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingConfig {
     #[serde(default)]
+    pub free_models: crate::free_models::FreeModeConfig,
+    #[serde(default)]
     pub global: GlobalConfig,
     #[serde(default)]
     pub task_types: HashMap<String, TaskTypeConfig>,
@@ -256,6 +258,7 @@ impl RoutingConfig {
                 default_timeout_secs: Some(300),
                 default_max_retries: Some(2),
             },
+            free_models: Default::default(),
             task_types,
             providers: HashMap::new(),
             model_options: HashMap::new(),

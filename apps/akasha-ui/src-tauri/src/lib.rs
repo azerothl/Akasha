@@ -398,6 +398,24 @@ async fn get_router_models(port: Option<u16>) -> Result<std::collections::HashMa
 
 /// GET /api/router/routes — primary + fallback per category (for /routes, /models list).
 #[tauri::command]
+async fn free_models_control(action: String, enabled: Option<bool>, confirm_paid_routes: Option<bool>, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let base = format!("{}/api/router/free-models", daemon_base_url(port.unwrap_or(DAEMON_PORT)));
+    let client = http_client();
+    let request = match action.as_str() {
+        "status" => client.get(&base),
+        "refresh" => client.post(format!("{base}/refresh")),
+        "set" => client.post(&base).json(&serde_json::json!({"enabled":enabled.ok_or("enabled required")?,"confirm_paid_routes":confirm_paid_routes.unwrap_or(false)})),
+        _ => return Err("Unknown free-model action".into()),
+    };
+    let response = request.timeout(std::time::Duration::from_secs(30)).send().await.map_err(|error|error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|error|error.to_string())?;
+    if !status.is_success() { return Err(format!("{status}: {body}")); }
+    serde_json::from_str(&body).map_err(|error|error.to_string())
+}
+
+/// GET /api/router/routes — primary + fallback per category (for /routes, /models list).
+#[tauri::command]
 async fn get_router_routes(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/router/routes", daemon_base_url(port));
@@ -2815,6 +2833,7 @@ pub fn run() {
             install_skill,
             uninstall_skill,
             get_router_routes,
+            free_models_control,
             set_router_route,
             get_voice_status,
             voice_stt_transcribe,

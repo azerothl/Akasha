@@ -34,6 +34,27 @@ pub async fn try_handle(
     let llm_router = ctx.llm_router;
     let ollama_base_url = ctx.ollama_base_url;
     let task_usage_store = ctx.task_usage_store;
+if method == "GET" && path == "/api/router/free-models" {
+    return Some(json_response("200 OK", &llm_router.free_models_status().to_string()));
+}
+if method == "POST" && path == "/api/router/free-models/refresh" {
+    llm_router.refresh_free_models(true).await;
+    return Some(json_response("200 OK", &llm_router.free_models_status().to_string()));
+}
+if method == "POST" && path == "/api/router/free-models" {
+    let payload = body.and_then(|bytes|serde_json::from_slice::<serde_json::Value>(bytes).ok());
+    let Some(enabled) = payload.as_ref().and_then(|value|value["enabled"].as_bool()) else {
+        return Some(json_response("400 Bad Request", r#"{"error":"enabled_boolean_required"}"#));
+    };
+    let confirmed = payload.as_ref().is_some_and(|value|value["confirm_paid_routes"] == true);
+    match llm_router.save_free_mode(enabled, confirmed, &data_dir.join("llm_router.yaml")) {
+        Ok(()) => {
+            if enabled { llm_router.refresh_free_models(false).await; }
+            return Some(json_response("200 OK", &llm_router.free_models_status().to_string()));
+        }
+        Err(error) => return Some(json_response("409 Conflict", &serde_json::json!({"error":error}).to_string())),
+    }
+}
 if method == "GET" && path == "/api/router/studio-options" {
     return Some(json_response("200 OK", &crate::studio_execution::catalog(llm_router).to_string()));
 }

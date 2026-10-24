@@ -12,6 +12,7 @@ mod qwen35;
 pub use conversation::{ConversationMessage, MessageRole};
 pub mod discovery;
 pub mod fallback;
+pub mod free_models;
 pub mod metrics;
 pub mod provider;
 pub mod retry;
