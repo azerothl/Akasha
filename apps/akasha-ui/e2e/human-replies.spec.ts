@@ -1,5 +1,17 @@
 import { expect, test } from "@playwright/test";
 
+type HumanReplyFixture = {
+  pending: Array<{ task_id: string; request_id: string; question: string; context: string; choices: string[] }>;
+  replies: Array<Record<string, unknown>>;
+  failure: string;
+};
+
+declare global {
+  interface Window {
+    humanReplyFixture: HumanReplyFixture;
+  }
+}
+
 test.beforeEach(async ({ page }) => {
   await page.clock.install();
   await page.addInitScript(() => {
@@ -43,7 +55,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("expired question closes the dialog and explains the failure", async ({ page }) => {
-  await page.evaluate(() => { (window as any).humanReplyFixture.failure = "expired"; });
+  await page.evaluate(() => { window.humanReplyFixture.failure = "expired"; });
   await page.getByRole("dialog").getByRole("button", { name: "Continuer", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Action requise" })).toHaveCount(0);
   await expect(page.getByRole("alert")).toContainText("Cette question a expiré");
@@ -51,20 +63,20 @@ test("expired question closes the dialog and explains the failure", async ({ pag
 });
 
 test("changed question requires a fresh click and submits its new identity", async ({ page }) => {
-  await page.evaluate(() => { (window as any).humanReplyFixture.failure = "changed"; });
+  await page.evaluate(() => { window.humanReplyFixture.failure = "changed"; });
   const dialog = page.getByRole("dialog", { name: "Action requise" });
   await dialog.getByRole("button", { name: "Continuer", exact: true }).click();
   await expect(dialog.getByRole("alert")).toContainText("La question a changé");
   await expect(dialog).toContainText("Nouvelle décision requise");
-  expect(await page.evaluate(() => (window as any).humanReplyFixture.replies.length)).toBe(1);
+  expect(await page.evaluate(() => window.humanReplyFixture.replies.length)).toBe(1);
   await dialog.getByRole("button", { name: "Continuer", exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  expect(await page.evaluate(() => (window as any).humanReplyFixture.replies[1].requestId)).toBe("second");
+  expect(await page.evaluate(() => window.humanReplyFixture.replies[1].requestId)).toBe("second");
 });
 
 test("an empty server snapshot removes a stale question without a reply", async ({ page }) => {
-  await page.evaluate(() => { (window as any).humanReplyFixture.pending = []; });
+  await page.evaluate(() => { window.humanReplyFixture.pending = []; });
   await page.clock.fastForward(26000);
   await expect(page.getByRole("dialog", { name: "Action requise" })).toHaveCount(0);
-  expect(await page.evaluate(() => (window as any).humanReplyFixture.replies.length)).toBe(0);
+  expect(await page.evaluate(() => window.humanReplyFixture.replies.length)).toBe(0);
 });
