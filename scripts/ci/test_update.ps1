@@ -86,7 +86,7 @@ Assert ((Get-UpdateHash (Join-Path $install 'akasha-daemon.exe')) -eq $before) '
 # Simulate failure after the daemon has been replaced, and verify rollback.
 function Move-Item {
     [CmdletBinding()]param([string]$LiteralPath, [string]$Destination, [switch]$Force)
-    if ($Destination -eq (Join-Path $install 'akasha-install.json') -and $LiteralPath.EndsWith('.update-new')) { throw 'Injected replacement failure' }
+    if ([IO.Path]::GetFileName($Destination) -ieq 'akasha-install.json' -and [IO.Path]::GetFileName($LiteralPath) -ieq 'akasha-install.json.update-new') { throw 'Injected replacement failure' }
     Microsoft.PowerShell.Management\Move-Item @PSBoundParameters
 }
 Assert-Throws { Apply-AkashaUpdate } 'Injected replacement failure was ignored'
