@@ -81,8 +81,20 @@ Si vous avez installé l'**application desktop** (Akasha UI), lancez-la ; elle s
 
 | Commande | Description |
 |----------|-------------|
-| `akasha update check` | Vérifie si une nouvelle version est disponible (interroge le site vitrine). Affiche l'URL de téléchargement si une mise à jour existe. |
-| `akasha update install` | Ouvre la page de téléchargement de la dernière release dans le navigateur. |
+| `akasha update check` | Windows installé avec le nouveau setup : vérifie et prépare les seuls composants modifiés. Autres installations : vérifie la version sur le site. |
+| `akasha update install` | Windows : demande confirmation, applique la mise à jour préparée et redémarre le daemon s’il était actif. Linux/macOS : ouvre la page de téléchargement. |
+
+Sur les nouvelles installations Windows CPU/CUDA, le daemon vérifie les mises à
+jour au plus une fois par jour et télécharge les composants modifiés en arrière-plan.
+La bannière **Mise à jour du moteur Akasha** propose ensuite **Installer et
+redémarrer le moteur**. La confirmation est obligatoire ; attendez la fin des tâches
+en cours avant de l’accepter. La mise à jour conserve vos modèles, bases et réglages.
+L’application desktop elle-même conserve ses installateurs séparés.
+
+Une installation plus ancienne doit être remplacée une fois par une distribution
+incluant `scripts/update.ps1` et `akasha-install.json`. Ensuite, aucun ZIP complet
+n’est nécessaire pour mettre à jour le moteur. Les fichiers inchangés, notamment
+les DLL CUDA, sont réutilisés. Un exécutable modifié est téléchargé en entier.
 
 L'URL de l'API est configurable via la variable d'environnement `AKASHA_APP_BASE_URL` (défaut : `https://azerothl.github.io/Akasha_app`).
 
@@ -172,7 +184,7 @@ Prérequis : daemon démarré ; capacités via `GET /api/terminal/capabilities` 
 | Redémarrer le daemon | `/restart` dans le chat |
 | Configurer un fournisseur LLM (sans init) | `akasha config provider set-ollama` / `add-openai` / `add-openrouter` |
 | Vérifier une mise à jour | `akasha update check` |
-| Ouvrir la page de téléchargement | `akasha update install` |
+| Installer une mise à jour du moteur Windows | `akasha update install` |
 
 Cette documentation est également affichée dans l'**onglet Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`.
 

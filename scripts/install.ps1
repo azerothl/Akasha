@@ -1,4 +1,4 @@
-# Akasha installation script (Windows)
+﻿# Akasha installation script (Windows)
 # Release archives include playwright-runner\ beside the binaries; Node.js is only needed for the managed browser feature.
 # Usage: .\install.ps1 [-InstallDir <path>] [-NoAutoStart]
 # -InstallDir: where to copy binaries (default: C:\Akasha)
@@ -50,6 +50,13 @@ foreach ($folder in @("docs", "playwright-runner", "spec")) {
     }
 }
 Write-Host "Binaries installed to $InstallDir"
+
+# Keep the updater and variant metadata with the installed binaries.
+if ((Test-Path (Join-Path $BinDir 'scripts\update.ps1')) -and (Test-Path (Join-Path $BinDir 'akasha-install.json'))) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir 'scripts') | Out-Null
+    Copy-Item -LiteralPath (Join-Path $BinDir 'scripts\update.ps1') -Destination (Join-Path $InstallDir 'scripts\update.ps1') -Force
+    Copy-Item -LiteralPath (Join-Path $BinDir 'akasha-install.json') -Destination (Join-Path $InstallDir 'akasha-install.json') -Force
+}
 
 # Initial setup (idempotent: safe to run again)
 $akashaExe = Join-Path $InstallDir "akasha.exe"

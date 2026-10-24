@@ -794,6 +794,37 @@ async fn get_update_status(port: Option<u16>) -> Result<serde_json::Value, Strin
 
 /// App version (from Cargo.toml) for update comparison.
 #[tauri::command]
+async fn install_runtime_update(confirmed: bool, port: Option<u16>) -> Result<String, String> {
+    if !confirmed { return Err("Update installation requires confirmation".into()); }
+    if !cfg!(windows) { return Err("Runtime updates are currently available on Windows".into()); }
+    // Update the installation serving this daemon, which need not be first on PATH.
+    let status = get_update_status(port).await?;
+    let runtime = &status["runtime_update"];
+    if runtime["supported"] != true { return Err("This daemon does not support runtime updates".into()); }
+    let directory = std::path::PathBuf::from(runtime["install_dir"].as_str().ok_or("Missing runtime installation path")?);
+    if !directory.is_absolute() { return Err("Invalid runtime installation path".into()); }
+    let directory = directory.canonicalize().map_err(|e| e.to_string())?;
+    let marker: serde_json::Value = serde_json::from_slice(&std::fs::read(directory.join("akasha-install.json")).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    if marker["schema_version"] != 1 || marker["target"] != runtime["target"] { return Err("Runtime installation metadata does not match the daemon".into()); }
+    let cli = directory.join("akasha.exe");
+    if !cli.is_file() || !directory.join("scripts/update.ps1").is_file() { return Err("Runtime updater is missing".into()); }
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = std::process::Command::new(cli);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        command.args(["update", "install", "--yes"])
+            .current_dir(directory)
+            .env("AKASHA_PORT", port.unwrap_or(DAEMON_PORT).to_string()).output()
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
@@ -2840,6 +2871,7 @@ pub fn run() {
             get_doctor,
             run_akasha_doctor_fix,
             get_update_status,
+            install_runtime_update,
             get_app_version,
             open_url,
             install_code_studio_module,
