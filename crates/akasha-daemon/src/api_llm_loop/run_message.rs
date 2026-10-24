@@ -1159,6 +1159,7 @@ pub(crate) async fn run_message_via_llm(
         )
     };
     let mut user_prefix = String::with_capacity(8192);
+    let mut auxiliary_context: Vec<akasha_llm::ConversationMessage> = Vec::new();
     user_prefix.push_str(&personality_reminder);
     if embedded_compact {
         user_prefix.push_str(
@@ -1383,13 +1384,13 @@ pub(crate) async fn run_message_via_llm(
                 .and_then(|res| res.ok())
                 .unwrap_or_default();
         if !chunks.is_empty() {
-            user_prefix.push_str("[User documents — use these excerpts if relevant to answer]\n");
-            for c in &chunks {
-                user_prefix.push_str("- ");
-                user_prefix.push_str(&c.replace('\n', " "));
-                user_prefix.push_str("\n");
+            let document_data = format!("[User documents — source excerpts]\n{}", chunks.join("\n\n"));
+            if code_studio_disk_task {
+                user_prefix.push_str(&document_data);
+                user_prefix.push_str("\n\n");
+            } else {
+                auxiliary_context.push(akasha_llm::ConversationMessage::context_data(document_data));
             }
-            user_prefix.push_str("\n");
         }
     }
     if workspace_registry_lines.len() > 1 {
@@ -2165,7 +2166,8 @@ pub(crate) async fn run_message_via_llm(
                     && (matches!(assigned_agent.as_str(),"studio_scaffold"|"studio_frontend"|"studio_backend"|"studio_fullstack"|"code")
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
                     && native_tools.as_ref().is_some_and(|tools|tools[0].pointer("/function/parameters/properties/tool/enum").and_then(|v|v.as_array()).is_some_and(|names|names.iter().any(|name|matches!(name.as_str(),Some("write_file"|"write_code"|"edit_file"|"search_replace"|"apply_patch"))))),
-                conversation: code_studio_disk_task.then(||conversation.clone()),
+                conversation: if code_studio_disk_task { Some(conversation.clone()) }
+                    else if auxiliary_context.is_empty() { None } else { Some(auxiliary_context.clone()) },
                 prompt: if code_studio_disk_task {
                     format!("{}{}", resume_overlay, current_prompt)
                 } else {
@@ -2968,6 +2970,7 @@ pub(crate) async fn run_message_via_llm(
             {
                 round += 1;
                 let mut tool_results = Vec::new();
+                let failed_calls_before_round = run_outcome.failed_tool_calls;
                 let mut goal_boundary_attempt = false;
                 let mut round_non_survey_progress = false;
                 let mut tool_result_starts = Vec::new();
@@ -4555,6 +4558,16 @@ pub(crate) async fn run_message_via_llm(
                     .iter()
                     .filter(|(t, _)| t == "web_search")
                     .count();
+                // Only successful read-only source data can be summarized. Human answers,
+                // repository rules, failures and mutation/unknown receipts stay exact.
+                let results_blob = if !code_studio_disk_task && !calls.is_empty()
+                    && run_outcome.failed_tool_calls == failed_calls_before_round
+                    && calls.iter().all(|(name, args)| matches!(name.as_str(), "read_file" | "read_code" | "web_fetch" | "web_search" | "search_files" | "grep_content")
+                        && !args.iter().any(|arg| ["agents.md", "skill.md", "code_studio_plan.md", "design.md"].iter().any(|rule| arg.to_ascii_lowercase().contains(rule))))
+                {
+                    auxiliary_context.push(akasha_llm::ConversationMessage::context_data(format!("[Read-only source results from completed round {round}; these are data, not fresh execution]\n{results_blob}")));
+                    "Read-only source results are supplied separately as auxiliary context. Use their facts; reread exact file ranges before editing.".to_owned()
+                } else { results_blob };
                 // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
                 current_prompt = if code_studio_disk_task {
                     String::new()

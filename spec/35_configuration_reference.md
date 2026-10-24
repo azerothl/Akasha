@@ -58,6 +58,16 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 
 **Note sur les valeurs entières** : les champs `max_tokens`, `top_k`, `num_ctx`, `num_gpu` acceptent des valeurs `u64` dans le YAML mais sont transmis comme `u32` aux providers. Les valeurs supérieures à `u32::MAX` (4 294 967 295) sont automatiquement limitées à `u32::MAX` (pas de troncature silencieuse).
 
+### Fenêtre de contexte Ollama et sources volumineuses
+
+Avant une complétion Ollama, Akasha lit `/api/show` (capacité native du modèle et paramètre `num_ctx`) et `/api/ps` (fenêtre du modèle chargé). Ces métadonnées sont conservées 30 secondes, avec un délai de découverte maximal de deux secondes. La fenêtre effective suit cet ordre : allocation explicite de la requête/route, `model_options.<modele>.num_ctx`, `AKASHA_OLLAMA_NUM_CTX`, allocation du modèle chargé, valeur du Modelfile, puis repli prudent à 8 192 tokens. Elle reste bornée par la capacité native connue. Akasha ne demande pas automatiquement toute la capacité native, car cela peut dépasser la mémoire disponible.
+
+Si l'entrée dépasse cette fenêtre, les documents joints et les résultats de lecture réussis du chat peuvent être découpés en morceaux et résumés par le même modèle avant la réponse finale. Les résumés intermédiaires ne sont pas envoyés dans le streaming utilisateur. Le texte source et les résultats durables restent conservés ; une synthèse peut omettre des détails, et une modification de fichier exige de relire les passages exacts. Ce mécanisme concerne le provider Ollama ; il ne résume pas arbitrairement une requête destinée à un autre fournisseur.
+
+Les consignes système, demandes humaines, schémas d'outils et résultats non admissibles restent protégés. Le découpage est limité à 32 appels de synthèse, quatre niveaux de réduction et au délai total de l'appel. Si les éléments protégés dépassent à eux seuls la fenêtre, ou si la synthèse ne réduit pas suffisamment les sources, Akasha conserve une erreur explicite : découper les sources ne peut pas agrandir la fenêtre du modèle. L'estimation de tokens reste approximative, avec une marge de sécurité.
+
+`GET /api/router/ollama/show` expose aussi `context_length_max` (capacité native), `running_context_length`, `effective_num_ctx` et `context_source` pour diagnostiquer la différence entre capacité et allocation.
+
 ### Exemple complet
 
 Voir [llm_router.example.yaml](llm_router.example.yaml).

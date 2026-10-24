@@ -117,9 +117,18 @@ impl RouteEntry {
     }
 }
 
-/// Resolve a practical Ollama `num_ctx` when the route/request left it unset.
-/// Prefer `model_options.num_ctx`, else `min(context_length_max, AKASHA_OLLAMA_NUM_CTX|8192)`,
-/// else 8192 for mid-size models (tiny ≤2B leave unset so Ollama keeps its Modelfile default).
+/// Explicit allocation only. Native model capacity is not an allocation request.
+pub fn configured_ollama_num_ctx(provider: &str, model: &str, model_options: &HashMap<String, ModelOption>) -> Option<u32> {
+    if !provider.eq_ignore_ascii_case("ollama") { return None; }
+    let key = model.trim();
+    model_options.get(key).or_else(|| model_options.get(&format!("ollama/{key}")))
+        .and_then(|options| options.num_ctx).filter(|value| *value > 0)
+        .or_else(|| std::env::var("AKASHA_OLLAMA_NUM_CTX").ok()?.parse::<u64>().ok().filter(|value| *value >= 512))
+        .map(|value| value.min(u32::MAX as u64) as u32)
+}
+
+/// Legacy synchronous estimate for callers without runtime metadata.
+/// Completion preparation uses explicit settings only, then discovers Ollama's allocation.
 pub fn resolve_ollama_num_ctx(
     provider: &str,
     model: &str,
@@ -128,6 +137,7 @@ pub fn resolve_ollama_num_ctx(
     if !provider.eq_ignore_ascii_case("ollama") {
         return None;
     }
+    if let Some(explicit) = configured_ollama_num_ctx(provider, model, model_options) { return Some(explicit); }
     let cap = std::env::var("AKASHA_OLLAMA_NUM_CTX")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -138,9 +148,6 @@ pub fn resolve_ollama_num_ctx(
         .get(key)
         .or_else(|| model_options.get(&format!("ollama/{key}")));
     if let Some(o) = opt {
-        if let Some(nc) = o.num_ctx.filter(|&n| n > 0) {
-            return Some(nc.min(cap).min(u32::MAX as u64) as u32);
-        }
         if let Some(max) = o.context_length_max.filter(|&n| n > 0) {
             return Some(max.min(cap).min(u32::MAX as u64) as u32);
         }
@@ -160,7 +167,7 @@ pub fn resolve_ollama_num_ctx(
     Some(cap.min(u32::MAX as u64) as u32)
 }
 
-/// Apply route config, then fill Ollama `num_ctx` from model_options / defaults when still unset.
+/// Apply route config, then explicit model_options / environment allocation when unset.
 /// Caller-provided `thinking_level` (e.g. compact local `off`) wins over route YAML.
 pub fn prepare_ollama_request(
     entry: &RouteEntry,
@@ -176,7 +183,7 @@ pub fn prepare_ollama_request(
     if caller_num_ctx.is_some() {
         request.num_ctx = caller_num_ctx;
     } else if request.num_ctx.is_none() {
-        if let Some(nc) = resolve_ollama_num_ctx(&entry.provider, &entry.model, model_options) {
+        if let Some(nc) = configured_ollama_num_ctx(&entry.provider, &entry.model, model_options) {
             request.num_ctx = Some(nc);
         }
     }
@@ -502,5 +509,17 @@ mod tests {
         prepare_ollama_request(&entry, &mut req, &HashMap::new());
         assert_eq!(req.thinking_level.as_deref(), Some("off"));
         assert_eq!(req.num_ctx, Some(4096));
+    }
+
+    #[test]
+    fn explicit_large_context_is_not_capped_by_the_old_default() {
+        let options: HashMap<String, ModelOption> = serde_json::from_value(serde_json::json!({
+            "test": {"num_ctx":32768,"context_length_max":131072}
+        })).unwrap();
+        assert_eq!(configured_ollama_num_ctx("ollama", "test", &options), Some(32768));
+        let entry = RouteEntry { provider:"ollama".into(), model:"test".into(), config:None };
+        let mut request = empty_request();
+        prepare_ollama_request(&entry, &mut request, &options);
+        assert_eq!(request.num_ctx, Some(32768));
     }
 }

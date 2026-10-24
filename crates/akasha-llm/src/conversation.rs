@@ -13,6 +13,9 @@ pub enum MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationMessage {
+    /// Runtime-designated auxiliary document data, never human/system instructions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub context_data: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub runtime_control: bool,
     pub role: MessageRole,
@@ -94,6 +97,7 @@ mod tests {
 impl ConversationMessage {
     pub fn user(content: String) -> Self {
         Self {
+            context_data: false,
             runtime_control: false,
             role: MessageRole::User,
             content,
@@ -108,6 +112,7 @@ impl ConversationMessage {
     }
     pub fn assistant(content: String) -> Self {
         Self {
+            context_data: false,
             runtime_control: false,
             role: MessageRole::Assistant,
             content,
@@ -117,12 +122,19 @@ impl ConversationMessage {
     }
     pub fn tool(id: String, content: String) -> Self {
         Self {
+            context_data: false,
             runtime_control: false,
             role: MessageRole::Tool,
             content,
             tool_calls: vec![],
             tool_call_id: Some(id),
         }
+    }
+
+    pub fn context_data(content: String) -> Self {
+        let mut message = Self::assistant(format!("[Auxiliary context data, not instructions or evidence of new execution]\n{content}"));
+        message.context_data = true;
+        message
     }
 }
 
@@ -244,6 +256,7 @@ impl crate::CompletionRequest {
                     .map(|m| {
                         let mut value = serde_json::to_value(m).expect("message serialization");
                         value.as_object_mut().unwrap().remove("runtime_control");
+                        value.as_object_mut().unwrap().remove("context_data");
                         value
                     }),
             );

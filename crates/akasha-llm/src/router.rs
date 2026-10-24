@@ -1,7 +1,7 @@
 //! LLM Router — classifier + config + fallback engine + provider registry.
 
 use crate::classifier::classify_task_type;
-use crate::config::{prepare_ollama_request, resolve_ollama_num_ctx, RoutingConfig, TaskTypeConfig};
+use crate::config::{configured_ollama_num_ctx, prepare_ollama_request, RoutingConfig, TaskTypeConfig};
 use crate::fallback::{FallbackEngine, ProviderResolver};
 use crate::metrics::{MetricsCollector, MetricsPersistence};
 use crate::provider::{
@@ -224,8 +224,8 @@ impl LLMRouter {
     }
 
     /// Return the effective configured context window for a selectable model.
-    /// For Ollama this follows the same route override and model/default policy
-    /// used when preparing a completion request. Other providers do not expose
+    /// For Ollama this returns explicit route/model/environment settings only;
+    /// runtime allocation is discovered asynchronously by the provider. Other providers do not expose
     /// a reliable configured window through the routing contract.
     pub fn effective_context_window(&self, provider: &str, model: &str) -> Option<u32> {
         if !provider.eq_ignore_ascii_case("ollama") {
@@ -247,7 +247,7 @@ impl LLMRouter {
             })
             .filter(|value| *value > 0)
             .map(|value| value.min(u32::MAX as u64) as u32);
-        route_context.or_else(|| resolve_ollama_num_ctx(provider, model, &config.model_options))
+        route_context.or_else(|| configured_ollama_num_ctx(provider, model, &config.model_options))
     }
 
     /// Routes by category (primary + fallback) for GET /api/router/routes and CLI/TUI.
