@@ -115,6 +115,8 @@ pub mod companion_discovery;
 pub mod api_routes_config;
 pub mod api_routes_router;
 pub mod api_routes_plugins;
+pub mod api_routes_modules;
+pub mod module_catalog;
 pub mod api_routes_memory;
 pub mod api_routes_tasks;
 pub mod user_docs;

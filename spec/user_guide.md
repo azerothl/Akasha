@@ -122,6 +122,14 @@ Les services du projet **akasha-models** (Docker Compose) peuvent être install�
 | `akasha plugin uninstall ID` | Désinstalle un plugin par son ID |
 | `akasha plugin catalog` | Affiche le catalogue local des plugins |
 
+### Modules applicatifs
+
+Les modules applicatifs ajoutent une interface ou un espace de travail à Akasha. Ils sont distincts des plugins WASM : un module applicatif n'est pas exécuté par l'agent.
+
+Dans l'interface Tauri, ouvrez **Modules** pour voir les modules connus, leur disponibilité, leurs prérequis et leur source. **Installer le module** installe la version fixe de Code Studio depuis npm ; **Lancer Code Studio** démarre son serveur local puis ouvre l'interface. Le lancement nécessite Node.js 22.12+, 24.x ou 26+ et npm. Si Node.js vient d'être installé et qu'Akasha était déjà ouvert, redémarrez Akasha pour que le daemon recharge son `PATH`. Le serveur écoute sur `127.0.0.1:5178` et utilise le daemon Akasha sur `127.0.0.1:3876`.
+
+Depuis un agent, `modules_list [id]` inventorie les modules, leur installation, leur version et leur état en cours. `module_launch <id>` lance uniquement un module déjà installé et répertorié, puis retourne son URL. L'installation d'un paquet reste une action explicite depuis **Modules** ; l'agent indique le statut et guide l'utilisateur vers ce bouton. L'API de découverte et de lancement est `GET /api/modules` et `POST /api/modules/code-studio/launch`.
+
 ### Interfaces
 
 | Commande | Description |

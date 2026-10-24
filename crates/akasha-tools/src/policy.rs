@@ -436,7 +436,11 @@ impl ToolsPolicy {
     /// device_discover and device_invoke require at least one allowed device interface AND are subject to profile gating when a profile is active.
     /// Tools in allowed_commands (e.g. skill names like "bankr") are allowed so TOOL: bankr <args> can be executed as run_command.
     pub fn can_use_tool(&self, tool_name: &str) -> bool {
-        if tool_name == "ask_user" || tool_name == "install_skill" || tool_name == "uninstall_skill" {
+        if tool_name == "ask_user"
+            || tool_name == "install_skill"
+            || tool_name == "uninstall_skill"
+            || tool_name == "modules_list"
+        {
             return true;
         }
         if tool_name == "device_discover" || tool_name == "device_invoke" {

@@ -29,7 +29,7 @@ pub fn built_in_tool_capabilities(tool_name: &str) -> ToolCapabilities {
         "read_file" | "search_files" | "grep_content" | "file_diff" | "diff_unified" | "dir_compare"
         | "git_status" | "git_diff" | "git_log" | "git_rev_parse" | "web_search" | "web_fetch"
         | "web_crawl" | "web_crawl_status" | "search_skills_catalog" | "arxiv_search"
-        | "github_repo_info" | "analyze_table"
+        | "github_repo_info" | "analyze_table" | "modules_list"
         | "read_todos" | "memory_search" | "memory_stats" | "workspace_graph_search" => {
             ToolCapabilities {
                 name: "read_only",
