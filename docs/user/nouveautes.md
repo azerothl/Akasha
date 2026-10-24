@@ -1,3 +1,13 @@
+## Nouveautés 0.12.1
+
+- **Modules complémentaires** : le catalogue présente les modules Akasha disponibles, leurs prérequis et leur état d’installation ; Code Studio peut être lancé depuis l’application. Une skill explique aussi aux agents comment concevoir un module intégrable à Akasha.
+- **Modèles gratuits** : catalogue actualisé automatiquement et routage strict vers des modèles compatibles sans coût déclaré. Tant que le mode gratuit est activé, Akasha bloque les routes payantes au lieu de s’y rabattre.
+- **Contexte Ollama** : meilleure détection de la taille de contexte réellement allouée et découpage des sources trop volumineuses.
+- **Fiabilité du chat** : correction de dialogues de réponse humaine obsolètes ou dont l’échec restait silencieux.
+- **Mises à jour Windows** : sélection des composants à mettre à jour avec confirmation explicite ; améliorations des diagnostics de publication et de démarrage desktop Linux/macOS.
+
+---
+
 ## Nouveautés 0.12.0
 
 - **Code Studio et Kanban** : les demandes de développement sont suivies par des tickets liés au projet. Le daemon peut planifier les phases, dispatcher les tickets prêts et conserver leur état lors d'une reprise.

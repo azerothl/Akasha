@@ -1,8 +1,8 @@
 {
   "meta": {
     "product": "Akasha",
-    "version": "0.12.0",
-    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with fallback, 4-layer memory, vault-backed tools, WASM plugins, MCP stdio, Companion LAN pairing, Code Studio project workflows, and Tauri/TUI clients (v0.12.0).",
+    "version": "0.12.1",
+    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with strict free-model routing, 4-layer memory, vault-backed tools, WASM plugins, MCP stdio, Companion LAN pairing, first-party module catalog, Code Studio project workflows, and Tauri/TUI clients (v0.12.1).",
     "defaultPort": 3876,
     "dataDir": "~/akasha (or AKASHA_DATA_DIR)",
     "sources": [
@@ -30,7 +30,13 @@
       "crates/akasha-daemon/src/studio_vite_scaffold.rs",
       "crates/akasha-daemon/src/studio_dependencies.rs",
       "crates/akasha-llm/src/studio_health.rs",
-      "docs/user/nouveautes.md"
+      "docs/user/nouveautes.md",
+      "crates/akasha-daemon/src/module_catalog.rs",
+      "crates/akasha-daemon/src/api_routes_modules.rs",
+      "crates/akasha-llm/src/free_models.rs",
+      "crates/akasha-llm/src/free_routing.rs",
+      "apps/akasha-ui/src/components/ModulesPanel.tsx",
+      "apps/akasha-ui/src/components/FreeModelsPanel.tsx"
     ]
   },
   "nodes": [
@@ -39,7 +45,7 @@
       "label": "Tauri UI",
       "layer": "clients",
       "crate": "apps/akasha-ui",
-      "description": "Desktop React/TypeScript app (Chat, Tasks, Calendar, Memory, Router, Settings). Talks to the daemon on port 3876.",
+      "description": "Desktop React/TypeScript app (Chat, Tasks, Calendar, Memory, Router, Settings, and first-party module catalog). Talks to the daemon on port 3876.",
       "apis": [
         "POST /api/message",
         "GET /api/tasks/:id",
@@ -123,7 +129,7 @@
       "label": "HTTP API :3876",
       "layer": "ingress",
       "crate": "akasha-daemon",
-      "description": "HTTP surface: health, message, tasks, memory, router, plugins, MCP, calendar, workspace graph, Companion LAN pairing, capabilities. CSRF on mutating routes. Routes split across api_routes_*; LLM tool loop in api_llm_loop.",
+      "description": "HTTP surface: health, message, tasks, memory, router, plugins, MCP, calendar, workspace graph, Companion LAN pairing, capabilities. CSRF on mutating routes. Routes split across api_routes_*; LLM tool loop in api_llm_loop. First-party module discovery and strict free-model controls are also exposed here.",
       "apis": [
         "GET /",
         "GET /api/status",
@@ -133,7 +139,12 @@
         "GET /api/capabilities",
         "GET /api/router/embedded-status",
         "POST /api/companion/pair",
-        "GET /api/companion/snapshot"
+        "GET /api/companion/snapshot",
+        "GET /api/modules",
+        "POST /api/modules/code-studio/launch",
+        "GET /api/router/free-models",
+        "POST /api/router/free-models",
+        "POST /api/router/free-models/refresh"
       ]
     },
     {
@@ -245,7 +256,7 @@
       "label": "LLM Router",
       "layer": "llm",
       "crate": "akasha-llm",
-      "description": "Task-type classifier, route config, provider manager, fallback engine, streaming, metrics. Config: llm_router.yaml."
+      "description": "Task-type classifier, route config, provider manager, fallback engine, streaming, metrics. Config: llm_router.yaml. Optional strict free mode blocks paid-provider fallback."
     },
     {
       "id": "llm-cloud",
@@ -378,6 +389,28 @@
       "layer": "data",
       "crate": "akasha-daemon/api_studio",
       "description": "Project-scoped metadata, ticket relationships, prerequisites, acceptance evidence, and task links persisted by the daemon."
+    },
+    {
+      "id": "module-catalog",
+      "label": "First-party Module Catalog",
+      "layer": "extensibility",
+      "crate": "akasha-daemon/module_catalog + apps/akasha-ui/ModulesPanel",
+      "description": "Read-only catalog for Akasha application modules; reports Code Studio requirements, install and runtime state, and launches the supported module.",
+      "apis": [
+        "GET /api/modules",
+        "POST /api/modules/code-studio/launch"
+      ]
+    },
+    {
+      "id": "free-model-catalog",
+      "label": "Free Model Catalog",
+      "layer": "llm",
+      "crate": "akasha-llm/free_models + free_routing",
+      "description": "Refreshes OpenRouter and Hugging Face model metadata, filters compatible zero-price routes, and fails closed rather than calling paid providers when strict free mode is enabled.",
+      "apis": [
+        "GET /api/router/free-models",
+        "POST /api/router/free-models/refresh"
+      ]
     }
   ],
   "edges": [
@@ -722,6 +755,30 @@
       "from": "scheduler",
       "to": "studio-project-store",
       "label": "ready tickets and recorded outcomes"
+    },
+    {
+      "id": "e58",
+      "from": "http-api",
+      "to": "module-catalog",
+      "label": "module discovery / launch"
+    },
+    {
+      "id": "e59",
+      "from": "module-catalog",
+      "to": "ui-code-studio",
+      "label": "launch supported app module"
+    },
+    {
+      "id": "e60",
+      "from": "llm-router",
+      "to": "free-model-catalog",
+      "label": "refresh and filter free candidates"
+    },
+    {
+      "id": "e61",
+      "from": "free-model-catalog",
+      "to": "llm-cloud",
+      "label": "verified provider metadata"
     }
   ],
   "flows": [
@@ -979,6 +1036,29 @@
         "event-bus",
         "http-api",
         "ui-code-studio"
+      ]
+    },
+    {
+      "id": "flow-module-catalog",
+      "name": "Discover and launch an Akasha module",
+      "description": "The Tauri client lists first-party modules and their requirements through the daemon catalog, then launches the supported Code Studio module.",
+      "steps": [
+        "ui-tauri",
+        "http-api",
+        "module-catalog",
+        "ui-code-studio"
+      ]
+    },
+    {
+      "id": "flow-strict-free-model",
+      "name": "Strict free-model routing",
+      "description": "The router refreshes provider metadata, keeps only compatible zero-price candidates, and refuses paid-provider fallback while free mode is enabled.",
+      "steps": [
+        "ui-tauri",
+        "http-api",
+        "llm-router",
+        "free-model-catalog",
+        "llm-cloud"
       ]
     }
   ]
