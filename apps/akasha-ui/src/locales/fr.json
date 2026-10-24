@@ -5,6 +5,7 @@
   "tabs.research": "Recherche",
   "tabs.cookbook": "Cookbook",
   "tabs.notes": "Notes",
+  "tabs.modules": "Modules",
   "cookbook.configured_models": "Modèles configurés (llm_router.yaml)",
   "cookbook.hardware_suggestions": "Suggestions matériel",
   "cookbook.huggingface_local": "Hugging Face — intégration locale",

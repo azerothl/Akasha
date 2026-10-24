@@ -79,6 +79,7 @@ const GeoMapView = deferPanel(() => import("./GeoMapView").then(m => ({ default:
 const SystemHealthPanel = deferPanel(() => import("./SystemHealthPanel").then(m => ({ default: m.SystemHealthPanel })));
 const UserRagPanel = deferPanel(() => import("./components/UserRagPanel").then(m => ({ default: m.UserRagPanel })));
 const PluginCatalogPanel = deferPanel(() => import("./components/PluginCatalogPanel").then(m => ({ default: m.PluginCatalogPanel })));
+const ModulesPanel = deferPanel(() => import("./components/ModulesPanel").then(m => ({ default: m.ModulesPanel })));
 const OpenClawMigrationPanel = deferPanel(() => import("./components/OpenClawMigrationPanel").then(m => ({ default: m.OpenClawMigrationPanel })));
 const CalDavAccountsPanel = deferPanel(() => import("./components/CalDavAccountsPanel").then(m => ({ default: m.CalDavAccountsPanel })));
 const ToolsPolicyPanel = deferPanel(() => import("./components/ToolsPolicyPanel").then(m => ({ default: m.ToolsPolicyPanel })));
@@ -7390,6 +7391,12 @@ function App() {
         {(tab === "notes" || visitedTabs.has("notes")) && (
           <section id="panel-notes" role="tabpanel" aria-labelledby="tab-notes" className="panel notes-panel-wrap" hidden={tab !== "notes"}>
             <NotesPanel t={t} locale={locale} daemonPort={DAEMON_PORT} onDiscussNote={discussNote} />
+          </section>
+        )}
+
+        {(tab === "modules" || visitedTabs.has("modules")) && (
+          <section id="panel-modules" role="tabpanel" aria-labelledby="tab-modules" className="panel modules-panel-wrap" hidden={tab !== "modules"}>
+            <ModulesPanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
           </section>
         )}
 

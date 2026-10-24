@@ -1441,6 +1441,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("lsp_query", "lsp_query <JSON {action:diagnostics|definition|references|rename,path,position:{line,character},new_name?,text?}> — serveur LSP préinstallé et autorisé ; positions UTF-16 à base zéro. Rename prépare un plan sans modifier le dépôt."),
     ("lsp_apply_rename", "lsp_apply_rename <plan_uuid> — appliquer un plan LSP de cette tâche, versions et politique contrôlées ; inspecter le plan avant appel."),
     ("list_tools", "list_tools [name] — current task capabilities: permissions, availability, argument schemas. Refresh after MCP or policy changes."),
+    ("modules_list", "modules_list [id] — liste les modules applicatifs Akasha connus et leur état en cours, avec leur source, prérequis et étapes sûres d'installation/lancement. Outil de découverte en lecture seule ; n'installe et ne lance rien."),
+    ("module_launch", "module_launch <id> — lance uniquement un module first-party déjà installé, en local sur son port répertorié, et retourne son URL. N'accepte aucune commande libre. À appeler quand l'utilisateur demande à ouvrir le module."),
     ("list_skills", "list_skills — retourne la liste des skills installés (nom et description). Utiliser avant read_skill pour charger le détail d'un skill."),
     ("search_skills_catalog", "search_skills_catalog <query> [max] — rechercher dans la galerie Akasha_skills (skills.json distant)"),
     ("read_skill", "read_skill <name> — charge le contenu (instructions, usage) du skill. À utiliser quand tu as besoin du détail d'un skill avant de l'invoquer par son nom."),
@@ -1476,6 +1478,7 @@ pub(crate) fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, ass
         "lsp_query",
         "lsp_apply_rename",
         "list_tools",
+        "modules_list",
         "browser",
         "terminal_session",
         "read_file",
@@ -1593,6 +1596,7 @@ pub(crate) fn available_tools_instruction(allowed_tools: Option<&[String]>) -> S
     let iter: Box<dyn Iterator<Item = &(&str, &str)>> = if let Some(allowed) = allowed_tools {
         Box::new(AVAILABLE_TOOLS.iter().filter(move |(name, _)| {
             let always_misc = *name == "ask_user"
+                || *name == "modules_list"
                 || *name == "install_skill"
                 || *name == "uninstall_skill"
                 || *name == "write_todos"
@@ -5198,6 +5202,10 @@ pub async fn handle_api(
     )
     .await
     {
+        return resp;
+    }
+
+    if let Some(resp) = crate::api_routes_modules::try_handle(method, path_only).await {
         return resp;
     }
 

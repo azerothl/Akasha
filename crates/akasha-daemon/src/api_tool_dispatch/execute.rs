@@ -275,6 +275,30 @@ pub(crate) async fn execute_tool_call_impl(
                 Err(error) => (false, error, None),
             }
         }
+        "modules_list" => {
+            let modules = crate::module_catalog::list().await;
+            let requested_id = args.first().map(|id| id.trim()).filter(|id| !id.is_empty());
+            let modules: Vec<_> = modules
+                .into_iter()
+                .filter(|module| requested_id.map_or(true, |id| module.id.eq_ignore_ascii_case(id)))
+                .collect();
+            if modules.is_empty() {
+                (false, format!("[modules_list] module not found: {}", requested_id.unwrap_or("")), None)
+            } else {
+                (true, serde_json::json!({ "modules": modules }).to_string(), None)
+            }
+        }
+        "module_launch" => {
+            let id = args.first().map(|id| id.trim()).filter(|id| !id.is_empty());
+            let Some(id) = id else {
+                return (false, format!("[{tool_name}] usage: {tool_name} <id>"), None);
+            };
+            let result = crate::module_catalog::launch(id).await;
+            match result {
+                Ok(value) => (true, value.to_string(), None),
+                Err(error) => (false, serde_json::json!({ "error": error }).to_string(), None),
+            }
+        }
         "workspace_graph_search" => {
             let Some(sp) = store_path else {
                 return (

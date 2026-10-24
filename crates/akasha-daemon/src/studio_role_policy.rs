@@ -17,6 +17,7 @@ pub(crate) fn allows_tool(role: &str, tool: &str) -> bool {
             tool,
             "read_file"
                 | "list_tools"
+                | "modules_list"
                 | "search_files"
                 | "grep_content"
                 | "file_diff"
@@ -46,6 +47,7 @@ pub(crate) fn allows_tool(role: &str, tool: &str) -> bool {
         tool,
         "read_file"
             | "list_tools"
+            | "modules_list"
             | "search_files"
             | "grep_content"
             | "file_diff"

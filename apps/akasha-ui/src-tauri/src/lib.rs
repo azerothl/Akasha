@@ -885,12 +885,16 @@ fn open_path_in_explorer(path: String) -> Result<(), String> {
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     let url = url.trim();
-    if !url.starts_with("https://") {
+    let parsed = url.parse::<url::Url>().map_err(|e| format!("Invalid URL: {}", e))?;
+    let local_code_studio = parsed.scheme() == "http"
+        && parsed.host_str() == Some("127.0.0.1")
+        && parsed.port() == Some(5178)
+        && parsed.path() == "/";
+    if !url.starts_with("https://") && !local_code_studio {
         return Err("Only https URLs are allowed".to_string());
     }
-    let parsed = url.parse::<url::Url>().map_err(|e| format!("Invalid URL: {}", e))?;
     let host = parsed.host_str().unwrap_or("");
-    if !host.ends_with("github.io") && !host.ends_with("github.com") && host != "ollama.com" {
+    if !local_code_studio && !host.ends_with("github.io") && !host.ends_with("github.com") && host != "ollama.com" {
         return Err("URL host not allowed for security".to_string());
     }
     let _ = match std::env::consts::OS {
@@ -899,6 +903,55 @@ fn open_url(url: String) -> Result<(), String> {
         _ => std::process::Command::new("xdg-open").arg(url).status(),
     };
     Ok(())
+}
+
+const CODE_STUDIO_NPM_PACKAGE: &str = "akasha-code-studio@0.10.0";
+
+fn npm_command(args: &[&str]) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/d", "/s", "/c", "npm"]);
+        command.args(args);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = std::process::Command::new("npm");
+        command.args(args);
+        command
+    }
+}
+
+#[tauri::command]
+async fn install_code_studio_module() -> Result<serde_json::Value, String> {
+    let output = tokio::task::spawn_blocking(|| {
+        npm_command(&["install", "--global", CODE_STUDIO_NPM_PACKAGE])
+            .output()
+            .map_err(|error| format!("Node.js avec npm est requis. Installez Node.js puis redémarrez Akasha pour recharger le PATH. ({error})"))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let details = if stderr.trim().is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        let lower = details.to_ascii_lowercase();
+        let workaround = if lower.contains("eacces") || lower.contains("eperm") {
+            " Configurez un préfixe npm global accessible en écriture pour votre compte, puis réessayez."
+        } else {
+            " Vérifiez Node.js/npm et l'accès à registry.npmjs.org, puis réessayez."
+        };
+        return Err(format!("Échec de l'installation de {CODE_STUDIO_NPM_PACKAGE} : {details}{workaround}"));
+    }
+    Ok(serde_json::json!({
+        "installed": true,
+        "package": CODE_STUDIO_NPM_PACKAGE,
+        "output": String::from_utf8_lossy(&output.stdout).trim(),
+    }))
 }
 
 /// POST /api/diagnostic/advice — get advice from health (for slash /advice).
@@ -2788,6 +2841,7 @@ pub fn run() {
             get_update_status,
             get_app_version,
             open_url,
+            install_code_studio_module,
             open_path,
             open_path_in_explorer,
             read_file_as_data_url,
