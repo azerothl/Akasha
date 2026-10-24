@@ -1,6 +1,7 @@
 //! Akasha Core - Shared types, event envelope, spec loader, security
 
 pub mod config_merge;
+pub mod data_dir;
 pub mod env_file;
 pub mod events;
 pub mod security;

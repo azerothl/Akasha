@@ -31,6 +31,10 @@ function Start-Sleep { param($Seconds, $Milliseconds) }
 
 Assert ((Convert-UpdateNativePath '\\?\C:\Akasha') -eq 'C:\Akasha') 'Verbatim disk path not normalized for process matching'
 Assert ((Convert-UpdateNativePath '\\?\UNC\server\share\Akasha') -eq '\\server\share\Akasha') 'Verbatim UNC path not normalized'
+Assert ((Resolve-UpdateDataDir '~\akasha') -eq (Join-Path $env:USERPROFILE 'akasha')) 'Tilde data directory must resolve against the user profile'
+Assert ((Resolve-UpdateDataDir $userData) -eq $userData) 'Absolute data directory changed'
+Assert-Throws { Resolve-UpdateDataDir 'relative-data' } 'Relative data directory must not use updater working directory'
+Assert-Throws { Resolve-UpdateDataDir '' } 'Empty data directory accepted'
 
 foreach ($path in @('../outside', 'docs/../../outside', 'C:/outside', 'docs/a:stream', 'docs/CON', 'docs/trailing.')) {
     Assert-Throws { Resolve-UpdatePath $install $path } "Accepted unsafe path $path"

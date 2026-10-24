@@ -144,7 +144,7 @@ if method == "GET" && path == "/api/config" {
         akasha_core::warn_env_file_parse_errors("akasha.env", &errors);
         vars = map;
     }
-    let body_json = serde_json::to_string(&serde_json::json!({ "vars": vars }))
+    let body_json = serde_json::to_string(&serde_json::json!({ "vars": vars, "data_dir": data_dir }))
         .unwrap_or_else(|_| "{}".into());
     return Some(format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -170,6 +170,9 @@ if method == "POST" && path == "/api/config" {
         .map(String::from);
     match (key, value) {
         (Some(k), Some(v)) if !k.is_empty() => {
+            if akasha_core::env_file::ENV_FILE_SKIP_KEYS.contains(&k.as_str()) {
+                return Some(json_response("400 Bad Request", &serde_json::json!({"error":"bootstrap_setting_requires_process_environment","key":k,"data_dir":data_dir,"detail":"Set AKASHA_DATA_DIR to an absolute path before starting Akasha; akasha.env cannot relocate a running daemon."}).to_string()));
+            }
             let env_path = data_dir.join("akasha.env");
             let mut lines: Vec<String> = if env_path.exists() {
                 std::fs::read_to_string(&env_path)

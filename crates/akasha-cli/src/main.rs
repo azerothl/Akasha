@@ -792,6 +792,8 @@ fn daemon_doctor_check_status_label(check: &serde_json::Value) -> &'static str {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Pin one absolute root before any child or embedded backend can read environment files.
+    std::env::set_var("AKASHA_DATA_DIR", akasha_data_dir());
 
     match cli.command {
         Commands::Up => cmd_up(),
@@ -2112,12 +2114,8 @@ fn cmd_vault(sub: VaultSub) -> anyhow::Result<()> {
 }
 
 fn akasha_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("AKASHA_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("akasha")
+    akasha_core::data_dir::resolve_bootstrap_data_dir(std::env::var_os("AKASHA_DATA_DIR").as_deref(), dirs::home_dir().as_deref())
+        .unwrap_or_else(|error| { eprintln!("{error}"); std::process::exit(2) })
 }
 
 fn is_source_workspace_dir(path: &Path) -> bool {
@@ -3236,6 +3234,9 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                     anyhow::bail!("Key not found: {}", key);
                 }
                 ConfigEnvSub::Set { key, value } => {
+                    if akasha_core::env_file::ENV_FILE_SKIP_KEYS.contains(&key.as_str()) {
+                        anyhow::bail!("{key} est un réglage de démarrage : définissez-le dans l'environnement avec un chemin absolu avant de lancer Akasha, pas dans akasha.env");
+                    }
                     let value = match value {
                         Some(v) => v,
                         None => {
@@ -4146,13 +4147,18 @@ fn record_restart() {
 /// Load connectors.env from data_dir (KEY=VALUE per line, # = comment) and set env on cmd.
 /// Used after `akasha init` so the user doesn't need to source the file manually.
 fn daemon_env_load_env_file(cmd: &mut Command, file_name: &str) {
-    let path = akasha_data_dir().join(file_name);
+    daemon_env_load_env_file_at(cmd, file_name, &akasha_data_dir());
+}
+
+fn daemon_env_load_env_file_at(cmd: &mut Command, file_name: &str, data_dir: &Path) {
+    let path = data_dir.join(file_name);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return,
     };
     let (map, _) = parse_env_file_content(&content);
     for (k, v) in map {
+        if akasha_core::env_file::ENV_FILE_SKIP_KEYS.contains(&k.as_str()) { continue; }
         cmd.env(k, v);
     }
 }
@@ -4181,6 +4187,7 @@ fn daemon_env(cmd: &mut Command, env_log: &str) {
             cmd.env(k, v);
         }
     }
+    cmd.env("AKASHA_DATA_DIR", akasha_data_dir());
 }
 
 fn run_supervisor_loop(daemon_path: &PathBuf) -> anyhow::Result<()> {
@@ -5507,5 +5514,21 @@ mod tests {
         assert!(warn.description.contains("AKASHA_MEMORY_ENCRYPT"));
         assert!(warn.description.contains("no effect"));
         std::fs::remove_dir_all(data_dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod data_directory_launch_tests {
+    use super::*;
+    #[test]
+    fn persisted_bootstrap_assignment_never_redirects_a_child_daemon() {
+        let dir=tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("akasha.env"),"AKASHA_DATA_DIR=~\\akasha\nAKASHA_PORT=4001\n").unwrap();
+        let mut command=Command::new("akasha-daemon");
+        command.env("AKASHA_DATA_DIR",dir.path());
+        daemon_env_load_env_file_at(&mut command,"akasha.env",dir.path());
+        let values:std::collections::HashMap<_,_>=command.get_envs().map(|(key,value)|(key.to_string_lossy().into_owned(),value.unwrap().to_string_lossy().into_owned())).collect();
+        assert_eq!(values["AKASHA_DATA_DIR"],dir.path().to_string_lossy());
+        assert_eq!(values["AKASHA_PORT"],"4001");
     }
 }
