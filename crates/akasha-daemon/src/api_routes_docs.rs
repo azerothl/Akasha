@@ -68,7 +68,7 @@ if method == "GET" && path == "/api/update/status" {
 }
 
 if method == "GET" && path == "/api/status" {
-    return Some(json_response("200 OK", r#"{"status":"ok"}"#));
+    return Some(json_response("200 OK", &crate::health::runtime_status(data_dir).await.to_string()));
 }
 
 // GET /api/docs — multi-page user documentation (JSON index or page markdown)

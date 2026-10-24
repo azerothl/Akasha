@@ -215,6 +215,7 @@ impl Daemon {
 
     /// Run the daemon (blocks until shutdown)
     pub async fn run(&self) -> anyhow::Result<RunOutcome> {
+        crate::health::register_runtime(self.health.clone());
         log_upgrade_heritage_reminder(&self.data_dir);
         // Load specs at startup
         match load_specs(&self.spec_dir) {
