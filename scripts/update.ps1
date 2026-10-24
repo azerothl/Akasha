@@ -15,6 +15,18 @@ function Convert-UpdateNativePath([string]$Path) {
     return $Path
 }
 
+function Resolve-UpdateDataDir([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { throw 'Data directory must not be empty' }
+    $Path = Convert-UpdateNativePath $Path
+    if ($Path -eq '~' -or $Path -match '^~[\\/]') {
+        if (-not $env:USERPROFILE) { throw 'USERPROFILE is required to expand the data directory' }
+        $tail = $Path.Substring(1).TrimStart('\', '/')
+        $Path = if ($tail) { Join-Path $env:USERPROFILE $tail } else { $env:USERPROFILE }
+    }
+    if ($Path -notmatch '^([a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)') { throw 'Data directory must be an absolute path or start with ~/' }
+    return [IO.Path]::GetFullPath($Path)
+}
+
 function Resolve-UpdatePath([string]$Root, [string]$Relative) {
     if (-not $Relative -or $Relative.Contains('\') -or $Relative.Contains(':') -or $Relative.StartsWith('/')) { throw "Invalid update path: $Relative" }
     foreach ($part in $Relative.Split('/')) {
@@ -344,7 +356,7 @@ $mutex = $null
 $locked = $false
 try {
     $InstallDir = [IO.Path]::GetFullPath((Convert-UpdateNativePath $InstallDir)).TrimEnd('\')
-    $DataDir = [IO.Path]::GetFullPath((Convert-UpdateNativePath $DataDir))
+    $DataDir = Resolve-UpdateDataDir $DataDir
     $env:AKASHA_DATA_DIR = $DataDir
     $script:Marker = Get-Content -LiteralPath (Resolve-UpdatePath $InstallDir 'akasha-install.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($script:Marker.schema_version -ne 1 -or $script:Marker.version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid installation metadata' }

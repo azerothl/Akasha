@@ -92,6 +92,10 @@ cargo build
 
 **Arrêter** : `akasha stop`
 
+Le dossier persistant est `%USERPROFILE%\akasha` sous Windows, ou `~/akasha` sous Linux/macOS. `AKASHA_DATA_DIR`, lorsqu'il est défini **dans l'environnement avant le lancement**, permet de choisir un autre dossier absolu ; `~/...` et `~\...` sont développés vers le dossier utilisateur. Les chemins relatifs et les valeurs vides sont refusés. Le CLI transmet le même chemin absolu au superviseur, au daemon et aux modèles embarqués ; Pour compatibilit�, une ancienne ligne `AKASHA_DATA_DIR` du profil par d�faut est lue une seule fois au d�marrage et normalis�e ; les fichiers du dossier final ne peuvent pas d�clencher une nouvelle redirection. `GET /api/config` expose le dossier réellement utilisé dans `data_dir`.
+
+Une ancienne version pouvait transmettre littéralement `AKASHA_DATA_DIR=~\akasha` depuis `akasha.env` et créer un dossier `~\akasha` sous le répertoire de lancement. Si l'historique semble vide après une mise à jour, vérifier d'abord le dossier utilisé : ne pas supprimer ni fusionner automatiquement les bases existantes. Relancer avec le bon chemin absolu permet de réutiliser leurs données.
+
 **Toujours actif (one-command)** : `akasha up` démarre le daemon si nécessaire puis vérifie l’état via `/api/status`.
 
 **Chemins** : `akasha paths` affiche le répertoire de données et les fichiers de config (utile sous WSL).
