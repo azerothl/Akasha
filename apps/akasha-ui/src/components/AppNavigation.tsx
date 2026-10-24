@@ -13,7 +13,7 @@ type Props = {
 };
 
 const GROUP_ORDER: NavGroupId[] = ["primary", "workspace", "operations", "data", "help"];
-const primary = new Set(["chat", "research", "tasks", "notes", "docs", "settings"]);
+const primary = new Set(["chat", "research", "tasks", "notes", "modules", "docs", "settings"]);
 
 export function AppNavigation({ tab, setTab, t, collapsed, onToggleCollapse, simple }: Props) {
   const [moreOpen, setMoreOpen] = useState(!primary.has(tab));

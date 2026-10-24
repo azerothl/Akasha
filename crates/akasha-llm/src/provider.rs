@@ -436,6 +436,7 @@ mod studio_native_tests {
             socket.write_all(&body[split..]).unwrap();
         });
         let provider = OllamaProvider::new(Some(format!("http://{address}")));
+        provider.context_limits.lock().unwrap().insert("test".into(), (std::time::Instant::now(), Default::default()));
         provider
             .chat_templates
             .lock()
@@ -474,6 +475,7 @@ mod studio_native_tests {
                 write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             });
             let provider=OllamaProvider::new(Some(format!("http://{address}")));
+            provider.context_limits.lock().unwrap().insert("raw-qwen".into(), (std::time::Instant::now(), Default::default()));
             provider.chat_templates.lock().unwrap().insert("raw-qwen".into(),OllamaConversationTemplate::Qwen35ChatMl);
             let request:CompletionRequest=serde_json::from_value(json!({"prompt":"create a.txt","conversation":[],"presence_penalty":0.0,"tools":[{"function":{"name":"write_file","parameters":{"properties":{"path":{"type":"string"},"content":{"type":"string"},"expected_version":{"type":"string"}}}}}]})).unwrap();
             let result=if streaming {let(tx,_)=std::sync::mpsc::channel();provider.complete_stream_async(&request,"raw-qwen",Duration::from_secs(5),&tx).await.unwrap()}
@@ -535,6 +537,7 @@ mod studio_native_tests {
                 write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
             });
             let provider = OllamaProvider::new(Some(format!("http://{address}")));
+            provider.context_limits.lock().unwrap().insert("lfm".into(), (std::time::Instant::now(), Default::default()));
             provider
                 .chat_templates
                 .lock()
@@ -1104,6 +1107,7 @@ enum OllamaConversationTemplate {
 pub struct OllamaProvider {
     base_url: String,
     chat_templates: std::sync::Mutex<std::collections::HashMap<String, OllamaConversationTemplate>>,
+    context_limits: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, crate::ollama_context::OllamaContextLimits)>>,
 }
 
 impl OllamaProvider {
@@ -1111,6 +1115,7 @@ impl OllamaProvider {
         Self {
             base_url: base_url.unwrap_or_else(|| "http://localhost:11434".into()),
             chat_templates: Default::default(),
+            context_limits: Default::default(),
         }
     }
 
@@ -1185,6 +1190,32 @@ impl OllamaProvider {
             warn!(model,"Completion-only Ollama template: using explicit conversation framing without changing the installed model");
         }
         Ok(())
+    }
+
+    async fn prepare_model_context(&self, request: &CompletionRequest, model: &str, timeout: Duration) -> Result<CompletionRequest, ProviderError> {
+        let started = std::time::Instant::now();
+        let cached = self.context_limits.lock().map_err(|_| ProviderError::Unavailable)?
+            .get(model).filter(|(time, _)| time.elapsed() < Duration::from_secs(30)).map(|(_, limits)| limits.clone());
+        let limits = match cached {
+            Some(limits) => limits,
+            None => {
+                let limits = crate::ollama_context::discover(&self.base_url, model, timeout).await;
+                let mut cache = self.context_limits.lock().map_err(|_| ProviderError::Unavailable)?;
+                if cache.len() >= 128 { cache.clear(); }
+                cache.insert(model.to_owned(), (std::time::Instant::now(), limits.clone()));
+                limits
+            }
+        };
+        let (effective, source) = limits.effective(request.num_ctx);
+        tracing::debug!(model, native_max=?limits.native_max, allocated=?limits.running_context, effective, source, "Resolved Ollama context capacity");
+        let mut prepared = request.clone();
+        prepared.num_ctx = Some(effective);
+        match prepared.bounded_context() {
+            Ok(bounded) => Ok(bounded),
+            Err(_) => crate::context_compaction::prepare(&prepared, timeout.checked_sub(started.elapsed()).filter(|left| !left.is_zero()).ok_or(ProviderError::Timeout)?, |summary, remaining| async move {
+                self.complete_prepared_async(&summary, model, remaining).await
+            }).await,
+        }
     }
 
     /// Shared `/api/generate` JSON body for Ollama (same options for stream and non-stream).
@@ -1302,10 +1333,17 @@ impl OllamaProvider {
         model: &str,
         timeout: Duration,
     ) -> Result<CompletionResponse, ProviderError> {
-        let client = reqwest::Client::new();
+        let started = std::time::Instant::now();
         self.prepare_conversation(request, model, timeout).await?;
-        let bounded = request.bounded_context()?;
-        let (url, body) = self.build_generate_body(&bounded, model, false);
+        let remaining = timeout.checked_sub(started.elapsed()).ok_or(ProviderError::Timeout)?;
+        let prepared = self.prepare_model_context(request, model, remaining).await?;
+        let remaining = timeout.checked_sub(started.elapsed()).ok_or(ProviderError::Timeout)?;
+        self.complete_prepared_async(&prepared, model, remaining).await
+    }
+
+    async fn complete_prepared_async(&self, request: &CompletionRequest, model: &str, timeout: Duration) -> Result<CompletionResponse, ProviderError> {
+        let client = reqwest::Client::new();
+        let (url, body) = self.build_generate_body(request, model, false);
         let resp = client
             .post(&url)
             .json(&body)
@@ -1461,8 +1499,11 @@ impl OllamaProvider {
         chunk_tx: &std::sync::mpsc::Sender<String>,
     ) -> Result<CompletionResponse, ProviderError> {
         let client = reqwest::Client::new();
+        let started = std::time::Instant::now();
         self.prepare_conversation(request, model, timeout).await?;
-        let bounded = request.bounded_context()?;
+        let remaining = timeout.checked_sub(started.elapsed()).ok_or(ProviderError::Timeout)?;
+        let bounded = self.prepare_model_context(request, model, remaining).await?;
+        let timeout = timeout.checked_sub(started.elapsed()).ok_or(ProviderError::Timeout)?;
         let (url, body) = self.build_generate_body(&bounded, model, true);
         let mut resp = client
             .post(&url)
@@ -3571,3 +3612,7 @@ mod free_price_tests {
         assert!(ordinary.build_chat_completions_body(&request,"paid").get("provider").is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "adaptive_context_tests.rs"]
+mod adaptive_context_tests;

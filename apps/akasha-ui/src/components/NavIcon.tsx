@@ -55,6 +55,14 @@ export function NavIcon({ id }: Props) {
           <path d="M14 2v6h6M8 13h6M8 17h4" />
         </svg>
       );
+    case "modules":
+      return (
+        <svg {...svgProps}>
+          <path d="M8 3v3M16 3v3M8 18v3M16 18v3M3 8h3M3 16h3M18 8h3M18 16h3" />
+          <rect x="6" y="6" width="12" height="12" rx="2" />
+          <path d="M10 10h4v4h-4z" />
+        </svg>
+      );
     case "tasks":
       return (
         <svg {...svgProps}>

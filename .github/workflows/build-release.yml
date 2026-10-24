@@ -39,6 +39,10 @@ jobs:
       - name: Start build measurement
         run: python scripts/ci/report_build.py start
 
+      - name: Verify Windows updater before packaging
+        if: runner.os == 'Windows'
+        run: python -m unittest discover -s scripts/ci/tests -p test_package_updates.py -v
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -143,6 +147,11 @@ jobs:
           Copy-Item -LiteralPath spec\skills -Destination staging\spec\ -Recurse -Force
           Copy-Item scripts/install.ps1 -Destination staging/scripts/
           Copy-Item scripts/setup.ps1 -Destination staging/scripts/
+          Copy-Item scripts/update.ps1 -Destination staging/scripts/
+          $updateTarget = '${{ inputs.artifact_name }}' -replace '^akasha-', ''
+          python scripts/ci/package_updates.py marker staging $updateTarget workspace
+          Copy-Item INSTALL.cmd -Destination staging/
+          Set-Content -Path staging/README.txt -Value "Pour installer Akasha, double-cliquez sur INSTALL.cmd." -Encoding ascii
           New-Item -ItemType Directory -Force -Path staging\playwright-runner | Out-Null
           Copy-Item -Path scripts\playwright-runner\* -Destination staging\playwright-runner\ -Recurse -Force
           Remove-Item -Recurse -Force staging\playwright-runner\node_modules -ErrorAction SilentlyContinue

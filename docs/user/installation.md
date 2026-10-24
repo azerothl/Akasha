@@ -15,7 +15,7 @@ Vous obtenez les exécutables **akasha** (ou akasha.exe), **akasha-daemon** et *
 
 Après avoir extrait le zip **full** :
 
-- **Windows (PowerShell)** : exécutez `.\scripts\setup.ps1`. Le script vous demandera : installer l'application desktop (interface web) ? Démarrer le daemon à chaque connexion ? Il installe les binaires, lance le premier `akasha init`, démarre le daemon une fois et, si vous le souhaitez, enregistre le daemon au démarrage de Windows et installe l'app Tauri.
+- **Windows** : après extraction, double-cliquez sur `INSTALL.cmd` à la racine de l’archive. Le lanceur contourne uniquement pour ce processus le blocage PowerShell des scripts non signés, sans changer le réglage permanent de Windows. Le setup vous demandera : installer l'application desktop (interface web) ? Démarrer le daemon à chaque connexion ? Il installe les binaires, lance le premier `akasha init`, démarre le daemon une fois et, si vous le souhaitez, enregistre le daemon au démarrage de Windows et installe l'app Tauri.
 - **Linux / macOS** : exécutez `./scripts/setup.sh` (ou `bash scripts/setup.sh`). Mêmes choix (application desktop, daemon au démarrage). Le script installe les binaires, lance l'init, démarre le daemon une fois et, sous Linux (systemd) ou macOS (launchd), peut enregistrer le daemon pour qu'il démarre à chaque connexion.
 
 **Redémarrage en cas de crash** : si vous avez activé le démarrage automatique, le daemon est relancé en cas d'arrêt — sous Windows via le superviseur intégré à `akasha start`, sous Linux/macOS via systemd ou launchd.
@@ -26,7 +26,7 @@ Après avoir extrait le zip **full** :
 Ouvrez un terminal dans le dossier où vous avez extrait l'archive, puis :
 
 ```
-.\scripts\install.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 .\akasha.exe start
 ```
 

@@ -1342,19 +1342,20 @@ impl Daemon {
                 }
             });
 
-            // Update check: fetch api/latest.json at start and every 12h (for UI update banner)
-            const UPDATE_CHECK_INTERVAL_SECS: u64 = 43_200; // 12 hours
+            // Metadata and selective background downloads; application always requires confirmation.
+            const UPDATE_CHECK_INTERVAL_SECS: u64 = 86_400;
             tokio::spawn({
                 let cache = update_check_cache.clone();
+                let update_data_dir = self.data_dir.clone();
                 let base_url = std::env::var("AKASHA_APP_BASE_URL")
                     .unwrap_or_else(|_| "https://azerothl.github.io/Akasha_app".to_string());
                 async move {
-                    run_update_check_once(&cache, &base_url).await;
                     let mut interval =
                         tokio::time::interval(std::time::Duration::from_secs(UPDATE_CHECK_INTERVAL_SECS));
                     loop {
                         interval.tick().await;
                         run_update_check_once(&cache, &base_url).await;
+                        crate::runtime_update::prepare(&update_data_dir).await;
                     }
                 }
             });

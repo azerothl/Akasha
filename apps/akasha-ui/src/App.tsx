@@ -3,6 +3,7 @@ import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary }
 import { invoke } from "@tauri-apps/api/core";
 import { E2E_WEB, e2eDaemonGetJson, e2eDaemonHttpUrl } from "./e2eDaemon";
 import { taskTitle, taskStatus } from "./tasks/presentation";
+import { useHumanReply } from "./tasks/useHumanReply";
 
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
 import {
@@ -80,6 +81,7 @@ const GeoMapView = deferPanel(() => import("./GeoMapView").then(m => ({ default:
 const SystemHealthPanel = deferPanel(() => import("./SystemHealthPanel").then(m => ({ default: m.SystemHealthPanel })));
 const UserRagPanel = deferPanel(() => import("./components/UserRagPanel").then(m => ({ default: m.UserRagPanel })));
 const PluginCatalogPanel = deferPanel(() => import("./components/PluginCatalogPanel").then(m => ({ default: m.PluginCatalogPanel })));
+const ModulesPanel = deferPanel(() => import("./components/ModulesPanel").then(m => ({ default: m.ModulesPanel })));
 const OpenClawMigrationPanel = deferPanel(() => import("./components/OpenClawMigrationPanel").then(m => ({ default: m.OpenClawMigrationPanel })));
 const CalDavAccountsPanel = deferPanel(() => import("./components/CalDavAccountsPanel").then(m => ({ default: m.CalDavAccountsPanel })));
 const ToolsPolicyPanel = deferPanel(() => import("./components/ToolsPolicyPanel").then(m => ({ default: m.ToolsPolicyPanel })));
@@ -2563,7 +2565,12 @@ function App() {
     current_version: string;
     download_url: string;
     release_notes_url?: string | null;
+    runtime_state?: string;
+    runtime_error?: string;
   } | null>(null);
+  const [runtimeUpdateBusy, setRuntimeUpdateBusy] = useState(false);
+  const [runtimeUpdateError, setRuntimeUpdateError] = useState("");
+  const dismissedUpdateVersion = useRef("");
 
   const [chatTipsEnabled, setChatTipsEnabled] = useState(() => {
     try {
@@ -2729,19 +2736,34 @@ function App() {
   // Check for app update (daemon caches latest.json; compare with app version)
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const check = async () => {
       try {
         const [currentVersion, status] = await Promise.all([
           invoke<string>("get_app_version"),
-          invoke<{ remote_version?: string; download_url?: string; error?: string | null }>("get_update_status", {
+          invoke<{ remote_version?: string; download_url?: string; error?: string | null; runtime_update?: { supported?: boolean; state?: string; remote_version?: string; installed_version?: string; error?: string; recovery_required?: boolean } }>("get_update_status", {
             port: DAEMON_PORT,
           }),
         ]);
         if (cancelled) return;
+        const runtime = status?.runtime_update;
+        if (runtime?.supported && runtime.remote_version && runtime.installed_version &&
+            (versionGt(runtime.remote_version, runtime.installed_version) || runtime.state === "applying" || runtime.recovery_required)) {
+          if (runtime.state === "failed") setRuntimeUpdateBusy(false);
+          if (dismissedUpdateVersion.current !== runtime.remote_version) {
+            setUpdateBannerInfo({ remote_version: runtime.remote_version, current_version: runtime.installed_version,
+              download_url: "", runtime_state: runtime.state, runtime_error: runtime.error });
+          }
+          return;
+        }
+        if (runtime?.state === "installed" || runtime?.state === "up_to_date") {
+          setRuntimeUpdateBusy(false);
+          setUpdateBannerInfo(previous => previous?.runtime_state ? null : previous);
+        }
         if (status?.error || !status?.remote_version) return;
         const remote = (status.remote_version ?? "0.0.0").trim();
         const current = (currentVersion ?? "0.0.0").trim();
         if (versionGt(remote, current) && status.download_url) {
+          if (dismissedUpdateVersion.current === remote) return;
           setUpdateBannerInfo({
             remote_version: remote,
             current_version: current,
@@ -2752,9 +2774,12 @@ function App() {
       } catch {
         /* daemon may be down; skip banner */
       }
-    })();
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 5000);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -2781,31 +2806,40 @@ function App() {
   }, [health?.ok]);
 
   // Fetch all pending human-input (agent questions) on load and periodically, so user sees them after relaunch or when popup was missed.
+  const humanInputSnapshotVersion = useRef(0);
   const fetchPendingHumanInput = useCallback(async () => {
     if (!health?.ok) return;
+    const version = ++humanInputSnapshotVersion.current;
     try {
       const data = await invoke<{ pending?: Array<{ task_id: string; question: string; context?: string; choices?: string[]; request_id?: string }> }>(
         "get_pending_human_input",
         { port: DAEMON_PORT }
       );
-      if (data?.pending?.length) {
-        setPendingHumanInput((prev) => {
-          const next = { ...prev };
-          for (const p of data.pending!) {
-            next[p.task_id] = {
-              question: p.question ?? "",
-              context: p.context ?? "",
-              choices: p.choices,
-              request_id: p.request_id,
-            };
-          }
-          return next;
-        });
+      if (version === humanInputSnapshotVersion.current && Array.isArray(data?.pending)) {
+        setPendingHumanInput(Object.fromEntries(data.pending.map((p) => [p.task_id, {
+          question: p.question ?? "", context: p.context ?? "", choices: p.choices, request_id: p.request_id,
+        }])));
       }
     } catch {
       /* ignore */
     }
   }, [health?.ok]);
+
+  const humanReply = useHumanReply({
+    pending: pendingHumanInput, port: DAEMON_PORT, english: locale === "en", refresh: fetchPendingHumanInput,
+    accepted: (taskId, requestId) => {
+      humanInputSnapshotVersion.current += 1;
+      setPendingHumanInput((prev) => {
+        if (prev[taskId]?.request_id !== requestId) return prev;
+        const next = { ...prev }; delete next[taskId]; return next;
+      });
+      setHumanInputFreeText("");
+      setInlineHumanReplyText("");
+    },
+  });
+  useEffect(() => {
+    if (humanInputModalTaskId && !pendingHumanInput[humanInputModalTaskId]) setHumanInputModalTaskId(null);
+  }, [humanInputModalTaskId, pendingHumanInput]);
 
   useEffect(() => {
     fetchPendingHumanInput();
@@ -6023,38 +6057,49 @@ function App() {
         <div className="update-banner" role="region" aria-label={t("update.banner_label")}>
           <div className="update-banner-inner">
             <p className="update-banner-text">
-              {t("update.available")} <strong>{updateBannerInfo.remote_version}</strong> ({t("update.you_have")} {updateBannerInfo.current_version}). {t("update.banner_install")}
+              {t(updateBannerInfo.runtime_state ? "update.runtime_available" : "update.available")} <strong>{updateBannerInfo.remote_version}</strong> ({t("update.you_have")} {updateBannerInfo.current_version}). {t(updateBannerInfo.runtime_state ? `update.runtime_${updateBannerInfo.runtime_state}` : "update.banner_install")}
             </p>
             <div className="update-banner-actions">
               <button
                 type="button"
                 className="update-banner-download-btn"
+                disabled={!!updateBannerInfo.runtime_state && (!["ready", "failed"].includes(updateBannerInfo.runtime_state) || runtimeUpdateBusy)}
                 onClick={async () => {
                   try {
+                    if (updateBannerInfo!.runtime_state) {
+                      if (!window.confirm(t("update.runtime_confirm"))) return;
+                      setRuntimeUpdateBusy(true);
+                      setRuntimeUpdateError("");
+                      await invoke("install_runtime_update", { confirmed: true, port: DAEMON_PORT });
+                      return;
+                    }
                     await invoke("open_url", { url: updateBannerInfo!.download_url });
                   } catch (e) {
+                    setRuntimeUpdateBusy(false);
+                    setRuntimeUpdateError(String(e));
                     console.error(e);
                   }
                 }}
               >
-                {t("update.download")}
+                {t(updateBannerInfo.runtime_state ? "update.runtime_install" : "update.download")}
               </button>
               <button
                 type="button"
                 className="update-banner-dismiss-btn"
-                onClick={() => setUpdateBannerInfo(null)}
+                onClick={() => { dismissedUpdateVersion.current = updateBannerInfo.remote_version; setUpdateBannerInfo(null); }}
               >
                 {t("update.later")}
               </button>
             </div>
-            <details className="update-banner-steps">
+            {(runtimeUpdateError || updateBannerInfo.runtime_error) && <p role="alert">{runtimeUpdateError || updateBannerInfo.runtime_error}</p>}
+            {!updateBannerInfo.runtime_state && <details className="update-banner-steps">
               <summary>{t("update.steps_title")}</summary>
               <ol>
                 <li>{t("update.step1")}</li>
                 <li>{t("update.step2")}</li>
                 <li>{t("update.step3")}</li>
               </ol>
-            </details>
+            </details>}
           </div>
         </div>
       )}
@@ -6214,10 +6259,19 @@ function App() {
             </button>
           </div>
         )}
+        {humanReply.error && !humanInputModalTaskId && (
+          <div className="human-input-error" role="alert">
+            {humanReply.error}
+            <button type="button" onClick={() => { humanReply.clearError(); void fetchPendingHumanInput(); }}>
+              {locale === "en" ? "Refresh questions" : "Actualiser les questions"}
+            </button>
+          </div>
+        )}
         {humanInputModalTaskId && pendingHumanInput[humanInputModalTaskId] && (
           <div className="human-input-overlay" role="dialog" aria-labelledby="human-input-title" aria-modal="true">
             <div className="human-input-modal">
               <h2 id="human-input-title">{t("human_input.action_required")}</h2>
+              {humanReply.error && <p className="human-input-error" role="alert">{humanReply.error}</p>}
               <p className="human-input-question">{pendingHumanInput[humanInputModalTaskId].question}</p>
               {pendingHumanInput[humanInputModalTaskId].context && (
                 <p className="human-input-context">{pendingHumanInput[humanInputModalTaskId].context}</p>
@@ -6229,15 +6283,9 @@ function App() {
                       key={i}
                       type="button"
                       className="human-input-choice-btn"
+                      disabled={humanReply.busy}
                       onClick={async () => {
-                        try {
-                          await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, requestId: pendingHumanInput[humanInputModalTaskId]?.request_id, response: choice, port: DAEMON_PORT });
-                          setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
-                          setHumanInputModalTaskId(null);
-                          setHumanInputFreeText("");
-                        } catch (e) {
-                          console.error(e);
-                        }
+                        await humanReply.submit(humanInputModalTaskId, choice);
                       }}
                     >
                       {choice}
@@ -6251,6 +6299,7 @@ function App() {
                 ) : null}
                 <textarea
                   id="human-input-free-textarea"
+                  disabled={humanReply.busy}
                   rows={3}
                   value={humanInputFreeText}
                   onChange={(e) => setHumanInputFreeText(e.target.value)}
@@ -6258,21 +6307,15 @@ function App() {
                 />
                 <button
                   id="human-input-submit-btn"
+                  disabled={humanReply.busy}
                   type="button"
                   onClick={async () => {
                     const text = humanInputFreeText.trim();
                     if (!text) return;
-                    try {
-                      await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, requestId: pendingHumanInput[humanInputModalTaskId]?.request_id, response: text, port: DAEMON_PORT });
-                      setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
-                      setHumanInputModalTaskId(null);
-                      setHumanInputFreeText("");
-                    } catch (e) {
-                      console.error(e);
-                    }
+                    await humanReply.submit(humanInputModalTaskId, text);
                   }}
                 >
-                  {t("human_input.submit")}
+                  {humanReply.busy ? (locale === "en" ? "Sending…" : "Envoi…") : t("human_input.submit")}
                 </button>
               </div>
               <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label={t("common.close")}>
@@ -6343,6 +6386,7 @@ function App() {
                 <button
                   type="button"
                   className="human-input-choice-btn"
+                        disabled={humanReply.busy}
                   onClick={async () => {
                     const payload = { ...devicePendingRequest };
                     setDevicePendingRequest(null);
@@ -6465,6 +6509,7 @@ function App() {
                 <button
                   type="button"
                   className="human-input-choice-btn"
+                        disabled={humanReply.busy}
                   onClick={async () => {
                     try {
                       await invoke("post_device_result", {
@@ -6728,18 +6773,9 @@ function App() {
                         key={j}
                         type="button"
                         className="message-ask-user-choice-tag"
+                        disabled={humanReply.busy}
                         onClick={async () => {
-                          try {
-                            await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, requestId: pendingHumanInput[pendingTaskIdForReply]?.request_id, response: choice, port: DAEMON_PORT });
-                            setPendingHumanInput((prev) => {
-                              const next = { ...prev };
-                              delete next[pendingTaskIdForReply];
-                              return next;
-                            });
-                            setHumanInputModalTaskId((c) => (c === pendingTaskIdForReply ? null : c));
-                          } catch (e) {
-                            console.error(e);
-                          }
+                          await humanReply.submit(pendingTaskIdForReply, choice);
                         }}
                       >
                         {choice}
@@ -7030,15 +7066,9 @@ function App() {
                           key={i}
                           type="button"
                           className="chat-inline-human-reply-choice-btn"
+                        disabled={humanReply.busy}
                           onClick={async () => {
-                            try {
-                              await invoke("post_task_human_reply", { taskId: pendingTaskId, requestId: pendingHumanInput[pendingTaskId]?.request_id, response: choice, port: DAEMON_PORT });
-                              setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
-                              setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
-                              setInlineHumanReplyText("");
-                            } catch (e) {
-                              console.error(e);
-                            }
+                            await humanReply.submit(pendingTaskId, choice);
                           }}
                         >
                           {choice}
@@ -7059,6 +7089,7 @@ function App() {
                     <div className="chat-inline-human-reply-free-row">
                       <textarea
                         id="inline-human-reply-textarea"
+                        disabled={humanReply.busy}
                         rows={3}
                         value={inlineHumanReplyText}
                         onChange={(e) => setInlineHumanReplyText(e.target.value)}
@@ -7066,21 +7097,15 @@ function App() {
                       />
                       <button
                         id="inline-human-reply-submit"
+                  disabled={humanReply.busy}
                         type="button"
                         onClick={async () => {
                           const text = inlineHumanReplyText.trim();
                           if (!text) return;
-                          try {
-                            await invoke("post_task_human_reply", { taskId: pendingTaskId, requestId: pendingHumanInput[pendingTaskId]?.request_id, response: text, port: DAEMON_PORT });
-                            setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
-                            setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
-                            setInlineHumanReplyText("");
-                          } catch (e) {
-                            console.error(e);
-                          }
+                          await humanReply.submit(pendingTaskId, text);
                         }}
                       >
-                        {t("human_input.submit")}
+                        {humanReply.busy ? (locale === "en" ? "Sending…" : "Envoi…") : t("human_input.submit")}
                       </button>
                     </div>
                   </div>
@@ -7391,6 +7416,12 @@ function App() {
         {(tab === "notes" || visitedTabs.has("notes")) && (
           <section id="panel-notes" role="tabpanel" aria-labelledby="tab-notes" className="panel notes-panel-wrap" hidden={tab !== "notes"}>
             <NotesPanel t={t} locale={locale} daemonPort={DAEMON_PORT} onDiscussNote={discussNote} />
+          </section>
+        )}
+
+        {(tab === "modules" || visitedTabs.has("modules")) && (
+          <section id="panel-modules" role="tabpanel" aria-labelledby="tab-modules" className="panel modules-panel-wrap" hidden={tab !== "modules"}>
+            <ModulesPanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
           </section>
         )}
 

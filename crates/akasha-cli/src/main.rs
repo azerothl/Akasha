@@ -440,11 +440,14 @@ enum UpdateSub {
         #[arg(long)]
         api_url: Option<String>,
     },
-    /// Open the latest release download page in the default browser
+    /// Install a prepared Windows update (asks before restarting the daemon)
     Install {
         /// Base URL for the API (default: AKASHA_APP_BASE_URL env or https://azerothl.github.io/Akasha_app)
         #[arg(long)]
         api_url: Option<String>,
+        /// Confirmation already given (for the desktop confirmation dialog)
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -2223,9 +2226,45 @@ fn update_api_base(api_url: Option<String>) -> String {
 
 fn cmd_update(sub: UpdateSub) -> anyhow::Result<()> {
     match sub {
-        UpdateSub::Check { api_url } => cmd_update_check(update_api_base(api_url)),
-        UpdateSub::Install { api_url } => cmd_update_install(update_api_base(api_url)),
+        UpdateSub::Check { api_url } => {
+            #[cfg(windows)]
+            if std::env::current_exe()?.parent().unwrap().join("akasha-install.json").is_file() {
+                return windows_runtime_update("Prepare", api_url, false);
+            }
+            cmd_update_check(update_api_base(api_url))
+        }
+        UpdateSub::Install { api_url, yes } => {
+            #[cfg(windows)]
+            { windows_runtime_update("Install", api_url, yes) }
+            #[cfg(not(windows))]
+            { let _ = yes; cmd_update_install(update_api_base(api_url)) }
+        }
     }
+}
+
+#[cfg(windows)]
+fn windows_runtime_update(mode: &str, api_url: Option<String>, yes: bool) -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let directory = exe.parent().ok_or_else(|| anyhow::anyhow!("Cannot locate installation"))?;
+    let script = directory.join("scripts").join("update.ps1");
+    anyhow::ensure!(script.is_file() && directory.join("akasha-install.json").is_file(),
+        "This installation predates automatic updates. Install a compatible release once from {}.", DEFAULT_AKASHA_APP_BASE);
+    let mut command = Command::new("powershell.exe");
+    command.args(["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(script).args(["-Mode", mode, "-InstallDir"]).arg(directory)
+        .arg("-DataDir").arg(akasha_data_dir())
+        .arg("-WaitForPid").arg(std::process::id().to_string());
+    if let Some(base) = api_url.or_else(|| std::env::var("AKASHA_APP_BASE_URL").ok()) {
+        command.arg("-ApiBase").arg(base);
+    }
+    if yes { command.arg("-ConfirmInstall"); }
+    anyhow::ensure!(command.status()?.success(), "Update failed; the installed files were retained. See the update status for details.");
+    if mode == "Prepare" {
+        let status: serde_json::Value = serde_json::from_slice(&std::fs::read(directory.join(".akasha-update/status.json"))?)?;
+        println!("Update: {} ({})", status["state"].as_str().unwrap_or("unknown"), status["remote_version"].as_str().unwrap_or(""));
+        if status["state"] == "ready" { println!("Run akasha update install to confirm installation and restart."); }
+    }
+    Ok(())
 }
 
 /// Resolve directory containing docker-compose.yml for akasha-models.
@@ -2636,6 +2675,7 @@ fn cmd_update_check(base: String) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn cmd_update_install(base: String) -> anyhow::Result<()> {
     let base = base.trim_end_matches('/');
     let url = format!("{}/api/latest.json", base);

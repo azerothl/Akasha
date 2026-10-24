@@ -812,6 +812,37 @@ async fn get_update_status(port: Option<u16>) -> Result<serde_json::Value, Strin
 
 /// App version (from Cargo.toml) for update comparison.
 #[tauri::command]
+async fn install_runtime_update(confirmed: bool, port: Option<u16>) -> Result<String, String> {
+    if !confirmed { return Err("Update installation requires confirmation".into()); }
+    if !cfg!(windows) { return Err("Runtime updates are currently available on Windows".into()); }
+    // Update the installation serving this daemon, which need not be first on PATH.
+    let status = get_update_status(port).await?;
+    let runtime = &status["runtime_update"];
+    if runtime["supported"] != true { return Err("This daemon does not support runtime updates".into()); }
+    let directory = std::path::PathBuf::from(runtime["install_dir"].as_str().ok_or("Missing runtime installation path")?);
+    if !directory.is_absolute() { return Err("Invalid runtime installation path".into()); }
+    let directory = directory.canonicalize().map_err(|e| e.to_string())?;
+    let marker: serde_json::Value = serde_json::from_slice(&std::fs::read(directory.join("akasha-install.json")).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    if marker["schema_version"] != 1 || marker["target"] != runtime["target"] { return Err("Runtime installation metadata does not match the daemon".into()); }
+    let cli = directory.join("akasha.exe");
+    if !cli.is_file() || !directory.join("scripts/update.ps1").is_file() { return Err("Runtime updater is missing".into()); }
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = std::process::Command::new(cli);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        command.args(["update", "install", "--yes"])
+            .current_dir(directory)
+            .env("AKASHA_PORT", port.unwrap_or(DAEMON_PORT).to_string()).output()
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
@@ -903,12 +934,16 @@ fn open_path_in_explorer(path: String) -> Result<(), String> {
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     let url = url.trim();
-    if !url.starts_with("https://") {
+    let parsed = url.parse::<url::Url>().map_err(|e| format!("Invalid URL: {}", e))?;
+    let local_code_studio = parsed.scheme() == "http"
+        && parsed.host_str() == Some("127.0.0.1")
+        && parsed.port() == Some(5178)
+        && parsed.path() == "/";
+    if !url.starts_with("https://") && !local_code_studio {
         return Err("Only https URLs are allowed".to_string());
     }
-    let parsed = url.parse::<url::Url>().map_err(|e| format!("Invalid URL: {}", e))?;
     let host = parsed.host_str().unwrap_or("");
-    if !host.ends_with("github.io") && !host.ends_with("github.com") && host != "ollama.com" {
+    if !local_code_studio && !host.ends_with("github.io") && !host.ends_with("github.com") && host != "ollama.com" {
         return Err("URL host not allowed for security".to_string());
     }
     let _ = match std::env::consts::OS {
@@ -917,6 +952,55 @@ fn open_url(url: String) -> Result<(), String> {
         _ => std::process::Command::new("xdg-open").arg(url).status(),
     };
     Ok(())
+}
+
+const CODE_STUDIO_NPM_PACKAGE: &str = "akasha-code-studio@0.10.0";
+
+fn npm_command(args: &[&str]) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/d", "/s", "/c", "npm"]);
+        command.args(args);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = std::process::Command::new("npm");
+        command.args(args);
+        command
+    }
+}
+
+#[tauri::command]
+async fn install_code_studio_module() -> Result<serde_json::Value, String> {
+    let output = tokio::task::spawn_blocking(|| {
+        npm_command(&["install", "--global", CODE_STUDIO_NPM_PACKAGE])
+            .output()
+            .map_err(|error| format!("Node.js avec npm est requis. Installez Node.js puis redémarrez Akasha pour recharger le PATH. ({error})"))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let details = if stderr.trim().is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        let lower = details.to_ascii_lowercase();
+        let workaround = if lower.contains("eacces") || lower.contains("eperm") {
+            " Configurez un préfixe npm global accessible en écriture pour votre compte, puis réessayez."
+        } else {
+            " Vérifiez Node.js/npm et l'accès à registry.npmjs.org, puis réessayez."
+        };
+        return Err(format!("Échec de l'installation de {CODE_STUDIO_NPM_PACKAGE} : {details}{workaround}"));
+    }
+    Ok(serde_json::json!({
+        "installed": true,
+        "package": CODE_STUDIO_NPM_PACKAGE,
+        "output": String::from_utf8_lossy(&output.stdout).trim(),
+    }))
 }
 
 /// POST /api/diagnostic/advice — get advice from health (for slash /advice).
@@ -1651,12 +1735,13 @@ async fn post_task_human_reply(task_id: String, response: String, request_id: Op
     let url = format!("{}/api/tasks/{}/human-reply", daemon_base_url(port), task_id);
     let client = http_client();
     let body = serde_json::json!({ "response": response, "request_id": request_id });
-    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("{}", resp.status()));
+    let resp = client.post(&url).json(&body).timeout(std::time::Duration::from_secs(15)).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json = resp.json::<serde_json::Value>().await;
+    if !status.is_success() {
+        return Err(format!("{}: {}", status, json.as_ref().ok().and_then(|value| value.get("error")).and_then(|e| e.as_str()).unwrap_or("human_reply_failed")));
     }
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(json)
+    json.map_err(|e| e.to_string())
 }
 
 /// Schedules: GET /api/schedules (FR-028, Calendrier).
@@ -2804,8 +2889,10 @@ pub fn run() {
             get_doctor,
             run_akasha_doctor_fix,
             get_update_status,
+            install_runtime_update,
             get_app_version,
             open_url,
+            install_code_studio_module,
             open_path,
             open_path_in_explorer,
             read_file_as_data_url,

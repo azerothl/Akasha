@@ -4,6 +4,7 @@ export type Tab =
   | "research"
   | "cookbook"
   | "notes"
+  | "modules"
   | "scheduled"
   | "router"
   | "mission"
@@ -28,6 +29,7 @@ export const NAV_ITEMS: NavItem[] = [
   { id: "research", labelKey: "tabs.research", group: "workspace", shortcut: "3" },
   { id: "cookbook", labelKey: "tabs.cookbook", group: "workspace" },
   { id: "notes", labelKey: "tabs.notes", group: "workspace" },
+  { id: "modules", labelKey: "tabs.modules", group: "workspace" },
   { id: "tasks", labelKey: "tabs.tasks", group: "operations", shortcut: "4" },
   { id: "scheduled", labelKey: "tabs.scheduled", group: "operations" },
   { id: "router", labelKey: "tabs.router", group: "operations", shortcut: "5" },

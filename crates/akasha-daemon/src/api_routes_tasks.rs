@@ -1,5 +1,58 @@
 //! Tasks, messages, schedules, and timeline routes.
 
+/// Consume only the current approval and acknowledge delivery, never just removal.
+fn deliver_human_reply(
+    waiting: &mut std::collections::HashMap<uuid::Uuid, crate::api::PendingHumanInput>,
+    task: uuid::Uuid,
+    request_id: Option<&str>,
+    response: String,
+) -> Result<(), (&'static str, &'static str)> {
+    if response.trim().is_empty() { return Err(("400 Bad Request", "empty_human_reply")); }
+    let pending = waiting.get(&task).ok_or(("404 Not Found", "no_pending_human_input"))?;
+    if pending.response_tx.is_closed() {
+        waiting.remove(&task);
+        return Err(("410 Gone", "human_input_expired"));
+    }
+    if pending.request_id.is_some() && pending.request_id.as_deref() != request_id {
+        return Err(("409 Conflict", "stale_approval_request"));
+    }
+    waiting.remove(&task).unwrap().response_tx.send(response)
+        .map_err(|_| ("410 Gone", "human_input_expired"))
+}
+
+#[cfg(test)]
+mod human_reply_delivery_tests {
+    use super::deliver_human_reply;
+    fn question() -> (uuid::Uuid, std::collections::HashMap<uuid::Uuid, crate::api::PendingHumanInput>, tokio::sync::oneshot::Receiver<String>) {
+        let task = uuid::Uuid::new_v4();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let pending = crate::api::PendingHumanInput { request_id:Some("current".into()), question:"Continue?".into(), context:String::new(), choices:None, response_tx:tx };
+        (task, [(task, pending)].into_iter().collect(), rx)
+    }
+    #[test]
+    fn stale_or_blank_reply_never_consumes_current_question() {
+        let (task, mut pending, mut rx) = question();
+        assert_eq!(deliver_human_reply(&mut pending, task, Some("old"), "yes".into()), Err(("409 Conflict", "stale_approval_request")));
+        assert_eq!(deliver_human_reply(&mut pending, task, None, "yes".into()), Err(("409 Conflict", "stale_approval_request")));
+        assert_eq!(deliver_human_reply(&mut pending, task, Some("current"), " ".into()), Err(("400 Bad Request", "empty_human_reply")));
+        assert!(pending.contains_key(&task));
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+    }
+    #[test]
+    fn expired_wait_is_removed_and_never_acknowledged_as_delivered() {
+        let (task, mut pending, rx) = question(); drop(rx);
+        assert_eq!(deliver_human_reply(&mut pending, task, Some("current"), "yes".into()), Err(("410 Gone", "human_input_expired")));
+        assert!(pending.is_empty());
+    }
+    #[test]
+    fn answer_is_delivered_exactly_once() {
+        let (task, mut pending, mut rx) = question();
+        assert_eq!(deliver_human_reply(&mut pending, task, Some("current"), "exact answer".into()), Ok(()));
+        assert_eq!(rx.try_recv().unwrap(), "exact answer");
+        assert_eq!(deliver_human_reply(&mut pending, task, Some("current"), "again".into()), Err(("404 Not Found", "no_pending_human_input")));
+    }
+}
+
 use crate::agents::{MainAgent, TaskPriority};
 use crate::api::{
     build_ack_message, extract_how_to_call_from_message, studio_code_rag_enabled, EventsCache, HumanInputStore, ProgressCache, ProgressEntry,
@@ -2807,7 +2860,8 @@ if method == "POST" && path == "/api/message" {
 // GET /api/pending-human-input — list all tasks waiting for user input (so UI can show notifications after reload or when user was away)
 if method == "GET" && path == "/api/pending-human-input" {
     if let Some(ref store) = human_input_store {
-        let g = store.read().await;
+        let mut g = store.write().await;
+        g.retain(|_, pending| !pending.response_tx.is_closed());
         let pending: Vec<_> = g
             .iter()
             .map(|(id, p)| {
@@ -2890,7 +2944,8 @@ if path.starts_with("/api/tasks/") {
             // Human in the loop: GET pending question/context/choices for the task
             if method == "GET" && parts.get(1) == Some(&"human-input") {
                 if let Some(ref store) = human_input_store {
-                    let g = store.read().await;
+                    let mut g = store.write().await;
+                    g.retain(|_, pending| !pending.response_tx.is_closed());
                     if let Some(pending) = g.get(&id) {
                         let body = serde_json::json!({
                             "task_id": id.to_string(),
@@ -2913,16 +2968,10 @@ if path.starts_with("/api/tasks/") {
                     .and_then(|v| v.get("response").and_then(|r| r.as_str().map(String::from)))
                     .unwrap_or_else(|| String::new());
                 if let Some(ref store) = human_input_store {
-                    let pending = {
-                        let mut g = store.write().await;
-                        if g.get(&id).is_some_and(|pending| pending.request_id.is_some() && pending.request_id != request_id) {
-                            return Some(json_response("409 Conflict",r#"{"error":"stale_approval_request","detail":"Send the request_id from the current human-input question."}"#));
-                        }
-                        g.remove(&id)
-                    };
-                    if let Some(pending) = pending {
-                        let _ = pending.response_tx.send(response_text);
-                        return Some(json_response("200 OK", &serde_json::json!({ "ok": true, "message": "Réponse transmise à l'agent." }).to_string()));
+                    let result = deliver_human_reply(&mut *store.write().await, id, request_id.as_deref(), response_text);
+                    match result {
+                        Ok(()) => return Some(json_response("200 OK", &serde_json::json!({ "ok": true, "message": "Réponse transmise à l'agent." }).to_string())),
+                        Err((status, error)) => return Some(json_response(status, &serde_json::json!({"error":error,"task_id":id}).to_string())),
                     }
                 }
                 return Some(json_response("404 Not Found", &serde_json::json!({ "error": "no_pending_human_input", "task_id": id.to_string() }).to_string()));
