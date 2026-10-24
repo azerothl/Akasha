@@ -1199,9 +1199,24 @@ pre,
 }
 
 .human-input-context {
+  overflow-wrap: anywhere;
   margin: 0 0 1rem;
   font-size: 0.875rem;
   color: var(--akasha-text-muted);
+}
+
+.human-input-error {
+  color: var(--akasha-text);
+  background: var(--akasha-bg-surface);
+  border: 1px solid var(--akasha-accent, #a78bfa);
+  padding: 12px;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.human-input-choices button:disabled,
+.chat-inline-human-reply button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .human-input-choices {
