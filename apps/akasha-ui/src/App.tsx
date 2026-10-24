@@ -2562,7 +2562,12 @@ function App() {
     current_version: string;
     download_url: string;
     release_notes_url?: string | null;
+    runtime_state?: string;
+    runtime_error?: string;
   } | null>(null);
+  const [runtimeUpdateBusy, setRuntimeUpdateBusy] = useState(false);
+  const [runtimeUpdateError, setRuntimeUpdateError] = useState("");
+  const dismissedUpdateVersion = useRef("");
 
   const [chatTipsEnabled, setChatTipsEnabled] = useState(() => {
     try {
@@ -2728,19 +2733,34 @@ function App() {
   // Check for app update (daemon caches latest.json; compare with app version)
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const check = async () => {
       try {
         const [currentVersion, status] = await Promise.all([
           invoke<string>("get_app_version"),
-          invoke<{ remote_version?: string; download_url?: string; error?: string | null }>("get_update_status", {
+          invoke<{ remote_version?: string; download_url?: string; error?: string | null; runtime_update?: { supported?: boolean; state?: string; remote_version?: string; installed_version?: string; error?: string; recovery_required?: boolean } }>("get_update_status", {
             port: DAEMON_PORT,
           }),
         ]);
         if (cancelled) return;
+        const runtime = status?.runtime_update;
+        if (runtime?.supported && runtime.remote_version && runtime.installed_version &&
+            (versionGt(runtime.remote_version, runtime.installed_version) || runtime.state === "applying" || runtime.recovery_required)) {
+          if (runtime.state === "failed") setRuntimeUpdateBusy(false);
+          if (dismissedUpdateVersion.current !== runtime.remote_version) {
+            setUpdateBannerInfo({ remote_version: runtime.remote_version, current_version: runtime.installed_version,
+              download_url: "", runtime_state: runtime.state, runtime_error: runtime.error });
+          }
+          return;
+        }
+        if (runtime?.state === "installed" || runtime?.state === "up_to_date") {
+          setRuntimeUpdateBusy(false);
+          setUpdateBannerInfo(previous => previous?.runtime_state ? null : previous);
+        }
         if (status?.error || !status?.remote_version) return;
         const remote = (status.remote_version ?? "0.0.0").trim();
         const current = (currentVersion ?? "0.0.0").trim();
         if (versionGt(remote, current) && status.download_url) {
+          if (dismissedUpdateVersion.current === remote) return;
           setUpdateBannerInfo({
             remote_version: remote,
             current_version: current,
@@ -2751,9 +2771,12 @@ function App() {
       } catch {
         /* daemon may be down; skip banner */
       }
-    })();
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 5000);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -6022,38 +6045,49 @@ function App() {
         <div className="update-banner" role="region" aria-label={t("update.banner_label")}>
           <div className="update-banner-inner">
             <p className="update-banner-text">
-              {t("update.available")} <strong>{updateBannerInfo.remote_version}</strong> ({t("update.you_have")} {updateBannerInfo.current_version}). {t("update.banner_install")}
+              {t(updateBannerInfo.runtime_state ? "update.runtime_available" : "update.available")} <strong>{updateBannerInfo.remote_version}</strong> ({t("update.you_have")} {updateBannerInfo.current_version}). {t(updateBannerInfo.runtime_state ? `update.runtime_${updateBannerInfo.runtime_state}` : "update.banner_install")}
             </p>
             <div className="update-banner-actions">
               <button
                 type="button"
                 className="update-banner-download-btn"
+                disabled={!!updateBannerInfo.runtime_state && (!["ready", "failed"].includes(updateBannerInfo.runtime_state) || runtimeUpdateBusy)}
                 onClick={async () => {
                   try {
+                    if (updateBannerInfo!.runtime_state) {
+                      if (!window.confirm(t("update.runtime_confirm"))) return;
+                      setRuntimeUpdateBusy(true);
+                      setRuntimeUpdateError("");
+                      await invoke("install_runtime_update", { confirmed: true, port: DAEMON_PORT });
+                      return;
+                    }
                     await invoke("open_url", { url: updateBannerInfo!.download_url });
                   } catch (e) {
+                    setRuntimeUpdateBusy(false);
+                    setRuntimeUpdateError(String(e));
                     console.error(e);
                   }
                 }}
               >
-                {t("update.download")}
+                {t(updateBannerInfo.runtime_state ? "update.runtime_install" : "update.download")}
               </button>
               <button
                 type="button"
                 className="update-banner-dismiss-btn"
-                onClick={() => setUpdateBannerInfo(null)}
+                onClick={() => { dismissedUpdateVersion.current = updateBannerInfo.remote_version; setUpdateBannerInfo(null); }}
               >
                 {t("update.later")}
               </button>
             </div>
-            <details className="update-banner-steps">
+            {(runtimeUpdateError || updateBannerInfo.runtime_error) && <p role="alert">{runtimeUpdateError || updateBannerInfo.runtime_error}</p>}
+            {!updateBannerInfo.runtime_state && <details className="update-banner-steps">
               <summary>{t("update.steps_title")}</summary>
               <ol>
                 <li>{t("update.step1")}</li>
                 <li>{t("update.step2")}</li>
                 <li>{t("update.step3")}</li>
               </ol>
-            </details>
+            </details>}
           </div>
         </div>
       )}

@@ -62,6 +62,7 @@ if method == "GET" && path == "/api/update/status" {
         "release_notes_url": status.release_notes_url,
         "last_checked_at": status.last_checked_at.map(|t| t.to_rfc3339()),
         "error": status.error,
+        "runtime_update": crate::runtime_update::status(),
     });
     return Some(json_response("200 OK", &body.to_string()));
 }

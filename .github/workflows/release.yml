@@ -386,10 +386,7 @@ jobs:
             esac
             # README at root of full zip (all platforms)
             printf 'To install: Windows: double-click INSTALL.cmd. Linux/macOS: in a terminal, run: chmod +x scripts/setup.sh && ./scripts/setup.sh\n' > "$RELEASE_DIR/${full_name}/README.txt"
-            # Windows full zip: entry point that bypasses ExecutionPolicy for setup.ps1
-            if [ "$suffix" = "windows-x86_64" ]; then
-              printf '%s\r\n' '@echo off' 'powershell -ExecutionPolicy Bypass -File "%~dp0scripts\setup.ps1"' 'pause' > "$RELEASE_DIR/${full_name}/INSTALL.cmd"
-            fi
+            # Windows INSTALL.cmd is included in the CLI artifact and applies the process-scoped policy bypass.
             (cd "$RELEASE_DIR/${full_name}" && zip -r "$RELEASE_DIR/${full_name}.zip" .)
             rm -rf "$RELEASE_DIR/${full_name}"
           done
@@ -405,8 +402,7 @@ jobs:
               mkdir -p "$RELEASE_DIR/${full_cuda}/ui"
               cp -r "$UI_WIN"/* "$RELEASE_DIR/${full_cuda}/ui/"
             fi
-            printf 'To install: double-click INSTALL.cmd or run: powershell -ExecutionPolicy Bypass -File scripts\\setup.ps1\r\n' > "$RELEASE_DIR/${full_cuda}/README.txt"
-            printf '%s\r\n' '@echo off' 'powershell -ExecutionPolicy Bypass -File "%~dp0scripts\setup.ps1"' 'pause' > "$RELEASE_DIR/${full_cuda}/INSTALL.cmd"
+            printf 'To install: double-click INSTALL.cmd.\r\n' > "$RELEASE_DIR/${full_cuda}/README.txt"
             (cd "$RELEASE_DIR/${full_cuda}" && zip -r "$RELEASE_DIR/${full_cuda}.zip" .)
             rm -rf "$RELEASE_DIR/${full_cuda}"
           fi
@@ -421,6 +417,11 @@ jobs:
             exit 1
           fi
 
+      - name: Package selective Windows updates
+        env:
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
+        run: python scripts/ci/package_updates.py build release "$VERSION"
+
       - name: Verify shared Windows clients in packaged archives
         run: python scripts/ci/verify_release_windows_archives.py release
 
@@ -428,7 +429,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-archives
-          path: release/*.zip
+          path: release/*
           if-no-files-found: error
           retention-days: 7
 
@@ -520,7 +521,12 @@ jobs:
         run: |
           set -e
           shopt -s nullglob
-          RELEASE_FILES=("release"/*.zip)
+          # The public site mirrors these assets. Updater components use their own feed below.
+          RELEASE_FILES=()
+          for archive in release/*.zip; do
+            [[ "$(basename "$archive")" == akasha-component-* ]] && continue
+            RELEASE_FILES+=("$archive")
+          done
           if [ ${#RELEASE_FILES[@]} -eq 0 ]; then
             echo "::error::No packaged release archives were downloaded."
             exit 1
@@ -559,6 +565,38 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download update components
+        uses: actions/download-artifact@v4
+        with:
+          name: release-archives
+          path: release
+
+      # Akasha may be private. Serve update components from the public website repo.
+      # The token needs contents:write on Akasha_app (in addition to dispatch permission).
+      - name: Publish public update feed
+        env:
+          GH_TOKEN: ${{ secrets.AKASHA_UPDATE_PUBLISH_TOKEN || secrets.AKASHA_APP_DISPATCH_TOKEN }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
+        run: |
+          set -e
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::Configure AKASHA_UPDATE_PUBLISH_TOKEN with contents:write on Akasha_app to publish automatic updates."
+            exit 0
+          fi
+          UPDATE_FILES=(release/akasha-component-*.zip release/akasha-update-*.json)
+          UPDATE_TAG="updates-v${VERSION#v}"
+          if gh release view "$UPDATE_TAG" --repo azerothl/Akasha_app >/dev/null 2>&1; then
+            gh release upload "$UPDATE_TAG" --repo azerothl/Akasha_app "${UPDATE_FILES[@]}" --clobber
+          else
+            gh release create "$UPDATE_TAG" --repo azerothl/Akasha_app --prerelease --latest=false --title "Runtime components $VERSION" --notes "Windows runtime update components. Installation downloads remain on the Akasha website." "${UPDATE_FILES[@]}"
+          fi
+          # A separate, mutable channel pointer does not collide with the site's vX.Y.Z releases.
+          if gh release view updates-stable --repo azerothl/Akasha_app >/dev/null 2>&1; then
+            gh release upload updates-stable --repo azerothl/Akasha_app release/akasha-update-*.json --clobber
+          else
+            gh release create updates-stable --repo azerothl/Akasha_app --prerelease --latest=false --title "Stable runtime update feed" --notes "Machine-readable update channel; use the Akasha website for installation downloads." release/akasha-update-*.json
+          fi
 
       - name: Trigger Akasha_app deployment via repository_dispatch
         env:

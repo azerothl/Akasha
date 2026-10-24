@@ -20,7 +20,7 @@ Vous obtenez les exécutables **akasha** (ou akasha.exe), **akasha-daemon** et *
 
 Après avoir extrait le zip **full** :
 
-- **Windows (PowerShell)** : exécutez `.\scripts\setup.ps1`. Le script vous demandera : installer l'application desktop (interface web) ? Démarrer le daemon à chaque connexion ? Il installe les binaires, lance le premier `akasha init`, démarre le daemon une fois et, si vous le souhaitez, enregistre le daemon au démarrage de Windows et installe l'app Tauri.
+- **Windows** : après extraction, double-cliquez sur `INSTALL.cmd` à la racine de l’archive. Le lanceur contourne uniquement pour ce processus le blocage PowerShell des scripts non signés, sans changer le réglage permanent de Windows. Le setup vous demandera : installer l'application desktop (interface web) ? Démarrer le daemon à chaque connexion ? Il installe les binaires, lance le premier `akasha init`, démarre le daemon une fois et, si vous le souhaitez, enregistre le daemon au démarrage de Windows et installe l'app Tauri.
 - **Linux / macOS** : exécutez `./scripts/setup.sh` (ou `bash scripts/setup.sh`). Mêmes choix (application desktop, daemon au démarrage). Le script installe les binaires, lance l'init, démarre le daemon une fois et, sous Linux (systemd) ou macOS (launchd), peut enregistrer le daemon pour qu'il démarre à chaque connexion.
 
 **Redémarrage en cas de crash** : si vous avez activé le démarrage automatique, le daemon est relancé en cas d'arrêt — sous Windows via le superviseur intégré à `akasha start`, sous Linux/macOS via systemd ou launchd.
@@ -31,7 +31,7 @@ Après avoir extrait le zip **full** :
 Ouvrez un terminal dans le dossier où vous avez extrait l'archive, puis :
 
 ```
-.\scripts\install.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 .\akasha.exe start
 ```
 
@@ -445,8 +445,20 @@ Si vous avez installé l'**application desktop** (Akasha UI), lancez-la ; elle s
 
 | Commande | Description |
 |----------|-------------|
-| `akasha update check` | Vérifie si une nouvelle version est disponible (interroge le site vitrine). Affiche l'URL de téléchargement si une mise à jour existe. |
-| `akasha update install` | Ouvre la page de téléchargement de la dernière release dans le navigateur. |
+| `akasha update check` | Windows installé avec le nouveau setup : vérifie et prépare les seuls composants modifiés. Autres installations : vérifie la version sur le site. |
+| `akasha update install` | Windows : demande confirmation, applique la mise à jour préparée et redémarre le daemon s’il était actif. Linux/macOS : ouvre la page de téléchargement. |
+
+Sur les nouvelles installations Windows CPU/CUDA, le daemon vérifie les mises à
+jour au plus une fois par jour et télécharge les composants modifiés en arrière-plan.
+La bannière **Mise à jour du moteur Akasha** propose ensuite **Installer et
+redémarrer le moteur**. La confirmation est obligatoire ; attendez la fin des tâches
+en cours avant de l’accepter. La mise à jour conserve vos modèles, bases et réglages.
+L’application desktop elle-même conserve ses installateurs séparés.
+
+Une installation plus ancienne doit être remplacée une fois par une distribution
+incluant `scripts/update.ps1` et `akasha-install.json`. Ensuite, aucun ZIP complet
+n’est nécessaire pour mettre à jour le moteur. Les fichiers inchangés, notamment
+les DLL CUDA, sont réutilisés. Un exécutable modifié est téléchargé en entier.
 
 L'URL de l'API est configurable via la variable d'environnement `AKASHA_APP_BASE_URL` (défaut : `https://azerothl.github.io/Akasha_app`).
 
@@ -710,7 +722,7 @@ Les variables d'activation sont chargées depuis le fichier **connectors.env** d
 | Redémarrer le daemon | `/restart` dans le chat |
 | Configurer un fournisseur LLM (sans init) | `akasha config provider set-ollama` / `add-openai` / `add-openrouter` |
 | Vérifier une mise à jour | `akasha update check` |
-| Ouvrir la page de téléchargement | `akasha update install` |
+| Installer une mise à jour du moteur Windows | `akasha update install` |
 
 Cette documentation est également affichée dans l'**onglet Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`.
 

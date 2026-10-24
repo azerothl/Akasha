@@ -188,6 +188,10 @@ jobs:
               "changelog": description,
               "min_supported_version": "0.5.0"
           }
+          latest["update_manifests"] = {
+              target: f"https://github.com/azerothl/Akasha_app/releases/download/updates-stable/akasha-update-{target}.json"
+              for target in ("windows-x86_64", "windows-x86_64-cuda")
+          }
 
           with open("api/latest.json", "w") as f:
               json.dump(latest, f, indent=2, ensure_ascii=False)

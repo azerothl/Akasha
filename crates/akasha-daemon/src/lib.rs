@@ -110,6 +110,7 @@ pub mod user_rag_indexer;
 pub mod notes;
 pub mod api_routes_notes;
 pub mod api_routes_docs;
+pub mod runtime_update;
 pub mod api_routes_companion;
 pub mod companion_discovery;
 pub mod api_routes_config;

@@ -280,10 +280,20 @@ jobs:
           cargo build --locked -p akasha-embedded-llm --features llama-cpp
           cargo test --locked -p akasha-embedded-llm --features llama-cpp
 
+  windows-updater:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate Windows PowerShell updater and component publication
+        run: python -m unittest discover -s scripts/ci/tests -p test_package_updates.py -v
+
   # Preserve the existing required "test" check, including docs-only changes.
   test:
     if: always()
-    needs: [changes, rust-tests, ui-e2e]
+    needs: [changes, rust-tests, ui-e2e, windows-updater]
     runs-on: ubuntu-latest
     steps:
       - name: Check all required outcomes
@@ -291,9 +301,11 @@ jobs:
           PLAN_RESULT: ${{ needs.changes.result }}
           RUST_RESULT: ${{ needs.rust-tests.result }}
           UI_RESULT: ${{ needs.ui-e2e.result }}
+          UPDATE_RESULT: ${{ needs.windows-updater.result }}
           RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
           UI_REQUIRED: ${{ needs.changes.outputs.ui }}
         run: |
           [[ "$PLAN_RESULT" == success ]]
+          [[ "$UPDATE_RESULT" == success ]]
           if [[ "$RUST_REQUIRED" == true ]]; then [[ "$RUST_RESULT" == success ]]; else [[ "$RUST_RESULT" == skipped ]]; fi
           if [[ "$UI_REQUIRED" == true ]]; then [[ "$UI_RESULT" == success ]]; else [[ "$UI_RESULT" == skipped ]]; fi
