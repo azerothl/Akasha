@@ -5310,6 +5310,8 @@ pub async fn handle_api(
     if let Some(response)=crate::profile_backup::route(method,path_only,body.as_deref(),data_dir,store_path) {
         return response;
     }
+    if let Some(response)=crate::consumer_profile::route(method,path_only,body.as_deref(),data_dir,store_path) {return response;}
+    if let Some(response)=crate::consumer_preferences::route(method,path_only,body.as_deref(),data_dir) {return response;}
     if let Some(resp) = crate::api_routes_permissions::try_handle(
         method,
         path_only,

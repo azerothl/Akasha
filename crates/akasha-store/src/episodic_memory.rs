@@ -64,6 +64,7 @@ impl EpisodicStore {
             CREATE INDEX IF NOT EXISTS idx_episodic_events_type ON episodic_events(event_type);
             "#,
         )?;
+        crate::memory_lineage::install(&conn)?;
         Ok(Self { conn })
     }
 

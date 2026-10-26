@@ -177,6 +177,7 @@ async fn tick(
                     dedup_key: dedup_key.clone(),
                 };
                 schedule_store.insert_task_run(&task_run)?;
+                if cfg!(feature="consumer-beta") && !schedule.rrule.trim().is_empty(){schedule_store.record_resume_cursor(schedule.id,now)?;}
                 let data_dir = store_path
                     .parent()
                     .map(PathBuf::from)
@@ -220,6 +221,12 @@ async fn tick(
     // Only track runs whose send succeeded so we don't mark failed sends as Running.
     let mut successful_run_ids: Vec<uuid::Uuid> = Vec::new();
     for (run_id, task_id, message, session_id) in &pending {
+        if let Some(watch)=session_id.strip_prefix("consumer:watch:").and_then(|id|Uuid::parse_str(id).ok()) {
+            let tasks=TaskStore::open(store_path)?;tasks.update_status(*task_id,TaskStatus::Running)?;tasks.update_assigned_agent(*task_id,"personal_watch")?;
+            ScheduleStore::open(store_path)?.update_task_run_status(*run_id,TaskRunStatus::Running,Some(now),None)?;
+            crate::consumer_watch::spawn(store_path.parent().unwrap_or(store_path).into(),store_path.clone(),*task_id,watch);
+            continue;
+        }
         match orch_tx
             .send(crate::agents::OrchestratorTask {
                 task_id: *task_id,
@@ -312,6 +319,10 @@ async fn process_due_wakeups(
         store.list_pending_before(now)?
     };
     for w in due {
+        if cfg!(feature="consumer-beta") || w.session_id.starts_with("consumer:reminder:") {
+            WakeupStore::open(store_path)?.fire_notification(w.id,now)?;
+            continue;
+        }
         let task_id = Uuid::new_v4();
         let msg = format!("[Agent wakeup] {}", w.message);
         let _ = bus.send(
@@ -414,7 +425,8 @@ fn due_slots_rrule(
     }
     let runs = schedule_store.list_task_runs(Some(schedule.id), 1)?;
     let last_planned = runs.into_iter().next().map(|r| r.planned_for);
-    let after = last_planned.unwrap_or_else(|| schedule.start_at - Duration::seconds(1));
+    let mut after = last_planned.unwrap_or_else(|| schedule.start_at - Duration::seconds(1));
+    if cfg!(feature="consumer-beta"){if let Some(cursor)=schedule_store.resume_cursor(schedule.id)?{after=after.max(cursor);}}
     let before = now + Duration::seconds(1);
     let chrono_tz = chrono_tz::Tz::from_str(&schedule.timezone)
         .map_err(|e| anyhow::anyhow!("invalid schedule timezone {}: {:?}", schedule.timezone, e))?;
@@ -438,10 +450,13 @@ fn due_slots_rrule(
         .dates
         .into_iter()
         .map(|dt| dt.with_timezone(&Utc))
-        .filter(|dt| *dt <= now && (last_planned.is_none() || *dt > last_planned.unwrap()))
+        .filter(|dt| *dt <= now && *dt>after)
         .filter(|dt| schedule.end_at.map(|e| *dt <= e).unwrap_or(true))
         .take(MAX_CATCHUP)
         .collect();
+    if cfg!(feature="consumer-beta") {
+        if let Some(first)=slots.first(){let count=slots.len().saturating_sub(1)+usize::from(now-*first>Duration::minutes(1));schedule_store.record_missed_window(schedule.id,*first,now,count as u64,now,false)?;return Ok(vec![*first]);}
+    }
     Ok(slots)
 }
 
@@ -452,6 +467,7 @@ fn due_slots_interval(
     now: chrono::DateTime<Utc>,
     interval_secs: u64,
 ) -> anyhow::Result<Vec<chrono::DateTime<Utc>>> {
+    let interval_secs=i64::try_from(interval_secs).ok().filter(|seconds|*seconds>0).ok_or_else(||anyhow::anyhow!("schedule interval must be positive and representable"))?;
     if let Some(end_at) = schedule.end_at {
         if end_at < now {
             return Ok(vec![]);
@@ -466,15 +482,24 @@ fn due_slots_interval(
     if base > now {
         return Ok(vec![]);
     }
-    let delta = Duration::seconds(interval_secs as i64);
+    let delta = Duration::seconds(interval_secs);
     // If there are existing runs, start from the slot after the last known run.
     // If there are no runs yet, the first candidate is start_at itself (the schedule's first
     // occurrence is at start_at, not start_at + delta).
     let first_candidate = if last_run.is_some() { base + delta } else { base };
+    if first_candidate>now {return Ok(vec![]);}
+    let consumer_watch=schedule.channel_context.as_deref().is_some_and(|context|context.contains("consumer:watch:"));
+    if cfg!(feature="consumer-beta")||consumer_watch {
+        let missed=(now-first_candidate).num_seconds()/interval_secs;
+        let latest=first_candidate+Duration::seconds(missed*interval_secs);
+        let late=now-latest>Duration::minutes(1);let missed_count=missed+if late{1}else{0};
+        schedule_store.record_missed(schedule.id,first_candidate,if late{latest}else{latest-delta},missed_count as u64,now)?;
+        return Ok(vec![latest]);
+    }
     let mut slots = Vec::new();
     let mut candidate = first_candidate;
     // Include slots up to and including now: a slot at exactly `now` is considered due.
-    while candidate <= now {
+    while candidate <= now && slots.len()<MAX_CATCHUP {
         slots.push(candidate);
         candidate = candidate + delta;
     }
@@ -485,6 +510,15 @@ fn due_slots_interval(
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn personal_watch_resumes_once_after_many_missed_deadlines() {
+        let db=NamedTempFile::new().unwrap();let store=ScheduleStore::open(db.path()).unwrap();let now=Utc::now();let id=Uuid::new_v4();
+        let schedule=Schedule{id,name:"Veille synthétique".into(),description:String::new(),enabled:true,timezone:"Europe/Paris".into(),rrule:String::new(),interval_seconds:Some(86400),start_at:now-Duration::days(24),end_at:None,channel_context:Some(format!("consumer:watch:{id}")),created_at:now,updated_at:now};
+        store.insert_schedule(&schedule).unwrap();let slots=due_slots_interval(&store,&schedule,now,86400).unwrap();assert_eq!(slots,vec![now]);assert_eq!(store.missed(id).unwrap().unwrap()["count"],24);
+        store.insert_task_run(&TaskRun{id:Uuid::new_v4(),schedule_id:Some(id),task_id:Uuid::new_v4(),status:TaskRunStatus::Completed,planned_for:slots[0],started_at:Some(now),ended_at:Some(now),dedup_key:"resume-synthetic".into()}).unwrap();
+        assert!(due_slots_interval(&store,&schedule,now,86400).unwrap().is_empty());assert!(due_slots_interval(&store,&schedule,now,0).is_err());
+    }
 
     #[test]
     fn sync_terminal_task_run_statuses_marks_completed_runs() {

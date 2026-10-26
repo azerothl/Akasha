@@ -21,6 +21,12 @@ pub struct FactsStore {
 }
 
 impl FactsStore {
+    /// An asynchronous extractor may finish after the user corrected its source.
+    /// The predicate and insert share a statement, so stale facts cannot reappear.
+    pub fn insert_if_current(&self,subject:&str,predicate:&str,object:&str,entry:Uuid,expected:&str)->anyhow::Result<bool>{
+        let now=Utc::now().to_rfc3339();
+        Ok(self.conn.execute("INSERT INTO facts(id,subject,predicate,object,source_entry_id,created_at,valid_from,recorded_at) SELECT ?1,?2,?3,?4,?5,?6,?6,?6 WHERE EXISTS(SELECT 1 FROM memory_entries WHERE id=?5 AND content=?7)",rusqlite::params![Uuid::new_v4().to_string(),subject,predicate,object,entry.to_string(),now,expected])?>0)
+    }
     /// Open the facts store. Uses the same DB path as long-term memory; creates facts table if missing.
     pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let conn = crate::memory_protection::open_connection(path)?;
@@ -39,6 +45,7 @@ impl FactsStore {
             CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object);
             CREATE INDEX IF NOT EXISTS idx_facts_predicate ON facts(predicate);
             CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(created_at);
+            CREATE INDEX IF NOT EXISTS idx_facts_source ON facts(source_entry_id);
             "#,
         )?;
         let has_col = |name: &str| -> anyhow::Result<bool> {
@@ -52,6 +59,7 @@ impl FactsStore {
         if !has_col("recorded_at")? {
             conn.execute("ALTER TABLE facts ADD COLUMN recorded_at TEXT", [])?;
         }
+        crate::memory_lineage::install(&conn)?;
         Ok(Self { conn })
     }
 

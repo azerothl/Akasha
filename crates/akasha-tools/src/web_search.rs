@@ -11,7 +11,7 @@ const DEFAULT_SEARXNG_URL: &str = "https://searx.be";
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 const USER_AGENT: &str = "Mozilla/5.0 (compatible; Akasha/1.0; +https://github.com/akasha)";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct WebSearchHit {
     pub title: String,
     pub url: String,
@@ -225,17 +225,22 @@ pub fn format_hits(hits: &[WebSearchHit]) -> String {
 }
 
 /// Search with provider fallback chain. Returns (formatted lines, tool result, provider used).
-pub async fn web_search_routed(
+pub async fn web_search_routed(query:&str,max_results:u32,policy:&ToolsPolicy)->anyhow::Result<(String,ToolResult,Option<String>)>{
+    let(hits,result,provider)=web_search_hits(query,max_results,policy).await?;
+    Ok((format_hits(&hits),result,provider))
+}
+
+pub async fn web_search_hits(
     query: &str,
     max_results: u32,
     policy: &ToolsPolicy,
-) -> anyhow::Result<(String, ToolResult, Option<String>)> {
+) -> anyhow::Result<(Vec<WebSearchHit>, ToolResult, Option<String>)> {
     let count = max_results.clamp(1, 10);
     let chain = build_provider_chain(policy);
 
     if chain.is_empty() {
         return Ok((
-            String::new(),
+            Vec::new(),
             ToolResult {
                 tool: "web_search".to_string(),
                 success: false,
@@ -257,26 +262,27 @@ pub async fn web_search_routed(
         }
         match search_with_provider(provider, query, count, policy).await {
             Ok(hits) if !hits.is_empty() => {
+                let total=hits.len();
                 let name = provider.as_str().to_string();
-                let text = format_hits(&hits);
                 return Ok((
-                    text,
+                    hits,
                     ToolResult {
                         tool: "web_search".to_string(),
                         success: true,
-                        summary: format!("{} result(s) via {}", hits.len(), name),
+                        summary: format!("{} result(s) via {}", total, name),
                         detail: Some(format!("query: {}\nprovider: {}", query, name)),
                     },
                     Some(name),
                 ));
             }
             Ok(_) => attempts.push(format!("{}:empty", provider.as_str())),
-            Err(e) => attempts.push(format!("{}:{}", provider.as_str(), e)),
+            // Transport errors may contain an URL with a provider API key.
+            Err(_) => attempts.push(format!("{}:request_failed", provider.as_str())),
         }
     }
 
     Ok((
-        String::new(),
+        Vec::new(),
         ToolResult {
             tool: "web_search".to_string(),
             success: false,

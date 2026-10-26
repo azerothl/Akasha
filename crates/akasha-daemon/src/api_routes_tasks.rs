@@ -2822,6 +2822,13 @@ if method == "POST" && path == "/api/message" {
             Err(error)=>return Some(json_response("409 Conflict",&serde_json::json!({"error":error.to_string()}).to_string())),
         }
     }
+    if let Some(note)=body_json.as_ref().and_then(|body|body.get("organization_note")) {
+        if envelope.document_request.is_some(){return Some(json_response("400 Bad Request",r#"{"error":"Choisissez un seul parcours par demande"}"#));}
+        match crate::consumer_organization::prepare(data_dir,note) {
+            Ok(request)=>{envelope.organization_request=Some(request);envelope.incognito=true;},
+            Err(error)=>return Some(json_response("400 Bad Request",&serde_json::json!({"error":error.to_string()}).to_string())),
+        }
+    }
     envelope.display_request = Some(display_request);
     envelope.studio_execution = studio_execution;
     if let Some(consents) = body_json.as_ref().and_then(|body|body.get("remote_consents")) {
@@ -2833,7 +2840,7 @@ if method == "POST" && path == "/api/message" {
     envelope.studio_disk_root = studio_disk_root.clone();
     envelope.studio_forced_agent = studio_forced_agent;
     envelope.studio_evolution_branch = studio_evolution_branch;
-    if envelope.document_request.is_some() {envelope.studio_forced_agent=Some("ask".into());}
+    if envelope.document_request.is_some() || envelope.organization_request.is_some() {envelope.studio_forced_agent=Some("ask".into());}
     match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
         Ok(task_id) => {
             if let (Some(root), Some(ticket_id)) = (studio_disk_root.as_ref(), studio_ticket_id.as_ref()) {

@@ -12,6 +12,8 @@ pub mod metrics;
 pub mod pipeline;
 pub mod external_calendar;
 pub mod platform_extras;
+pub mod consumer_organization;
+mod memory_lineage;
 pub mod schedules;
 pub mod tasks;
 pub mod todos;

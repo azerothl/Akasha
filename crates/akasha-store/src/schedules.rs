@@ -150,6 +150,8 @@ impl ScheduleStore {
             CREATE INDEX IF NOT EXISTS idx_task_runs_schedule ON task_runs(schedule_id);
             CREATE INDEX IF NOT EXISTS idx_task_runs_planned ON task_runs(planned_for);
             CREATE INDEX IF NOT EXISTS idx_task_runs_dedup ON task_runs(dedup_key);
+            CREATE TABLE IF NOT EXISTS consumer_missed_schedules(schedule_id TEXT PRIMARY KEY,first_due TEXT NOT NULL,last_due TEXT NOT NULL,missed_count INTEGER NOT NULL,observed_at TEXT NOT NULL,exact INTEGER NOT NULL DEFAULT 1);
+            CREATE TABLE IF NOT EXISTS consumer_schedule_cursors(schedule_id TEXT PRIMARY KEY,last_evaluated_at TEXT NOT NULL);
             "#,
         )?;
         // Migration: add interval_seconds if table existed without it
@@ -180,6 +182,19 @@ impl ScheduleStore {
         )?;
         Ok(())
     }
+    pub fn record_missed(&self,id:Uuid,first:DateTime<Utc>,last:DateTime<Utc>,count:u64,now:DateTime<Utc>)->anyhow::Result<()> {
+        self.record_missed_window(id,first,last,count,now,true)
+    }
+    pub fn record_missed_window(&self,id:Uuid,first:DateTime<Utc>,last:DateTime<Utc>,count:u64,now:DateTime<Utc>,exact:bool)->anyhow::Result<()> {
+        if count==0{return Ok(());}
+        self.conn.execute("INSERT INTO consumer_missed_schedules(schedule_id,first_due,last_due,missed_count,observed_at,exact) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(schedule_id) DO UPDATE SET first_due=excluded.first_due,last_due=excluded.last_due,missed_count=excluded.missed_count,observed_at=excluded.observed_at,exact=excluded.exact",rusqlite::params![id.to_string(),first.to_rfc3339(),last.to_rfc3339(),i64::try_from(count).unwrap_or(i64::MAX),now.to_rfc3339(),exact])?;Ok(())
+    }
+    pub fn missed(&self,id:Uuid)->anyhow::Result<Option<serde_json::Value>> {
+        use rusqlite::OptionalExtension;
+        Ok(self.conn.query_row("SELECT first_due,last_due,missed_count,observed_at,exact FROM consumer_missed_schedules WHERE schedule_id=?1",[id.to_string()],|row|Ok(serde_json::json!({"first_due":row.get::<_,String>(0)?,"window_end":row.get::<_,String>(1)?,"count":row.get::<_,i64>(2)?,"observed_at":row.get::<_,String>(3)?,"count_is_exact":row.get::<_,bool>(4)?}))).optional()?)
+    }
+    pub fn resume_cursor(&self,id:Uuid)->anyhow::Result<Option<DateTime<Utc>>>{use rusqlite::OptionalExtension;let value:Option<String>=self.conn.query_row("SELECT last_evaluated_at FROM consumer_schedule_cursors WHERE schedule_id=?1",[id.to_string()],|row|row.get(0)).optional()?;Ok(value.map(|value|value.parse()).transpose()?)}
+    pub fn record_resume_cursor(&self,id:Uuid,now:DateTime<Utc>)->anyhow::Result<()>{self.conn.execute("INSERT INTO consumer_schedule_cursors(schedule_id,last_evaluated_at) VALUES(?1,?2) ON CONFLICT(schedule_id) DO UPDATE SET last_evaluated_at=excluded.last_evaluated_at",rusqlite::params![id.to_string(),now.to_rfc3339()])?;Ok(())}
 
     pub fn update_schedule(&self, s: &Schedule) -> anyhow::Result<()> {
         let now = Utc::now();

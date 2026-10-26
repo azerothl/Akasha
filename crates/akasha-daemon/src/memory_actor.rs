@@ -862,6 +862,8 @@ pub fn start_memory_actor(
                                             .map_err(|e| e.to_string())
                                             .and_then(|ok| {
                                                 if ok {
+                                                    if let Some(ref facts)=facts_store {for(subject,predicate,object)in extract_facts_simple(&content){let _=facts.insert_if_current(&subject,&predicate,&object,uuid,&content);}}
+                                                    let _=memory_relation_inference::infer_typed_relations(&store,uuid,&content);
                                                     Ok(())
                                                 } else {
                                                     Err("not found".to_string())

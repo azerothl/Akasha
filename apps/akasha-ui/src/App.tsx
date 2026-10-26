@@ -18,6 +18,12 @@ import { useI18n } from "./useI18n";
 
 import { AppNavigation } from "./components/AppNavigation";
 import { FreeModelsPanel } from "./components/FreeModelsPanel";
+import "./components/consumerFlows.css";
+import {MemoryEntryActions} from "./components/MemoryEntryActions";
+import {ConsumerOrganizationPanel} from "./components/ConsumerOrganizationPanel";
+import {ConsumerWatchPanel} from "./components/ConsumerWatchPanel";
+import {ConsumerBackupPanel} from "./components/ConsumerBackupPanel";
+import {useConsumerProfile} from "./components/useConsumerProfile";
 import { RemoteConsentPicker, type RemoteConsent } from "./components/RemotePrivacy";
 import { PermissionsBell } from "./components/PermissionsBell";
 import { SteeringQueueBell } from "./components/SteeringQueueBell";
@@ -1841,6 +1847,7 @@ function App() {
     });
   }, []);
 
+  useConsumerProfile(fetchSystemEndpoint, !!health?.ok);
   const cookbookRecipeHandlers = useMemo<CookbookRecipeHandlers>(
     () => ({
       onTryInChat: tryCookbookRecipeInChat,
@@ -7425,6 +7432,7 @@ function App() {
 
         {(tab === "notes" || visitedTabs.has("notes")) && (
           <section id="panel-notes" role="tabpanel" aria-labelledby="tab-notes" className="panel notes-panel-wrap" hidden={tab !== "notes"}>
+            <ConsumerOrganizationPanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
             <NotesPanel t={t} locale={locale} daemonPort={DAEMON_PORT} onDiscussNote={discussNote} />
           </section>
         )}
@@ -7443,6 +7451,7 @@ function App() {
             className="panel scheduled-panel"
           >
             <h2 className="panel-title">{t("tabs.scheduled")}</h2>
+            <ConsumerWatchPanel fetchEndpoint={fetchSystemEndpoint} />
             <p className="panel-description">{t("scheduled.description")}</p>
             <div className="scheduled-scroll" role="region" aria-label={t("tabs.scheduled")}>
             {scheduleReports.length === 0 ? (
@@ -9302,23 +9311,7 @@ function App() {
                                 )}
                               </div>
                               {e.id != null && (
-                                <button
-                                  type="button"
-                                  className="memory-long-term-delete"
-                                  onClick={async (ev) => {
-                                    ev.stopPropagation();
-                                    try {
-                                      await invoke("delete_memory_long_term", { id: e.id, port: DAEMON_PORT });
-                                      fetchMemory();
-                                    } catch (err) {
-                                      setMemoryError(String(err));
-                                    }
-                                  }}
-                                  aria-label="Supprimer cette entrée"
-                                  title="Supprimer de la mémoire long terme"
-                                >
-                                  Supprimer
-                                </button>
+                                <MemoryEntryActions id={e.id} content={e.content} fetchEndpoint={fetchSystemEndpoint} onChanged={() => void fetchMemory()} />
                               )}
                             </li>
                           ))}
@@ -11019,6 +11012,8 @@ function App() {
                 </div>
                 <div className="settings-data-scroll">
                   {dataSourcesSubTab === "rag" && (
+                    <>
+                    <ConsumerBackupPanel fetchEndpoint={fetchSystemEndpoint} daemonPort={DAEMON_PORT} />
                     <UserRagPanel
                       t={t}
                       locale={locale}
@@ -11031,6 +11026,7 @@ function App() {
                       fetchEndpoint={fetchSystemEndpoint}
                       readFileAsBase64={readFileAsBase64}
                     />
+                    </>
                   )}
                   {dataSourcesSubTab === "project_graph" && (
                     <>

@@ -1833,15 +1833,16 @@ pub async fn web_fetch(url: &str, policy: &crate::policy::ToolsPolicy) -> Result
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("web_fetch build client")?;
-    let res = client
+    let mut res = client
         .get(url)
         .send()
         .await
         .context("web_fetch send")?;
     let status = res.status();
     const MAX_BODY_BYTES: usize = 10 * 1024 * 1024; // 10 MB
-    let bytes = res.bytes().await.context("web_fetch body")?;
-    if bytes.len() > MAX_BODY_BYTES {
+    let mut bytes=Vec::new();
+    while let Some(chunk)=res.chunk().await.context("web_fetch body")? {
+    if chunk.len()>MAX_BODY_BYTES.saturating_sub(bytes.len()) {
         return Ok((
             String::new(),
             ToolResult {
@@ -1851,6 +1852,8 @@ pub async fn web_fetch(url: &str, policy: &crate::policy::ToolsPolicy) -> Result
                 detail: Some(url.to_string()),
             },
         ));
+    }
+        bytes.extend_from_slice(&chunk);
     }
     let body = String::from_utf8_lossy(&bytes).into_owned();
     let success = status.is_success();

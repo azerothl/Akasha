@@ -100,7 +100,7 @@ pub fn warn_env_file_parse_errors(file_label: &str, errors: &[(usize, EnvFilePar
 }
 
 /// Env keys that must not be applied from disk (bootstrap path is fixed before files load).
-pub const ENV_FILE_SKIP_KEYS: &[&str] = &["AKASHA_DATA_DIR"];
+pub const ENV_FILE_SKIP_KEYS: &[&str] = &["AKASHA_DATA_DIR", "AKASHA_PROFILE_BOOTSTRAP_DIR"];
 
 /// Load `connectors.env` then `akasha.env` from `data_dir` into the process environment.
 ///
