@@ -8,7 +8,9 @@ essais de restauration sur un autre compte Windows restent à qualifier.
 
 Le chiffrement est activé par la fonctionnalité Cargo `consumer-beta` du daemon.
 Les binaires développeur existants conservent leur compatibilité avec les bases
-non chiffrées. Une base munie du marqueur `memory.db.protection.json` exige le
+non chiffrées. Le premier démarrage du binaire particuliers initialise la protection
+même lorsque les embeddings ne sont pas chargés ; un échec du Gestionnaire
+d’identifiants est exposé comme mémoire verrouillée. Une base munie du marqueur `memory.db.protection.json` exige le
 support SQLCipher et sa clé ; une ouverture ne crée jamais de base de remplacement.
 Un ancien binaire SQLite échoue sur le fichier chiffré au lieu d'en lire les tables.
 

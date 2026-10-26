@@ -216,6 +216,12 @@ impl Daemon {
     /// Run the daemon (blocks until shutdown)
     pub async fn run(&self) -> anyhow::Result<RunOutcome> {
         log_upgrade_heritage_reminder(&self.data_dir);
+        if cfg!(feature="consumer-beta") {
+            let memory=self.data_dir.join("memory.db");
+            if !memory.exists() && !memory.with_extension("db.protection.json").exists() {
+                if let Err(error)=akasha_store::memory_protection::open_connection(&memory) {warn!(%error,"Memory locked: Windows protection unavailable");}
+            }
+        }
         // Load specs at startup
         match load_specs(&self.spec_dir) {
             Ok(specs) => {
