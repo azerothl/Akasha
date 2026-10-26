@@ -298,6 +298,31 @@ mod tests {
         .unwrap()
     }
     #[tokio::test]
+    async fn consent_can_be_granted_and_used_immediately_without_a_health_cooldown() {
+        for bounded in [false,true] {
+            let (directory,scope)=consent_fixture();
+            akasha_core::privacy::update(directory.path(),|state|{for grant in &mut state.grants {grant.revoked=true;}Ok(())}).unwrap();
+            let (mut router,paid,free)=fixture();
+            router.register_provider(Arc::new(Mock{name:"openrouter_free",calls:free.clone(),fail:false}));
+            akasha_core::privacy::scoped(scope,async {
+                if bounded {
+                    let (sender,_)=std::sync::mpsc::channel();
+                    router.complete_stream_bounded(&request(),None,None,sender,std::time::Duration::from_secs(2),Arc::new(|_|{})).await.unwrap();
+                } else {router.complete(&request()).await.unwrap();}
+                assert_eq!(free.load(Ordering::SeqCst),0);
+                assert!(router.metrics().get("openrouter_free","example:free").last_failure.is_none());
+                akasha_core::privacy::update(directory.path(),|state|{for grant in &mut state.grants {grant.revoked=false;}Ok(())}).unwrap();
+                let answer=if bounded {
+                    let (sender,_)=std::sync::mpsc::channel();
+                    router.complete_stream_bounded(&request(),None,None,sender,std::time::Duration::from_secs(2),Arc::new(|_|{})).await.unwrap()
+                } else {router.complete(&request()).await.unwrap()};
+                assert_eq!(answer.provider_used.as_deref(),Some("openrouter_free"));
+                assert_eq!(free.load(Ordering::SeqCst),1);
+                assert_eq!(paid.load(Ordering::SeqCst),0);
+            }).await;
+        }
+    }
+    #[tokio::test]
     async fn automatic_and_streamed_fallbacks_never_call_paid_provider() {
         let (_consent_dir,scope)=consent_fixture();
         akasha_core::privacy::scoped(scope,async {

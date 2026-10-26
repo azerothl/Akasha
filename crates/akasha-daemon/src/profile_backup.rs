@@ -20,7 +20,7 @@ const ROOT_FILES: &[&str] = &[
     "embedded_runtime.json",
     "consumer_settings.json",
 ];
-const ROOT_DIRS: &[&str] = &["notes", "user_rag"];
+const ROOT_DIRS: &[&str] = &["notes", "user_rag", "short_term"];
 const MAX_FILES: usize = 10000;
 const MAX_BYTES: u64 = 700 * 1024 * 1024; // Base64 + manifest must fit the 1 GiB envelope.
 static OPERATIONS: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -301,6 +301,8 @@ fn restore(
         if schedules > 0 {
             connection.execute("UPDATE schedules SET enabled=0", [])?;
         }
+        let wakeups:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='wakeups'",[],|row|row.get(0))?;
+        if wakeups>0 {connection.execute("UPDATE wakeups SET status='disabled_restored' WHERE status='pending'",[])?;}
     }
     progress(
         store,
@@ -491,8 +493,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_profile_is_restored_separately_with_stable_ids_and_no_service_secrets() {
+    #[tokio::test]
+    async fn a_profile_is_restored_separately_with_stable_ids_and_no_service_secrets() {
         let directory = tempfile::tempdir().unwrap();
         let data = directory.path().join("source");
         std::fs::create_dir(&data).unwrap();
@@ -512,6 +514,10 @@ mod tests {
             })
             .unwrap();
         akasha_store::ScheduleStore::open(&store).unwrap();
+        let wakeup=Uuid::new_v4();
+        akasha_store::WakeupStore::open(&store).unwrap().insert(&akasha_store::Wakeup{id:wakeup,session_id:"beta-history".into(),fire_at:chrono::Utc::now()-chrono::Duration::hours(1),message:"Rappel synthétique".into(),status:"pending".into(),created_by_task_id:Some(id),rrule:None,created_at:chrono::Utc::now()}).unwrap();
+        let history=crate::memory::ShortTermStore::with_persistence(20,0.9,Some(data.join("short_term")));
+        history.append("beta-history","user","Souvenir de conversation été".into()).await;
         std::fs::create_dir_all(data.join("notes/note-one")).unwrap();
         std::fs::write(
             data.join("notes/note-one/note.md"),
@@ -548,6 +554,11 @@ mod tests {
             "Note personnelle été 🙂"
         );
         assert!(!restored.join("connectors.env").exists());
+        let restored_history=crate::memory::ShortTermStore::with_persistence(20,0.9,Some(restored.join("short_term")));
+        let turns=restored_history.get_turns("beta-history").await;
+        assert_eq!(turns.len(),1);assert_eq!(turns[0].content,"Souvenir de conversation été");
+        assert!(akasha_store::WakeupStore::open(restored.join("akasha.db")).unwrap().list_pending_before(chrono::Utc::now()).unwrap().is_empty());
+        assert_eq!(akasha_store::WakeupStore::open(&store).unwrap().list_all().unwrap()[0].status,"pending");
         #[cfg(all(feature = "consumer-beta", windows))]
         {
             let connection =

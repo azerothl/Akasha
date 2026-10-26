@@ -35,8 +35,12 @@ test.beforeEach(async ({ page, request }) => {
       const result = await request.post(`${daemon}/api/message`, { data: {
         message: args.message, display_message: args.displayMessage,
         session_id: args.sessionId || `ui-${Date.now()}`, composer_mode: args.composerMode, incognito: true,
+        remote_consents: args.remoteConsents,
       } });
       value = await result.json();
+    } else if (command === "daemon_get_text" || command === "daemon_request") {
+      const response = await request.fetch(`${daemon}${args.path}`, { method: command === "daemon_get_text" ? "GET" : args.method, data: args.body ? JSON.parse(args.body) : undefined });
+      value = { ok: response.ok(), status: response.status(), text: await response.text() };
     } else if (command === "get_task_status") value = await (await request.get(`${daemon}/api/tasks/${args.taskId}`)).text();
     else if (command === "get_task_events") value = await (await request.get(`${daemon}/api/tasks/${args.taskId}/events`)).json();
     else if (command === "get_tasks") value = { tasks: [] };
@@ -56,6 +60,9 @@ for (const scenario of [
 ]) {
   test(`chat displays the actual result: ${scenario.id}`, async ({ page, request }) => {
     await request.post(`${provider}/control`, { data: { case: scenario.id } });
+    const consent = page.locator("details.remote-privacy");
+    await consent.locator("summary").click();
+    await consent.getByRole("checkbox").first().check();
     await page.getByPlaceholder("Votre message…").fill(scenario.question);
     await page.getByRole("button", { name: "Envoyer le message", exact: true }).click();
     const answer = page.locator(".message.assistant").filter({ hasText: scenario.result }).last();

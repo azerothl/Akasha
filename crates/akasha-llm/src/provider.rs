@@ -845,6 +845,8 @@ pub trait LLMProvider: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    #[error("{0}")]
+    ConsentRequired(String),
     #[error("timeout (HTTP request deadline exceeded; logs should include base_url, model, timeout_secs)")]
     Timeout,
     #[error("api error: {0}")]
@@ -1146,7 +1148,7 @@ impl OllamaProvider {
         let remote=metadata["remote_host"].as_str().filter(|value|!value.is_empty());
         if let Some(host)=remote {
             let recipient=format!("model:ollama-cloud:{}",akasha_core::privacy::endpoint_identity(host));
-            akasha_core::privacy::check(&recipient,&["message","history","memory","documents","tool_results"]).map_err(ProviderError::Api)?;
+            akasha_core::privacy::check(&recipient,&["message","history","memory","documents","tool_results"]).map_err(ProviderError::ConsentRequired)?;
         } else if metadata["remote_model"].as_str().is_some_and(|value|!value.is_empty()) || model.contains(":cloud") || model.ends_with("-cloud") {
             return Err(ProviderError::Api("model_privacy_unverified: destinataire du modèle distant inconnu".into()));
         }

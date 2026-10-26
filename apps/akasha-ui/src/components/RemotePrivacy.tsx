@@ -12,6 +12,10 @@ type Privacy = {
   memory: { state: string; encrypted_at_rest: boolean };
 };
 export type PrivacyFetch = (path: string, init?: RequestInit) => Promise<{ ok: boolean; status: number; text: string }>;
+function dataDescription(classes: string[], en: boolean): string {
+  const names: Record<string, string> = en ? { message: "message", history: "conversation history", memory: "retrieved memories", documents: "documents", tool_results: "tool results", web_query: "search query", web_url: "requested page address", connector_payload: "content sent to the connector" } : { message: "message", history: "historique de conversation", memory: "souvenirs consultés", documents: "documents", tool_results: "résultats d’outils", web_query: "requête de recherche", web_url: "adresse de la page demandée", connector_payload: "contenu transmis au connecteur" };
+  return classes.map((value) => names[value] ?? value).join(", ");
+}
 
 function usePrivacy(fetchEndpoint: PrivacyFetch, refresh = 0) {
   const [state, setState] = useState<Privacy | null>(null);
@@ -78,7 +82,7 @@ export function RemotePermissions({ fetchEndpoint, locale }: { fetchEndpoint: Pr
       <h4>{en ? "Remote permissions" : "Autorisations distantes"}</h4>
       {(state.requests ?? []).map((request) => <div className="remote-privacy-grant" key={`request:${request.scope}:${request.recipient}`}>
         <p>{en ? "Blocked recipient" : "Destinataire bloqué"} : {request.recipient}<br />
-          {request.data_classes.includes("web_query") ? (en ? "Search query" : "Requête de recherche") : request.data_classes.includes("web_url") ? (en ? "Requested page address" : "Adresse de la page demandée") : (en ? "Message and task context" : "Message et contexte de la tâche")}<br />
+          {dataDescription(request.data_classes, en)}<br />
           <small>{en ? "After approval, resume the task from Tasks." : "Après autorisation, reprenez la tâche depuis Tâches."}</small></p>
         <button type="button" className="btn-secondary" disabled={busy} onClick={() => void decide(request, true)}>{en ? "Allow for this task" : "Autoriser pour cette tâche"}</button>
       </div>)}

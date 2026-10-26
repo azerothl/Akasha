@@ -1898,7 +1898,8 @@ async fn process_root_task(
     let child_activity_timeout = child_first_activity_timeout();
     let retry_timeout = deliverable_retry_timeout();
     let mut startup_watchdog_tx = startup_watchdog_tx;
-    tokio::spawn(async move {
+    let aggregate_scope=crate::privacy::task_scope(store_path,root_task_id);
+    tokio::spawn(akasha_core::privacy::scoped(aggregate_scope,async move {
         let _active_execution = _active_execution;
         let workspace_root = store_path_buf
             .parent()
@@ -3184,7 +3185,7 @@ Formatting rules (Markdown):
             )
             .with_correlation(root_task_id),
         );
-    });
+    }));
     Ok(())
 }
 

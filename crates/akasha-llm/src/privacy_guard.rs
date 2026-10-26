@@ -10,6 +10,7 @@ impl Guard {
         self.inner.endpoint().map(str::to_owned)
     }
     fn local(&self) -> bool {
+        if !self.inner.is_local() { return false; }
         if let Some(url) = self.endpoint() { return akasha_core::privacy::loopback_url(&url); }
         self.inner.is_local()
     }
@@ -19,7 +20,7 @@ impl Guard {
         // Conservatively cover all context assembled by the runtime. A narrow
         // grant is never silently expanded by history, retrieval or tool results.
         akasha_core::privacy::check(&recipient, &["message","history","memory","documents","tool_results"])
-            .map_err(ProviderError::Api)
+            .map_err(ProviderError::ConsentRequired)
     }
 }
 #[async_trait::async_trait]

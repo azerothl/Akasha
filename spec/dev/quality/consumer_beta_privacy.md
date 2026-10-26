@@ -35,7 +35,8 @@ Chaque appel de modèle enregistré dans le routeur est protégé avant le
 transport. L'identité contient le fournisseur et son URL effective, sans
 identifiants ni paramètres secrets. Une URL sur le réseau local n'est pas un
 modèle exécuté sur cet ordinateur. Seules les adresses de boucle locale sont
-traitées comme locales. Ollama peut néanmoins relayer un modèle distant derrière
+traitées comme locales pour les moteurs qui annoncent une exécution locale.
+Un adaptateur cloud ne devient pas local du seul fait de cette adresse. Ollama peut néanmoins relayer un modèle distant derrière
 une adresse locale : ses métadonnées `remote_host` et `remote_model` sont
 contrôlées avant d’envoyer le contexte, y compris pour un alias renommé.
 Un destinataire cloud exige son propre accord ; des métadonnées absentes
@@ -119,3 +120,10 @@ Windows ni depuis l'installateur distribué. Les captures Chromium sont des
 tests d'interface avec services contrôlés, distincts des preuves natives du
 magasin et du daemon. Aucun résultat de modèle réel ni pilote n'est déduit de
 ces tests.
+
+La revue automatique de la PR a conduit à inclure `short_term/`, à neutraliser
+les wakeups restaurés, à transmettre le périmètre au collecteur de sous-agents
+et à séparer un refus d’autorisation des pannes de fournisseur. Les tests de
+reprise vérifient l’utilisation immédiate après accord, sans délai de santé.
+Les lectures personnelles de l’API du binaire particuliers refusent également
+les origines de navigateur étrangères et opaques ; le pont natif reste accepté.

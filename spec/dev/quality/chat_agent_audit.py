@@ -277,6 +277,10 @@ def run(args):
                 body = {"message": message + "\n\n[Préférence de réponse : privilégie web_search pour vérifier les informations actuelles et cite les sources utilisées.]", "display_message": message, "session_id": "audit-context" if case in {"qa", "followup", "incognito"} else f"audit-{case}", "incognito": case not in {"qa", "followup"}}
                 if mode:
                     body["composer_mode"] = mode
+                if not args.model:
+                    # The fixture is an unverified OpenAI adapter, even on
+                    # loopback. Authorize only this controlled synthetic task.
+                    body["remote_consents"] = [{"recipient": f"model:openai:{provider.base}/v1", "data_classes": ["message", "history", "memory", "documents", "tool_results"]}]
                 ack = http_json(base, "POST", "/api/message", body)
                 task_id = ack["task_id"]
                 if case == "cancel":
