@@ -10,7 +10,14 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 const LONG_LLM_REQUEST_TIMEOUT_SECS: u64 = 600;
 const LONG_COMPARE_REQUEST_TIMEOUT_SECS: u64 = 1800;
 
-fn default_daemon_port()->u16 { std::env::var("AKASHA_PORT").ok().and_then(|value|value.parse().ok()).unwrap_or(DAEMON_PORT) }
+fn configured_daemon_port(runtime:Option<&str>,build:Option<&str>)->u16{
+    let parse=|value:&str|value.parse::<u16>().ok().filter(|port|*port>0);
+    runtime.and_then(parse).or_else(||build.and_then(parse)).unwrap_or(DAEMON_PORT)
+}
+fn default_daemon_port()->u16 { configured_daemon_port(std::env::var("AKASHA_PORT").ok().as_deref(),option_env!("VITE_AKASHA_DAEMON_PORT")) }
+
+#[tauri::command]
+fn get_daemon_launch_config()->serde_json::Value {serde_json::json!({"port":default_daemon_port()})}
 
 fn daemon_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{}", port)
@@ -1096,6 +1103,12 @@ async fn daemon_request(
 }
 
 #[cfg(test)] mod desktop_transport_tests {
+    #[test]fn launch_port_takes_precedence_and_beta_default_stays_isolated(){
+        assert_eq!(super::configured_daemon_port(Some("3880"),Some("3877")),3880);
+        assert_eq!(super::configured_daemon_port(None,Some("3877")),3877);
+        assert_eq!(super::configured_daemon_port(Some("invalid"),Some("3877")),3877);
+        assert_eq!(super::configured_daemon_port(None,None),3876);
+    }
     use super::*;
     use tokio::io::{AsyncReadExt,AsyncWriteExt};
     #[tokio::test]
@@ -2883,6 +2896,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             startup_probe::record_startup_probe,
             check_health,
+            get_daemon_launch_config,
             get_router_metrics,
             send_message,
             send_message_ack,

@@ -1,4 +1,4 @@
-param([switch]$RecoverProfile,[string]$ProfileDir,[int]$Port=3877)
+param([switch]$RecoverProfile,[string]$ProfileDir,[ValidateRange(1,65535)][int]$Port=3877)
 $ErrorActionPreference='Stop'
 $package=Split-Path -Parent $PSScriptRoot
 function Get-ComponentSha256([string]$Path) {

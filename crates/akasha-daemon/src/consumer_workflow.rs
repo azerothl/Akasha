@@ -39,23 +39,20 @@ fn installed_version(message: &str) -> Option<Value> {
         "fichier",
         "document",
         "exemple",
+        "compatible",
+        "necessaire",
+        "requis",
+        "compiler",
+        "faut-il",
+        "installer",
     ]
     .iter()
     .any(|word| text.contains(word))
     {
         return None;
     }
-    if ![
-        "quelle version",
-        "quel version",
-        "version installe",
-        "version actuelle",
-        "version du daemon",
-        "version du demon",
-    ]
-    .iter()
-    .any(|phrase| text.contains(phrase))
-    {
+    let target=regex::Regex::new(r"\bversion(?:\s+(?:actuelle|installee))?\s+(?:d['’]\s*akasha\b|de\s+(?:l['’]\s*)?akasha\b|du\s+(?:daemon|demon)(?:\s+d['’]akasha)?(?:\s+(?:est|installe|utilise|actuel|ici)\b|\s*[?!.]|$))").expect("runtime version pattern");
+    if !target.is_match(&text) {
         return None;
     }
     let version = env!("CARGO_PKG_VERSION");
@@ -65,7 +62,9 @@ fn installed_version(message: &str) -> Option<Value> {
     )
 }
 
-pub(crate) fn runtime_version_request(message:&str)->bool{installed_version(message).is_some()}
+pub(crate) fn runtime_version_request(message: &str) -> bool {
+    installed_version(message).is_some()
+}
 
 pub async fn complete(
     store: &Path,
@@ -167,6 +166,9 @@ mod runtime_tests {
             "Quelle version d’Akasha est publiée sur GitHub ?",
             "Lis ce document : quelle version d’Akasha ?",
             "Donne un exemple : quelle version d’Akasha ?",
+            "Quelle version de Windows est nécessaire pour Akasha ?",
+            "Quelle version de Python faut-il pour compiler Akasha ?",
+            "Quelle version d’Akasha est compatible avec Windows 10 ?",
         ] {
             assert!(installed_version(question).is_none());
         }

@@ -5,6 +5,8 @@ import { NotificationProvider } from "./notifications/NotificationContext";
 import App from "./App";
 import { ResearchPreviewPage } from "./ResearchPreviewPage";
 import "./styles.css";
+import {invoke} from "@tauri-apps/api/core";
+import {initializeDaemonPort} from "./daemonPort";
 
 function isResearchPreviewRoute(): boolean {
   const raw = window.location.hash.replace(/^#\/?/, "").split("?")[0]?.trim() ?? "";
@@ -13,6 +15,8 @@ function isResearchPreviewRoute(): boolean {
 
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
 
+async function start(){
+await initializeDaemonPort("__TAURI_INTERNALS__" in window,()=>invoke("get_daemon_launch_config"));
 if (isResearchPreviewRoute()) {
   root.render(
     <React.StrictMode>
@@ -30,3 +34,5 @@ if (isResearchPreviewRoute()) {
     </React.StrictMode>,
   );
 }
+}
+void start().catch(()=>root.render(<p role="alert">Le lancement d’Akasha est incomplet. Fermez puis relancez l’application depuis son raccourci Windows.</p>));

@@ -107,7 +107,7 @@ const ThemeEditorPanel = deferPanel(() => import("./components/ThemeEditorPanel"
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
-const DAEMON_PORT = Number(import.meta.env.VITE_AKASHA_DAEMON_PORT) || 3876;
+import {DAEMON_PORT} from "./daemonPort";
 const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";

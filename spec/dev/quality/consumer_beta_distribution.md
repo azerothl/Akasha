@@ -25,12 +25,14 @@ SHA-256 avant activation. Trois anciens liens de téléchargement invalides ont
 été remplacés par des fichiers vérifiés. Les poids GGUF restent téléchargés à
 la demande. Un fichier invalide ne remplace pas un modèle déjà présent.
 
-Le paquet possède son identité Tauri, le port 3877 et un profil séparé sous
+Le paquet possède son identité Tauri, le port 3877 par défaut et un profil séparé sous
 `%LOCALAPPDATA%\AkashaBeta\profile`. Son lanceur vérifie les composants avant
 exécution, surveille le moteur et relance uniquement son processus sur le code
 85. Il conserve le profil lors d'un changement de dossier de binaires. Le
 raccourci de récupération annule uniquement le choix du profil restauré ; il
 ne supprime aucun profil. Aucune installation existante n'est remplacée.
+Le port choisi au lancement est lu avant le montage de l'interface : un lancement
+sur 3880 utilise ce port pour la santé et toutes les requêtes, sans joindre 3876.
 
 Les transports avancés non qualifiés sont refusés aussi au niveau HTTP dans
 l'édition particuliers. Les écritures de l'ancien scheduler ne permettent pas
@@ -48,7 +50,7 @@ Ces résultats sont distincts d'une qualification des paquets de publication :
   daemon particuliers : 755 tests et un ignoré. Les échecs intermédiaires sont
   conservés dans les journaux, puis les contrôles concernés sont rejoués après
   correction.
-- Interface : 83 tests unitaires, compilation et 11 parcours Chromium aux
+- Interface : 86 tests unitaires, compilation et 12 parcours Chromium aux
   largeurs 900/1440, dont le refus d'un envoi distant sans accord et sa remise
   à zéro après échec. Inspection finale de l'accueil, sans débordement horizontal.
 - Vidéo reproductible : interface réelle, daemon réel et Ollama `qwen3.5:9b` ;
@@ -83,7 +85,8 @@ est **invalide pour qualifier le candidat**. Le corpus **1.0.1** exige désormai
 un reçu de version du moteur et aucun outil réseau. La demande originale
 persistée choisit une réponse native, sans génération ni sélecteur de modèle ;
 elle est conservée dans la session pour les relances. Les documents et exemples
-cités ne choisissent pas cette voie. Le reçu de l'ancien faux positif est
+cités ne choisissent pas cette voie. Les questions sur les versions de Windows,
+Python ou la compatibilité suivent aussi le parcours ordinaire. Le reçu de l'ancien faux positif est
 conservé dans `evidence/consumer-beta-20261026/version-false-positive-before-fix.json`.
 Le build réévalue aussi l'état Git après une modification non indexée des
 sources : une ancienne identité propre ne peut pas être réutilisée à tort.
@@ -133,7 +136,7 @@ une série réelle ; les cas sémantiques utilisent le modèle local indiqué. L
 le même identifiant de série et une chaîne de trois passages sans réutilisation.
 
 La CI Windows exécute le corpus déterministe et conserve les reçus. La CI UI
-exécute les onze parcours de confidentialité et usages. Les compilations et
+exécute les douze parcours de confidentialité et usages. Les compilations et
 contrôles historiques des autres systèmes restent conservés.
 
 ## Condition d'ouverture du pilote
