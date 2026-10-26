@@ -72,6 +72,22 @@ Un test natif couvre la conservation du contenu source, le préfixe fermé, le
 mode avec réflexion et le refus d'un format inconnu. Les résultats rejoués et
 les trois passages du corpus réel doivent être joints à chaque candidat.
 
+Le rejeu du même précontrôle donne 24/27 pour Qwen3.5 0.8B et 21/27 pour
+Qwen3 0.6B : le défaut de format est corrigé, mais leurs erreurs sémantiques
+restantes interdisent une recommandation. Les quatre modèles restent candidats.
+
+La première série de 50 cas réels a également révélé un contrôle de version
+trop permissif : la réponse contenait le numéro local, mais effectuait une
+recherche et mélangeait la publication distante. Son ancien gate favorable
+est **invalide pour qualifier le candidat**. Le corpus **1.0.1** exige désormais
+un reçu de version du moteur et aucun outil réseau. La demande originale
+persistée choisit une réponse native, sans génération ni sélecteur de modèle ;
+elle est conservée dans la session pour les relances. Les documents et exemples
+cités ne choisissent pas cette voie. Le reçu de l'ancien faux positif est
+conservé dans `evidence/consumer-beta-20261026/version-false-positive-before-fix.json`.
+Le build réévalue aussi l'état Git après une modification non indexée des
+sources : une ancienne identité propre ne peut pas être réutilisée à tort.
+
 ## Reproduction
 
 Préparer les composants OCR avec `scripts/prepare-ocr-runtime.py`, les embeddings

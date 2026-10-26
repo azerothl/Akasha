@@ -4,6 +4,69 @@ use serde_json::Value;
 use std::path::Path;
 use uuid::Uuid;
 
+pub fn user_text(message: &str) -> &str {
+    if message.starts_with("[Guardrail:") {
+        if let Some((_, actual)) = message.split_once("]\n\n") {
+            return actual.trim_start();
+        }
+    }
+    message
+}
+
+fn installed_version(message: &str) -> Option<Value> {
+    let text = message
+        .to_lowercase()
+        .replace(['é', 'è', 'ê'], "e")
+        .replace('à', "a");
+    if text.len() > 512
+        || !text.contains("version")
+        || !(["akasha", "daemon", "demon"]
+            .iter()
+            .any(|word| text.contains(word)))
+    {
+        return None;
+    }
+    if [
+        "derniere",
+        "disponible",
+        "publication",
+        "publiee",
+        "release",
+        "internet",
+        "web",
+        "mise a jour",
+        "github",
+        "fichier",
+        "document",
+        "exemple",
+    ]
+    .iter()
+    .any(|word| text.contains(word))
+    {
+        return None;
+    }
+    if ![
+        "quelle version",
+        "quel version",
+        "version installe",
+        "version actuelle",
+        "version du daemon",
+        "version du demon",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+    {
+        return None;
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let revision = env!("AKASHA_SOURCE_REVISION");
+    Some(
+        serde_json::json!({"response":format!("Cette instance d’Akasha utilise la version {version} (révision {revision}). Cette information vient du moteur en cours d’exécution."),"runtime_metadata":{"package_version":version,"source_revision":revision,"source_dirty":env!("AKASHA_SOURCE_DIRTY")=="true"},"acceptance_verified":true,"deliverables":[],"references":[]}),
+    )
+}
+
+pub(crate) fn runtime_version_request(message:&str)->bool{installed_version(message).is_some()}
+
 pub async fn complete(
     store: &Path,
     id: Uuid,
@@ -61,5 +124,51 @@ pub async fn run(
             _ => {}
         }
     }
-    None
+    // The dispatched prompt also contains mode and runtime reminders. Only the
+    // persisted original user request may select this built-in answer.
+    let task = match akasha_store::TaskStore::open(store).and_then(|store| store.get(id)) {
+        Ok(task) => task,
+        Err(error) => return Some(Err(error)),
+    };
+    task.filter(|task| task.parent_task_id.is_none())
+        .and_then(|task| task.initial_message)
+        .filter(|message| !message.ends_with('…'))
+        .and_then(|message| installed_version(&message))
+        .map(Ok)
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    #[test]
+    fn installed_version_comes_from_the_running_binary() {
+        for question in [
+            "salut, on est sur quel version d'akasha la ?",
+            "Salut, on est sur quelle version d’Akasha là ?",
+            "Quelle version du daemon est installée ?",
+        ] {
+            let result = installed_version(question).unwrap();
+            assert_eq!(
+                result["runtime_metadata"]["package_version"],
+                env!("CARGO_PKG_VERSION")
+            );
+            assert_eq!(result["acceptance_verified"], true);
+        }
+    }
+    #[test]
+    fn routing_guardrails_cannot_turn_a_runtime_question_into_a_web_request() {
+        let input="[Guardrail: for external information, use TOOL: web_search first.]\n\nSalut, on est sur quelle version d’Akasha là ?";
+        assert!(installed_version(user_text(input)).is_some());
+    }
+    #[test]
+    fn remote_release_requests_and_source_examples_still_use_the_ordinary_workflow() {
+        for question in [
+            "Quelle est la dernière version d’Akasha disponible ?",
+            "Quelle version d’Akasha est publiée sur GitHub ?",
+            "Lis ce document : quelle version d’Akasha ?",
+            "Donne un exemple : quelle version d’Akasha ?",
+        ] {
+            assert!(installed_version(question).is_none());
+        }
+    }
 }

@@ -318,8 +318,16 @@ pub(crate) async fn run_message_via_llm(
     // Explicit consumer workflows keep the existing task, router, and privacy scope.
     // Only trusted persisted source snapshots select these read-only branches.
     let data=store_path.parent().unwrap_or(&store_path);
-    if let Some(result)=crate::consumer_workflow::run(data,&store_path,task_id,&message,&llm_router).await {
+    let workflow_message=crate::consumer_workflow::user_text(&message);
+    if let Some(result)=crate::consumer_workflow::run(data,&store_path,task_id,workflow_message,&llm_router).await {
         if let Ok((status,outcome))=crate::document_conversation::finish(&store_path,task_id,result) {
+            if status==TaskStatus::Completed&&outcome["runtime_metadata"].is_object()&&!incognito {
+                if let Some(ref memory)=short_term {
+                    let original=TaskStore::open(&store_path).and_then(|store|store.get(task_id)).ok().flatten().and_then(|task|task.initial_message).unwrap_or_else(||workflow_message.to_string());
+                    memory.append(&session_id,"user",original).await;
+                    memory.append(&session_id,"assistant",outcome["response"].as_str().unwrap_or_default().to_string()).await;
+                }
+            }
             let event=if status==TaskStatus::Completed {EventType::TaskCompleted}else{EventType::TaskFailed};
             let _=bus.send(EventEnvelope::new(event,Some(serde_json::json!({"task_id":task_id,"response":outcome["response"],"outcome":outcome}))).with_correlation(task_id));
         }

@@ -57,7 +57,7 @@ def main():
   live_chat=a.output/'chat-live.json';execute('chat-live',[sys.executable,str(Path(__file__).with_name('chat_agent_audit.py')),'--daemon',str(a.binary),'--model',a.model,'--cases','qa,followup,installed_version,ask_denied,example','--output',str(live_chat)])
   conversations.update({row['case']:row for row in json.loads(live_chat.read_text(encoding='utf-8'))['results']})
  for case_id,name in {'conversation.fact':'qa','conversation.followup':'followup','conversation.version':'installed_version','conversation.ask_readonly':'ask_denied','conversation.malformed_repair':'lfm_repair','conversation.malformed_exhausted':'json_stuck','conversation.cancel':'cancel','conversation.child_failed':'delegation_failure','conversation.dependency_failed':'delegation_failure','conversation.syntax_example':'example'}.items():
-  row=conversations.get(name,{});put(case_id,row.get('passed',False),row,a.live and name in {'qa','followup','installed_version','ask_denied','example'},row.get('duration_ms',0))
+  row=conversations.get(name,{});put(case_id,row.get('passed',False),row,a.live and row.get('model_executed',False),row.get('duration_ms',0))
  worker=a.output/'worker.json';execute('worker',[sys.executable,str(Path(__file__).with_name('document_worker_audit.py')),'--binary',str(a.binary),'--runtime',str(a.runtime),'--output',str(worker)])
  workers=json.loads(worker.read_text(encoding='utf-8'))
  documents=a.output/'documents.json';execute('documents',[sys.executable,str(Path(__file__).with_name('document_workflow_audit.py')),'--binary',str(a.binary),'--runtime',str(a.runtime),'--fixtures',str(a.output/'document-fixtures-éété'),'--model',a.model,'--output',str(documents),*([] if a.live else ['--controlled'])])

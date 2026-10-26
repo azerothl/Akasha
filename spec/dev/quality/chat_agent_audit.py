@@ -70,6 +70,11 @@ class Provider:
             if not version:
                 self.errors.append("installed_version: authoritative runtime version missing")
             return f"Le daemon Akasha utilisé est en version {version.group(1).rstrip('.') if version else 'unknown'}.", None
+        if case == "version_followup":
+            if "Cette instance d’Akasha utilise la version" not in text:
+                self.errors.append("version_followup: previous runtime answer missing from session context")
+            version = re.search(r"running Akasha daemon product version is ([\d.]+)", text)
+            return f"Je confirme la version de cette instance : {version.group(1).rstrip('.') if version else 'unknown'}.", None
         if case == "followup":
             if "Paris" not in text:
                 self.errors.append("followup: previous answer missing from session context")
@@ -241,6 +246,7 @@ def run(args):
                 ("qa", "Quelle est la capitale de la France ?", "ask", "completed", "Paris"),
                 ("followup", "?", "ask", "completed", "Paris"),
                 ("installed_version", "Salut, on est sur quelle version d’Akasha là ?", "ask", "completed", re.search(r'\[workspace.package\]\s*version\s*=\s*"([^"]+)"', (ROOT / "Cargo.toml").read_text()).group(1)),
+                ("version_followup", "?", "ask", "completed", re.search(r'\[workspace.package\]\s*version\s*=\s*"([^"]+)"', (ROOT / "Cargo.toml").read_text()).group(1)),
                 ("read", f"Lis le fichier {root / 'canary.txt'} et donne exactement son contenu.", "ask", "completed", "CANARY_42"),
                 ("search", "Recherche la version de test Akasha audit release, ouvre la source et cite sa version.", "ask", "completed", "9.8.7-AUDIT"),
                 ("write_verify", f"Crée le fichier {root / 'answer.txt'} avec exactement Bonjour été 🙂, puis relis-le et donne son contenu.", "code", "completed", "Bonjour été 🙂"),
@@ -275,7 +281,7 @@ def run(args):
                 provider.case = case
                 before_errors = len(provider.errors)
                 started = time.monotonic()
-                body = {"message": message + "\n\n[Préférence de réponse : privilégie web_search pour vérifier les informations actuelles et cite les sources utilisées.]", "display_message": message, "session_id": "audit-context" if case in {"qa", "followup", "incognito"} else f"audit-{case}", "incognito": case not in {"qa", "followup"}}
+                body = {"message": message + "\n\n[Préférence de réponse : privilégie web_search pour vérifier les informations actuelles et cite les sources utilisées.]", "display_message": message, "session_id": "audit-runtime" if case in {"installed_version","version_followup"} else "audit-context" if case in {"qa", "followup", "incognito"} else f"audit-{case}", "incognito": case not in {"qa", "followup","installed_version","version_followup"}}
                 if mode:
                     body["composer_mode"] = mode
                 if not args.model:
@@ -309,8 +315,15 @@ def run(args):
                 tools = [e.get("payload", {}) for e in events if e.get("event_type") == "tool_invoked"]
                 visible = "".join(e.get("payload", {}).get("delta", "") for e in events if e.get("event_type") == "assistant_text_delta")
                 checks = {"expected_status": task.get("status") == expected_status, "expected_response": expected_text.casefold() in reply.casefold(), "no_protocol_leak": "<|tool_call_start|>" not in reply + visible and '"tool_use"' not in reply + visible}
-                if args.model:
+                if args.model and case != "installed_version":
                     checks["requested_model_used"] = str(task.get("last_turn_model_used") or "").endswith(args.model)
+                if case == "installed_version":
+                    checks["runtime_version_receipt"] = task.get("outcome",{}).get("runtime_metadata",{}).get("package_version") == expected_text
+                    checks["no_network"] = not any(tool.get("tool") in {"web_search","web_fetch"} for tool in tools)
+                    checks["no_release_confusion"] = "9.8.7-AUDIT" not in reply
+                if case == "version_followup":
+                    checks["no_network"] = not any(tool.get("tool") in {"web_search","web_fetch"} for tool in tools)
+                    checks["no_release_confusion"] = "9.8.7-AUDIT" not in reply
                 if mode == "ask":
                     checks["direct_ask"] = task.get("assigned_agent") == "ask" and not any(e.get("event_type") == "subtask_started" for e in events)
                 if case in {"read", "lfm_repair", "fenced_repair"}:
@@ -346,6 +359,7 @@ def run(args):
                 row = {"case": case, "task_id":task_id, "passed": all(checks.values()), "status": task.get("status"), "agent": task.get("assigned_agent"), "duration_ms": round((time.monotonic()-started)*1000), "checks": checks, "response": reply, "tools": [{"tool": t.get("tool"), "success": t.get("success")} for t in tools], "lineage":lineage, "events":diagnostic_events}
                 row["event_counts"] = dict(Counter(e["event_type"] for e in events))
                 row["model_used"] = task.get("last_turn_model_used")
+                row["model_executed"] = any(event["event_type"] == "llm_call_started" for event in events)
                 row["tool_trace"] = [e for e in events if "tool" in e["event_type"]]
                 if case == "write_verify":
                     row["actual_file"] = (root / "answer.txt").read_text(encoding="utf-8") if (root / "answer.txt").is_file() else None

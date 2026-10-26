@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.0.1",
   "cases": [
     {
       "id": "conversation.fact",
@@ -28,7 +28,8 @@
       "expect": "result",
       "checks": [
         "no_false_success",
-        "runtime_version"
+        "runtime_version",
+        "no_network"
       ]
     },
     {

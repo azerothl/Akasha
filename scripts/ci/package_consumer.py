@@ -31,7 +31,9 @@ def package(daemon,ui,runtime,output,cuda=False,embeddings=None):
     if embeddings is None:raise ValueError('Pinned offline embedding components are required')
     shutil.copytree(embeddings,output/'embedding_model')
     (output/'qualification').mkdir();shutil.copy2(ROOT/'spec/dev/quality/CONSUMER_BETA_DELIVERY.md',output/'qualification/DELIVERY.md')
-    shutil.copy2(ROOT/'spec/consumer-beta-windows.md',output/'README.md');shutil.copy2(ROOT/'LICENSE',output/'LICENSE')
+    for document in (ROOT/'spec/dev/quality').glob('consumer_beta_*.md'):shutil.copy2(document,output/'qualification'/document.name)
+    (output/'README.md').write_text((ROOT/'spec/consumer-beta-windows.md').read_text(encoding='utf-8').replace('dev/quality/CONSUMER_BETA_DELIVERY.md','qualification/DELIVERY.md'),encoding='utf-8')
+    shutil.copy2(ROOT/'LICENSE',output/'LICENSE')
     if cuda:
         import os
         cuda_bin=Path(os.environ['CUDA_PATH'])/'bin'
