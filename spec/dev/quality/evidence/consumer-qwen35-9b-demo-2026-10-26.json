@@ -1,0 +1,232 @@
+{
+  "kind": "live_first_demo",
+  "model": "qwen3.5:9b",
+  "source": "DOCUMENT DE DÉMONSTRATION — DONNÉES FICTIVES\nFacture de la famille Exemple\nMontant à payer : 42 euros\nÉchéance : 10 novembre 2026\nRéférence : DEMO-001\n",
+  "task": {
+    "assigned_agent": "ask",
+    "cost_usd": 0.0,
+    "created_at": "2026-10-26T15:49:19.670057600+00:00",
+    "last_turn_cost_usd": 0.0,
+    "last_turn_latency_ms": 3936,
+    "last_turn_model_used": "qwen3.5:9b",
+    "last_turn_tokens_in": 735,
+    "last_turn_tokens_out": 36,
+    "outcome": {
+      "acceptance_verified": false,
+      "confirmed_file_mutation": false,
+      "failed_tool_calls": 0,
+      "planning_verified": false,
+      "reason": null,
+      "response": "{\"montant\": 42, \"echeance\": \"2026-11-10\", \"source\": \"demo-facture.txt\"}",
+      "result": "succeeded",
+      "schema_version": 1,
+      "status": "completed",
+      "successful_tool_calls": 0,
+      "termination_reason": "success",
+      "verification": []
+    },
+    "progress": [
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "",
+        "progress_pct": 50,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "{\"montant\": 42, \"echeance\": \"2026-11-10\", \"source\": \"demo-facture.txt\"}",
+        "progress_pct": 100,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "{\"montant\": 42, \"echeance\": \"2026-11-10\", \"source\": \"demo-facture.txt\"}",
+        "progress_pct": 100,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      },
+      {
+        "message": "{\"montant\": 42, \"echeance\": \"2026-11-10\", \"source\": \"demo-facture.txt\"}",
+        "progress_pct": 100,
+        "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+      }
+    ],
+    "status": "completed",
+    "suggested_actions": [
+      {
+        "id": "refresh_files",
+        "kind": "ui",
+        "label": "Rafraîchir la liste des fichiers",
+        "ui_action": "refresh_files"
+      },
+      {
+        "id": "open_editor",
+        "kind": "ui",
+        "label": "Onglet Éditeur",
+        "ui_action": "open_editor"
+      },
+      {
+        "id": "open_preview",
+        "kind": "ui",
+        "label": "Ouvrir l’aperçu",
+        "ui_action": "open_preview"
+      },
+      {
+        "id": "open_design",
+        "kind": "ui",
+        "label": "Voir DESIGN.md",
+        "ui_action": "open_design"
+      }
+    ],
+    "task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4",
+    "todos": [],
+    "tokens_used": 771,
+    "updated_at": "2026-10-26T15:49:24.061889200+00:00"
+  },
+  "children": {
+    "children": [],
+    "parent_task_id": "ef2e15f1-51ed-40f9-98fc-894c3f95e8f4"
+  },
+  "passed": true
+}

@@ -214,6 +214,15 @@ impl LLMRouter {
             .clone()
     }
 
+    /// Stable identity of all routing options; never expose the configuration's
+    /// credentials as qualification evidence.
+    pub fn configuration_sha256(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let config=self.config.read().unwrap_or_else(|error|error.into_inner());
+        let canonical=serde_json::to_value(&*config).expect("serializable routing config").to_string();
+        format!("{:x}",Sha256::digest(canonical.as_bytes()))
+    }
+
     /// List models per provider from routing config (for GET /api/router/models).
     pub fn provider_configs(
         &self,
@@ -293,12 +302,15 @@ impl LLMRouter {
 
     /// Base URL of the Ollama provider from config (if set).
     pub fn ollama_base_url(&self) -> Option<String> {
+        if let Some(endpoint)=self.providers.get("ollama").and_then(|provider|provider.endpoint()) {
+            return Some(endpoint.to_string());
+        }
         self.config
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .providers
             .get("ollama")
-            .and_then(|c| c.base_url.clone())
+            .and_then(|c| c.base_url.clone()).filter(|url|!url.trim().is_empty())
     }
 
     /// Returns true when the primary provider for `task_type` is Ollama.

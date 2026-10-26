@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useFocusScope } from "../hooks/useFocusScope";
+import { ConsumerOnboardingWizard } from "./ConsumerOnboardingWizard";
+import type { PrivacyFetch } from "./RemotePrivacy";
 import { invoke } from "@tauri-apps/api/core";
 import { E2E_WEB, e2eDaemonGetJson } from "../e2eDaemon";
 
@@ -12,6 +14,7 @@ type Props = {
   daemonOk: boolean;
   onComplete: () => void;
   t: (key: string) => string;
+  fetchEndpoint?: PrivacyFetch;
 };
 
 type EmbeddedStatus = {
@@ -85,7 +88,23 @@ export function markSetupWizardDone(): void {
   }
 }
 
-export function OnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
+export function OnboardingWizard(props: Props) {
+  const [consumer, setConsumer] = useState(false);
+  const [checked, setChecked] = useState(!props.fetchEndpoint);
+  useEffect(() => {
+    if (!props.fetchEndpoint) return;
+    let disposed=false;
+    props.fetchEndpoint("/api/privacy").then((result) => {
+      if (!disposed && result.ok) setConsumer(JSON.parse(result.text).consumer_beta_build === true);
+    }).catch(() => {}).finally(() => { if (!disposed) setChecked(true); });
+    return () => { disposed=true; };
+  }, [props.fetchEndpoint]);
+  if (!checked) return createPortal(<div className="human-input-overlay onboarding-overlay" role="status">{props.locale === "en" ? "Preparing setup…" : "Préparation du démarrage…"}</div>, document.body);
+  if (consumer && props.fetchEndpoint) return <ConsumerOnboardingWizard locale={props.locale} daemonOk={props.daemonOk} fetchEndpoint={props.fetchEndpoint} onComplete={() => { markSetupWizardDone(); props.onComplete(); }} onDismiss={props.onComplete} />;
+  return <LegacyOnboardingWizard {...props} />;
+}
+
+function LegacyOnboardingWizard({ locale, daemonOk, onComplete, t }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   useFocusScope(dialogRef, true, onComplete, { inertOutside: true });
