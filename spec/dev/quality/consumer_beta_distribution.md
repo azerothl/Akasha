@@ -64,6 +64,14 @@ Ces résultats sont distincts d'une qualification des paquets de publication :
   Le test a corrigé la dépendance du lanceur à `Get-FileHash` et la conservation
   du code de sortie sous PowerShell 5.1.
 
+Le paquet final CPU debug assemble le binaire `bd4912f` et les documents de
+la révision `54ef55d`, tous deux sans modification locale. Son lancement natif
+sur 3880, la mémoire chiffrée, les trois documents prêts et l'arrêt à la fermeture
+sont conservés dans le [reçu natif final](evidence/consumer-beta-20261026/final-native-package-receipt.json)
+et le [manifeste du paquet](evidence/consumer-beta-20261026/final-debug-package-manifest.json).
+Le paquet contient la vidéo vérifiée avec le même binaire. Il reste un essai
+de développement, distinct des paquets de publication CPU et CUDA à qualifier.
+
 Les préqualifications GGUF conservent réponses et identités complètes. La
 première série a trouvé 24/27 pour Qwen2.5 1.5B et 0/27 pour les trois autres.
 Elle a révélé que le moteur natif ignorait `thinking_level=off` pour Qwen3/3.5.
