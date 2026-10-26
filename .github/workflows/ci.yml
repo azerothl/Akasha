@@ -234,6 +234,10 @@ jobs:
 
       - name: Test isolated real-agentic eval harness
         run: python3 spec/dev/quality/test_real_agentic_eval.py
+      - name: Validate consumer acceptance corpus and evidence gate
+        run: |
+          python3 spec/dev/quality/consumer_beta_eval.py --validate-corpus
+          python3 -m unittest discover -s spec/dev/quality -p test_consumer_beta_eval.py -v
   release-artifact-first-boot-linux:
     if: github.event_name == 'workflow_dispatch' && inputs.run_release_smoke
     runs-on: ubuntu-latest
