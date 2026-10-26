@@ -319,7 +319,7 @@ impl Native {
             "FPDFPage_CountObjects",
             unsafe extern "C" fn(*mut c_void) -> c_int
         )(page.ptr);
-        let mut large_image = false;
+        let mut image_content = false;
         for index in 0..objects.min(100000) {
             let object = native!(
                 self.pdf,
@@ -332,27 +332,13 @@ impl Native {
                 unsafe extern "C" fn(*mut c_void) -> c_int
             )(object);
             if kind == 3 || kind == 5 {
-                let (mut left, mut bottom, mut right, mut top) = (0f32, 0f32, 0f32, 0f32);
-                if native!(
-                    self.pdf,
-                    "FPDFPageObj_GetBounds",
-                    unsafe extern "C" fn(
-                        *mut c_void,
-                        *mut f32,
-                        *mut f32,
-                        *mut f32,
-                        *mut f32,
-                    ) -> c_int
-                )(object, &mut left, &mut bottom, &mut right, &mut top)
-                    != 0
-                    && (right - left) * (top - bottom) > width * height * 0.4
-                {
-                    large_image = true;
-                }
+                // A long text layer says nothing about an image or nested form.
+                // Rasterize the whole page so mixed content is never omitted.
+                image_content = true;
+                break;
             }
         }
-        let needs_ocr =
-            text.trim().chars().count() < 10 || (large_image && text.chars().count() < 200);
+        let needs_ocr = text.trim().chars().count() < 10 || image_content;
         if input.operation == "extract" && !needs_ocr {
             return Ok(WorkerOutput {
                 pages: count as u32,

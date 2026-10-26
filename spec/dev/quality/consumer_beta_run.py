@@ -63,7 +63,11 @@ def main():
  documents=a.output/'documents.json';execute('documents',[sys.executable,str(Path(__file__).with_name('document_workflow_audit.py')),'--binary',str(a.binary),'--runtime',str(a.runtime),'--fixtures',str(a.output/'document-fixtures-éété'),'--model',a.model,'--output',str(documents),*([] if a.live else ['--controlled'])])
  docs=json.loads(documents.read_text(encoding='utf-8'));docrows=docs['cases'];imports={row['name']:row for row in docrows if row['kind']=='import'}
  for case_id,name in {'documents.text':'unicode-été.txt','documents.unicode':'unicode-été.txt','documents.pdf_text':'text.pdf','documents.pdf_scan':'scan.pdf','documents.pdf_mixed':'mixed.pdf','documents.photo_jpg':'photo.jpg','documents.photo_png':'photo.png'}.items():
-  row=imports.get(name,{});put(case_id,row.get('passed',False),row)
+  row=imports.get(name,{});passed=row.get('passed',False)
+  if case_id=='documents.pdf_mixed':
+   same_page=next((item for item in workers['cases'] if item['file']=='mixed-content.pdf' and item['operation']=='extract'),{})
+   passed=passed and same_page.get('passed',False);row={'workflow':row,'same_page_text_and_scan':same_page}
+  put(case_id,passed,row)
  for case_id,kind in [('documents.missing_fact','missing_fact'),('documents.unreadable','unreadable'),('documents.injection','answer_export_injection'),('documents.restart','restart')]:
   row=next((row for row in docrows if row['kind']==kind),{});put(case_id,row.get('passed',False),row,a.live and kind in {'missing_fact','answer_export_injection'},row.get('duration_ms',0))
  for case_id,name in [('documents.rotation','rotation.png'),('documents.page_limit','too-many-pages.pdf')]:

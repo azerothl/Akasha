@@ -1,5 +1,5 @@
 {
-  "version": "1.0.1",
+  "version": "1.0.2",
   "cases": [
     {
       "id": "conversation.fact",
@@ -152,7 +152,8 @@
       "checks": [
         "no_false_success",
         "ocr",
-        "page_citation"
+        "page_citation",
+        "same_page_text_and_scan"
       ]
     },
     {
@@ -245,7 +246,8 @@
       "checks": [
         "no_false_success",
         "privacy",
-        "no_mutation"
+        "no_mutation",
+        "answer_citation_membership"
       ]
     },
     {

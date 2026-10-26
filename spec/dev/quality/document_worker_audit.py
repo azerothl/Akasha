@@ -37,6 +37,12 @@ def fixtures(folder):
                     pdf.drawString(50,700-y*45,text)
             pdf.showPage()
         pdf.save()
+    pdf=canvas.Canvas(str(folder / "mixed-content.pdf"), pagesize=(600,800))
+    pdf.setFont("Helvetica",12)
+    for y in range(5):
+        pdf.drawString(20,780-y*18,"Document fictif pour verifier la lecture locale de toutes les informations.")
+    pdf.drawImage(ImageReader(image),0,0,width=600,height=640)
+    pdf.save()
     pdf=canvas.Canvas(str(folder / "too-many-pages.pdf"))
     for _ in range(101):
         pdf.drawString(20,20,"synthetic page");pdf.showPage()
@@ -70,6 +76,7 @@ def main():
             passed=output is not None and bool(output["png_base64"])
         else:
             passed=output is not None and "42" in output["page"]["text"] and output["page"]["method"]==expected
+            if name=="mixed-content.pdf":passed=passed and "2026" in output["page"]["text"] and "novembre" in output["page"]["text"].lower()
         if output and output.get("png_base64"):
             import base64
             (folder/f"preview-{name}.png").write_bytes(base64.b64decode(output.pop("png_base64")))
@@ -81,6 +88,7 @@ def main():
     run("text.pdf","extract",1,"pdfium_text")
     run("mixed.pdf","extract",1,"pdfium_text")
     run("mixed.pdf","extract",2,"tesseract_5_fra_eng")
+    run("mixed-content.pdf","extract",1,"tesseract_5_fra_eng")
     run("unreadable.png","extract",1,"warning")
     run("unicode-été.txt","extract",1,"utf8_text")
     run("too-many-pages.pdf","inspect",0,"refusal")

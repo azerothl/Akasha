@@ -47,10 +47,10 @@ Ces résultats sont distincts d'une qualification des paquets de publication :
   14 refus attendus, aucun faux succès. Les reçus proviennent de processus de
   tests natifs, d'appels HTTP et du worker OCR, pas de déclarations du modèle.
 - Magasin SQLCipher : 37 tests ; routeur/modèles : 127 tests et un ignoré ;
-  daemon particuliers : 755 tests et un ignoré. Les échecs intermédiaires sont
+  daemon particuliers : 756 tests et un ignoré. Les échecs intermédiaires sont
   conservés dans les journaux, puis les contrôles concernés sont rejoués après
   correction.
-- Interface : 86 tests unitaires, compilation et 12 parcours Chromium aux
+- Interface : 87 tests unitaires, compilation et 13 parcours Chromium aux
   largeurs 900/1440, dont le refus d'un envoi distant sans accord et sa remise
   à zéro après échec. Inspection finale de l'accueil, sans débordement horizontal.
 - Vidéo reproductible : interface réelle, daemon réel et Ollama `qwen3.5:9b` ;
@@ -114,6 +114,17 @@ CUDA peut être préparée sur un poste sans pilote NVIDIA. Un fichier ancien,
 ambigu ou dont l'empreinte OCR diffère est refusé. La révision du binaire et
 celle de l'assemblage sont distinctes ; une source modifiée bloque la diffusion.
 
+Le contrat 1.0.2 ajoute la page contenant à la fois plus de 200 caractères
+sélectionnables et une facture scannée. Toute page contenant une image ou un
+formulaire PDF passe par l'OCR, même si sa couche texte est longue. Les marqueurs
+de citation de la réponse doivent correspondre exactement aux références retenues.
+Un scénario sans observation ou sans tous ses contrôles booléens reste non exécuté ;
+la qualification recalcule les trois rapports selon le corpus courant et refuse
+les anciens contrats ou les simples indicateurs de réussite mis en cache.
+Les autorisations sont aussi proposées avant une recherche avancée dans l'édition
+développeur. L'ancien formulaire du calendrier demande confirmation et affiche
+l'échec d'enregistrement ; il utilise le transport natif pour lire, créer et supprimer.
+
 ## Reproduction
 
 Préparer les composants OCR avec `scripts/prepare-ocr-runtime.py`, les embeddings
@@ -136,7 +147,7 @@ une série réelle ; les cas sémantiques utilisent le modèle local indiqué. L
 le même identifiant de série et une chaîne de trois passages sans réutilisation.
 
 La CI Windows exécute le corpus déterministe et conserve les reçus. La CI UI
-exécute les douze parcours de confidentialité et usages. Les compilations et
+exécute les treize parcours de confidentialité et usages. Les compilations et
 contrôles historiques des autres systèmes restent conservés.
 
 ## Condition d'ouverture du pilote
