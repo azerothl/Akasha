@@ -204,6 +204,10 @@ mod tests {
         fn is_local(&self) -> bool {
             self.name == "ollama"
         }
+        fn endpoint(&self) -> Option<&str> {
+            if self.is_local() { Some("http://127.0.0.1:11434") }
+            else { Some("https://synthetic.example/v1") }
+        }
         async fn complete(
             &self,
             _: &CompletionRequest,
@@ -226,7 +230,7 @@ mod tests {
         let scope=akasha_core::privacy::Scope { data_dir:dir.path().into(), id:"price-filter-test".into() };
         akasha_core::privacy::update(dir.path(), |state| {
             for provider in ["openrouter", "openrouter_free"] {
-                state.grants.push(akasha_core::privacy::Grant { scope:scope.id.clone(), recipient:format!("model:{provider}:default"), data_classes:vec!["message","history","memory","documents","tool_results"].into_iter().map(str::to_owned).collect(), created_at:chrono::Utc::now().to_rfc3339(), expires_at:(chrono::Utc::now()+chrono::Duration::hours(1)).to_rfc3339(),revoked:false });
+                state.grants.push(akasha_core::privacy::Grant { scope:scope.id.clone(), recipient:format!("model:{provider}:https://synthetic.example/v1"), data_classes:vec!["message","history","memory","documents","tool_results"].into_iter().map(str::to_owned).collect(), created_at:chrono::Utc::now().to_rfc3339(), expires_at:(chrono::Utc::now()+chrono::Duration::hours(1)).to_rfc3339(),revoked:false });
             } Ok(())
         }).unwrap();
         (dir,scope)

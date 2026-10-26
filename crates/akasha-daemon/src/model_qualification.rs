@@ -30,6 +30,8 @@ struct Identity {
     provider: String,
     model: String,
     model_bytes: u64,
+    hardware_profile: Value,
+    hardware_sha256: String,
 }
 struct Probe {
     id: &'static str,
@@ -79,9 +81,7 @@ fn selected_service(router: &LLMRouter, provider: &str) -> anyhow::Result<Value>
 fn configuration_fingerprint(data: &Path, router: &LLMRouter) -> String {
     let mut hash = Sha256::new();
     hash.update(router.configuration_sha256());
-    if let Ok(bytes) = std::fs::read(data.join("embedded_runtime.json")) {
-        hash.update(bytes);
-    }
+    if let Ok(bytes)=std::fs::read(data.join("embedded_runtime.json")){if let Ok(mut value)=serde_json::from_slice::<Value>(&bytes){if let Some(object)=value.as_object_mut(){for key in ["calibrated_at","bench_results","winner_tok_per_s"]{object.remove(key);}}hash.update(serde_json::to_vec(&value).unwrap_or_default());}else{hash.update(bytes);}}
     let settings: std::collections::BTreeMap<_, _> = std::env::vars()
         .filter(|(name, _)| {
             name.starts_with("AKASHA_EMBEDDED_")
@@ -96,8 +96,8 @@ fn configuration_fingerprint(data: &Path, router: &LLMRouter) -> String {
 }
 async fn identity(router: &LLMRouter, input: &Input, data: &Path) -> anyhow::Result<Identity> {
     let service = selected_service(router, &input.provider)?;
-    let executable = std::env::current_exe()?;
-    let binary = tokio::task::spawn_blocking(move || file_digest(&executable)).await??;
+    static BINARY:OnceLock<String>=OnceLock::new();
+    let binary=if let Some(value)=BINARY.get(){value.clone()}else{let executable=std::env::current_exe()?;let digest=tokio::task::spawn_blocking(move||file_digest(&executable)).await??;let _=BINARY.set(digest.clone());digest};
     let (model_digest, engine, model_bytes) = if input.provider == "ollama" {
         let base = service["endpoint"]
             .as_str()
@@ -174,6 +174,11 @@ async fn identity(router: &LLMRouter, input: &Input, data: &Path) -> anyhow::Res
     } else {
         anyhow::bail!("Qualification limitée au catalogue embarqué et à Ollama.")
     };
+    #[cfg(feature="embedded")]
+    let hardware=router.embedded_hardware().unwrap_or(json!({"available":false}));
+    #[cfg(not(feature="embedded"))]
+    let hardware=json!({"available":false,"architecture":std::env::consts::ARCH,"threads":std::thread::available_parallelism().map(|value|value.get()).unwrap_or(1)});
+    let hardware_sha256=format!("{:x}",Sha256::digest(serde_json::to_vec(&hardware)?));
     Ok(Identity {
         source_revision: env!("AKASHA_SOURCE_REVISION").into(),
         source_dirty: env!("AKASHA_SOURCE_DIRTY") == "true",
@@ -185,8 +190,11 @@ async fn identity(router: &LLMRouter, input: &Input, data: &Path) -> anyhow::Res
         provider: input.provider.clone(),
         model: input.model.clone(),
         model_bytes,
+        hardware_profile:hardware,
+        hardware_sha256,
     })
 }
+pub async fn current_identity(router:&LLMRouter,data:&Path,provider:&str,model:&str)->anyhow::Result<Value>{Ok(serde_json::to_value(identity(router,&Input{provider:provider.into(),model:model.into()},data).await?)?)}
 fn still_running(store: &Path, id: Uuid) -> bool {
     TaskStore::open(store)
         .and_then(|store| store.get(id))

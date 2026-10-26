@@ -60,6 +60,10 @@ fn init_tracing(data_dir: &Path) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref()==Some("--consumer-build-info") {
+        println!("{}",serde_json::json!({"consumer_beta":cfg!(feature="consumer-beta"),"version":env!("CARGO_PKG_VERSION"),"source_revision":env!("AKASHA_SOURCE_REVISION"),"source_dirty":env!("AKASHA_SOURCE_DIRTY")=="true","ocr_lock_sha256":option_env!("AKASHA_OCR_LOCK_SHA256").unwrap_or(""),"cuda":cfg!(feature="embedded-llama-cpp-cuda")}));
+        return Ok(());
+    }
     if let Some(code) = akasha_daemon::document_worker::entry() { std::process::exit(code); }
     let previous=akasha_core::data_dir::resolve_bootstrap_data_dir(std::env::var_os("AKASHA_DATA_DIR").as_deref(),dirs::home_dir().as_deref())?;
     let bootstrap_path=if cfg!(feature="consumer-beta"){std::env::var_os("AKASHA_PROFILE_BOOTSTRAP_DIR").map(std::path::PathBuf::from).unwrap_or_else(||previous.clone())}else{previous.clone()};

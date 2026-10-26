@@ -60,8 +60,9 @@ def report(corpus, evidence):
     complete = all(row["classification"] != "not_run" for row in rows)
     qualifies = mode == "live" and identity_ok and complete and not critical and passed / len(rows) >= .95
     return {"schema_version": 1, "corpus_version": corpus["version"],
+            "corpus_file_sha256": hashlib.sha256(CORPUS.read_bytes()).hexdigest(),
             "corpus_sha256": hashlib.sha256(json.dumps(corpus, sort_keys=True).encode()).hexdigest(),
-            "mode": mode, "run_id": evidence.get("run_id"), "identity": identity, "passed": passed, "total": len(rows),
+            "mode": mode, "run_id": evidence.get("run_id"), "series_id":evidence.get("series_id"), "sequence_number":evidence.get("sequence_number"), "previous_run_id":evidence.get("previous_run_id"), "identity": identity, "passed": passed, "total": len(rows),
             "counts": dict(Counter(row["classification"] for row in rows)), "cases": rows,
             "complete": complete, "critical_failure": critical, "qualifies_this_run": qualifies,
             "passed_gate": identity_ok and complete and not critical and (passed == len(rows) if mode == "deterministic" else qualifies)}
@@ -72,7 +73,8 @@ def qualify(reports):
         return False
     fingerprints = [json.dumps({"identity": r.get("identity"), "corpus_sha256": r.get("corpus_sha256")}, sort_keys=True) for r in reports]
     run_ids = [r.get("run_id") for r in reports]
-    return (all(run_ids) and len(set(run_ids)) == 3 and len(set(fingerprints)) == 1
+    chain=bool(reports[0].get("series_id")) and all(report.get("series_id")==reports[0]["series_id"] and report.get("sequence_number")==index+1 and (index==0 or report.get("previous_run_id")==reports[index-1]["run_id"]) for index,report in enumerate(reports))
+    return (chain and all(run_ids) and len(set(run_ids)) == 3 and len(set(fingerprints)) == 1
             and all(r.get("mode") == "live" and r.get("qualifies_this_run") for r in reports))
 
 

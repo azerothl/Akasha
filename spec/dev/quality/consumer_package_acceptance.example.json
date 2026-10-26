@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {
+      "variant": "cpu",
+      "manifest_sha256": null,
+      "deterministic_report": "cpu/controlled/report.json",
+      "live_reports": ["cpu/live/run-1/report.json", "cpu/live/run-2/report.json", "cpu/live/run-3/report.json"],
+      "document_video": {"path": "cpu/document.webm", "sha256": null},
+      "physical_checks": {
+        "windows_hardware": {
+          "operator": null, "performed_at": null, "windows_build": null,
+          "manifest_sha256": null,
+          "hardware": {"cpu": null, "ram_gb": null, "gpu": null},
+          "checks": {"fresh_install": false, "first_document_result": false, "offline_start": false, "update_preserves_data": false, "cancellation": false, "consent_revocation": false},
+          "receipts": []
+        },
+        "second_windows_account": {
+          "operator": null, "performed_at": null, "windows_build": null,
+          "manifest_sha256": null,
+          "checks": {"restore_validated": false, "identifiers_preserved": false, "services_disconnected": false, "wrong_password_rejected": false, "tampered_archive_rejected": false},
+          "receipts": []
+        }
+      }
+    }
+  ]
+}

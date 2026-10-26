@@ -4922,8 +4922,12 @@ pub async fn handle_api(
     if let Some(resp) = crate::api_security::csrf_reject_response(method, path, headers) {
         return resp;
     }
+    if let Some(response)=crate::consumer_surface::reject(method,path.split('?').next().unwrap_or(path)){return response;}
 
     let (path_only, query_str) = crate::api_security::split_path_query(path);
+    if method=="GET"&&path_only=="/api/consumer/demo" {return json_response("200 OK",&crate::consumer_demo::files().to_string());}
+    if let Some(response)=crate::consumer_pilot::route(method,path_only,body.as_deref(),data_dir){return response;}
+    if let Some(response)=crate::consumer_services::route(method,path_only,body.as_deref(),data_dir){return response;}
     let _http_post_lifecycle = crate::lifecycle_hooks::HttpPostLifecycleHooks {
         data_dir: data_dir.to_path_buf(),
         method: method.to_string(),

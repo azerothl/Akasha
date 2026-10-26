@@ -7,19 +7,27 @@
       "label_en": "Qwen2.5 1.5B Instruct Q4_K_M",
       "label_fr": "Qwen2.5 1.5B Instruct Q4_K_M",
       "filename": "default.gguf",
-      "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-      "size_bytes_hint": 986000000,
+      "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+      "size_bytes_hint": 1117320736,
       "min_vram_mb": 4096,
       "min_ram_mb": 8192,
       "arch": "qwen2",
-      "engine_candidates": ["llama_cpp_cpu", "llama_cpp_cuda"],
-      "profile_tiers": ["gpu_mid_8gb", "gpu_high_12gb", "gpu_low_4gb"],
+      "engine_candidates": [
+        "llama_cpp_cpu",
+        "llama_cpp_cuda"
+      ],
+      "profile_tiers": [
+        "gpu_mid_8gb",
+        "gpu_high_12gb",
+        "gpu_low_4gb"
+      ],
       "compatibility": "supported",
       "vision": false,
       "mmproj_required": false,
       "bench_tier": "tier1",
       "bench_role": "default",
-      "evidence_notes": "Défaut prod v0.10 CUDA; gate historique >20 tok/s sur GTX 3080+"
+      "evidence_notes": "Défaut prod v0.10 CUDA; gate historique >20 tok/s sur GTX 3080+",
+      "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
     },
     {
       "id": "smollm2-360m-instruct-q4",
@@ -27,19 +35,27 @@
       "label_en": "SmolLM2 360M Instruct Q4_K_M (lighter download)",
       "label_fr": "SmolLM2 360M Instruct Q4_K_M (téléchargement léger)",
       "filename": "smollm2-360m-q4.gguf",
-      "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf",
-      "size_bytes_hint": 250000000,
+      "url": "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/7be6f65f1db715fe5dc5a4634c0d459b4eed42ec/SmolLM2-360M-Instruct-Q4_K_M.gguf",
+      "size_bytes_hint": 270590880,
       "min_vram_mb": 0,
       "min_ram_mb": 4096,
       "arch": "llama",
-      "engine_candidates": ["llama_cpp_cpu", "llama_cpp_cuda"],
-      "profile_tiers": ["cpu_only", "cpu_capable_32gb", "gpu_low_4gb"],
+      "engine_candidates": [
+        "llama_cpp_cpu",
+        "llama_cpp_cuda"
+      ],
+      "profile_tiers": [
+        "cpu_only",
+        "cpu_capable_32gb",
+        "gpu_low_4gb"
+      ],
       "compatibility": "supported",
       "vision": false,
       "mmproj_required": false,
       "bench_tier": "tier1",
       "bench_role": "wizard_variant",
-      "evidence_notes": "Variante wizard téléchargement léger; FR limité"
+      "evidence_notes": "Variante wizard téléchargement léger; FR limité",
+      "sha256": "2fa3f013dcdd7b99f9b237717fa0b12d75bbb89984cc1274be1471a465bac9c2"
     },
     {
       "id": "qwen3.5-0.8b-q4",
@@ -47,20 +63,30 @@
       "label_en": "Qwen3.5 0.8B Q4_K_M (best bench on 4 GB GPU)",
       "label_fr": "Qwen3.5 0.8B Q4_K_M (meilleur bench GPU 4 Go)",
       "filename": "qwen3.5-0.8b-q4.gguf",
-      "url": "https://huggingface.co/diodel/Qwen3.5-0.8B-Q4_K_M-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
-      "size_bytes_hint": 529000000,
+      "url": "https://huggingface.co/diodel/Qwen3.5-0.8B-Q4_K_M-GGUF/resolve/dfdaeea1fdbef1d8900313cf5bed689abff3feec/qwen3.5-0.8b-Q4_K_M.gguf",
+      "size_bytes_hint": 529297312,
       "min_vram_mb": 3072,
       "min_ram_mb": 8192,
       "arch": "qwen35",
-      "engine_candidates": ["llama_cpp_cpu", "llama_cpp_cuda"],
-      "profile_tiers": ["cpu_only", "cpu_capable_32gb", "gpu_low_4gb", "gpu_mid_8gb", "gpu_high_12gb"],
+      "engine_candidates": [
+        "llama_cpp_cpu",
+        "llama_cpp_cuda"
+      ],
+      "profile_tiers": [
+        "cpu_only",
+        "cpu_capable_32gb",
+        "gpu_low_4gb",
+        "gpu_mid_8gb",
+        "gpu_high_12gb"
+      ],
       "compatibility": "evidence_only",
       "vision": true,
       "mmproj_required": true,
       "mmproj_filename": "qwen3.5-0.8b-mmproj.gguf",
       "bench_tier": "tier1",
       "bench_role": "bench_candidate",
-      "evidence_notes": "Candidat A1 swap défaut; vision native via mmproj séparé; valider n_batch hybrid"
+      "evidence_notes": "Candidat A1 swap défaut; vision native via mmproj séparé; valider n_batch hybrid",
+      "sha256": "fb89581c3863314f6e6e1810f11b0bbb30a07315e7b1229a5c7db10fb0100ca6"
     },
     {
       "id": "qwen3-0.6b-q4",
@@ -68,19 +94,27 @@
       "label_en": "Qwen3 0.6B Q4_K_M (compact GGUF)",
       "label_fr": "Qwen3 0.6B Q4_K_M (GGUF compact)",
       "filename": "qwen3-0.6b-q4.gguf",
-      "url": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf",
-      "size_bytes_hint": 400000000,
+      "url": "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/50968a4468ef4233ed78cd7c3de230dd1d61a56b/Qwen3-0.6B-Q4_K_M.gguf",
+      "size_bytes_hint": 396705472,
       "min_vram_mb": 0,
       "min_ram_mb": 4096,
       "arch": "qwen3",
-      "engine_candidates": ["llama_cpp_cpu", "llama_cpp_cuda"],
-      "profile_tiers": ["cpu_only", "cpu_capable_32gb", "gpu_low_4gb"],
+      "engine_candidates": [
+        "llama_cpp_cpu",
+        "llama_cpp_cuda"
+      ],
+      "profile_tiers": [
+        "cpu_only",
+        "cpu_capable_32gb",
+        "gpu_low_4gb"
+      ],
       "compatibility": "evidence_only",
       "vision": false,
       "mmproj_required": false,
       "bench_tier": "tier1",
       "bench_role": "bench_candidate",
-      "evidence_notes": "Alignement famille Qwen3 vs Candle bundlé"
+      "evidence_notes": "Alignement famille Qwen3 vs Candle bundlé",
+      "sha256": "ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a"
     }
   ]
 }

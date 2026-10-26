@@ -428,6 +428,14 @@ pub fn route(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn unavailable_sources_produce_a_failed_task_and_a_retained_error_report(){
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let base=format!("http://{}",listener.local_addr().unwrap());drop(listener);
+        let root=tempfile::tempdir().unwrap();let data=root.path();let path=data.join("akasha.db");
+        std::fs::write(data.join("tools_policy.yaml"),serde_json::to_vec(&json!({"web_search_enabled":true,"search_provider":"searxng","search_fallback_chain":[],"searxng_url":base,"allowed_web_domains":["127.0.0.1"]})).unwrap()).unwrap();
+        let watch=Watch{id:Uuid::new_v4(),topic:"sujet synthétique".into(),sources:vec![format!("{base}/unavailable")],provider:"searxng".into(),frequency_seconds:86400};authorize(data,&watch,&recipients(data,&watch).unwrap()).unwrap();connection(&path).unwrap().execute("INSERT INTO consumer_watches(id,payload) VALUES(?1,?2)",rusqlite::params![watch.id.to_string(),serde_json::to_string(&watch).unwrap()]).unwrap();
+        let id=manual(data,&path,&watch).unwrap();for _ in 0..100{let task=TaskStore::open(&path).unwrap().get(id).unwrap().unwrap();if task.status==TaskStatus::Failed{let payload:String=connection(&path).unwrap().query_row("SELECT payload FROM consumer_watch_reports WHERE task_id=?1",[id.to_string()],|row|row.get(0)).unwrap();let report:Value=serde_json::from_str(&payload).unwrap();assert_eq!(report["usable"],false);assert!(!report["unavailable_sources"].as_array().unwrap().is_empty());return;}tokio::time::sleep(std::time::Duration::from_millis(50)).await;}panic!("unavailable watch did not fail explicitly");
+    }
+    #[tokio::test]
     async fn watch_needs_its_own_grant_tracks_seen_items_and_stops_after_revocation() {
         use std::io::{Read, Write};
         use std::sync::{

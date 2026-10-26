@@ -222,7 +222,8 @@ def run(args):
         env = {k: v for k, v in clean_env().items() if not k.upper().startswith("AKASHA_")}
         port = choose_port()
         env.update({"AKASHA_DATA_DIR": str(data), "AKASHA_SPEC_DIR": str(ROOT / "spec"), "AKASHA_PORT": str(port), "OPENAI_API_KEY": "audit-local-only", "AKASHA_LLM_TIMEOUT_SECS": "90", "AKASHA_LLM_FIRST_CHUNK_SECS": "90", "AKASHA_MAX_RESPONSE_TOKENS": "1024", "AKASHA_SELECTOR_TIMEOUT_MS": "2000"})
-        subprocess.run([str(args.cli), "init", "--defaults"], cwd=ROOT, env=env, check=True, capture_output=True, timeout=30)
+        if args.cli.is_file():
+            subprocess.run([str(args.cli), "init", "--defaults"], cwd=ROOT, env=env, check=True, capture_output=True, timeout=30)
         if args.model:
             write_router(data, args.model, args.ollama_url, "auto")
         else:

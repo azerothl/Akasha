@@ -607,6 +607,10 @@ mod tests {
     use base64::Engine;
 
     #[test]
+    fn oversized_source_is_rejected_before_persistence(){
+        let root=tempfile::tempdir().unwrap();let store=UserRagStore::new(root.path());let bytes=vec![b'x';crate::document_worker::MAX_BYTES as usize+1];let encoded=base64::engine::general_purpose::STANDARD.encode(bytes);let error=store.add_document(&encoded,"oversize.txt","text/plain").unwrap_err();assert!(error.to_string().contains("25 Mio"));assert!(store.list_documents().unwrap().is_empty());
+    }
+    #[test]
     fn page_references_and_unicode_positions_survive_reopening() {
         let dir = tempfile::tempdir().unwrap();
         let first = UserRagStore::new(dir.path());

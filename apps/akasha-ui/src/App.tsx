@@ -22,6 +22,7 @@ import "./components/consumerFlows.css";
 import {MemoryEntryActions} from "./components/MemoryEntryActions";
 import {ConsumerOrganizationPanel} from "./components/ConsumerOrganizationPanel";
 import {ConsumerWatchPanel} from "./components/ConsumerWatchPanel";
+import {ConsumerHome} from "./components/ConsumerHome";
 import {ConsumerBackupPanel} from "./components/ConsumerBackupPanel";
 import {useConsumerProfile} from "./components/useConsumerProfile";
 import { RemoteConsentPicker, type RemoteConsent } from "./components/RemotePrivacy";
@@ -106,7 +107,7 @@ const ThemeEditorPanel = deferPanel(() => import("./components/ThemeEditorPanel"
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
-const DAEMON_PORT = 3876;
+const DAEMON_PORT = Number(import.meta.env.VITE_AKASHA_DAEMON_PORT) || 3876;
 const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
@@ -1490,6 +1491,8 @@ function App() {
   >([]);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [uiMode, setUiMode] = useState<UiMode>(loadSavedUiMode);
+  const [consumerBuild,setConsumerBuild]=useState(false);
+  const [consumerHome,setConsumerHome]=useState(true);
   const [showOnboarding, setShowOnboarding] = useState(() => readSetupWizardPending());
   const eventLabel = useCallback(
     (typ: string) => {
@@ -1848,6 +1851,7 @@ function App() {
   }, []);
 
   useConsumerProfile(fetchSystemEndpoint, !!health?.ok);
+  useEffect(()=>{if(!health?.ok)return;let disposed=false;void fetchSystemEndpoint("/api/privacy").then(result=>{if(!disposed&&result.ok)setConsumerBuild(JSON.parse(result.text).consumer_beta_build===true);}).catch(()=>{});return()=>{disposed=true;};},[health?.ok,fetchSystemEndpoint]);
   const cookbookRecipeHandlers = useMemo<CookbookRecipeHandlers>(
     () => ({
       onTryInChat: tryCookbookRecipeInChat,
@@ -6240,7 +6244,7 @@ function App() {
                     {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
                   </span>
                 </Tooltip>
-                {tab !== "tasks" && (
+                {tab !== "tasks" && !(tab==="chat"&&isSimpleMode&&consumerBuild&&consumerHome) && (
                   <Tooltip content={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}>
                     <button
                       type="button"
@@ -6566,7 +6570,9 @@ function App() {
             </div>
           </div>
         )}
-        {tab === "chat" && (
+        {tab==="chat"&&isSimpleMode&&consumerBuild&&!consumerHome?<button type="button" className="btn-secondary" onClick={()=>setConsumerHome(true)}>Revenir à mes usages</button>:null}
+        {tab==="chat"&&isSimpleMode&&consumerBuild&&consumerHome?<ConsumerHome fetchEndpoint={fetchSystemEndpoint} daemonPort={DAEMON_PORT} locale={locale} onChat={()=>setConsumerHome(false)} onMemory={()=>setTab("memory")} t={t} readFileAsBase64={readFileAsBase64}/>:null}
+        {tab === "chat" && !(isSimpleMode&&consumerBuild&&consumerHome) && (
           <section
             id="panel-chat"
             role="tabpanel"
@@ -11210,7 +11216,7 @@ function App() {
           </div>
         </div>
 
-        {rightSidebarOpen && (
+        {rightSidebarOpen && !(tab==="chat"&&isSimpleMode&&consumerBuild&&consumerHome) && (
           <aside className="sidebar-right" aria-label={tab === "chat" ? t("sidebar.threads_panel") : t("sidebar.tasks_panel")}>
             <div className="sidebar-right-header">
               <h3 className="sidebar-right-title">{tab === "chat" ? t("chat.threads_title") : t("tabs.tasks")}</h3>

@@ -199,6 +199,9 @@ jobs:
       - name: Playwright E2E
         working-directory: apps/akasha-ui
         run: npm run test:e2e
+      - name: Consumer privacy and three workflows
+        working-directory: apps/akasha-ui
+        run: npx playwright test --config playwright.privacy.config.ts
 
   evals-mock-ci:
     runs-on: ubuntu-latest
@@ -237,7 +240,7 @@ jobs:
       - name: Validate consumer acceptance corpus and evidence gate
         run: |
           python3 spec/dev/quality/consumer_beta_eval.py --validate-corpus
-          python3 -m unittest discover -s spec/dev/quality -p test_consumer_beta_eval.py -v
+          python3 -m unittest discover -s spec/dev/quality -p 'test_consumer*py' -v
   release-artifact-first-boot-linux:
     if: github.event_name == 'workflow_dispatch' && inputs.run_release_smoke
     runs-on: ubuntu-latest
@@ -340,24 +343,18 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo build --locked -p akasha-daemon --no-default-features --features consumer-beta
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python spec/dev/quality/document_worker_audit.py --binary target/debug/akasha-daemon.exe --runtime "$env:RUNNER_TEMP/ocr-runtime" --output "$env:RUNNER_TEMP/document-worker.json"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python spec/dev/quality/document_workflow_audit.py --controlled --binary target/debug/akasha-daemon.exe --runtime "$env:RUNNER_TEMP/ocr-runtime" --fixtures "$env:RUNNER_TEMP/document-fixtures-éété" --output "$env:RUNNER_TEMP/document-workflow.json"
+          python spec/dev/quality/consumer_beta_run.py --binary target/debug/akasha-daemon.exe --runtime "$env:RUNNER_TEMP/ocr-runtime" --output "$env:RUNNER_TEMP/consumer-50"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test --locked --manifest-path apps/akasha-ui/src-tauri/Cargo.toml --lib desktop_transport_tests
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test --locked --manifest-path apps/akasha-ui/src-tauri/Cargo.toml --lib backup_export_tests
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python spec/dev/quality/consumer_organization_audit.py --controlled --binary target/debug/akasha-daemon.exe --output "$env:RUNNER_TEMP/consumer-organization.json"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: consumer-document-receipts-windows
           path: |
-            ${{ runner.temp }}/document-worker.json
-            ${{ runner.temp }}/document-workflow.json
-            ${{ runner.temp }}/consumer-organization.json
+            ${{ runner.temp }}/consumer-50/
             ${{ runner.temp }}/ocr-runtime/runtime-lock.json
 
   # Preserve the existing required "test" check, including docs-only changes.

@@ -125,6 +125,7 @@ mod tract_backend {
                 let model_path = self.cache_dir.join("model.onnx");
                 let tokenizer_path = self.cache_dir.join("tokenizer.json");
                 if !model_path.exists() || !tokenizer_path.exists() {
+                    anyhow::ensure!(std::env::var("AKASHA_EMBEDDINGS_OFFLINE").as_deref()!=Ok("1"),"Composants de mémoire locale manquants. Réinstallez le paquet complet ; aucun téléchargement automatique n’est autorisé.");
                     Self::download_model(&model_path, &tokenizer_path)?;
                 }
                 let tokenizer =

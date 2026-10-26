@@ -12,13 +12,14 @@ pub async fn complete(
 ) -> Result<akasha_llm::CompletionResponse> {
     request.preferred_task_type = Some(router.resolve_task_type_for_agent("conversation"));
     request.thinking_level = Some("off".into());
+    let started = std::time::Instant::now();
     let call = router.complete(&request);
     tokio::pin!(call);
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(180));
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            response=&mut call=>return response.map_err(anyhow::Error::msg),
+            response=&mut call=>{let response=response.map_err(anyhow::Error::msg)?;akasha_store::TaskStore::open(store)?.insert_event(id,"consumer_model_receipt",Some(&serde_json::json!({"model_used":response.model_used,"provider_used":response.provider_used,"elapsed_ms":started.elapsed().as_millis() as u64,"raw_response":response.text.chars().take(65536).collect::<String>()})),&chrono::Utc::now().to_rfc3339())?;return Ok(response);},
             _=&mut deadline=>anyhow::bail!("Le modèle n’a pas fourni de réponse dans les trois minutes. Vous pouvez réessayer."),
             _=tokio::time::sleep(std::time::Duration::from_millis(200))=>ensure!(crate::document_import::active(store,id),"workflow_cancelled"),
         }

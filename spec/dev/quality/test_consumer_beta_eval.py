@@ -28,7 +28,7 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_three_same_real_runs_are_required(self):
         record = {"mode": "live", "run_id": "one", "identity": {"model": "test", "model_digest": "abc"}, "corpus_sha256": "123", "qualifies_this_run": True}
-        records = [{**copy.deepcopy(record), "run_id": str(i)} for i in range(3)]
+        records = [{**copy.deepcopy(record), "run_id": str(i),"series_id":"synthetic-series","sequence_number":i+1,"previous_run_id":str(i-1) if i else None} for i in range(3)]
         self.assertTrue(gate.qualify(records))
         self.assertFalse(gate.qualify([record] * 3))
         self.assertFalse(gate.qualify([record] * 2))

@@ -621,6 +621,9 @@ pub fn start_memory_actor(
         use crate::memory_fact_extract;
         use crate::memory_relation_inference;
 
+        // Fail before publishing a usable client when the protected database
+        // cannot be opened. A locked profile must never look like empty memory.
+        drop(LongTermStore::open(_memory_db_path)?);
         let (tx, rx) = mpsc::channel::<(MemoryRequest, mpsc::Sender<MemoryResponse>)>();
         let memory_db_path = _memory_db_path.to_path_buf();
         let embedding_cache_dir = _embedding_cache_dir.to_path_buf();

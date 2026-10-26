@@ -98,7 +98,7 @@ pub fn routes(
 ) -> Option<String> {
     use crate::api_http::json_response;
     if method == "GET" && path == "/api/privacy" {
-        return Some(json_response("200 OK", &serde_json::json!({"schema_version":1,"consumer_beta_build":cfg!(feature="consumer-beta"),"default":"local","remote_models_require_consent":true,"web_requires_separate_consent":true,"services":router.privacy_services(),"search_services":akasha_tools::privacy_search_services(&akasha_tools::ToolsPolicy::load_from_path(&data_dir.join("tools_policy.yaml")).unwrap_or_default()),"memory":akasha_store::memory_protection::status(&data_dir.join("memory.db")),"unencrypted":["conversations","notes","imported_documents"],"requests":akasha_core::privacy::load(data_dir).map(|state|state.requests).unwrap_or_default(),"grants":akasha_core::privacy::load(data_dir).map(|state|state.grants).unwrap_or_default()}).to_string()));
+        return Some(json_response("200 OK", &serde_json::json!({"schema_version":1,"process_id":std::process::id(),"consumer_beta_build":cfg!(feature="consumer-beta"),"default":"local","remote_models_require_consent":true,"web_requires_separate_consent":true,"services":router.privacy_services(),"search_services":akasha_tools::privacy_search_services(&akasha_tools::ToolsPolicy::load_from_path(&data_dir.join("tools_policy.yaml")).unwrap_or_default()),"memory":akasha_store::memory_protection::status(&data_dir.join("memory.db")),"unencrypted":["conversations","notes","imported_documents"],"requests":akasha_core::privacy::load(data_dir).map(|state|state.requests).unwrap_or_default(),"grants":akasha_core::privacy::load(data_dir).map(|state|state.grants).unwrap_or_default()}).to_string()));
     }
     if !path.starts_with("/api/permissions/remote") {
         return None;

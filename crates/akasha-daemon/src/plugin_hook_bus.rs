@@ -16,6 +16,7 @@ fn hook_payload(event_name: &str, payload_json: &str) -> String {
 
 /// Dispatch one hook event to all enabled plugins that subscribe via `manifest.hook_events`.
 pub fn dispatch_hook_event(data_dir: &Path, event_name: &str, payload_json: &str) {
+    if cfg!(feature="consumer-beta") {return;}
     let plugins_dir = data_dir.join("plugins");
     if !plugins_dir.is_dir() {
         return;

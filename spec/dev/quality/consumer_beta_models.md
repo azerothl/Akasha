@@ -53,8 +53,12 @@ uniquement son daemon. Il ne modifie pas l'installation personnelle.
 
 Ces binaires de développement sont identifiés comme issus de sources modifiées.
 Ces observations ne qualifient ni un paquet Windows distribué, ni une machine
-sans GPU ou NVIDIA. La calibration matérielle, le recours distant dans le
-démarrage et le classement des modèles attendent encore leur intégration aux
-parcours complets. Les autres résultats historiques restent datés et distincts.
+sans GPU ou NVIDIA. Le lot 6 intègre les mesures dans le démarrage, la connexion
+Windows d'un service distant sans consentement implicite et l'import de trois
+rapports complets via `/api/router/qualification-evidence`. Le classement ne
+retient que les preuves encore identiques au binaire, modèle, moteur, matériel
+et réglages courants, issues de sources propres et d'un usage à 95 % sur chacun
+des trois passages. Il trie par taille du modèle puis latence médiane observée.
+Les autres résultats historiques restent datés et distincts.
 
 La détection d’édition est réessayée lorsque le daemon redevient disponible ; une erreur réseau ne sélectionne pas le démarrage historique. Le chemin GGUF est résolu depuis le catalogue installé avant le premier chargement, et la préqualification ne peut pas attribuer une inférence Candle au fichier GGUF. Un test UI de reprise couvre le premier cas.

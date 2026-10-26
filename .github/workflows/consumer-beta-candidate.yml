@@ -1,0 +1,77 @@
+name: Windows consumer beta candidate
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: '0'
+jobs:
+  candidate:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda: [false, true]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/akasha-ui/package-lock.json
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ./.github/actions/cargo-cache
+        with:
+          variant: consumer-beta-candidate-${{ matrix.cuda }}
+          cuda: ${{ matrix.cuda }}
+      - name: Prepare SQLCipher and pinned OCR
+        shell: pwsh
+        run: |
+          ./scripts/ci/prepare-sqlcipher-windows.ps1
+          python scripts/prepare-ocr-runtime.py --output "$env:RUNNER_TEMP/ocr-runtime"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/ci/prepare_consumer_embeddings.py --output "$env:RUNNER_TEMP/embedding-model"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "AKASHA_OCR_LOCK_SHA256=$((Get-FileHash "$env:RUNNER_TEMP/ocr-runtime/runtime-lock.json" -Algorithm SHA256).Hash.ToLower())" >> $env:GITHUB_ENV
+      - name: CUDA toolkit
+        if: matrix.cuda
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.9.1'
+      - name: Compile CPU candidate
+        if: '!matrix.cuda'
+        run: cargo build --locked --release -p akasha-daemon --no-default-features --features consumer-beta,embedded,embedded-llama-cpp,embeddings-tract
+      - name: Compile NVIDIA candidate
+        if: matrix.cuda
+        run: ./scripts/build-windows-daemon-cuda.ps1 -Features 'consumer-beta,embedded,embedded-llama-cpp,embedded-llama-cpp-cuda,embeddings-tract'
+      - name: Compile desktop with restricted consumer policy
+        working-directory: apps/akasha-ui
+        env:
+          VITE_AKASHA_DAEMON_PORT: '3877'
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run tauri build -- --no-bundle --config src-tauri/tauri.consumer.conf.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Assemble isolated portable package
+        shell: pwsh
+        run: |
+          $daemon='target/release/akasha-daemon.exe'
+          if ('${{ matrix.cuda }}' -eq 'true') { $daemon='target/x86_64-pc-windows-msvc/release/akasha-daemon.exe'; $variant='nvidia' } else { $variant='cpu' }
+          $arguments=@('scripts/ci/package_consumer.py','--daemon',$daemon,'--ui','apps/akasha-ui/src-tauri/target/release/akasha-ui.exe','--runtime',"$env:RUNNER_TEMP/ocr-runtime",'--output',"candidate-$variant",'--embeddings',"$env:RUNNER_TEMP/embedding-model")
+          if ($variant -eq 'nvidia') { $arguments+='--cuda' }
+          python @arguments
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: akasha-consumer-beta-candidate-cuda-${{ matrix.cuda }}
+          path: candidate-*/
+          if-no-files-found: error
+          retention-days: 30
+      # This workflow only creates candidates. It never tags, publishes or emails.
+      # Hosted Windows runners do not prove real NVIDIA inference or second-account restore.
