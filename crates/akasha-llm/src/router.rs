@@ -377,6 +377,18 @@ impl LLMRouter {
         akasha_embedded_llm::EmbeddedLlm::status_snapshot()
     }
 
+    /// Resolve the installed candidate without requiring a prior inference.
+    /// A Candle inference must never be attributed to an unrelated GGUF file.
+    #[cfg(feature = "embedded")]
+    pub fn embedded_qualification_model_path(&self, model:&str) -> Result<std::path::PathBuf,String> {
+        #[cfg(feature="embedded-llama-cpp")]
+        if matches!(akasha_embedded_llm::config::resolve_backend_choice(),Ok(akasha_embedded_llm::config::ResolvedBackend::LlamaCpp(_))) {
+            return akasha_embedded_llm::config::resolve_gguf_path_for_model(model).ok_or_else(||"GGUF absent : préparez le modèle choisi avant les essais.".into());
+        }
+        let _=model;
+        Err("La qualification du catalogue GGUF nécessite le moteur llama-cpp actif ; Candle ne qualifie pas un fichier GGUF.".into())
+    }
+
     /// Camelid-style evidence-gated capabilities for `/api/capabilities`.
     #[cfg(feature = "embedded")]
     pub fn embedded_capabilities(&self) -> serde_json::Value {

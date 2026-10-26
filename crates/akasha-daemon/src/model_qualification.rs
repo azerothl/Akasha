@@ -4,8 +4,6 @@ use akasha_store::{Task, TaskStatus, TaskStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-#[cfg(feature = "embedded")]
-use std::path::PathBuf;
 use std::{
     path::Path,
     sync::{Arc, OnceLock},
@@ -157,16 +155,13 @@ async fn identity(router: &LLMRouter, input: &Input, data: &Path) -> anyhow::Res
                 status["active_model_id"] == input.model,
                 "Préparez et activez le modèle choisi avant de lancer ses essais."
             );
-            let path = PathBuf::from(status["model_path"].as_str().ok_or_else(|| {
-                anyhow::anyhow!("GGUF absent : téléchargez un modèle local avant l’essai.")
-            })?);
+            let path = router.embedded_qualification_model_path(&input.model).map_err(anyhow::Error::msg)?;
             let bytes = std::fs::metadata(&path)?.len();
             let digest = tokio::task::spawn_blocking(move || file_digest(&path)).await??;
             (
                 digest,
                 format!(
-                    "embedded:{}:{}",
-                    status["backend"].as_str().unwrap_or("unknown"),
+                    "embedded:llama_cpp:{}",
                     env!("CARGO_PKG_VERSION")
                 ),
                 bytes,

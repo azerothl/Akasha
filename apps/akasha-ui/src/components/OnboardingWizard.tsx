@@ -91,15 +91,20 @@ export function markSetupWizardDone(): void {
 export function OnboardingWizard(props: Props) {
   const [consumer, setConsumer] = useState(false);
   const [checked, setChecked] = useState(!props.fetchEndpoint);
+  const [retry, setRetry] = useState(0);
   useEffect(() => {
     if (!props.fetchEndpoint) return;
     let disposed=false;
+    let timer: number;
     props.fetchEndpoint("/api/privacy").then((result) => {
-      if (!disposed && result.ok) setConsumer(JSON.parse(result.text).consumer_beta_build === true);
-    }).catch(() => {}).finally(() => { if (!disposed) setChecked(true); });
-    return () => { disposed=true; };
-  }, [props.fetchEndpoint]);
-  if (!checked) return createPortal(<div className="human-input-overlay onboarding-overlay" role="status">{props.locale === "en" ? "Preparing setup…" : "Préparation du démarrage…"}</div>, document.body);
+      if (!result.ok) throw new Error("edition detection unavailable");
+      const edition=JSON.parse(result.text).consumer_beta_build;
+      if (typeof edition !== "boolean") throw new Error("edition detection invalid");
+      if (!disposed) {setConsumer(edition);setChecked(true);}
+    }).catch(() => {if (!disposed) timer=window.setTimeout(()=>setRetry(value=>value+1),1500);});
+    return () => { disposed=true;window.clearTimeout(timer); };
+  }, [props.fetchEndpoint,props.daemonOk,retry]);
+  if (!checked) return createPortal(<div className="human-input-overlay onboarding-overlay"><div className="human-input-modal"><p role="status">{props.locale === "en" ? "Preparing setup. Waiting for Akasha…" : "Préparation du démarrage. En attente d’Akasha…"}</p><button type="button" className="btn-secondary" onClick={props.onComplete}>{props.locale === "en" ? "Finish setup later" : "Terminer le démarrage plus tard"}</button></div></div>, document.body);
   if (consumer && props.fetchEndpoint) return <ConsumerOnboardingWizard locale={props.locale} daemonOk={props.daemonOk} fetchEndpoint={props.fetchEndpoint} onComplete={() => { markSetupWizardDone(); props.onComplete(); }} onDismiss={props.onComplete} />;
   return <LegacyOnboardingWizard {...props} />;
 }

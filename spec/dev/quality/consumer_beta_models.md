@@ -56,3 +56,5 @@ Ces observations ne qualifient ni un paquet Windows distribué, ni une machine
 sans GPU ou NVIDIA. La calibration matérielle, le recours distant dans le
 démarrage et le classement des modèles attendent encore leur intégration aux
 parcours complets. Les autres résultats historiques restent datés et distincts.
+
+La détection d’édition est réessayée lorsque le daemon redevient disponible ; une erreur réseau ne sélectionne pas le démarrage historique. Le chemin GGUF est résolu depuis le catalogue installé avant le premier chargement, et la préqualification ne peut pas attribuer une inférence Candle au fichier GGUF. Un test UI de reprise couvre le premier cas.
