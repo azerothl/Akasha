@@ -53,6 +53,17 @@ pub fn spawn_research_run(
     config: EngineConfig,
 ) -> String {
     let run_id = format!("dr_{}", Uuid::new_v4().simple());
+    spawn_with_id(ctx,topic,config,run_id)
+}
+
+pub fn spawn_authorized_research_run(ctx:ResearchContext,topic:String,config:EngineConfig,consents:&[crate::privacy::Consent]) -> Result<String,String> {
+    let id=Uuid::new_v4();
+    crate::privacy::grant(&ctx.data_dir,&format!("task:{id}"),consents,2).map_err(|error|error.to_string())?;
+    Ok(spawn_with_id(ctx,topic,config,format!("dr_{}",id.simple())))
+}
+
+fn spawn_with_id(ctx:ResearchContext,topic:String,config:EngineConfig,run_id:String) -> String {
+    let privacy_scope=akasha_core::privacy::current().unwrap_or_else(||akasha_core::privacy::Scope {data_dir:ctx.data_dir.clone(),id:format!("task:{}",Uuid::parse_str(run_id.trim_start_matches("dr_")).map(|id|id.to_string()).unwrap_or_default())});
     let cancel = Arc::new(AtomicBool::new(false));
     let store = ResearchStore::global();
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -80,7 +91,7 @@ pub fn spawn_research_run(
 
     let run_id_spawn = run_id.clone();
     let cancel_spawn = cancel.clone();
-    tokio::spawn(async move {
+    tokio::spawn(akasha_core::privacy::scoped(privacy_scope,async move {
         store.insert(run, cancel_spawn).await;
         let result = run_until_cancelled(&cancel,
             run_engine(&ctx, &run_id_spawn, &topic, &config, &cancel)).await;
@@ -100,7 +111,7 @@ pub fn spawn_research_run(
                 })
                 .await;
         }
-    });
+    }));
 
     run_id
 }

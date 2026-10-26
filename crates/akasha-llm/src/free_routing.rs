@@ -221,6 +221,16 @@ mod tests {
             }
         }
     }
+    fn consent_fixture() -> (tempfile::TempDir, akasha_core::privacy::Scope) {
+        let dir=tempfile::tempdir().unwrap();
+        let scope=akasha_core::privacy::Scope { data_dir:dir.path().into(), id:"price-filter-test".into() };
+        akasha_core::privacy::update(dir.path(), |state| {
+            for provider in ["openrouter", "openrouter_free"] {
+                state.grants.push(akasha_core::privacy::Grant { scope:scope.id.clone(), recipient:format!("model:{provider}:default"), data_classes:vec!["message","history","memory","documents","tool_results"].into_iter().map(str::to_owned).collect(), created_at:chrono::Utc::now().to_rfc3339(), expires_at:(chrono::Utc::now()+chrono::Duration::hours(1)).to_rfc3339(),revoked:false });
+            } Ok(())
+        }).unwrap();
+        (dir,scope)
+    }
     fn fixture() -> (LLMRouter, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let mut config = RoutingConfig::default_config();
         config.free_models.enabled = true;
@@ -289,6 +299,8 @@ mod tests {
     }
     #[tokio::test]
     async fn automatic_and_streamed_fallbacks_never_call_paid_provider() {
+        let (_consent_dir,scope)=consent_fixture();
+        akasha_core::privacy::scoped(scope,async {
         let (router, paid, free) = fixture();
         let request = request();
         assert_eq!(
@@ -318,6 +330,7 @@ mod tests {
         );
         assert!(free.load(Ordering::SeqCst) > 0);
         assert_eq!(paid.load(Ordering::SeqCst), 0);
+        }).await;
     }
     #[tokio::test]
     async fn explicit_selection_cannot_bypass_zero_cost_policy() {
@@ -388,6 +401,8 @@ mod tests {
     }
     #[tokio::test]
     async fn confirmed_setting_is_persisted_and_is_the_only_path_back_to_paid_routes() {
+        let (_consent_dir,scope)=consent_fixture();
+        akasha_core::privacy::scoped(scope,async {
         let (router, paid, free) = fixture();
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -414,5 +429,6 @@ mod tests {
         router.complete(&request()).await.unwrap();
         assert_eq!(paid.load(Ordering::SeqCst), 1);
         std::fs::remove_file(path).unwrap();
+        }).await;
     }
 }

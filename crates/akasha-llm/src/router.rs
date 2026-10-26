@@ -169,7 +169,7 @@ impl LLMRouter {
     }
 
     pub fn register_provider(&mut self, provider: Arc<dyn LLMProvider>) {
-        self.providers.insert(provider.name().to_string(), provider);
+        self.providers.insert(provider.name().to_string(), Arc::new(crate::privacy_guard::Guard { inner:provider }));
     }
 
     /// Returns true if the given provider name is registered with the router.
@@ -179,6 +179,14 @@ impl LLMRouter {
 
     pub fn metrics(&self) -> Arc<MetricsCollector> {
         self.metrics.clone()
+    }
+
+    pub fn privacy_services(&self) -> Vec<serde_json::Value> {
+        let mut services=self.providers.iter().map(|(name,provider)| {
+            let endpoint=provider.endpoint().map(akasha_core::privacy::endpoint_identity).unwrap_or_else(||"default".into());
+            serde_json::json!({"name":name,"provider":name,"endpoint":endpoint,"recipient":format!("model:{name}:{endpoint}"),"local":provider.is_local(),"data_classes":["message","history","memory","documents","tool_results"]})
+        }).collect::<Vec<_>>();
+        services.sort_by_key(|value|value["provider"].as_str().unwrap_or("").to_owned());services
     }
 
     /// Global per-call timeout (seconds) from routing config.

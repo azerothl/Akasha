@@ -91,7 +91,7 @@ pub struct TaskStore {
 
 impl TaskStore {
     pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = crate::memory_protection::open_connection(path)?;
         // Multiple TaskStore connections hit the same file (API + persistence threads); wait on locks
         // instead of failing immediately with SQLITE_BUSY.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;

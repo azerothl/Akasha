@@ -6,6 +6,7 @@ description = "Akasha 24/7 daemon runtime with supervision"
 
 [features]
 default = ["embeddings", "embedded"]
+consumer-beta = ["akasha-store/memory-sqlcipher"]
 # Embeddings (fastembed + ONNX Runtime) for long-term memory; can cause linker errors on Windows (ort_sys)
 embeddings = ["dep:akasha-embeddings", "akasha-embeddings/fastembed"]
 # Embeddings via tract-onnx (pure Rust): use on Windows when default embeddings fail to link (e.g. cargo build -p akasha-daemon --no-default-features --features embedded,embeddings-tract)
@@ -64,6 +65,7 @@ hmac = "0.12"
 sha2 = "0.10"
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "http", "builder", "native_tls_backend"] }
 hex = "0.4"
+zeroize = "1"
 urlencoding = "2.1"
 base64 = "0.22"
 pdf-extract = "0.12"

@@ -12,6 +12,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 
 fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(REQUEST_TIMEOUT)
         .user_agent(USER_AGENT)
         .build()
@@ -111,6 +112,7 @@ pub async fn github_repo_info(owner: &str, repo: &str) -> Result<(String, ToolRe
         ));
     }
     let url = format!("https://api.github.com/repos/{}/{}", owner.trim(), repo.trim());
+    akasha_core::privacy::check_url(&url,&["web_url"]).map_err(anyhow::Error::msg)?;
     let client = http_client()?;
     let resp = client
         .get(&url)
@@ -173,6 +175,7 @@ pub async fn github_repo_info(owner: &str, repo: &str) -> Result<(String, ToolRe
 
 /// arXiv Atom API search.
 pub async fn arxiv_search(query: &str, max_results: u32) -> Result<(String, ToolResult)> {
+    akasha_core::privacy::check_url("https://export.arxiv.org",&["web_query"]).map_err(anyhow::Error::msg)?;
     let q = query.trim();
     if q.is_empty() {
         return Ok((
@@ -253,6 +256,7 @@ pub async fn http_probe(
     policy: &ToolsPolicy,
 ) -> Result<(String, ToolResult)> {
     use crate::tools::web_fetch;
+    akasha_core::privacy::check_url(url,&[if body.is_some() {"connector_payload"}else{"web_url"}]).map_err(anyhow::Error::msg)?;
     let m = method.trim().to_uppercase();
     let u = url.trim();
     if u.is_empty() {

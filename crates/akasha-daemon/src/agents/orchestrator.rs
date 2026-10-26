@@ -1352,7 +1352,7 @@ impl Orchestrator {
             let execution_mode = task.execution_mode;
             let preferred_task_type = task.preferred_task_type;
             tokio::spawn(async move {
-                if let Err(e) = process_root_task(
+                if let Err(e) = akasha_core::privacy::scoped(crate::privacy::task_scope(&store_path,root_task_id), process_root_task(
                     bus,
                     store_path.as_path(),
                     spec_dir.as_path(),
@@ -1369,7 +1369,7 @@ impl Orchestrator {
                     short_term,
                     execution_mode,
                     preferred_task_type,
-                )
+                ))
                 .await
                 {
                     tracing::error!(error = %e, task_id = %root_task_id, "Orchestrator failed");

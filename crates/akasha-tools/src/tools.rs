@@ -1812,6 +1812,11 @@ pub async fn compare_dirs(
 /// Fetch a URL (GET). Host must be allowed by policy (allowed_web_domains). Feature "web".
 #[cfg(feature = "web")]
 pub async fn web_fetch(url: &str, policy: &crate::policy::ToolsPolicy) -> Result<(String, ToolResult)> {
+    if !akasha_core::privacy::loopback_url(url) {
+        let parsed=url::Url::parse(url)?;
+        let recipient=format!("web:{}",parsed.origin().ascii_serialization());
+        akasha_core::privacy::check(&recipient,&["web_url"]).map_err(anyhow::Error::msg)?;
+    }
     if !policy.can_fetch_url(url) {
         return Ok((
             String::new(),

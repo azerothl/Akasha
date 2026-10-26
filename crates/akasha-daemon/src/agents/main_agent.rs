@@ -481,7 +481,7 @@ User message:\n{}",
         studio_evolution_branch: Option<String>,
         incognito: bool,
     ) -> anyhow::Result<Uuid> {
-        self.handle_message_with_execution(store_path, message, display_request, _correlation_id, forward_to_orchestrator, session_id, image_data_urls, priority, studio_disk_root, studio_forced_agent, studio_evolution_branch, incognito, None).await
+        self.handle_message_with_execution(store_path, message, display_request, _correlation_id, forward_to_orchestrator, session_id, image_data_urls, priority, studio_disk_root, studio_forced_agent, studio_evolution_branch, incognito, None, vec![]).await
     }
 
     pub(crate) fn validate_studio_execution(&self, body: &serde_json::Value) -> Result<Option<crate::studio_execution::Execution>, String> {
@@ -503,9 +503,13 @@ User message:\n{}",
         studio_evolution_branch: Option<String>,
         incognito: bool,
         studio_execution: Option<crate::studio_execution::Execution>,
+        remote_consents: Vec<crate::privacy::Consent>,
     ) -> anyhow::Result<Uuid> {
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
+        if !remote_consents.is_empty() {
+            crate::privacy::grant(store_path.parent().ok_or_else(||anyhow::anyhow!("data directory unavailable"))?, &format!("task:{task_id}"), &remote_consents, 2)?;
+        }
 
         let initial_message = initial_task_message(message, display_request);
 
@@ -648,7 +652,7 @@ User message:\n{}",
                 }
             } else if forward_to_orchestrator && !skip_selector_for_recall {
                 emit_timeline_for_task(&agent_clone.bus, Some(store_path), task_id, "selector_start", None);
-                agent_clone.system_selector_decision(original_message).await
+                akasha_core::privacy::scoped(crate::privacy::task_scope(store_path,task_id), agent_clone.system_selector_decision(original_message)).await
             } else {
                 SelectorRunResult {
                     decision: None,

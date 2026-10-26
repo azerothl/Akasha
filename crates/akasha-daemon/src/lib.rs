@@ -6,6 +6,8 @@ pub mod agents;
 pub mod gateway;
 pub mod personality;
 pub mod permissions_center;
+pub mod privacy;
+pub mod profile_backup;
 pub mod permissions_queue;
 pub mod steering_queue;
 pub mod session_transcript;

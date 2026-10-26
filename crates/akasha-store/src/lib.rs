@@ -6,6 +6,7 @@ pub mod event_triggers;
 pub mod facts;
 pub mod log;
 pub mod long_term_memory;
+pub mod memory_protection;
 pub mod memory_fusion;
 pub mod metrics;
 pub mod pipeline;

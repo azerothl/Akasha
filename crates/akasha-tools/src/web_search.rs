@@ -114,6 +114,25 @@ fn build_provider_chain(policy: &ToolsPolicy) -> Vec<ProviderId> {
     chain
 }
 
+fn provider_endpoint(provider:ProviderId,policy:&ToolsPolicy)->String {
+    match provider {
+            ProviderId::Searxng => searxng_base_url(policy),
+            ProviderId::Brave => "https://api.search.brave.com".into(),
+            ProviderId::DuckDuckGo => "https://html.duckduckgo.com".into(),
+            ProviderId::Tavily => "https://api.tavily.com".into(),
+            ProviderId::Serper => "https://google.serper.dev".into(),
+            ProviderId::GooglePse => "https://www.googleapis.com".into(),
+        }
+}
+
+/// Only recipients in the configured search chain; never include API secrets.
+pub fn privacy_search_services(policy:&ToolsPolicy)->Vec<serde_json::Value> {
+    build_provider_chain(policy).into_iter().map(|provider| {
+        let endpoint=provider_endpoint(provider,policy);
+        serde_json::json!({"name":provider.as_str(),"endpoint":akasha_core::privacy::endpoint_identity(&endpoint),"recipient":format!("search:{}:{}",provider.as_str(),akasha_core::privacy::endpoint_identity(&endpoint)),"local":akasha_core::privacy::loopback_url(&endpoint),"data_classes":["web_query"]})
+    }).collect()
+}
+
 fn parse_provider_name(name: &str) -> Option<ProviderId> {
     match name.to_lowercase().as_str() {
         "brave" => Some(ProviderId::Brave),
@@ -182,6 +201,7 @@ fn searxng_base_url(policy: &ToolsPolicy) -> String {
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .user_agent(USER_AGENT)
         .build()
@@ -228,6 +248,13 @@ pub async fn web_search_routed(
 
     let mut attempts: Vec<String> = Vec::new();
     for provider in chain {
+        let endpoint = provider_endpoint(provider,policy);
+        if !akasha_core::privacy::loopback_url(&endpoint) {
+            let recipient=format!("search:{}:{}",provider.as_str(),akasha_core::privacy::endpoint_identity(&endpoint));
+            if let Err(error)=akasha_core::privacy::check(&recipient,&["web_query"]) {
+                attempts.push(error);continue;
+            }
+        }
         match search_with_provider(provider, query, count, policy).await {
             Ok(hits) if !hits.is_empty() => {
                 let name = provider.as_str().to_string();

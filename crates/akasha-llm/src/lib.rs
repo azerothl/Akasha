@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod provider;
 pub mod retry;
 pub mod router;
+mod privacy_guard;
 pub mod streaming;
 
 pub use classifier::{classify_task_type, TaskType};

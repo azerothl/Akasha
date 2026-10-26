@@ -5307,11 +5307,15 @@ pub async fn handle_api(
         return resp;
     }
 
+    if let Some(response)=crate::profile_backup::route(method,path_only,body.as_deref(),data_dir,store_path) {
+        return response;
+    }
     if let Some(resp) = crate::api_routes_permissions::try_handle(
         method,
         path_only,
         body.as_deref(),
         &crate::api_routes_permissions::RouteCtx {
+            llm_router,
             data_dir,
             path,
             human_input_store: human_input_store.as_ref(),
