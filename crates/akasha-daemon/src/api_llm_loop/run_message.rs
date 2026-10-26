@@ -737,7 +737,14 @@ pub(crate) async fn run_message_via_llm(
 
     let studio_policy_root = code_studio_disk_task.then_some(tool_disk_workspace_root.as_path());
     let tools_executor_snapshot = match &tools_executor {
-        Some(r) => Some(crate::studio_policy::executor((*r.read().await).clone(), studio_policy_root)),
+        Some(r) => {
+            let executor = crate::studio_policy::executor((*r.read().await).clone(), studio_policy_root);
+            if assigned_agent == "ask" {
+                let mut policy = executor.policy.clone();
+                crate::chat_contract::apply_role_policy(&mut policy, &assigned_agent);
+                Some(std::sync::Arc::new(akasha_tools::ToolExecutor::new(policy)))
+            } else { Some(executor) }
+        },
         None => None,
     };
 
@@ -1059,6 +1066,7 @@ pub(crate) async fn run_message_via_llm(
     } else {
         system_prompt.push_str(APP_CONTEXT);
     }
+    system_prompt.push_str(&format!("\n[Runtime facts]\nThe running Akasha daemon product version is {}. This value describes this running daemon, not the latest published release or an independently installed desktop UI. Use it for questions about the current daemon version; use retrieved sources for the latest release.\n", env!("CARGO_PKG_VERSION")));
     if !embedded_compact && !studio_initial_kanban_planning {
         system_prompt.push_str(os_env_block);
     }
@@ -1872,6 +1880,17 @@ pub(crate) async fn run_message_via_llm(
         let mut studio_prose_only_write_nags = 0u32;
         let mut studio_zero_tool_promise_nags = 0u32;
         let mut studio_unparsed_tool_marker_nags = 0u32;
+        let mut chat_protocol_repairs = 0u32;
+        let chat_requires_mutation = !code_studio_disk_task && assigned_agent != "ask"
+            && crate::studio_file_effects::has_request(clean_message);
+        let mut chat_mutation_succeeded = false;
+        let mut chat_effect_repairs = 0u32;
+        let mut chat_completion_repairs = 0u32;
+        let mut chat_written_paths = std::collections::HashSet::new();
+        let mut chat_read_after_write = false;
+        let mut chat_search_succeeded = false;
+        let mut chat_source_fetched = false;
+        let mut chat_literal_rejections = 0u32;
         let mut studio_pm_mandatory_delegate_nags = 0u32;
         let mut physical_completion_retries=0u32;
         let mut last_captured_image_base64: Option<String> = None;
@@ -2151,6 +2170,9 @@ pub(crate) async fn run_message_via_llm(
                     }
                     (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else if let Some(repair)=compiler_repair.as_ref() {repair.definition(names)}else if let Some(target)=build_missing_target.as_ref() {crate::studio_tool_contract::missing_entrypoint_definition(names,target)}else if let Some((ticket,command))=foundation_boundary {crate::studio_vite_scaffold::foundation_definition(names,ticket,command,foundation_ready)}else{crate::studio_tool_contract::native_definition(names)}])
                 })
+            }else if !code_studio_disk_task && !is_small_talk_fast_lane {
+                tools_executor_snapshot.as_ref()
+                    .and_then(|executor| crate::chat_contract::native_tools(&executor.policy, &assigned_agent))
             }else{None};
             let mut turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             // Workflow tools use the text protocol. Include their effective
@@ -2171,7 +2193,7 @@ pub(crate) async fn run_message_via_llm(
                 prompt: if code_studio_disk_task {
                     format!("{}{}", resume_overlay, current_prompt)
                 } else {
-                    format!("{}{}{}", resume_overlay, current_prompt, tool_instruction)
+                    format!("{}{}{}\n[Tool transport] Prefer the advertised native functions. Text fallback is one TOOL: line per call, or TOOL_JSON: followed by a complete object with schema_version:1, tool and arguments. Never put proposed calls in code fences or invent tool_use JSON wrappers. A call is complete only after the runtime returns its result.\n", resume_overlay, current_prompt, tool_instruction)
                 },
                 max_tokens: Some(goal_tracker.as_ref().map(|goal|completion_max_tokens.min(goal.goal.max_tokens.saturating_sub(goal.state.tokens_used) as u32)).unwrap_or(completion_max_tokens)),
                 temperature: Some(completion_temperature),
@@ -2242,6 +2264,7 @@ pub(crate) async fn run_message_via_llm(
                 else { router.complete_stream(&request, stream_tx).await }
             });
             let mut accumulated = String::new();
+            let mut visible_stream_bytes = 0usize;
             let mut first_wait = true;
             let overall_deadline = tokio::time::Instant::now() + turn_budget;
             let timeout_message=|| {
@@ -2335,23 +2358,28 @@ pub(crate) async fn run_message_via_llm(
                             accumulated.truncate(keep_len);
                         }
                         accumulated.push_str(chunk_ref);
+                        let visible = if code_studio_disk_task { accumulated.as_str() }
+                            else { crate::chat_contract::visible_stream_prefix(&accumulated) };
+                        let visible_delta = if code_studio_disk_task { chunk_ref }
+                            else { visible.get(visible_stream_bytes..).unwrap_or("") };
+                        visible_stream_bytes = visible.len();
                         let _ = bus.send(
                             EventEnvelope::new(
                                 EventType::ProgressUpdate,
                                 Some(serde_json::json!({
                                     "task_id": task_id.to_string(),
                                     "progress_pct": 50,
-                                    "message": accumulated
+                                    "message": visible
                                 })),
                             )
                             .with_correlation(task_id),
                         );
-                        if !chunk_ref.is_empty() {
+                        if !visible_delta.is_empty() {
                             let _ = store.insert_event(
                                 task_id,
                                 "assistant_text_delta",
                                 Some(&serde_json::json!({
-                                    "delta": chunk_ref,
+                                    "delta": visible_delta,
                                     "schema_version": 1
                                 })),
                                 &chrono::Utc::now().to_rfc3339(),
@@ -2648,6 +2676,24 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
             let mut no_parseable_tools_this_round = parsed_tool_calls.is_none();
+            let unparsed_chat_call = crate::chat_contract::unparsed_tool_request(&response);
+            if !code_studio_disk_task && no_parseable_tools_this_round
+                && (unparsed_chat_call || crate::chat_contract::unfinished_action_promise(clean_message, &response)) {
+                chat_protocol_repairs += 1;
+                let retry = chat_protocol_repairs <= 2;
+                run_outcome.checks.push(serde_json::json!({"kind":"chat_tool_protocol","status":if retry {"retried"}else{"failed"},"attempt":chat_protocol_repairs,"operations_executed_this_round":0}));
+                if retry {
+                    current_prompt = format!("{delivered_prompt}\n[Tool protocol repair — no operation executed this round]\nYour response was an unexecuted tool proposal, not an answer. Use the advertised native functions, or a line starting TOOL: <name> <arguments>. Do not use tool_use JSON or <|tool_call_start|> markers. Preserve the original request and completed results; do not repeat completed operations. After the actual tool result, answer the user with the obtained facts.\n");
+                    continue;
+                }
+                run_outcome.termination = TerminationReason::ProviderError;
+                reply_text = if unparsed_chat_call {
+                    "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils."
+                } else {
+                    "Le modèle a annoncé une action sans fournir la réponse demandée après deux tentatives de correction. Consultez les résultats déjà obtenus dans la tâche ou reprenez-la avec un autre modèle."
+                }.into();
+                break 'tool_rounds;
+            }
             if studio_initial_kanban_planning && no_parseable_tools_this_round {
                 match crate::studio_planning::finish(&tool_disk_workspace_root, &task_id.to_string()) {
                     Ok(check) => {
@@ -3069,6 +3115,20 @@ pub(crate) async fn run_message_via_llm(
                         let effective_role_tool = if actual_tool.is_empty() {
                             if tool_args.is_empty() { "read_skill" } else { "run_command" }
                         } else { actual_tool.as_str() };
+                        if !code_studio_disk_task {
+                            if let Some(error) = crate::chat_contract::literal_write_error(clean_message, effective_role_tool, tool_args) {
+                                run_outcome.failed_tool_calls += 1;
+                                chat_literal_rejections += 1;
+                                insert_task_tracking_event(&store_path,task_id,"chat_literal_rejected",serde_json::json!({"attempt":chat_literal_rejections,"error":error}));
+                                if chat_literal_rejections >= 3 {
+                                    run_outcome.termination = TerminationReason::ToolError;
+                                    reply_text = "Le modèle a proposé trois fois un contenu différent du texte demandé. Aucun de ces appels d’écriture n’a été exécuté. Reprenez la tâche avec un autre modèle.".into();
+                                    break 'tool_rounds;
+                                }
+                                tool_results.push(error);
+                                continue;
+                            }
+                        }
                         if let Some(repair)=compiler_repair.as_ref().and_then(|_|crate::studio_progress::compiler_repair(&run_outcome)) {
                             if !repair.accepts(effective_role_tool,tool_args) && !automatic_dependency_installs.iter().any(|args|args.as_slice()==tool_args) {
                                 run_outcome.failed_tool_calls+=1;
@@ -4177,8 +4237,8 @@ pub(crate) async fn run_message_via_llm(
                             } else {
                                 execute_tool_call(
                                     exec,
-                                    if typed_call.is_some() || approved_delivery_envelope.is_some(){"studio_call"}else{&actual_tool},
-                                    approved_delivery_envelope.as_deref().unwrap_or_else(||if typed_call.is_some(){native_envelope_args.as_slice()}else{tool_args}),
+                                    if code_studio_disk_task && (typed_call.is_some() || approved_delivery_envelope.is_some()){"studio_call"}else{&actual_tool},
+                                    if code_studio_disk_task {approved_delivery_envelope.as_deref().unwrap_or_else(||if typed_call.is_some(){native_envelope_args.as_slice()}else{tool_args})} else {tool_args},
                                     process_registry.as_ref(),
                                     long_term_client.as_ref(),
                                     task_id,
@@ -4208,6 +4268,21 @@ pub(crate) async fn run_message_via_llm(
                         previous_batch_call_succeeded = success;
                         if success {
                             run_outcome.successful_tool_calls += 1;
+                            if actual_tool == "web_search" { chat_search_succeeded = true; }
+                            if actual_tool == "web_fetch" { chat_source_fetched = true; }
+                            if matches!(actual_tool.as_str(), "write_file" | "write_code") {
+                                if let Some((path, _)) = crate::api::parse_write_file_request(tool_args) {
+                                    chat_written_paths.insert(crate::chat_contract::path_key(&path));
+                                }
+                            }
+                            if actual_tool == "read_file" {
+                                let (parts, _, _) = parse_read_file_args(tool_args);
+                                if chat_written_paths.contains(&crate::chat_contract::path_key(&parts.join(" "))) { chat_read_after_write = true; }
+                            }
+                            if crate::studio_tool_contract::is_file_mutation(&actual_tool)
+                                || matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container" | "rename_path" | "move_tree" | "copy_path") {
+                                chat_mutation_succeeded = true;
+                            }
                             if let Some(key) = goal_read_key.as_ref() {
                                 let reads = successful_goal_reads_by_path.entry(key.clone()).or_default();
                                 *reads = reads.saturating_add(1);
@@ -4618,7 +4693,7 @@ pub(crate) async fn run_message_via_llm(
                 )
                 } else {
                     format!(
-                    "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"). The task ends after this message — give the actual answer (e.g. weather forecast, search summary). No TOOL: lines.",
+                    "User request (retain the complete scope): {}\n\nYour previous reply:\n{}\n\nActual tool results:\n{}\n\nComplete every operation requested by the user. If another operation or check remains, call the next required tool and wait for its result. Do not repeat confirmed operations. Once the request is fulfilled, answer from the observed results, with concrete facts and any failures. A promise to act is not a final answer.",
                     user_message, response, results_blob
                 )
                 };
@@ -4784,13 +4859,14 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
 
-            let response_for_user = response
-                .lines()
-                .filter(|l| !l.trim_start().starts_with("TOOL:"))
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string();
+            // Executable calls have already been handled above. Preserve code
+            // examples in a final chat answer; TOOL: inside a fence is data.
+            let response_for_user = if code_studio_disk_task {
+                response.lines().filter(|line| !line.trim_start().starts_with("TOOL:"))
+                    .collect::<Vec<_>>().join("\n").trim().to_string()
+            } else {
+                crate::api_tool_parser::strip_redacted_reasoning_blocks(&response).trim().to_string()
+            };
             const MAX_STUDIO_MANUAL_PATCH_NAGS: u32 = 3;
             if code_studio_disk_task
                 && looks_like_manual_file_patch_reply(&response_for_user)
@@ -4844,6 +4920,12 @@ pub(crate) async fn run_message_via_llm(
                 last_tool_results_blob.as_deref().unwrap_or("")
             );
                 continue;
+            }
+            if !code_studio_disk_task && !tool_loop_history.is_empty()
+                && looks_like_placeholder_after_tools(&response_for_user) && force_synthesis_attempted {
+                run_outcome.termination = TerminationReason::ProviderError;
+                reply_text = "Les outils ont renvoyé leurs résultats, mais le modèle n’a pas produit la réponse demandée après une nouvelle tentative. Consultez les résultats de la tâche ou reprenez-la avec un autre modèle.".into();
+                break 'tool_rounds;
             }
             // Guardrail: when tools already produced results, reject generic greeting responses
             // and force one synthesis round from tool outputs.
@@ -4965,6 +5047,38 @@ pub(crate) async fn run_message_via_llm(
                     continue;
                 }
             }
+            let missing_source = !code_studio_disk_task && crate::chat_contract::requires_source_fetch(clean_message)
+                && chat_search_succeeded && !chat_source_fetched;
+            let missing_read = !code_studio_disk_task && chat_mutation_succeeded
+                && crate::chat_contract::requires_post_write_read(clean_message) && !chat_read_after_write;
+            if missing_source || missing_read {
+                let missing = if missing_source { "Open the actual result source with web_fetch and cite its content; search snippets alone do not fulfill the user's explicit request to open the source." }
+                    else { "Read the file you actually wrote with read_file, then answer from its observed contents. The user's requested post-write read is still missing." };
+                if chat_completion_repairs < 2 {
+                    chat_completion_repairs += 1;
+                    current_prompt = format!("{delivered_prompt}\n[Explicit requested check is still missing]\n{missing}\nDo not repeat the completed operations.\n");
+                    continue;
+                }
+                run_outcome.termination = TerminationReason::VerificationFailed;
+                reply_text = "La vérification explicitement demandée n’a pas été effectuée après deux tentatives de correction. Les résultats déjà obtenus sont conservés dans la tâche.".into();
+                break 'tool_rounds;
+            }
+            if chat_requires_mutation && !chat_mutation_succeeded {
+                if chat_effect_repairs < 1 && run_outcome.failed_tool_calls == 0 {
+                    chat_effect_repairs += 1;
+                    current_prompt = format!("{delivered_prompt}\n[Requested file operation is still unexecuted]\nNo file mutation has succeeded in this task. Prose and successful reads cannot replace the requested file operation. Execute it with the available tools, then verify the requested result. Do not repeat completed reads. If it is blocked, report the recorded reason.\n");
+                    continue;
+                }
+                run_outcome.termination = TerminationReason::ToolError;
+                reply_text = format!("Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n{}", last_tool_results_blob.as_deref().unwrap_or("Le modèle a répondu sans exécuter la modification demandée.").chars().take(1800).collect::<String>());
+                break 'tool_rounds;
+            }
+            if !run_outcome.failed() && run_outcome.failed_tool_calls > 0 && run_outcome.successful_tool_calls == 0 {
+                run_outcome.termination = TerminationReason::ToolError;
+                reply_text = format!("Aucun appel d’outil n’a réussi ; les actions demandées ne sont pas validées.\n{}",
+                    last_tool_results_blob.as_deref().unwrap_or("Consultez les erreurs d’exécution dans la tâche.").chars().take(1800).collect::<String>());
+                break 'tool_rounds;
+            }
             reply_text = if response_for_user.is_empty() {
                 format!("{}{}", response, image_md)
             } else {
@@ -4986,6 +5100,10 @@ pub(crate) async fn run_message_via_llm(
         }
         reply_text
     };
+    if !run_outcome.failed() && run_outcome.failed_tool_calls > 0 && run_outcome.successful_tool_calls == 0 {
+        run_outcome.termination = TerminationReason::ToolError;
+        reply_text = "Aucun appel d’outil n’a réussi ; les actions demandées ne sont pas validées.\n".to_string() + &reply_text;
+    }
     let task_status_snapshot = store.get(task_id).ok().flatten().map(|t| t.status);
     let halted_user = matches!(
         task_status_snapshot,
@@ -5520,10 +5638,6 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     if code_studio_disk_task && !run_outcome.failed() && run_outcome.requires_file_effect() && !run_outcome.confirmed_file_mutation() {
         run_outcome.termination=TerminationReason::ToolError;reply_text="No confirmed file mutation; reads and prose cannot attest the requested edit.".into();
     }
-    if code_studio_disk_task && !run_outcome.failed() && run_outcome.failed_tool_calls > 0 && run_outcome.successful_tool_calls == 0 {
-        run_outcome.termination = TerminationReason::ToolError;
-        reply_text = "No tool operation succeeded; the requested effects are not validated.\n".to_string() + &reply_text;
-    }
     if code_studio_disk_task && !explicit_file_goals.is_empty() {
         if let Some(registry)=tools_executor.as_ref() {
             let executor=crate::studio_policy::executor(registry.read().await.clone(), studio_policy_root);
@@ -5543,7 +5657,9 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     let reason = if run_outcome.failed() {
         Some(studio_verify_display_message.as_deref().unwrap_or(&reply_text).chars().take(2000).collect::<String>())
     } else { None };
-    let (final_status, outcome) = match store.finalize_outcome(task_id, proposed, run_outcome.json(reason)) {
+    let mut terminal_outcome = run_outcome.json(reason);
+    terminal_outcome["response"] = serde_json::json!(studio_verify_display_message.as_deref().unwrap_or(&reply_text));
+    let (final_status, outcome) = match store.finalize_outcome(task_id, proposed, terminal_outcome) {
         Ok(result) => result,
         Err(error) => {
             tracing::error!(%task_id, %error, "Cannot persist task outcome; completion not announced");

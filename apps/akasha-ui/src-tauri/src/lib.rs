@@ -110,6 +110,7 @@ struct AttachmentPayload {
 #[tauri::command]
 async fn send_message_ack(
     message: String,
+    display_message: Option<String>,
     session_id: Option<String>,
     attachments: Option<Vec<AttachmentPayload>>,
     new_session: Option<bool>,
@@ -137,6 +138,9 @@ async fn send_message_ack(
             _ => serde_json::json!({ "message": message_for_body }),
         }
     };
+    if let Some(display) = display_message.filter(|s| !s.trim().is_empty()) {
+        body["display_message"] = serde_json::json!(display);
+    }
     if let Some(ref atts) = attachments {
         if !atts.is_empty() {
             let arr: Vec<serde_json::Value> = atts

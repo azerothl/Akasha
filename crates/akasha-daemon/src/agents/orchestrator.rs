@@ -433,11 +433,56 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
 }
 
 fn parse_plan_or_legacy(text: &str, fallback_message: &str) -> ExecutionPlan {
-    if let Some(plan) = parse_plan_json(text) {
+    let plan = if let Some(plan) = parse_plan_json(text) {
         plan
     } else {
         let steps = parse_legacy_subtasks(text, fallback_message);
         ExecutionPlan::from_legacy(&steps)
+    };
+    // Echoes of the decomposer's schema are not instructions from the user.
+    let encoded = serde_json::to_string(&plan).unwrap_or_default();
+    if ["Full multi-sentence instructions for this step", "Optional: definition of done for this step", "workspace:/optional/path.md"]
+        .iter().any(|sample| encoded.contains(sample)) {
+        ExecutionPlan::from_legacy(&[("conversation".to_string(), fallback_message.to_string())])
+    } else {
+        plan
+    }
+}
+
+#[cfg(test)]
+mod chat_plan_regressions {
+    #[test]
+    fn invalid_evaluator_output_is_not_an_acceptance_receipt() {
+        assert_eq!(super::parse_satisfaction("SATISFACTORY"), super::SatisfactionOutcome::Satisfactory);
+        for text in ["", "maybe", "not SATISFACTORY", "{\"status\":\"SATISFACTORY\"}"] {
+            assert_eq!(super::parse_satisfaction(text), super::SatisfactionOutcome::NeedsRefinement);
+        }
+    }
+    #[test]
+    fn coordinator_wait_cannot_turn_a_failed_worker_into_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = akasha_store::TaskStore::open(&dir.path().join("tasks.db")).unwrap();
+        let id = uuid::Uuid::new_v4();
+        store.insert(&akasha_store::Task { id, parent_task_id:None, status:akasha_store::TaskStatus::Running,
+            assigned_agent:"conversation".into(), created_at:chrono::Utc::now(), updated_at:chrono::Utc::now(),
+            initial_message:Some("Test request".into()), studio_project_id:None }).unwrap();
+        store.finalize_outcome(id, akasha_store::TaskStatus::Failed, serde_json::json!({"result":"failed","reason":"bad tool protocol"})).unwrap();
+        super::settle_child_wait(&store, id);
+        assert_eq!(store.get(id).unwrap().unwrap().status, akasha_store::TaskStatus::Failed);
+        assert_eq!(store.get_outcome(id).unwrap().unwrap()["result"], "failed");
+    }
+
+    #[test]
+    fn schema_echo_cannot_replace_the_actual_request() {
+        for response in [
+            r#"{"steps":[{"step_id":"s0","agent_type":"documentalist","intent":"Full multi-sentence instructions for this step (not a one-liner)","depends_on":[],"deliverables":["workspace:/optional/path.md"]}]}"#,
+            "documentalist|Full multi-sentence instructions for this step (not a one-liner)|depends_on:[s0]",
+        ] {
+            let plan = super::parse_plan_or_legacy(response, "Comparer les deux documents joints.");
+            assert_eq!(plan.steps.len(), 1);
+            assert_eq!(plan.steps[0].agent_type, "conversation");
+            assert_eq!(plan.steps[0].intent, "Comparer les deux documents joints.");
+        }
     }
 }
 
@@ -541,6 +586,18 @@ fn compute_root_status(
         TaskStatus::Failed
     } else {
         TaskStatus::Completed
+    }
+}
+
+fn settle_child_wait(store: &TaskStore, id: Uuid) {
+    // Only the worker can attest completion. A wait returning is not a success;
+    // preserve its actual failed/cancelled/paused outcome and stop active work
+    // when the coordinator's bounded wait has expired.
+    if store.get(id).ok().flatten().is_some_and(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running)) {
+        let _ = store.finalize_outcome(id, TaskStatus::Interrupted, serde_json::json!({
+            "schema_version":1,"termination_reason":"timeout","result":"failed","acceptance_verified":false,
+            "reason":"Le délai d’attente du sous-agent a expiré ; sa réussite n’est pas validée.","verification":[]
+        }));
     }
 }
 
@@ -1172,7 +1229,7 @@ async fn decompose_to_plan(
 }
 
 /// Asks the LLM whether the aggregated response satisfies the user request or agents clearly could not do the task.
-/// On timeout or parse error, returns Satisfactory (current behaviour: complete as-is).
+/// An unavailable or invalid evaluator cannot attest that the request is fulfilled.
 async fn check_satisfaction(
     llm_router: &Arc<akasha_llm::LLMRouter>,
     user_request: &str,
@@ -1219,16 +1276,17 @@ Output only: SATISFACTORY, CANNOT_DO, or NEEDS_REFINEMENT"#,
     .await
     {
         Ok(Ok(resp)) => {
-            let t = resp.text.to_uppercase();
-            if t.contains("NEEDS_REFINEMENT") {
-                SatisfactionOutcome::NeedsRefinement
-            } else if t.contains("CANNOT_DO") {
-                SatisfactionOutcome::CannotDo
-            } else {
-                SatisfactionOutcome::Satisfactory
-            }
+            parse_satisfaction(&resp.text)
         }
-        _ => SatisfactionOutcome::Satisfactory,
+        _ => SatisfactionOutcome::NeedsRefinement,
+    }
+}
+
+fn parse_satisfaction(text: &str) -> SatisfactionOutcome {
+    match crate::api_tool_parser::strip_redacted_reasoning_blocks(text).trim().to_uppercase().as_str() {
+        "SATISFACTORY" => SatisfactionOutcome::Satisfactory,
+        "CANNOT_DO" => SatisfactionOutcome::CannotDo,
+        _ => SatisfactionOutcome::NeedsRefinement,
     }
 }
 
@@ -1889,6 +1947,13 @@ async fn process_root_task(
                     Some(s) => s,
                     None => continue,
                 };
+                if step.depends_on.iter().any(|dependency| cumulative_problem_sids.contains(dependency)) {
+                    cumulative_problem_sids.insert(step.step_id.clone());
+                    if let Ok(store) = TaskStore::open(&store_path_buf) {
+                        let _ = store.insert_event(root_task_id, "subtask_dependency_blocked", Some(&serde_json::json!({"step_id":step.step_id,"depends_on":step.depends_on,"reason":"A prerequisite failed; dependent work was not started."})), &Utc::now().to_rfc3339());
+                    }
+                    continue;
+                }
                 let mut sub_message = step.intent.clone();
                 if let Some(note) = step_outputs.get("__orchestrator_recovery__") {
                     if step
@@ -2238,14 +2303,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                                     .unwrap_or_default()
                             };
                             if let Ok(s) = TaskStore::open(&store_path_buf) {
-                                let _ = s.update_status(
-                                    retry_id,
-                                    if retry_timed_out {
-                                        TaskStatus::Failed
-                                    } else {
-                                        TaskStatus::Completed
-                                    },
-                                );
+                                settle_child_wait(&s, retry_id);
                             }
                             if !retry_content.trim().is_empty() {
                                 content = retry_content;
@@ -2325,7 +2383,7 @@ Use TOOL: write_file <exact_path> with real, substantive content for each entry 
                         let _ = tokio::time::timeout(retry_timeout, notify_retry.notified()).await;
                         task_completion.write().await.remove(&retry_id);
                         if let Ok(s) = TaskStore::open(&store_path_buf) {
-                            let _ = s.update_status(retry_id, TaskStatus::Completed);
+                            settle_child_wait(&s, retry_id);
                         }
                     }
                     // Re-check deliverables after the retry attempt.
@@ -2506,7 +2564,7 @@ Reply with SHORT actionable guidance only: what the user should provide, which p
                                 .filter(|s| !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()))
                         };
                         if let Ok(s) = TaskStore::open(&store_path_buf) {
-                            let _ = s.update_status(recovery_id, TaskStatus::Completed);
+                            settle_child_wait(&s, recovery_id);
                         }
                         if let Some(t) = recovery_text {
                             step_outputs.insert("__orchestrator_recovery__".to_string(), t);
@@ -2580,7 +2638,7 @@ Do not only describe the files — execute the tools."#,
                     let _ = tokio::time::timeout(per_child_timeout, notify_r.notified()).await;
                     task_completion.write().await.remove(&remediation_id);
                     if let Ok(s) = TaskStore::open(&store_path_buf) {
-                        let _ = s.update_status(remediation_id, TaskStatus::Completed);
+                        settle_child_wait(&s, remediation_id);
                     }
                 }
                 missing_deliverables = collect_missing_plan_deliverables(&plan_spawn, &workspace_root);
@@ -2874,7 +2932,7 @@ Formatting rules (Markdown):
                     }
                 }
                 if let Ok(s) = TaskStore::open(&store_path_buf) {
-                    let _ = s.update_status(refinement_child_id, TaskStatus::Completed);
+                    settle_child_wait(&s, refinement_child_id);
                 }
             }
         }
@@ -3018,6 +3076,7 @@ Formatting rules (Markdown):
             "schema_version":1, "termination_reason":reason,
             "result":if proposed == TaskStatus::Completed {"succeeded"} else if children.iter().any(|t| t.status == TaskStatus::Completed) {"partial"} else {"failed"},
             "acceptance_verified":false,
+            "response":display_message,
             "reason":if proposed == TaskStatus::Failed {Some(display_message.chars().take(2000).collect::<String>())} else {None},
             "verification":[],
             "subtasks":children.iter().map(|t| serde_json::json!({"task_id":t.id,"status":t.status})).collect::<Vec<_>>()

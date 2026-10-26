@@ -5938,6 +5938,7 @@ function App() {
         queued?: boolean;
       }>("send_message_ack", {
         message: messageToSend,
+        displayMessage: userMessage,
         sessionId: sessionId,
         attachments: attachmentsPayload,
         newSession: useNewSession ? true : undefined,

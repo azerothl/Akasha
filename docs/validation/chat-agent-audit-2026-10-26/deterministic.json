@@ -1,0 +1,3739 @@
+{
+  "created_at": "2026-10-26T08:19:30.610076+00:00",
+  "model": "deterministic-local-fixture",
+  "source": "ed028348fe02f6b7a24fd3bb33f7f477e1c41a40",
+  "dirty": true,
+  "source_sha256": {
+    "apps/akasha-ui/e2e/chat-agent-results.spec.ts": "2d62e550a386ba570719cc574578496d818e8f1fa3ffb2589df58d02cd765414",
+    "apps/akasha-ui/playwright.chat-audit.config.ts": "5cb9288b5976b2ae543e7156a39b0934b7a4741e98fd3faa51d1ade5cde1aebc",
+    "apps/akasha-ui/src-tauri/src/lib.rs": "b26de42772feb08cb2e4b29b4a0591509aeae7973c79a694801e4010a3cee6d8",
+    "apps/akasha-ui/src/App.tsx": "eee6d680367e5cc9d139d5da11ae578c731d22738007627bb9a2800b32e30ba5",
+    "crates/akasha-daemon/src/agents/main_agent.rs": "6f37a9a141bb8f7512adcc4ec486002b3b192d46445f626bf1842c670467d9e2",
+    "crates/akasha-daemon/src/agents/orchestrator.rs": "32557848f791f731f69999273d844d35e0147bfd764d17805296393e8b9d87c8",
+    "crates/akasha-daemon/src/api.rs": "a5f1a209c9eafdb1b3525f254c2d10c052d9326f419e2590631fc0df4e5c5247",
+    "crates/akasha-daemon/src/api_llm_loop/run_message.rs": "76edcc094af023ff053c45f7b05b64c72790b5ec522897bedd90a0d6c23fbbb5",
+    "crates/akasha-daemon/src/api_llm_loop/studio_conversation.rs": "a4d72866ce507e94b83340d75106eb25c7816f66404973b1fdfa4ff7dcb9bede",
+    "crates/akasha-daemon/src/api_routes_tasks.rs": "98bfbcc6d80fac993006eecbc9d897faf444965ddd8589ff3a8661d8cf10c89a",
+    "crates/akasha-daemon/src/api_tool_parser.rs": "9e9aaf82f44f8f0953a339b48fd1c71715fe4043024eeb3ac374d98c27b27bef",
+    "crates/akasha-daemon/src/chat_contract.rs": "fcfca765ca9db1c2e71130219bdcf363ac053efa6ec19b2d8e54fd7bfad744e0",
+    "crates/akasha-daemon/src/lib.rs": "cf35f6f5a67e984e04c3666cf9107674cd09b66474e028ebd2fdc8fadc60f684",
+    "crates/akasha-daemon/src/studio_role_policy.rs": "936b2953675dcadec3c3f018e7b4679cfac4aa79d11d355f1c067b8d87d6c1e1",
+    "crates/akasha-daemon/src/studio_tool_contract.rs": "6ed597e9f7b7a72346e03a29875ef52e3ff7bbd0639eb9e330e9ca524d831670",
+    "crates/akasha-store/src/tasks.rs": "c2645734dfdcf6be179588f8a4c29102290004491ff6beb16caa784bbd2e70e1",
+    "spec/dev/quality/chat_agent_audit.py": "1d95f1209efcb3b7e1571a0ae99c5171449cc858c94811e8ca76ffe042286eea"
+  },
+  "daemon_sha256": "3accc3fa3186095fe09a7c5b916d25e092a19d04414bf8b5dd62d2e92ff787be",
+  "results": [
+    {
+      "case": "qa",
+      "task_id": "82e7efcb-d380-4000-ad57-37c1538dd9cc",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 453,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "La capitale de la France est Paris.",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "82e7efcb-d380-4000-ad57-37c1538dd9cc",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "La capitale de la France est Paris.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "La capitale de la France est Paris."
+            },
+            {
+              "progress_pct": 100,
+              "message": "La capitale de la France est Paris."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "La capitale de la France est Paris.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 0,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "82e7efcb-d380-4000-ad57-37c1538dd9cc"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 17,
+        "llm_route_planned": 1,
+        "memory_recall_started": 1,
+        "memory_recall_finished": 1,
+        "llm_call_started": 1,
+        "assistant_text_delta": 12,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": []
+    },
+    {
+      "case": "followup",
+      "task_id": "7ce6be7e-5042-49a1-a8fa-9fa7d615e314",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 469,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Je confirme : Paris est la capitale de la France.",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "7ce6be7e-5042-49a1-a8fa-9fa7d615e314",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Je confirme : Paris est la capitale de la France.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Je confirme : Paris est la capitale de la France."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Je confirme : Paris est la capitale de la France."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Je confirme : Paris est la capitale de la France.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 0,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "7ce6be7e-5042-49a1-a8fa-9fa7d615e314"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 22,
+        "llm_route_planned": 1,
+        "memory_recall_started": 1,
+        "memory_recall_finished": 1,
+        "llm_call_started": 1,
+        "assistant_text_delta": 17,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": []
+    },
+    {
+      "case": "installed_version",
+      "task_id": "fb438185-e718-4fac-a382-1d029b2fec53",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 312,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Le daemon Akasha utilisé est en version 0.12.1.",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "fb438185-e718-4fac-a382-1d029b2fec53",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Le daemon Akasha utilisé est en version 0.12.1.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Le daemon Akasha utilisé est en version 0.12.1."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Le daemon Akasha utilisé est en version 0.12.1."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Le daemon Akasha utilisé est en version 0.12.1.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 0,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "fb438185-e718-4fac-a382-1d029b2fec53"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 19,
+        "llm_route_planned": 1,
+        "llm_call_started": 1,
+        "assistant_text_delta": 16,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": []
+    },
+    {
+      "case": "read",
+      "task_id": "7f06f833-c65a-4922-94e5-b745df6e0b4a",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 454,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "read_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Le fichier contient CANARY_42.",
+      "tools": [
+        {
+          "tool": "read_file",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "7f06f833-c65a-4922-94e5-b745df6e0b4a",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Le fichier contient CANARY_42.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 1,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Le fichier contient CANARY_42."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Le fichier contient CANARY_42."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Le fichier contient CANARY_42.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 1,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "7f06f833-c65a-4922-94e5-b745df6e0b4a"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 16,
+        "llm_route_planned": 1,
+        "llm_call_started": 2,
+        "llm_call_finished": 2,
+        "tool_call_started": 1,
+        "tool_invoked": 1,
+        "tool_call_finished": 1,
+        "assistant_text_delta": 10,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt",
+            "call_id": "65570992-00aa-47a8-9365-3c0bfc4811b8",
+            "schema_version": 1,
+            "task_id": "7f06f833-c65a-4922-94e5-b745df6e0b4a",
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "65570992-00aa-47a8-9365-3c0bfc4811b8",
+            "duration_ms": 22,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "7f06f833-c65a-4922-94e5-b745df6e0b4a",
+            "tool": "read_file"
+          }
+        }
+      ]
+    },
+    {
+      "case": "search",
+      "task_id": "1b21234d-fbf2-4e58-97fa-45baae72b9e9",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 500,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "search_and_fetch_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)",
+      "tools": [
+        {
+          "tool": "web_search",
+          "success": true
+        },
+        {
+          "tool": "web_fetch",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "1b21234d-fbf2-4e58-97fa-45baae72b9e9",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 2,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)"
+            },
+            {
+              "progress_pct": 100,
+              "message": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 2,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "1b21234d-fbf2-4e58-97fa-45baae72b9e9"
+          }
+        }
+      ],
+      "event_counts": {
+        "progress_update": 35,
+        "llm_call_started": 3,
+        "timeline_milestone": 2,
+        "llm_call_finished": 3,
+        "tool_call_started": 2,
+        "tool_invoked": 2,
+        "tool_call_finished": 2,
+        "assistant_text_delta": 13,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "Akasha audit release 3",
+            "call_id": "382260ba-e564-467a-a6f7-4dcb85efbc3d",
+            "schema_version": 1,
+            "task_id": "1b21234d-fbf2-4e58-97fa-45baae72b9e9",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "Akasha audit release",
+              "3"
+            ],
+            "explanation": null,
+            "result_preview": "[web_search] 1 result(s) via searxng — 1. Release fixture | http://127.0.0.1:64597/release | Release audit fixture: 9.8.7-AUDIT",
+            "skill": null,
+            "success": true,
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "382260ba-e564-467a-a6f7-4dcb85efbc3d",
+            "duration_ms": 21,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "1b21234d-fbf2-4e58-97fa-45baae72b9e9",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "http://127.0.0.1:64597/release",
+            "call_id": "ec51f8be-186d-4dae-8863-2f66568039ac",
+            "schema_version": 1,
+            "task_id": "1b21234d-fbf2-4e58-97fa-45baae72b9e9",
+            "tool": "web_fetch"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "http://127.0.0.1:64597/release"
+            ],
+            "explanation": null,
+            "result_preview": "[web_fetch] 200 OK 118 bytes — <html><body><h1>Akasha audit fixture</h1><p>Version: 9.8.7-AUDIT. This is synthetic acceptance data.</p></body></html>",
+            "skill": null,
+            "success": true,
+            "tool": "web_fetch"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "ec51f8be-186d-4dae-8863-2f66568039ac",
+            "duration_ms": 12,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "1b21234d-fbf2-4e58-97fa-45baae72b9e9",
+            "tool": "web_fetch"
+          }
+        }
+      ]
+    },
+    {
+      "case": "write_verify",
+      "task_id": "d0f09585-aeb9-4ad6-9715-9eca3085f018",
+      "passed": true,
+      "status": "completed",
+      "agent": "code",
+      "duration_ms": 640,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "exact_file_bytes": true,
+        "write_and_read_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Le fichier answer.txt a été créé et relu : Bonjour été 🙂.",
+      "tools": [
+        {
+          "tool": "write_file",
+          "success": true
+        },
+        {
+          "tool": "read_file",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "d0f09585-aeb9-4ad6-9715-9eca3085f018",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "code",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Le fichier answer.txt a été créé et relu : Bonjour été 🙂.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 2,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Le fichier answer.txt a été créé et relu : Bonjour été 🙂."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Le fichier answer.txt a été créé et relu : Bonjour été 🙂."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Le fichier answer.txt a été créé et relu : Bonjour été 🙂.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 2,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "d0f09585-aeb9-4ad6-9715-9eca3085f018"
+          }
+        }
+      ],
+      "event_counts": {
+        "llm_route_planned": 1,
+        "user_request_received": 1,
+        "llm_call_started": 3,
+        "progress_update": 27,
+        "timeline_milestone": 2,
+        "llm_call_finished": 3,
+        "tool_call_started": 2,
+        "tool_invoked": 2,
+        "tool_call_finished": 2,
+        "assistant_text_delta": 19,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "{\"content\":\"Bonjour été 🙂\",\"path\":\"C:\\\\Users\\\\azero\\\\AppData\\\\Local\\\\Temp\\\\akasha-chat-audit-oc…",
+            "call_id": "6c800401-5e1a-4195-9448-acce253e6f97",
+            "schema_version": 1,
+            "task_id": "d0f09585-aeb9-4ad6-9715-9eca3085f018",
+            "tool": "write_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "[redacted for write-like tool]"
+            ],
+            "explanation": null,
+            "result_preview": "[write_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\answer.txt] wrote 18 bytes",
+            "skill": null,
+            "success": true,
+            "tool": "write_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "6c800401-5e1a-4195-9448-acce253e6f97",
+            "duration_ms": 14,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "d0f09585-aeb9-4ad6-9715-9eca3085f018",
+            "tool": "write_file"
+          }
+        },
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\answer.txt",
+            "call_id": "7edc868d-1758-486d-8fa2-38f196eef578",
+            "schema_version": 1,
+            "task_id": "d0f09585-aeb9-4ad6-9715-9eca3085f018",
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\answer.txt"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\answer.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nBonjour été 🙂",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "7edc868d-1758-486d-8fa2-38f196eef578",
+            "duration_ms": 13,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "d0f09585-aeb9-4ad6-9715-9eca3085f018",
+            "tool": "read_file"
+          }
+        }
+      ],
+      "actual_file": "Bonjour été 🙂"
+    },
+    {
+      "case": "ask_denied",
+      "task_id": "7b1467f5-ec5f-40f5-8467-8f30fead73af",
+      "passed": true,
+      "status": "failed",
+      "agent": "ask",
+      "duration_ms": 469,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "no_mutation": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Aucun appel d’outil n’a réussi ; les actions demandées ne sont pas validées.\nLe mode Question autorise uniquement la lecture. L’action `write_file` nécessite le mode Code ou Agent.",
+      "tools": [
+        {
+          "tool": "write_file",
+          "success": false
+        }
+      ],
+      "lineage": [
+        {
+          "id": "7b1467f5-ec5f-40f5-8467-8f30fead73af",
+          "parent_task_id": null,
+          "status": "failed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 1,
+            "planning_verified": false,
+            "reason": "Aucun appel d’outil n’a réussi ; les actions demandées ne sont pas validées.\nLe mode Question autorise uniquement la lecture. L’action `write_file` nécessite le mode Code ou Agent.",
+            "response": "Aucun appel d’outil n’a réussi ; les actions demandées ne sont pas validées.\nLe mode Question autorise uniquement la lecture. L’action `write_file` nécessite le mode Code ou Agent.",
+            "result": "failed",
+            "schema_version": 1,
+            "status": "failed",
+            "successful_tool_calls": 0,
+            "termination_reason": "tool_error",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Aucun appel d’outil n’a réussi ; les actions demandées ne sont pas validées.\nLe mode Question autorise uniquement la lecture. L’action `write_file` nécessite le mode Code ou Agent."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Aucun appel d’outil n’a réussi ; les actions demandées ne sont pas validées.\nLe mode Question autorise uniquement la lecture. L’action `write_file` nécessite le mode Code ou Agent."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_failed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 1,
+              "planning_verified": false,
+              "reason": "Aucun appel d’outil n’a réussi ; les actions demandées ne sont pas validées.\nLe mode Question autorise uniquement la lecture. L’action `write_file` nécessite le mode Code ou Agent.",
+              "response": "Aucun appel d’outil n’a réussi ; les actions demandées ne sont pas validées.\nLe mode Question autorise uniquement la lecture. L’action `write_file` nécessite le mode Code ou Agent.",
+              "result": "failed",
+              "schema_version": 1,
+              "status": "failed",
+              "successful_tool_calls": 0,
+              "termination_reason": "tool_error",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "reason": "Aucun appel d’outil n’a réussi ; les actions demandées ne sont pas validées.\nLe mode Question autorise uniquement la lecture. L’action `write_file` nécessite le mode Code ou Agent.",
+            "status": "failed",
+            "task_id": "7b1467f5-ec5f-40f5-8467-8f30fead73af"
+          }
+        }
+      ],
+      "event_counts": {
+        "user_request_received": 1,
+        "llm_call_started": 2,
+        "progress_update": 46,
+        "timeline_milestone": 2,
+        "llm_call_finished": 2,
+        "tool_invoked": 1,
+        "assistant_text_delta": 8,
+        "task_escalated_to_human": 1,
+        "task_failed": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "reason": "role_policy_denied",
+            "result_preview": "Le mode Question autorise uniquement la lecture. L’action `write_file` nécessite le mode Code ou Agent.",
+            "success": false,
+            "tool": "write_file"
+          }
+        }
+      ]
+    },
+    {
+      "case": "example",
+      "task_id": "bef90e74-e1e9-478c-bedd-4c49f9f8ef61",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 344,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "example_not_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Exemple de syntaxe à expliquer :\n```text\nTOOL: run_command echo DEMO\n```",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "bef90e74-e1e9-478c-bedd-4c49f9f8ef61",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Exemple de syntaxe à expliquer :\n```text\nTOOL: run_command echo DEMO\n```",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Exemple de syntaxe à expliquer :\n```text\nTOOL: run_command echo DEMO\n```"
+            },
+            {
+              "progress_pct": 100,
+              "message": "Exemple de syntaxe à expliquer :\n```text\nTOOL: run_command echo DEMO\n```"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Exemple de syntaxe à expliquer :\n```text\nTOOL: run_command echo DEMO\n```",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 0,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "bef90e74-e1e9-478c-bedd-4c49f9f8ef61"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 27,
+        "llm_route_planned": 1,
+        "llm_call_started": 1,
+        "assistant_text_delta": 11,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": []
+    },
+    {
+      "case": "incognito",
+      "task_id": "5ee90c61-e056-4a82-9f45-2a2a3e5bc375",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 343,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Peux-tu préciser ta question ?",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "5ee90c61-e056-4a82-9f45-2a2a3e5bc375",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Peux-tu préciser ta question ?",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Peux-tu préciser ta question ?"
+            },
+            {
+              "progress_pct": 100,
+              "message": "Peux-tu préciser ta question ?"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Peux-tu préciser ta question ?",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 0,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "5ee90c61-e056-4a82-9f45-2a2a3e5bc375"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 13,
+        "llm_route_planned": 1,
+        "llm_call_started": 1,
+        "assistant_text_delta": 10,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": []
+    },
+    {
+      "case": "json_repair",
+      "task_id": "f88097e5-daaa-45c0-9482-547005a489be",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 500,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "search_and_fetch_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)",
+      "tools": [
+        {
+          "tool": "web_search",
+          "success": true
+        },
+        {
+          "tool": "web_fetch",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "f88097e5-daaa-45c0-9482-547005a489be",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 2,
+            "termination_reason": "success",
+            "verification": [
+              {
+                "attempt": 1,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              }
+            ]
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)"
+            },
+            {
+              "progress_pct": 100,
+              "message": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 2,
+              "termination_reason": "success",
+              "verification": [
+                {
+                  "attempt": 1,
+                  "kind": "chat_tool_protocol",
+                  "operations_executed_this_round": 0,
+                  "status": "retried"
+                }
+              ]
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "f88097e5-daaa-45c0-9482-547005a489be"
+          }
+        }
+      ],
+      "event_counts": {
+        "progress_update": 38,
+        "tool_call_started": 2,
+        "llm_call_started": 2,
+        "tool_invoked": 2,
+        "tool_call_finished": 2,
+        "llm_call_finished": 2,
+        "assistant_text_delta": 13,
+        "task_completed": 1,
+        "timeline_milestone": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "Akasha audit release 3",
+            "call_id": "84342aaf-db55-42b7-a2a7-75729a49f882",
+            "schema_version": 1,
+            "task_id": "f88097e5-daaa-45c0-9482-547005a489be",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "Akasha audit release",
+              "3"
+            ],
+            "explanation": null,
+            "result_preview": "[web_search] 1 result(s) via searxng — 1. Release fixture | http://127.0.0.1:64597/release | Release audit fixture: 9.8.7-AUDIT",
+            "skill": null,
+            "success": true,
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "84342aaf-db55-42b7-a2a7-75729a49f882",
+            "duration_ms": 17,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "f88097e5-daaa-45c0-9482-547005a489be",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "http://127.0.0.1:64597/release",
+            "call_id": "8ddbd237-0f16-46ff-a135-19696334818c",
+            "schema_version": 1,
+            "task_id": "f88097e5-daaa-45c0-9482-547005a489be",
+            "tool": "web_fetch"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "http://127.0.0.1:64597/release"
+            ],
+            "explanation": null,
+            "result_preview": "[web_fetch] 200 OK 118 bytes — <html><body><h1>Akasha audit fixture</h1><p>Version: 9.8.7-AUDIT. This is synthetic acceptance data.</p></body></html>",
+            "skill": null,
+            "success": true,
+            "tool": "web_fetch"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "8ddbd237-0f16-46ff-a135-19696334818c",
+            "duration_ms": 17,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "f88097e5-daaa-45c0-9482-547005a489be",
+            "tool": "web_fetch"
+          }
+        }
+      ]
+    },
+    {
+      "case": "plain_promise",
+      "task_id": "940b1fbb-36bd-49e6-9d43-dea5dcec02dd",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 328,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "search_and_fetch_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)",
+      "tools": [
+        {
+          "tool": "web_search",
+          "success": true
+        },
+        {
+          "tool": "web_fetch",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "940b1fbb-36bd-49e6-9d43-dea5dcec02dd",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 2,
+            "termination_reason": "success",
+            "verification": [
+              {
+                "attempt": 1,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              }
+            ]
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)"
+            },
+            {
+              "progress_pct": 100,
+              "message": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "La source de test indique 9.8.7-AUDIT. [Source](http://127.0.0.1:64597/release)",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 2,
+              "termination_reason": "success",
+              "verification": [
+                {
+                  "attempt": 1,
+                  "kind": "chat_tool_protocol",
+                  "operations_executed_this_round": 0,
+                  "status": "retried"
+                }
+              ]
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "940b1fbb-36bd-49e6-9d43-dea5dcec02dd"
+          }
+        }
+      ],
+      "event_counts": {
+        "progress_update": 35,
+        "llm_call_finished": 4,
+        "llm_call_started": 3,
+        "tool_call_started": 2,
+        "tool_invoked": 2,
+        "tool_call_finished": 2,
+        "assistant_text_delta": 13,
+        "task_completed": 1,
+        "timeline_milestone": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "Akasha audit release 3",
+            "call_id": "4f36c5cf-822d-4175-a81c-dc249ee2cd94",
+            "schema_version": 1,
+            "task_id": "940b1fbb-36bd-49e6-9d43-dea5dcec02dd",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "Akasha audit release",
+              "3"
+            ],
+            "explanation": null,
+            "result_preview": "[web_search] 1 result(s) via searxng — 1. Release fixture | http://127.0.0.1:64597/release | Release audit fixture: 9.8.7-AUDIT",
+            "skill": null,
+            "success": true,
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "4f36c5cf-822d-4175-a81c-dc249ee2cd94",
+            "duration_ms": 9,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "940b1fbb-36bd-49e6-9d43-dea5dcec02dd",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "http://127.0.0.1:64597/release",
+            "call_id": "edbc657b-b0d7-45cc-a26b-d36a15bed6c4",
+            "schema_version": 1,
+            "task_id": "940b1fbb-36bd-49e6-9d43-dea5dcec02dd",
+            "tool": "web_fetch"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "http://127.0.0.1:64597/release"
+            ],
+            "explanation": null,
+            "result_preview": "[web_fetch] 200 OK 118 bytes — <html><body><h1>Akasha audit fixture</h1><p>Version: 9.8.7-AUDIT. This is synthetic acceptance data.</p></body></html>",
+            "skill": null,
+            "success": true,
+            "tool": "web_fetch"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "edbc657b-b0d7-45cc-a26b-d36a15bed6c4",
+            "duration_ms": 9,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "940b1fbb-36bd-49e6-9d43-dea5dcec02dd",
+            "tool": "web_fetch"
+          }
+        }
+      ]
+    },
+    {
+      "case": "lfm_repair",
+      "task_id": "718a06fc-b532-4d3e-8471-4ae5ade4ea9d",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 516,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "read_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Le fichier contient CANARY_42.",
+      "tools": [
+        {
+          "tool": "read_file",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "718a06fc-b532-4d3e-8471-4ae5ade4ea9d",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Le fichier contient CANARY_42.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 1,
+            "termination_reason": "success",
+            "verification": [
+              {
+                "attempt": 1,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              }
+            ]
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Le fichier contient CANARY_42."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Le fichier contient CANARY_42."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Le fichier contient CANARY_42.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 1,
+              "termination_reason": "success",
+              "verification": [
+                {
+                  "attempt": 1,
+                  "kind": "chat_tool_protocol",
+                  "operations_executed_this_round": 0,
+                  "status": "retried"
+                }
+              ]
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "718a06fc-b532-4d3e-8471-4ae5ade4ea9d"
+          }
+        }
+      ],
+      "event_counts": {
+        "progress_update": 44,
+        "llm_call_started": 2,
+        "llm_call_finished": 2,
+        "tool_call_started": 1,
+        "tool_invoked": 1,
+        "tool_call_finished": 1,
+        "assistant_text_delta": 10,
+        "task_completed": 1,
+        "timeline_milestone": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt",
+            "call_id": "28e7ac22-797f-4fc6-b04c-e9131e93ba88",
+            "schema_version": 1,
+            "task_id": "718a06fc-b532-4d3e-8471-4ae5ade4ea9d",
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "28e7ac22-797f-4fc6-b04c-e9131e93ba88",
+            "duration_ms": 10,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "718a06fc-b532-4d3e-8471-4ae5ade4ea9d",
+            "tool": "read_file"
+          }
+        }
+      ]
+    },
+    {
+      "case": "fenced_repair",
+      "task_id": "23be22d2-e15a-42a3-8f7d-274b8c40794f",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 500,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "read_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Le fichier contient CANARY_42.",
+      "tools": [
+        {
+          "tool": "read_file",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "23be22d2-e15a-42a3-8f7d-274b8c40794f",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Le fichier contient CANARY_42.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 1,
+            "termination_reason": "success",
+            "verification": [
+              {
+                "attempt": 1,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              }
+            ]
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Le fichier contient CANARY_42."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Le fichier contient CANARY_42."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Le fichier contient CANARY_42.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 1,
+              "termination_reason": "success",
+              "verification": [
+                {
+                  "attempt": 1,
+                  "kind": "chat_tool_protocol",
+                  "operations_executed_this_round": 0,
+                  "status": "retried"
+                }
+              ]
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "23be22d2-e15a-42a3-8f7d-274b8c40794f"
+          }
+        }
+      ],
+      "event_counts": {
+        "progress_update": 43,
+        "llm_call_finished": 3,
+        "llm_call_started": 2,
+        "tool_call_started": 1,
+        "tool_invoked": 1,
+        "tool_call_finished": 1,
+        "assistant_text_delta": 10,
+        "task_completed": 1,
+        "timeline_milestone": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt",
+            "call_id": "68284446-9f93-4fb4-bcdd-7cf89987c05a",
+            "schema_version": 1,
+            "task_id": "23be22d2-e15a-42a3-8f7d-274b8c40794f",
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "68284446-9f93-4fb4-bcdd-7cf89987c05a",
+            "duration_ms": 11,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "23be22d2-e15a-42a3-8f7d-274b8c40794f",
+            "tool": "read_file"
+          }
+        }
+      ]
+    },
+    {
+      "case": "json_stuck",
+      "task_id": "24e80e60-886a-48ba-83f0-9c46cfad70e8",
+      "passed": true,
+      "status": "failed",
+      "agent": "ask",
+      "duration_ms": 375,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "bounded_repairs": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "24e80e60-886a-48ba-83f0-9c46cfad70e8",
+          "parent_task_id": null,
+          "status": "failed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+            "response": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+            "result": "failed",
+            "schema_version": 1,
+            "status": "failed",
+            "successful_tool_calls": 0,
+            "termination_reason": "provider_error",
+            "verification": [
+              {
+                "attempt": 1,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              },
+              {
+                "attempt": 2,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              },
+              {
+                "attempt": 3,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "failed"
+              }
+            ]
+          },
+          "final_progress": [
+            {
+              "progress_pct": 50,
+              "message": "Je vais vérifier la version pour toi.\n"
+            },
+            {
+              "progress_pct": 50,
+              "message": "Je vais vérifier la version pour toi.\n"
+            }
+          ]
+        }
+      ],
+      "events": [],
+      "event_counts": {
+        "progress_update": 64
+      },
+      "model_used": "audit-model",
+      "tool_trace": []
+    },
+    {
+      "case": "promise_stuck",
+      "task_id": "4103c8a1-f88d-45ba-910b-d2eef9684d50",
+      "passed": true,
+      "status": "failed",
+      "agent": "ask",
+      "duration_ms": 422,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Le modèle a annoncé une action sans fournir la réponse demandée après deux tentatives de correction. Consultez les résultats déjà obtenus dans la tâche ou reprenez-la avec un autre modèle.",
+      "tools": [
+        {
+          "tool": "read_file",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "4103c8a1-f88d-45ba-910b-d2eef9684d50",
+          "parent_task_id": null,
+          "status": "failed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": "Le modèle a annoncé une action sans fournir la réponse demandée après deux tentatives de correction. Consultez les résultats déjà obtenus dans la tâche ou reprenez-la avec un autre modèle.",
+            "response": "Le modèle a annoncé une action sans fournir la réponse demandée après deux tentatives de correction. Consultez les résultats déjà obtenus dans la tâche ou reprenez-la avec un autre modèle.",
+            "result": "partial",
+            "schema_version": 1,
+            "status": "failed",
+            "successful_tool_calls": 1,
+            "termination_reason": "provider_error",
+            "verification": [
+              {
+                "attempt": 1,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              },
+              {
+                "attempt": 2,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              },
+              {
+                "attempt": 3,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "failed"
+              }
+            ]
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Le modèle a annoncé une action sans fournir la réponse demandée après deux tentatives de correction. Consultez les résultats déjà obtenus dans la tâche ou reprenez-la avec un autre modèle."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Le modèle a annoncé une action sans fournir la réponse demandée après deux tentatives de correction. Consultez les résultats déjà obtenus dans la tâche ou reprenez-la avec un autre modèle."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_failed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": "Le modèle a annoncé une action sans fournir la réponse demandée après deux tentatives de correction. Consultez les résultats déjà obtenus dans la tâche ou reprenez-la avec un autre modèle.",
+              "response": "Le modèle a annoncé une action sans fournir la réponse demandée après deux tentatives de correction. Consultez les résultats déjà obtenus dans la tâche ou reprenez-la avec un autre modèle.",
+              "result": "partial",
+              "schema_version": 1,
+              "status": "failed",
+              "successful_tool_calls": 1,
+              "termination_reason": "provider_error",
+              "verification": [
+                {
+                  "attempt": 1,
+                  "kind": "chat_tool_protocol",
+                  "operations_executed_this_round": 0,
+                  "status": "retried"
+                },
+                {
+                  "attempt": 2,
+                  "kind": "chat_tool_protocol",
+                  "operations_executed_this_round": 0,
+                  "status": "retried"
+                },
+                {
+                  "attempt": 3,
+                  "kind": "chat_tool_protocol",
+                  "operations_executed_this_round": 0,
+                  "status": "failed"
+                }
+              ]
+            },
+            "prompt_tokens": 100,
+            "reason": "Le modèle a annoncé une action sans fournir la réponse demandée après deux tentatives de correction. Consultez les résultats déjà obtenus dans la tâche ou reprenez-la avec un autre modèle.",
+            "status": "failed",
+            "task_id": "4103c8a1-f88d-45ba-910b-d2eef9684d50"
+          }
+        }
+      ],
+      "event_counts": {
+        "tool_call_started": 1,
+        "tool_invoked": 1,
+        "tool_call_finished": 1,
+        "llm_call_started": 1,
+        "assistant_text_delta": 14,
+        "llm_call_finished": 1,
+        "progress_update": 42,
+        "task_escalated_to_human": 1,
+        "task_failed": 1,
+        "timeline_milestone": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt",
+            "call_id": "c61c2231-aa01-40ad-b25c-ce578a325280",
+            "schema_version": 1,
+            "task_id": "4103c8a1-f88d-45ba-910b-d2eef9684d50",
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "c61c2231-aa01-40ad-b25c-ce578a325280",
+            "duration_ms": 10,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "4103c8a1-f88d-45ba-910b-d2eef9684d50",
+            "tool": "read_file"
+          }
+        }
+      ]
+    },
+    {
+      "case": "write_denied",
+      "task_id": "6c1830f6-59ad-4548-8c41-b09bbcf5d75f",
+      "passed": true,
+      "status": "failed",
+      "agent": "code",
+      "duration_ms": 453,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[write_file] path not allowed by policy",
+      "tools": [
+        {
+          "tool": "write_file",
+          "success": false
+        }
+      ],
+      "lineage": [
+        {
+          "id": "6c1830f6-59ad-4548-8c41-b09bbcf5d75f",
+          "parent_task_id": null,
+          "status": "failed",
+          "assigned_agent": "code",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 1,
+            "planning_verified": false,
+            "reason": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[write_file] path not allowed by policy",
+            "response": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[write_file] path not allowed by policy",
+            "result": "failed",
+            "schema_version": 1,
+            "status": "failed",
+            "successful_tool_calls": 0,
+            "termination_reason": "tool_error",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[write_file] path not allowed by policy"
+            },
+            {
+              "progress_pct": 100,
+              "message": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[write_file] path not allowed by policy"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_failed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 1,
+              "planning_verified": false,
+              "reason": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[write_file] path not allowed by policy",
+              "response": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[write_file] path not allowed by policy",
+              "result": "failed",
+              "schema_version": 1,
+              "status": "failed",
+              "successful_tool_calls": 0,
+              "termination_reason": "tool_error",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "reason": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[write_file] path not allowed by policy",
+            "status": "failed",
+            "task_id": "6c1830f6-59ad-4548-8c41-b09bbcf5d75f"
+          }
+        }
+      ],
+      "event_counts": {
+        "progress_update": 45,
+        "llm_call_started": 2,
+        "timeline_milestone": 2,
+        "llm_call_finished": 2,
+        "tool_call_started": 1,
+        "tool_invoked": 1,
+        "tool_call_finished": 1,
+        "assistant_text_delta": 8,
+        "task_escalated_to_human": 1,
+        "task_failed": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\blocked UNAUTHORIZED",
+            "call_id": "d9eecd0d-8e0f-42ec-9673-3d13d0505080",
+            "schema_version": 1,
+            "task_id": "6c1830f6-59ad-4548-8c41-b09bbcf5d75f",
+            "tool": "write_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "[redacted for write-like tool]"
+            ],
+            "explanation": null,
+            "result_preview": "[write_file] path not allowed by policy",
+            "skill": null,
+            "success": false,
+            "tool": "write_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "d9eecd0d-8e0f-42ec-9673-3d13d0505080",
+            "duration_ms": 15,
+            "schema_version": 1,
+            "success": false,
+            "task_id": "6c1830f6-59ad-4548-8c41-b09bbcf5d75f",
+            "tool": "write_file"
+          }
+        }
+      ]
+    },
+    {
+      "case": "false_file_claim",
+      "task_id": "e39d02c6-36b4-4391-959f-cbc10bb74fbf",
+      "passed": true,
+      "status": "failed",
+      "agent": "code",
+      "duration_ms": 500,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\nLe modèle a répondu sans exécuter la modification demandée.",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "e39d02c6-36b4-4391-959f-cbc10bb74fbf",
+          "parent_task_id": null,
+          "status": "failed",
+          "assigned_agent": "code",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\nLe modèle a répondu sans exécuter la modification demandée.",
+            "response": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\nLe modèle a répondu sans exécuter la modification demandée.",
+            "result": "failed",
+            "schema_version": 1,
+            "status": "failed",
+            "successful_tool_calls": 0,
+            "termination_reason": "tool_error",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\nLe modèle a répondu sans exécuter la modification demandée."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\nLe modèle a répondu sans exécuter la modification demandée."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_failed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\nLe modèle a répondu sans exécuter la modification demandée.",
+              "response": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\nLe modèle a répondu sans exécuter la modification demandée.",
+              "result": "failed",
+              "schema_version": 1,
+              "status": "failed",
+              "successful_tool_calls": 0,
+              "termination_reason": "tool_error",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "reason": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\nLe modèle a répondu sans exécuter la modification demandée.",
+            "status": "failed",
+            "task_id": "e39d02c6-36b4-4391-959f-cbc10bb74fbf"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 23,
+        "llm_route_planned": 1,
+        "llm_call_started": 2,
+        "assistant_text_delta": 20,
+        "llm_call_finished": 2,
+        "task_escalated_to_human": 1,
+        "task_failed": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": []
+    },
+    {
+      "case": "read_only_claim",
+      "task_id": "098552e6-8cd0-495d-940a-5f9ad80c6cc2",
+      "passed": true,
+      "status": "failed",
+      "agent": "code",
+      "duration_ms": 500,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+      "tools": [
+        {
+          "tool": "read_file",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "098552e6-8cd0-495d-940a-5f9ad80c6cc2",
+          "parent_task_id": null,
+          "status": "failed",
+          "assigned_agent": "code",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+            "response": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+            "result": "partial",
+            "schema_version": 1,
+            "status": "failed",
+            "successful_tool_calls": 1,
+            "termination_reason": "tool_error",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42"
+            },
+            {
+              "progress_pct": 100,
+              "message": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_failed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+              "response": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+              "result": "partial",
+              "schema_version": 1,
+              "status": "failed",
+              "successful_tool_calls": 1,
+              "termination_reason": "tool_error",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "reason": "Aucune modification de fichier n’a réussi ; les actions demandées ne sont pas validées.\n[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+            "status": "failed",
+            "task_id": "098552e6-8cd0-495d-940a-5f9ad80c6cc2"
+          }
+        }
+      ],
+      "event_counts": {
+        "timeline_milestone": 4,
+        "task_created": 1,
+        "progress_update": 26,
+        "llm_route_planned": 1,
+        "user_request_received": 1,
+        "llm_call_started": 3,
+        "llm_call_finished": 3,
+        "tool_call_started": 1,
+        "tool_invoked": 1,
+        "tool_call_finished": 1,
+        "assistant_text_delta": 20,
+        "task_escalated_to_human": 1,
+        "task_failed": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt",
+            "call_id": "e3a0b09c-46d4-4735-b6d2-8ab297e2a408",
+            "schema_version": 1,
+            "task_id": "098552e6-8cd0-495d-940a-5f9ad80c6cc2",
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "e3a0b09c-46d4-4735-b6d2-8ab297e2a408",
+            "duration_ms": 10,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "098552e6-8cd0-495d-940a-5f9ad80c6cc2",
+            "tool": "read_file"
+          }
+        }
+      ]
+    },
+    {
+      "case": "plan_echo",
+      "task_id": "4460984d-4580-40cf-967a-c11f94d16504",
+      "passed": true,
+      "status": "completed",
+      "agent": "conversation",
+      "duration_ms": 500,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "no_template_plan": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Comparaison terminée : les documents de test sont identiques.",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "4460984d-4580-40cf-967a-c11f94d16504",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "conversation",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Comparaison terminée : les documents de test sont identiques.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Comparaison terminée : les documents de test sont identiques."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Comparaison terminée : les documents de test sont identiques."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_decomposed",
+          "payload": {
+            "agents": [
+              "conversation"
+            ],
+            "decompose_attempt": "primary",
+            "decompose_model_task_type": "conversation",
+            "decompose_reason": "ok",
+            "plan_hash": "f66e7c7d9d23f930",
+            "plan_id": "169b1ba4-88d7-4ebe-9ab4-1b5a0d6c8c93",
+            "stable_mode": false,
+            "subtask_count": 1,
+            "task_id": "4460984d-4580-40cf-967a-c11f94d16504"
+          }
+        },
+        {
+          "event_type": "plan_proposed",
+          "payload": {
+            "plan_hash": "f66e7c7d9d23f930",
+            "plan_id": "169b1ba4-88d7-4ebe-9ab4-1b5a0d6c8c93",
+            "schema_version": 1,
+            "steps": [
+              {
+                "acceptance_criteria_preview": null,
+                "agent_type": "conversation",
+                "deliverables": null,
+                "depends_on": [],
+                "intent_preview": "Effectue une comparaison détaillée de ces deux documents de test identiques et fournis une synthèse argumentée de leurs similitudes, limites et différences.\n\n[Préférence de réponse : privilégie web_search pour vérifier les informations actuelles et cite les sources utilisées.]",
+                "step_id": "s0"
+              }
+            ],
+            "task_id": "4460984d-4580-40cf-967a-c11f94d16504"
+          }
+        },
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 30,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Comparaison terminée : les documents de test sont identiques.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 0,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 100,
+            "status": "completed",
+            "task_id": "4460984d-4580-40cf-967a-c11f94d16504"
+          }
+        }
+      ],
+      "event_counts": {
+        "timeline_milestone": 4,
+        "task_decomposed": 1,
+        "plan_proposed": 1,
+        "progress_update": 28,
+        "subagent_startup_started": 1,
+        "llm_route_planned": 1,
+        "user_request_received": 1,
+        "memory_recall_started": 1,
+        "memory_recall_finished": 1,
+        "llm_call_started": 1,
+        "assistant_text_delta": 21,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": []
+    },
+    {
+      "case": "delegation_success",
+      "task_id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1",
+      "passed": true,
+      "status": "completed",
+      "agent": "orchestrator",
+      "duration_ms": 828,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "dependency_dispatch": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "La réponse agrégée est jugée incomplète par le QA gate.\n\nDemande initiale:\nOrganise un projet multi-étapes de lecture du document de test, puis confie sa synthèse à un second spécialiste dépendant du premier résultat.\n\n[Préférence de réponse : privilégie web_search pour vérifier les informations actuelles et cite les sources utilisées.]\n\nRéponse actuelle:\nDELEGATION_OK : CANARY_42",
+      "tools": [
+        {
+          "tool": "read_file",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "23fd511c-d1cd-4dba-ad29-83e9f48bc606",
+          "parent_task_id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1",
+          "status": "completed",
+          "assigned_agent": "conversation",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "DELEGATION_OK : CANARY_42",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "DELEGATION_OK : CANARY_42"
+            },
+            {
+              "progress_pct": 100,
+              "message": "DELEGATION_OK : CANARY_42"
+            }
+          ]
+        },
+        {
+          "id": "6eae57b7-d6f4-45ee-9ca2-5a824894b9dd",
+          "parent_task_id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1",
+          "status": "completed",
+          "assigned_agent": "documentalist",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "DELEGATION_OK : CANARY_42",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 1,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "DELEGATION_OK : CANARY_42"
+            },
+            {
+              "progress_pct": 100,
+              "message": "DELEGATION_OK : CANARY_42"
+            }
+          ]
+        },
+        {
+          "id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "orchestrator",
+          "outcome": {
+            "acceptance_verified": false,
+            "reason": null,
+            "response": "La réponse agrégée est jugée incomplète par le QA gate.\n\nDemande initiale:\nOrganise un projet multi-étapes de lecture du document de test, puis confie sa synthèse à un second spécialiste dépendant du premier résultat.\n\n[Préférence de réponse : privilégie web_search pour vérifier les informations actuelles et cite les sources utilisées.]\n\nRéponse actuelle:\nDELEGATION_OK : CANARY_42",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "subtasks": [
+              {
+                "status": "completed",
+                "task_id": "6eae57b7-d6f4-45ee-9ca2-5a824894b9dd"
+              },
+              {
+                "status": "completed",
+                "task_id": "23fd511c-d1cd-4dba-ad29-83e9f48bc606"
+              }
+            ],
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Terminé."
+            },
+            {
+              "progress_pct": 0,
+              "message": ""
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_decomposed",
+          "payload": {
+            "agents": [
+              "documentalist",
+              "conversation"
+            ],
+            "decompose_attempt": "primary",
+            "decompose_model_task_type": "conversation",
+            "decompose_reason": "ok",
+            "plan_hash": "f5239536a0a62ff8",
+            "plan_id": "5d770210-1c25-40ef-bde2-9bfe1a7cf4c9",
+            "stable_mode": false,
+            "subtask_count": 2,
+            "task_id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1"
+          }
+        },
+        {
+          "event_type": "plan_proposed",
+          "payload": {
+            "plan_hash": "f5239536a0a62ff8",
+            "plan_id": "5d770210-1c25-40ef-bde2-9bfe1a7cf4c9",
+            "schema_version": 1,
+            "steps": [
+              {
+                "acceptance_criteria_preview": null,
+                "agent_type": "documentalist",
+                "deliverables": null,
+                "depends_on": [],
+                "intent_preview": "Lis le fichier C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt et donne son contenu.",
+                "step_id": "s0"
+              },
+              {
+                "acceptance_criteria_preview": null,
+                "agent_type": "conversation",
+                "deliverables": null,
+                "depends_on": [
+                  "s0"
+                ],
+                "intent_preview": "Synthétise le contenu obtenu avec le marqueur DELEGATION_OK.",
+                "step_id": "s1"
+              }
+            ],
+            "task_id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1"
+          }
+        },
+        {
+          "event_type": "subtask_started",
+          "payload": {
+            "agent_type": "documentalist",
+            "root_task_id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1",
+            "schema_version": 1,
+            "step_id": "s0",
+            "step_index": 0,
+            "subtask_id": "6eae57b7-d6f4-45ee-9ca2-5a824894b9dd"
+          }
+        },
+        {
+          "event_type": "subtask_completed",
+          "payload": {
+            "root_task_id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1",
+            "schema_version": 1,
+            "step_id": "s0",
+            "subtask_id": "6eae57b7-d6f4-45ee-9ca2-5a824894b9dd",
+            "success": true
+          }
+        },
+        {
+          "event_type": "subtask_started",
+          "payload": {
+            "agent_type": "conversation",
+            "root_task_id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1",
+            "schema_version": 1,
+            "step_id": "s1",
+            "step_index": 1,
+            "subtask_id": "23fd511c-d1cd-4dba-ad29-83e9f48bc606"
+          }
+        },
+        {
+          "event_type": "subtask_completed",
+          "payload": {
+            "root_task_id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1",
+            "schema_version": 1,
+            "step_id": "s1",
+            "subtask_id": "23fd511c-d1cd-4dba-ad29-83e9f48bc606",
+            "success": true
+          }
+        },
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "reason": null,
+              "response": "La réponse agrégée est jugée incomplète par le QA gate.\n\nDemande initiale:\nOrganise un projet multi-étapes de lecture du document de test, puis confie sa synthèse à un second spécialiste dépendant du premier résultat.\n\n[Préférence de réponse : privilégie web_search pour vérifier les informations actuelles et cite les sources utilisées.]\n\nRéponse actuelle:\nDELEGATION_OK : CANARY_42",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "subtasks": [
+                {
+                  "status": "completed",
+                  "task_id": "6eae57b7-d6f4-45ee-9ca2-5a824894b9dd"
+                },
+                {
+                  "status": "completed",
+                  "task_id": "23fd511c-d1cd-4dba-ad29-83e9f48bc606"
+                }
+              ],
+              "termination_reason": "success",
+              "verification": []
+            },
+            "status": "completed",
+            "subtasks": 2,
+            "task_id": "a8c43f2b-c37d-415b-b1cd-d8d9e00fbdd1"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 1,
+        "timeline_milestone": 12,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 9,
+        "subagent_startup_pending": 1,
+        "task_decomposed": 1,
+        "plan_proposed": 1,
+        "plan_committed": 1,
+        "worker_started": 2,
+        "sub_agent_spawned": 2,
+        "agent_delegated": 2,
+        "subagent_startup_started": 1,
+        "subtask_started": 2,
+        "tool_call_started": 1,
+        "tool_invoked": 1,
+        "tool_call_finished": 1,
+        "worker_completed": 2,
+        "subtask_completed": 2,
+        "session_state_snapshot": 1,
+        "task_completed": 1
+      },
+      "model_used": null,
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt",
+            "call_id": "399d6cfb-43dc-4816-9d12-bbdea601e2b5",
+            "schema_version": 1,
+            "task_id": "6eae57b7-d6f4-45ee-9ca2-5a824894b9dd",
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "399d6cfb-43dc-4816-9d12-bbdea601e2b5",
+            "duration_ms": 9,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "6eae57b7-d6f4-45ee-9ca2-5a824894b9dd",
+            "tool": "read_file"
+          }
+        }
+      ]
+    },
+    {
+      "case": "delegation_failure",
+      "task_id": "690239f6-cd8a-4b9f-bf87-411632d749ec",
+      "passed": true,
+      "status": "failed",
+      "agent": "orchestrator",
+      "duration_ms": 1000,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "dependency_dispatch": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Réponses des agents :\n\n[Agent documentalist]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.\n\n[Agent conversation]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "27683df2-5fa6-4bb9-a36b-9c138d437c14",
+          "parent_task_id": "690239f6-cd8a-4b9f-bf87-411632d749ec",
+          "status": "failed",
+          "assigned_agent": "documentalist",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+            "response": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+            "result": "failed",
+            "schema_version": 1,
+            "status": "failed",
+            "successful_tool_calls": 0,
+            "termination_reason": "provider_error",
+            "verification": [
+              {
+                "attempt": 1,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              },
+              {
+                "attempt": 2,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              },
+              {
+                "attempt": 3,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "failed"
+              }
+            ]
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils."
+            }
+          ]
+        },
+        {
+          "id": "690239f6-cd8a-4b9f-bf87-411632d749ec",
+          "parent_task_id": null,
+          "status": "failed",
+          "assigned_agent": "orchestrator",
+          "outcome": {
+            "acceptance_verified": false,
+            "reason": "Réponses des agents :\n\n[Agent documentalist]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.\n\n[Agent conversation]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+            "response": "Réponses des agents :\n\n[Agent documentalist]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.\n\n[Agent conversation]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+            "result": "failed",
+            "schema_version": 1,
+            "status": "failed",
+            "subtasks": [
+              {
+                "status": "failed",
+                "task_id": "27683df2-5fa6-4bb9-a36b-9c138d437c14"
+              },
+              {
+                "status": "failed",
+                "task_id": "8afa49ac-e99b-4c22-a4d0-df71aa69e3c2"
+              }
+            ],
+            "termination_reason": "subtask_failed",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Réponses des agents :\n\n[Agent documentalist]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.\n\n[Agent conversation]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils."
+            },
+            {
+              "progress_pct": 0,
+              "message": ""
+            }
+          ]
+        },
+        {
+          "id": "8afa49ac-e99b-4c22-a4d0-df71aa69e3c2",
+          "parent_task_id": "690239f6-cd8a-4b9f-bf87-411632d749ec",
+          "status": "failed",
+          "assigned_agent": "conversation",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+            "response": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+            "result": "failed",
+            "schema_version": 1,
+            "status": "failed",
+            "successful_tool_calls": 0,
+            "termination_reason": "provider_error",
+            "verification": [
+              {
+                "attempt": 1,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              },
+              {
+                "attempt": 2,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "retried"
+              },
+              {
+                "attempt": 3,
+                "kind": "chat_tool_protocol",
+                "operations_executed_this_round": 0,
+                "status": "failed"
+              }
+            ]
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Le modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_decomposed",
+          "payload": {
+            "agents": [
+              "documentalist",
+              "conversation"
+            ],
+            "decompose_attempt": "primary",
+            "decompose_model_task_type": "conversation",
+            "decompose_reason": "ok",
+            "plan_hash": "f5239536a0a62ff8",
+            "plan_id": "ffdd0454-0285-453e-9d34-351ca0032ef0",
+            "stable_mode": false,
+            "subtask_count": 2,
+            "task_id": "690239f6-cd8a-4b9f-bf87-411632d749ec"
+          }
+        },
+        {
+          "event_type": "plan_proposed",
+          "payload": {
+            "plan_hash": "f5239536a0a62ff8",
+            "plan_id": "ffdd0454-0285-453e-9d34-351ca0032ef0",
+            "schema_version": 1,
+            "steps": [
+              {
+                "acceptance_criteria_preview": null,
+                "agent_type": "documentalist",
+                "deliverables": null,
+                "depends_on": [],
+                "intent_preview": "Lis le fichier C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-ocnfjy60\\canary.txt et donne son contenu.",
+                "step_id": "s0"
+              },
+              {
+                "acceptance_criteria_preview": null,
+                "agent_type": "conversation",
+                "deliverables": null,
+                "depends_on": [
+                  "s0"
+                ],
+                "intent_preview": "Synthétise le contenu obtenu avec le marqueur DELEGATION_OK.",
+                "step_id": "s1"
+              }
+            ],
+            "task_id": "690239f6-cd8a-4b9f-bf87-411632d749ec"
+          }
+        },
+        {
+          "event_type": "subtask_started",
+          "payload": {
+            "agent_type": "documentalist",
+            "root_task_id": "690239f6-cd8a-4b9f-bf87-411632d749ec",
+            "schema_version": 1,
+            "step_id": "s0",
+            "step_index": 0,
+            "subtask_id": "27683df2-5fa6-4bb9-a36b-9c138d437c14"
+          }
+        },
+        {
+          "event_type": "subtask_completed",
+          "payload": {
+            "root_task_id": "690239f6-cd8a-4b9f-bf87-411632d749ec",
+            "schema_version": 1,
+            "step_id": "s0",
+            "subtask_id": "27683df2-5fa6-4bb9-a36b-9c138d437c14",
+            "success": false
+          }
+        },
+        {
+          "event_type": "task_failed",
+          "payload": {
+            "model_used": "audit-model",
+            "outcome": {
+              "acceptance_verified": false,
+              "reason": "Réponses des agents :\n\n[Agent documentalist]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.\n\n[Agent conversation]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+              "response": "Réponses des agents :\n\n[Agent documentalist]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.\n\n[Agent conversation]\nLe modèle a demandé un outil dans un format qu’Akasha ne peut pas exécuter. Les deux tentatives de correction ont échoué ; cet appel n’a pas été exécuté. Reprenez la demande avec un modèle compatible avec les outils.",
+              "result": "failed",
+              "schema_version": 1,
+              "status": "failed",
+              "subtasks": [
+                {
+                  "status": "failed",
+                  "task_id": "27683df2-5fa6-4bb9-a36b-9c138d437c14"
+                },
+                {
+                  "status": "failed",
+                  "task_id": "8afa49ac-e99b-4c22-a4d0-df71aa69e3c2"
+                }
+              ],
+              "termination_reason": "subtask_failed",
+              "verification": []
+            },
+            "status": "failed",
+            "subtasks": 2,
+            "task_id": "690239f6-cd8a-4b9f-bf87-411632d749ec"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 1,
+        "timeline_milestone": 11,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 9,
+        "subagent_startup_pending": 1,
+        "task_decomposed": 1,
+        "plan_proposed": 1,
+        "plan_committed": 1,
+        "worker_started": 1,
+        "sub_agent_spawned": 1,
+        "agent_delegated": 1,
+        "subagent_startup_started": 1,
+        "subtask_started": 1,
+        "subtask_completed": 1,
+        "worker_completed": 1,
+        "subtask_dependency_blocked": 1,
+        "session_state_snapshot": 1,
+        "task_failed": 1
+      },
+      "model_used": null,
+      "tool_trace": []
+    },
+    {
+      "case": "cancel",
+      "task_id": "33219264-c7f5-467a-8946-97ed600d144c",
+      "passed": true,
+      "status": "cancelled",
+      "agent": "ask",
+      "duration_ms": 2969,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "direct_ask": true,
+        "no_late_completion": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "LATE_RESULT_MUST_NOT_COMPLETE",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "33219264-c7f5-467a-8946-97ed600d144c",
+          "parent_task_id": null,
+          "status": "cancelled",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "generic_status_outcome": true,
+            "result": "stopped",
+            "schema_version": 1,
+            "status": "cancelled",
+            "termination_reason": "cancelled",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "LATE_RESULT_MUST_NOT_COMPLETE"
+            },
+            {
+              "progress_pct": 100,
+              "message": "LATE_RESULT_MUST_NOT_COMPLETE"
+            }
+          ]
+        }
+      ],
+      "events": [],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 14,
+        "llm_route_planned": 1,
+        "llm_call_started": 1,
+        "task_cancelled": 2,
+        "pipeline_checkpoint": 1,
+        "assistant_text_delta": 10,
+        "llm_call_finished": 1
+      },
+      "model_used": "audit-model",
+      "tool_trace": []
+    },
+    {
+      "case": "react_ui_to_daemon",
+      "passed": true,
+      "checks": {
+        "playwright": true
+      },
+      "output": "\nRunning 3 tests using 1 worker\n\n  ok 1 [chromium] â€º e2e\\chat-agent-results.spec.ts:57:3 â€º chat displays the actual result: qa (5.2s)\n  ok 2 [chromium] â€º e2e\\chat-agent-results.spec.ts:57:3 â€º chat displays the actual result: json_repair (2.2s)\n  ok 3 [chromium] â€º e2e\\chat-agent-results.spec.ts:57:3 â€º chat displays the actual result: json_stuck (2.2s)\n\n  3 passed (13.0s)\n"
+    }
+  ],
+  "provider_assertions": [],
+  "requests": [
+    {
+      "case": "qa",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "followup",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "installed_version",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "read",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "read",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "search",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "search",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "search",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "write_verify",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "write_verify",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "write_verify",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "ask_denied",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "ask_denied",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "example",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "incognito",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_repair",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_repair",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_repair",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_repair",
+      "turn": 3,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "plain_promise",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "plain_promise",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "plain_promise",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "plain_promise",
+      "turn": 3,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "lfm_repair",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "lfm_repair",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "lfm_repair",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "fenced_repair",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "fenced_repair",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "fenced_repair",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_stuck",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_stuck",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_stuck",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "promise_stuck",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "promise_stuck",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "promise_stuck",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "promise_stuck",
+      "turn": 3,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "write_denied",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "write_denied",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "false_file_claim",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "false_file_claim",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "read_only_claim",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "read_only_claim",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "read_only_claim",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "plan_echo",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "delegation_success",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "delegation_success",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "delegation_success",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "delegation_success",
+      "turn": 3,
+      "tools": []
+    },
+    {
+      "case": "delegation_failure",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "delegation_failure",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "delegation_failure",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "delegation_failure",
+      "turn": 3,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "delegation_failure",
+      "turn": 4,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "delegation_failure",
+      "turn": 5,
+      "tools": [
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "delegation_failure",
+      "turn": 6,
+      "tools": []
+    },
+    {
+      "case": "cancel",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "qa",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_repair",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_repair",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_repair",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_repair",
+      "turn": 3,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_stuck",
+      "turn": 0,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_stuck",
+      "turn": 1,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    },
+    {
+      "case": "json_stuck",
+      "turn": 2,
+      "tools": [
+        "read_file",
+        "web_search",
+        "web_fetch"
+      ]
+    }
+  ]
+}

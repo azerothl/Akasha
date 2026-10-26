@@ -121,8 +121,7 @@ pub(super) fn parse_calls(response: &str) -> Vec<(String, Vec<String>)> {
     let mut calls = crate::api_tool_parser::parse_tool_calls(response);
     for (name, args) in &mut calls {
         if matches!(name.as_str(), "write_file" | "write_code")
-            && args.len() >= 3
-            && args[1] == "--content"
+            && args.get(1).is_some_and(|body| body == "--content" || body.starts_with("--content "))
         {
             *name = "studio_call".into();
             *args=vec!["invalid legacy write_file option --content; no file written. Use native studio_call or TOOL_JSON with arguments path, content and expected_version. The legacy alternative is a header-only TOOL: write_file <path> followed by exact content on the next lines.".into()];

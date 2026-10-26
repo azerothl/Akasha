@@ -1233,8 +1233,24 @@ pub(crate) async fn get_task_status(
                     if e.task_id.is_none() {
                         e.task_id = Some(c.id.to_string());
                     }
-                    progress_list.push(e);
+                    // Keep the parent's response last: chat consumes the final
+                    // entry, while task details still retain child progress.
+                    let at = progress_list.len().saturating_sub(1);
+                    progress_list.insert(at, e);
                 }
+            }
+        }
+    }
+    // Terminal response and task status are persisted atomically. The event bus
+    // may still be draining earlier streamed text when polling first sees the
+    // terminal status; that text must not replace the final answer or error.
+    if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Interrupted) {
+        if let Some(outcome) = store.get_outcome(id).ok().flatten() {
+            let response = outcome["response"].as_str().or_else(|| {
+                if task.status != TaskStatus::Completed { outcome["reason"].as_str() } else { None }
+            });
+            if let Some(response) = response.filter(|text| !text.trim().is_empty()) {
+                progress_list.push(ProgressEntry { progress_pct:100, message:response.to_string(), task_id:Some(id.to_string()) });
             }
         }
     }
@@ -1959,7 +1975,10 @@ if method == "POST" && path == "/api/message" {
         .as_ref()
         .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
         .unwrap_or_default();
-    let display_request = message.clone();
+    let display_request = body_json.as_ref()
+        .and_then(|v| v.get("display_message").and_then(|v| v.as_str()))
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&message).to_string();
     // Parse attachments: images -> data URLs for vision; documents -> append extracted text to message.
     let image_data_urls: Option<Vec<String>> = {
         let arr = body_json
@@ -2439,7 +2458,7 @@ if method == "POST" && path == "/api/message" {
     } else if let Some(ref mode) = composer_mode {
         match mode.as_str() {
             "architect" | "code" => Some(mode.clone()),
-            "ask" => None,
+            "ask" => Some("ask".to_string()),
             other if crate::api::agent_role_system_prompt(other).is_some() => Some(other.to_string()),
             _ => None,
         }
