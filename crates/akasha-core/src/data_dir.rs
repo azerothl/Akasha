@@ -23,7 +23,10 @@ pub fn resolve_bootstrap_data_dir(
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+            // Optional legacy settings must not prevent doctor/recovery from
+            // opening the existing default profile. Explicit overrides and
+            // readable redirect values still receive strict path validation.
+            Err(error) => tracing::warn!(file=name,%error,"Ignoring unreadable optional bootstrap environment file"),
         }
     }
     match legacy {
@@ -57,6 +60,21 @@ pub fn resolve_data_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unreadable_optional_settings_do_not_block_default_profile_or_other_redirects() {
+        let home=tempfile::tempdir().unwrap();let root=home.path().join("akasha");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("connectors.env"),[0xff,0xfe,0x41,0]).unwrap();
+        assert_eq!(resolve_bootstrap_data_dir(None,Some(home.path())).unwrap(),root);
+        let custom=home.path().join("custom");
+        std::fs::write(root.join("akasha.env"),format!("AKASHA_DATA_DIR={}\n",custom.display())).unwrap();
+        assert_eq!(resolve_bootstrap_data_dir(None,Some(home.path())).unwrap(),custom);
+        std::fs::remove_file(root.join("connectors.env")).unwrap();
+        std::fs::create_dir(root.join("connectors.env")).unwrap();
+        assert_eq!(resolve_bootstrap_data_dir(None,Some(home.path())).unwrap(),custom);
+        std::fs::write(root.join("akasha.env"),"AKASHA_DATA_DIR=relative-is-still-invalid\n").unwrap();
+        assert!(resolve_bootstrap_data_dir(None,Some(home.path())).is_err());
+    }
     #[test]
     fn default_and_tilde_use_the_same_home_from_any_launcher() {
         let home = tempfile::tempdir().unwrap();
