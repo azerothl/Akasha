@@ -69,6 +69,8 @@ zeroize = "1"
 urlencoding = "2.1"
 base64 = "0.22"
 pdf-extract = "0.12"
+libloading = "0.8"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 portable-pty = "0.8"
 tempfile = "3"

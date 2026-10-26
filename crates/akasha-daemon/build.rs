@@ -7,6 +7,7 @@ fn git(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 fn main() {
+    println!("cargo:rerun-if-env-changed=AKASHA_OCR_LOCK_SHA256");
     if let Some(path) = git(&["rev-parse", "--git-path", "HEAD"]) {
         println!("cargo:rerun-if-changed={path}");
     }

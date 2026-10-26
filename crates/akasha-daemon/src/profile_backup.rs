@@ -20,7 +20,7 @@ const ROOT_FILES: &[&str] = &[
     "embedded_runtime.json",
     "consumer_settings.json",
 ];
-const ROOT_DIRS: &[&str] = &["notes", "user_rag", "short_term"];
+const ROOT_DIRS: &[&str] = &["notes", "user_rag", "short_term", "document_reports"];
 const MAX_FILES: usize = 10000;
 const MAX_BYTES: u64 = 700 * 1024 * 1024; // Base64 + manifest must fit the 1 GiB envelope.
 static OPERATIONS: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();

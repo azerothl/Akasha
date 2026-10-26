@@ -80,6 +80,7 @@ import { loadRecoveryDraft, useChatDraftRecovery } from "./hooks/useChatDraftRec
 const RelationGraph = deferPanel(() => import("relation-graph/react"));
 const GeoMapView = deferPanel(() => import("./GeoMapView").then(m => ({ default: m.GeoMapView })));
 const SystemHealthPanel = deferPanel(() => import("./SystemHealthPanel").then(m => ({ default: m.SystemHealthPanel })));
+import type { UserRagDocument } from "./components/UserRagPanel";
 const UserRagPanel = deferPanel(() => import("./components/UserRagPanel").then(m => ({ default: m.UserRagPanel })));
 const PluginCatalogPanel = deferPanel(() => import("./components/PluginCatalogPanel").then(m => ({ default: m.PluginCatalogPanel })));
 const ModulesPanel = deferPanel(() => import("./components/ModulesPanel").then(m => ({ default: m.ModulesPanel })));
@@ -2456,7 +2457,7 @@ function App() {
   const [handoffModels, setHandoffModels] = useState<Array<{ provider: string; model: string }>>([]);
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [handoffStatus, setHandoffStatus] = useState<string | null>(null);
-  const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string; index_status?: string; indexed_at?: string | null; index_error?: string | null }>>([]);
+  const [userRagDocuments, setUserRagDocuments] = useState<UserRagDocument[]>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
   const [dataSourcesSubTab, setDataSourcesSubTab] = useState<"rag" | "project_graph">("rag");
@@ -4989,11 +4990,12 @@ function App() {
     setUserRagLoading(true);
     setUserRagError(null);
     try {
-      const data = await invoke<{ documents?: Array<{ id?: string; name?: string; mime_type?: string; added_at?: string }> }>(
+      const data = await invoke<{ documents?: Array<Partial<UserRagDocument>> }>(
         "get_user_rag_documents",
         { port: DAEMON_PORT }
       );
       const docs = (data?.documents ?? []).map((d) => ({
+        ...d,
         id: d.id ?? "",
         name: d.name ?? "",
         mime_type: d.mime_type ?? "",

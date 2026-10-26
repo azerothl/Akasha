@@ -9627,3 +9627,11 @@ input, textarea { caret-color: var(--akasha-accent); }
 .consumer-demo-source { font-family: inherit; }
 .consumer-demo-receipt { display: grid; grid-template-columns: auto 1fr; gap: .5rem 1.5rem; }
 .consumer-demo-receipt dd { margin: 0; overflow-wrap: anywhere; }
+
+.document-workspace > * + * { margin-top: 0.75rem; }
+.document-workspace textarea { display:block; width:100%; min-height:5rem; font:inherit; line-height:1.5; padding:0.75rem; background:var(--akasha-bg-card); color:var(--akasha-text); border:1px solid var(--akasha-border); }
+.document-workspace textarea::placeholder { color:var(--akasha-text-muted); opacity:1; }
+.document-answer { white-space:pre-wrap; line-height:1.65; }
+.document-source-modal { width:min(95vw,70rem); max-height:90vh; overflow:auto; }
+.document-source-image { display:block; width:100%; height:auto; margin-top:1rem; }
+.document-workspace .settings-doc-item { flex-wrap:wrap; gap:0.75rem; }

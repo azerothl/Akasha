@@ -60,6 +60,7 @@ fn init_tracing(data_dir: &Path) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if let Some(code) = akasha_daemon::document_worker::entry() { std::process::exit(code); }
     let data_path = akasha_core::data_dir::resolve_bootstrap_data_dir(std::env::var_os("AKASHA_DATA_DIR").as_deref(), dirs::home_dir().as_deref())?;
     std::fs::create_dir_all(&data_path)?;
     // Embedded model paths and every subsystem must see exactly the same absolute root.

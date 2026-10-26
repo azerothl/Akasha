@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "pdfium": {
+    "version": "158.0.8111.0",
+    "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8111/pdfium-win-x64.tgz",
+    "sha256": "3452d11031050ec65e57f180215b57b9e6d465e3fbedafa8a77ad90885c7d23e"
+  },
+  "tesseract": {
+    "version": "5.5.3",
+    "url": "https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.3.tar.gz",
+    "sha256": "9218e62793116d42a9f6d14cd9348518b27f382096eea3d0f2d1a24616bb5884"
+  },
+  "leptonica": {
+    "version": "1.87.0",
+    "url": "https://github.com/DanBloomberg/leptonica/releases/download/1.87.0/leptonica-1.87.0.tar.gz",
+    "sha256": "c73363397f96eb1295602bf44d708a994ad42046c791bf03ea0505d829bdb6a7"
+  },
+  "tessdata_revision": "87416418657359cb625c412a48b6e1d6d41c29bd",
+  "languages": {
+    "fra": "ced037562e8c80c13122dece28dd477d399af80911a28791a66a63ac1e3445ca",
+    "eng": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+    "osd": "9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff"
+  },
+  "utf8_bridge_sha256": "cb2614f6e1af5e7da0ed438573c4672579a708fd1ba47a90ffeadc7e33ded9da"
+}

@@ -2,7 +2,6 @@
 //! Storage in data_dir/user_rag/, keyword + optional embedding retrieval.
 
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,6 +10,30 @@ use uuid::Uuid;
 
 const MANIFEST_FILENAME: &str = "index.json";
 const DOCUMENTS_DIR: &str = "documents";
+static MANIFEST_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub const INDEX_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceReference {
+    pub document_id: String,
+    pub document_name: String,
+    pub page: Option<u32>,
+    pub char_start: Option<usize>,
+    pub char_end: Option<usize>,
+    pub method: String,
+    pub ocr_confidence: Option<i32>,
+    pub warning: Option<String>,
+    pub source_sha256: String,
+    pub index_version: u32,
+    pub source_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievedPassage {
+    pub content: String,
+    pub reference: SourceReference,
+}
+
 const CHUNKS_SUFFIX: &str = ".chunks.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +42,8 @@ struct IndexedChunk {
     /// Little-endian f32 embedding bytes (optional).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     embedding: Vec<u8>,
+    #[serde(default)]
+    reference: Option<SourceReference>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +61,12 @@ pub struct UserDocMeta {
     pub indexed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_error: Option<String>,
+    #[serde(default)]
+    pub index_version: u32,
+    #[serde(default)]
+    pub pages: u32,
+    #[serde(default)]
+    pub warnings: Vec<serde_json::Value>,
 }
 
 fn default_index_status() -> String {
@@ -49,7 +80,13 @@ struct Manifest {
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
 }
 
@@ -71,15 +108,12 @@ pub type SharedUserRagStore = Arc<tokio::sync::Mutex<UserRagStore>>;
 
 pub struct UserRagStore {
     base_dir: PathBuf,
-    /// In-memory cache of the manifest to avoid repeated disk reads (invalidated on add/delete).
-    manifest_cache: RefCell<Option<Manifest>>,
 }
 
 impl UserRagStore {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             base_dir: data_dir.join("user_rag"),
-            manifest_cache: RefCell::new(None),
         }
     }
 
@@ -98,17 +132,13 @@ impl UserRagStore {
     }
 
     fn load_manifest(&self) -> anyhow::Result<Manifest> {
-        if let Some(ref m) = *self.manifest_cache.borrow() {
-            return Ok(m.clone());
-        }
         let p = self.manifest_path();
         let m = if !p.exists() {
             Manifest::default()
         } else {
             let s = std::fs::read_to_string(&p)?;
-            serde_json::from_str(&s).unwrap_or_default()
+            serde_json::from_str(&s)?
         };
-        *self.manifest_cache.borrow_mut() = Some(m.clone());
         Ok(m)
     }
 
@@ -116,8 +146,11 @@ impl UserRagStore {
         std::fs::create_dir_all(&self.base_dir)?;
         let p = self.manifest_path();
         let s = serde_json::to_string_pretty(manifest)?;
-        std::fs::write(p, s)?;
-        *self.manifest_cache.borrow_mut() = Some(manifest.clone());
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new_in(&self.base_dir)?;
+        file.write_all(s.as_bytes())?;
+        file.as_file().sync_all()?;
+        file.persist(p)?;
         Ok(())
     }
 
@@ -128,6 +161,17 @@ impl UserRagStore {
         name: &str,
         mime_type: &str,
     ) -> anyhow::Result<String> {
+        let _lock = MANIFEST_WRITE
+            .lock()
+            .map_err(|_| anyhow::anyhow!("manifest lock poisoned"))?;
+        anyhow::ensure!(
+            !name.is_empty() && name.encode_utf16().count() <= 180,
+            "invalid document name"
+        );
+        anyhow::ensure!(
+            content_base64.len() <= ((crate::document_worker::MAX_BYTES as usize + 2) / 3) * 4 + 8,
+            "Limite de 25 Mio par fichier dépassée"
+        );
         let id = Uuid::new_v4().to_string();
         let safe_name = sanitize_filename(name);
         let rel_path = format!("{}_{}", id.replace('-', ""), safe_name);
@@ -138,6 +182,21 @@ impl UserRagStore {
             &base64::engine::general_purpose::STANDARD,
             content_base64.trim(),
         )?;
+        anyhow::ensure!(
+            decoded.len() as u64 <= crate::document_worker::MAX_BYTES,
+            "Limite de 25 Mio par fichier dépassée"
+        );
+        if cfg!(feature = "consumer-beta") {
+            let ext = Path::new(name)
+                .extension()
+                .and_then(|v| v.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            anyhow::ensure!(
+                matches!(ext.as_str(), "pdf" | "png" | "jpg" | "jpeg" | "txt" | "md"),
+                "Format accepté : PDF, JPG, PNG, TXT ou Markdown"
+            );
+        }
         std::fs::write(&full_path, &decoded)?;
 
         let meta = UserDocMeta {
@@ -149,6 +208,9 @@ impl UserRagStore {
             index_status: "pending".to_string(),
             indexed_at: None,
             index_error: None,
+            index_version: 0,
+            pages: 0,
+            warnings: Vec::new(),
         };
 
         let mut manifest = self.load_manifest()?;
@@ -171,6 +233,9 @@ impl UserRagStore {
 
     /// Delete a document by id.
     pub fn delete_document(&self, id: &str) -> anyhow::Result<bool> {
+        let _lock = MANIFEST_WRITE
+            .lock()
+            .map_err(|_| anyhow::anyhow!("manifest lock poisoned"))?;
         let mut manifest = self.load_manifest()?;
         let pos = manifest.documents.iter().position(|d| d.id == id);
         let Some(pos) = pos else {
@@ -206,7 +271,7 @@ impl UserRagStore {
             "id": doc.id,
             "index_status": doc.index_status,
             "indexed_at": doc.indexed_at,
-            "index_error": doc.index_error,
+            "index_error": doc.index_error, "index_version":doc.index_version, "reindex_required":doc.index_version < INDEX_VERSION, "pages":doc.pages, "warnings":doc.warnings,
         })))
     }
 
@@ -217,6 +282,9 @@ impl UserRagStore {
         indexed_at: Option<chrono::DateTime<chrono::Utc>>,
         error: Option<&str>,
     ) -> anyhow::Result<()> {
+        let _lock = MANIFEST_WRITE
+            .lock()
+            .map_err(|_| anyhow::anyhow!("manifest lock poisoned"))?;
         let mut manifest = self.load_manifest()?;
         let Some(doc) = manifest.documents.iter_mut().find(|d| d.id == id) else {
             anyhow::bail!("document not found: {id}");
@@ -231,7 +299,11 @@ impl UserRagStore {
         if !is_safe_relative_filename(&meta.path) {
             anyhow::bail!("unsafe document path");
         }
-        let full_path = self.documents_dir().join(&meta.path);
+        let full_path = self.document_path(meta)?;
+        anyhow::ensure!(
+            std::fs::metadata(&full_path)?.len() <= crate::document_worker::MAX_BYTES,
+            "Document exceeds size limit"
+        );
         Ok(std::fs::read(full_path)?)
     }
 
@@ -252,6 +324,19 @@ impl UserRagStore {
         query_embedding: Option<&[f32]>,
         k: usize,
     ) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .retrieve_passages(query, query_embedding, k)?
+            .into_iter()
+            .map(|p| p.content)
+            .collect())
+    }
+
+    pub fn retrieve_passages(
+        &self,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        k: usize,
+    ) -> anyhow::Result<Vec<RetrievedPassage>> {
         let manifest = self.load_manifest()?;
         if manifest.documents.is_empty() || k == 0 {
             return Ok(Vec::new());
@@ -275,7 +360,12 @@ impl UserRagStore {
             if chunk_path.is_file() {
                 if let Ok(s) = std::fs::read_to_string(&chunk_path) {
                     if let Ok(stored) = serde_json::from_str::<Vec<IndexedChunk>>(&s) {
-                        chunks.extend(stored);
+                        chunks.extend(stored.into_iter().map(|mut chunk| {
+                            if chunk.reference.is_none() {
+                                chunk.reference = Some(self.legacy_reference(doc));
+                            }
+                            chunk
+                        }));
                         continue;
                     }
                 }
@@ -301,6 +391,7 @@ impl UserRagStore {
                 chunks.push(IndexedChunk {
                     content: content_trim.chars().take(4000).collect::<String>(),
                     embedding: Vec::new(),
+                    reference: Some(self.legacy_reference(doc)),
                 });
             }
         }
@@ -326,18 +417,29 @@ impl UserRagStore {
                     })
                     .collect();
                 if !scored.is_empty() {
-                    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                    scored
+                        .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                     return Ok(scored
                         .into_iter()
                         .take(k)
-                        .map(|(_, i)| chunks[i].content.clone())
+                        .map(|(_, i)| RetrievedPassage {
+                            content: chunks[i].content.clone(),
+                            reference: chunks[i].reference.clone().expect("reference attached"),
+                        })
                         .collect());
                 }
             }
         }
 
         if terms.is_empty() {
-            return Ok(chunks.into_iter().take(k).map(|c| c.content).collect());
+            return Ok(chunks
+                .into_iter()
+                .take(k)
+                .map(|c| RetrievedPassage {
+                    content: c.content,
+                    reference: c.reference.expect("reference attached"),
+                })
+                .collect());
         }
 
         let mut scored: Vec<(f64, usize)> = chunks
@@ -352,19 +454,145 @@ impl UserRagStore {
             .filter(|(s, _)| *s > 0.0)
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let result: Vec<String> = scored
+        let result: Vec<RetrievedPassage> = scored
             .into_iter()
             .take(k)
-            .map(|(_, i)| chunks[i].content.clone())
+            .map(|(_, i)| RetrievedPassage {
+                content: chunks[i].content.clone(),
+                reference: chunks[i].reference.clone().expect("reference attached"),
+            })
             .collect();
         Ok(result)
     }
 
+    pub fn document_path(&self, meta: &UserDocMeta) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            is_safe_relative_filename(&meta.path),
+            "unsafe document path"
+        );
+        Ok(self.documents_dir().join(&meta.path))
+    }
+    fn legacy_reference(&self, doc: &UserDocMeta) -> SourceReference {
+        SourceReference {
+            document_id: doc.id.clone(),
+            document_name: doc.name.clone(),
+            page: None,
+            char_start: None,
+            char_end: None,
+            method: "legacy_unlocated".into(),
+            ocr_confidence: None,
+            warning: Some("Ancien index sans position : réindexation nécessaire".into()),
+            source_sha256: String::new(),
+            index_version: 0,
+            source_url: format!("/api/user-rag/documents/{}/source", doc.id),
+        }
+    }
+    pub fn passages(&self, id: &str) -> anyhow::Result<Vec<RetrievedPassage>> {
+        let doc = self
+            .get_document(id)?
+            .ok_or_else(|| anyhow::anyhow!("document not found"))?;
+        let path = self.base_dir.join(format!("{id}{CHUNKS_SUFFIX}"));
+        let chunks: Vec<IndexedChunk> = serde_json::from_slice(&std::fs::read(path)?)?;
+        Ok(chunks
+            .into_iter()
+            .map(|chunk| RetrievedPassage {
+                content: chunk.content,
+                reference: chunk
+                    .reference
+                    .unwrap_or_else(|| self.legacy_reference(&doc)),
+            })
+            .collect())
+    }
+    pub fn save_extracted_pages(
+        &self,
+        id: &str,
+        pages: &[crate::document_worker::Page],
+    ) -> anyhow::Result<Vec<SourceReference>> {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let _lock = MANIFEST_WRITE
+            .lock()
+            .map_err(|_| anyhow::anyhow!("manifest lock poisoned"))?;
+        let mut manifest = self.load_manifest()?;
+        let doc = manifest
+            .documents
+            .iter_mut()
+            .find(|d| d.id == id)
+            .ok_or_else(|| anyhow::anyhow!("document deleted during extraction"))?;
+        let digest = format!("{:x}", Sha256::digest(self.read_document_bytes(doc)?));
+        let mut chunks = Vec::new();
+        let mut references = Vec::new();
+        for page in pages {
+            let chars: Vec<char> = page.text.chars().collect();
+            let mut start = 0;
+            while start < chars.len() {
+                let end = (start + 2048).min(chars.len());
+                let reference = SourceReference {
+                    document_id: id.into(),
+                    document_name: doc.name.clone(),
+                    page: Some(page.page),
+                    char_start: Some(start),
+                    char_end: Some(end),
+                    method: page.method.clone(),
+                    ocr_confidence: page.confidence,
+                    warning: page.warning.clone(),
+                    source_sha256: digest.clone(),
+                    index_version: INDEX_VERSION,
+                    source_url: format!("/api/user-rag/documents/{id}/source"),
+                };
+                chunks.push(IndexedChunk {
+                    content: chars[start..end].iter().collect(),
+                    embedding: Vec::new(),
+                    reference: Some(reference.clone()),
+                });
+                references.push(reference);
+                if end == chars.len() {
+                    break;
+                }
+                start = end.saturating_sub(256);
+            }
+        }
+        let mut output = tempfile::NamedTempFile::new_in(&self.base_dir)?;
+        output.write_all(&serde_json::to_vec(&chunks)?)?;
+        output.as_file().sync_all()?;
+        output.persist(self.base_dir.join(format!("{id}{CHUNKS_SUFFIX}")))?;
+        doc.index_version = INDEX_VERSION;
+        doc.pages = pages.len() as u32;
+        doc.warnings = pages
+            .iter()
+            .filter_map(|p| {
+                p.warning
+                    .as_ref()
+                    .map(|w| serde_json::json!({"page":p.page,"message":w}))
+            })
+            .collect();
+        doc.index_status = if references.is_empty() {
+            "failed"
+        } else if doc.warnings.is_empty() {
+            "ready"
+        } else {
+            "partial"
+        }
+        .into();
+        doc.indexed_at = Some(chrono::Utc::now().to_rfc3339());
+        doc.index_error = None;
+        self.save_manifest(&manifest)?;
+        Ok(references)
+    }
+
     /// Persist chunk embeddings for a document (called after async indexing).
-    pub fn save_chunk_embeddings(&self, doc_id: &str, chunks: Vec<(String, Vec<u8>)>) -> anyhow::Result<()> {
+    pub fn save_chunk_embeddings(
+        &self,
+        doc_id: &str,
+        chunks: Vec<(String, Vec<u8>)>,
+    ) -> anyhow::Result<()> {
         let indexed: Vec<IndexedChunk> = chunks
             .into_iter()
-            .map(|(content, embedding)| IndexedChunk { content, embedding })
+            .map(|(content, embedding)| IndexedChunk {
+                content,
+                embedding,
+                reference: None,
+            })
             .collect();
         let path = self.base_dir.join(format!("{doc_id}{CHUNKS_SUFFIX}"));
         std::fs::create_dir_all(&self.base_dir)?;
@@ -379,12 +607,65 @@ mod tests {
     use base64::Engine;
 
     #[test]
+    fn page_references_and_unicode_positions_survive_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = UserRagStore::new(dir.path());
+        let content = "Échéance : 10 novembre. Montant : 42 euros. 🙂".repeat(100);
+        let id = first
+            .add_document(
+                &base64::engine::general_purpose::STANDARD.encode(content.as_bytes()),
+                "été.txt",
+                "text/plain",
+            )
+            .unwrap();
+        let second = UserRagStore::new(dir.path());
+        second
+            .save_extracted_pages(
+                &id,
+                &[crate::document_worker::Page {
+                    page: 1,
+                    text: content.clone(),
+                    method: "utf8_text".into(),
+                    confidence: None,
+                    warning: None,
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            first.get_document(&id).unwrap().unwrap().index_version,
+            super::INDEX_VERSION
+        );
+        let chars: Vec<char> = content.chars().collect();
+        for passage in UserRagStore::new(dir.path()).passages(&id).unwrap() {
+            assert_eq!(passage.reference.document_id, id);
+            assert_eq!(passage.reference.page, Some(1));
+            let start = passage.reference.char_start.unwrap();
+            let end = passage.reference.char_end.unwrap();
+            assert_eq!(
+                passage.content,
+                chars[start..end].iter().collect::<String>()
+            );
+            assert_eq!(passage.reference.source_sha256.len(), 64);
+        }
+    }
+    #[test]
+    fn corrupt_manifest_never_looks_like_an_empty_document_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("user_rag")).unwrap();
+        std::fs::write(dir.path().join("user_rag/index.json"), b"broken").unwrap();
+        assert!(UserRagStore::new(dir.path()).list_documents().is_err());
+    }
+
+    #[test]
     fn user_rag_add_list_delete_retrieve() {
         let dir = tempfile::tempdir().unwrap();
         let store = UserRagStore::new(dir.path());
 
-        let content = base64::engine::general_purpose::STANDARD.encode(b"Hello world from test document");
-        let id = store.add_document(&content, "test.txt", "text/plain").unwrap();
+        let content =
+            base64::engine::general_purpose::STANDARD.encode(b"Hello world from test document");
+        let id = store
+            .add_document(&content, "test.txt", "text/plain")
+            .unwrap();
         assert!(!id.is_empty());
 
         let list = store.list_documents().unwrap();
@@ -411,9 +692,17 @@ mod tests {
         store
             .save_chunk_embeddings(&id, vec![("hello".into(), vec![])])
             .unwrap();
-        assert!(dir.path().join("user_rag").join(format!("{id}.chunks.json")).is_file());
+        assert!(dir
+            .path()
+            .join("user_rag")
+            .join(format!("{id}.chunks.json"))
+            .is_file());
         store.delete_document(&id).unwrap();
-        assert!(!dir.path().join("user_rag").join(format!("{id}.chunks.json")).exists());
+        assert!(!dir
+            .path()
+            .join("user_rag")
+            .join(format!("{id}.chunks.json"))
+            .exists());
     }
 
     #[test]
@@ -422,8 +711,13 @@ mod tests {
         let store = UserRagStore::new(dir.path());
         let content = base64::engine::general_purpose::STANDARD.encode(b"x");
         let id = store.add_document(&content, "a.txt", "text/plain").unwrap();
-        store.set_index_status(&id, "ready", Some(chrono::Utc::now()), None).unwrap();
+        store
+            .set_index_status(&id, "ready", Some(chrono::Utc::now()), None)
+            .unwrap();
         let st = store.document_status(&id).unwrap().unwrap();
-        assert_eq!(st.get("index_status").and_then(|v| v.as_str()), Some("ready"));
+        assert_eq!(
+            st.get("index_status").and_then(|v| v.as_str()),
+            Some("ready")
+        );
     }
 }

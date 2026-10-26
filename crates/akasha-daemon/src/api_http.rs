@@ -65,7 +65,7 @@ pub fn parse_request(
             headers.insert(name, value);
         }
     }
-    const MAX_BODY_PARSE: usize = 10 * 1024 * 1024; // 10 MiB — refuse to allocate larger body
+    const MAX_BODY_PARSE: usize = 36 * 1024 * 1024; // 36 MiB (one 25 MiB base64 document plus metadata) — refuse to allocate larger body
     let will_allocate =
         content_length > 0 && content_length <= MAX_BODY_PARSE && rest.len() >= content_length;
     let body = if will_allocate {
