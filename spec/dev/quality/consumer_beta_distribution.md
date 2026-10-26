@@ -47,7 +47,7 @@ Ces résultats sont distincts d'une qualification des paquets de publication :
   14 refus attendus, aucun faux succès. Les reçus proviennent de processus de
   tests natifs, d'appels HTTP et du worker OCR, pas de déclarations du modèle.
 - Magasin SQLCipher : 37 tests ; routeur/modèles : 127 tests et un ignoré ;
-  daemon particuliers : 756 tests et un ignoré. Les échecs intermédiaires sont
+  daemon particuliers : 757 tests et un ignoré. Les échecs intermédiaires sont
   conservés dans les journaux, puis les contrôles concernés sont rejoués après
   correction.
 - Interface : 87 tests unitaires, compilation et 13 parcours Chromium aux
@@ -121,6 +121,8 @@ de citation de la réponse doivent correspondre exactement aux références rete
 Un scénario sans observation ou sans tous ses contrôles booléens reste non exécuté ;
 la qualification recalcule les trois rapports selon le corpus courant et refuse
 les anciens contrats ou les simples indicateurs de réussite mis en cache.
+L'import des preuves dans le daemon applique le même refus des observations
+partielles, sans reçu, ou dont la version de contrat diffère.
 Les autorisations sont aussi proposées avant une recherche avancée dans l'édition
 développeur. L'ancien formulaire du calendrier demande confirmation et affiche
 l'échec d'enregistrement ; il utilise le transport natif pour lire, créer et supprimer.

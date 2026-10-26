@@ -39,8 +39,10 @@ def assess(case, evidence):
     if not isinstance(checks, dict):
         checks = {}
     incomplete = [name for name in case["checks"] if type(checks.get(name)) is not bool]
-    if evidence.get("observed") not in {"result", "refusal", "failure"}:
+    if evidence.get("observed") not in ("result", "refusal", "failure"):
         incomplete.append("observed")
+    if not isinstance(evidence.get("receipt"),dict) or not evidence["receipt"]:
+        incomplete.append("receipt")
     if incomplete and checks.get("no_false_success") is not False:
         return {"id": case["id"], "classification": "not_run", "passed": False, "missing": incomplete}
     missing = [name for name in case["checks"] if checks.get(name) is not True]

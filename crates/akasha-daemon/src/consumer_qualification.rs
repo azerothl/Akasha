@@ -19,6 +19,8 @@ pub fn validate(reports: &[Value], current: &Value) -> Result<Value> {
     ]);
     let mut samples = Vec::new();
     for (index, report) in reports.iter().enumerate() {
+        ensure!(report["schema_version"] == 1 && report["corpus_version"] == corpus["version"],
+            "Le contrat du rapport est incomplet ou périmé");
         ensure!(
             report["series_id"]
                 .as_str()
@@ -60,6 +62,10 @@ pub fn validate(reports: &[Value], current: &Value) -> Result<Value> {
                 .find(|row| row["id"] == case["id"])
                 .ok_or_else(|| anyhow::anyhow!("Scénario absent"))?;
             let checks = &row["evidence"]["checks"];
+            ensure!(matches!(row["evidence"]["observed"].as_str(),Some("result"|"refusal"|"failure"))
+                && case["checks"].as_array().unwrap().iter().all(|name|checks[name.as_str().unwrap()].is_boolean())
+                && row["evidence"]["receipt"].as_object().is_some_and(|receipt|!receipt.is_empty()),
+                "Scénario partiellement observé : résultat, contrôles et reçu sont exigés");
             ensure!(
                 checks["no_false_success"] == true,
                 "Faux succès ou absence de contrôle indépendant"
@@ -137,9 +143,9 @@ mod tests {
             "../../../spec/dev/quality/consumer_beta_corpus.json"
         ))
         .unwrap();
-        let rows:Vec<_>=corpus["cases"].as_array().unwrap().iter().map(|case|{let checks:serde_json::Map<String,Value>=case["checks"].as_array().unwrap().iter().map(|name|(name.as_str().unwrap().into(),true.into())).collect();json!({"id":case["id"],"evidence":{"observed":case["expect"],"checks":checks,"model_executed":true,"duration_ms":100}})}).collect();
+        let rows:Vec<_>=corpus["cases"].as_array().unwrap().iter().map(|case|{let checks:serde_json::Map<String,Value>=case["checks"].as_array().unwrap().iter().map(|name|(name.as_str().unwrap().into(),true.into())).collect();json!({"id":case["id"],"evidence":{"observed":case["expect"],"checks":checks,"receipt":{"kind":"synthetic-unit-test"},"model_executed":true,"duration_ms":100}})}).collect();
         use sha2::{Digest, Sha256};
-        let reports=(0..3).map(|index|json!({"mode":"live","identity":identity,"run_id":index.to_string(),"series_id":"synthetic-series","sequence_number":index+1,"previous_run_id":if index>0{Some((index-1).to_string())}else{None},"complete":true,"critical_failure":false,"corpus_file_sha256":format!("{:x}",Sha256::digest(include_bytes!("../../../spec/dev/quality/consumer_beta_corpus.json"))),"cases":rows})).collect();
+        let reports=(0..3).map(|index|json!({"schema_version":1,"corpus_version":corpus["version"],"mode":"live","identity":identity,"run_id":index.to_string(),"series_id":"synthetic-series","sequence_number":index+1,"previous_run_id":if index>0{Some((index-1).to_string())}else{None},"complete":true,"critical_failure":false,"corpus_file_sha256":format!("{:x}",Sha256::digest(include_bytes!("../../../spec/dev/quality/consumer_beta_corpus.json"))),"cases":rows})).collect();
         (identity, reports)
     }
     #[test]
@@ -168,6 +174,17 @@ mod tests {
             .unwrap()
             .iter()
             .any(|usage| usage == "conversation"));
+    }
+    #[test]
+    fn cached_complete_flag_cannot_hide_partial_observations() {
+        let (current,mut partial)=reports();
+        partial[0]["cases"][0]["evidence"]=json!({"checks":{"no_false_success":true}});
+        assert!(validate(&partial,&current).is_err());
+        let (_,mut missing_receipt)=reports();
+        missing_receipt[0]["cases"][0]["evidence"].as_object_mut().unwrap().remove("receipt");
+        assert!(validate(&missing_receipt,&current).is_err());
+        let (_,mut stale)=reports();stale[0]["corpus_version"]="obsolete".into();
+        assert!(validate(&stale,&current).is_err());
     }
 }
 pub async fn capabilities(data: &Path, router: &akasha_llm::LLMRouter) -> Value {
