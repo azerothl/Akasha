@@ -53,6 +53,9 @@ test.beforeEach(async ({ page, request }) => {
   await expect(page.getByPlaceholder("Votre message…")).toBeVisible();
 });
 
+// Drain background IPC requests before Playwright disposes its request context.
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: "wait" }); });
+
 for (const scenario of [
   { id: "qa", question: "Quelle est la capitale de la France ?", result: "La capitale de la France est Paris.", error: false },
   { id: "json_repair", question: "Recherche Akasha audit release et ouvre sa source pour donner sa version de test.", result: "9.8.7-AUDIT", error: false },
@@ -62,7 +65,7 @@ for (const scenario of [
     await request.post(`${provider}/control`, { data: { case: scenario.id } });
     const consent = page.locator("details.remote-privacy");
     await consent.locator("summary").click();
-    await consent.getByRole("checkbox").first().check();
+    await consent.getByRole("checkbox", { name: /Modèle distant · openai / }).check();
     await page.getByPlaceholder("Votre message…").fill(scenario.question);
     await page.getByRole("button", { name: "Envoyer le message", exact: true }).click();
     const answer = page.locator(".message.assistant").filter({ hasText: scenario.result }).last();
