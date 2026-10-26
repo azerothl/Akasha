@@ -33,7 +33,12 @@ Chaque appel de modèle enregistré dans le routeur est protégé avant le
 transport. L'identité contient le fournisseur et son URL effective, sans
 identifiants ni paramètres secrets. Une URL sur le réseau local n'est pas un
 modèle exécuté sur cet ordinateur. Seules les adresses de boucle locale sont
-traitées comme locales. Les redirections HTTP sont désactivées.
+traitées comme locales. Ollama peut néanmoins relayer un modèle distant derrière
+une adresse locale : ses métadonnées `remote_host` et `remote_model` sont
+contrôlées avant d’envoyer le contexte, y compris pour un alias renommé.
+Un destinataire cloud exige son propre accord ; des métadonnées absentes
+bloquent l’envoi. Voir le [contrat API Ollama](https://github.com/ollama/ollama/blob/main/docs/openapi.yaml).
+Les redirections HTTP sont désactivées.
 
 Un accord porte sur une tâche racine (partagé avec ses enfants et tentatives)
 ou sur une récurrence. Il précise le destinataire, les catégories de données,
