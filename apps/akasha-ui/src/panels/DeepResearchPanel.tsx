@@ -22,6 +22,7 @@ import { InfoTip } from "../components/Tooltip";
 import { useNotifyOnMessage } from "../notifications/useNotifyOnMessage";
 import { useI18n } from "../useI18n";
 import { researchQuality } from "../researchQuality";
+import { RemoteConsentPicker, type RemoteConsent } from "../components/RemotePrivacy";
 
 const LazyMarkdownContent = lazy(() => import("../MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -208,6 +209,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   const [activeRun, setActiveRun] = useState<ResearchRun | null>(null);
   const [phase, setPhase] = useState<ResearchPhase>("idle");
   const [loading, setLoading] = useState(false);
+  const [remoteConsents, setRemoteConsents] = useState<RemoteConsent[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [apiReady, setApiReady] = useState<boolean | null>(null);
   const [reportTheme, setReportTheme] = useState<ResearchReportTheme>(() => loadResearchReportTheme());
@@ -464,7 +466,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
       const startRes = await fetchEndpoint("/api/research/deep/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: trimmed, max_rounds: maxRounds, max_time_secs: 1200 }),
+        body: JSON.stringify({ topic: trimmed, max_rounds: maxRounds, max_time_secs: 1200, remote_consents: remoteConsents }),
       });
       if (startRes.status === 404) {
         setApiReady(false);
@@ -490,6 +492,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
       upsertRun(current);
       setPhase("idle");
     } finally {
+      setRemoteConsents([]);
       setLoading(false);
       stopPolling();
     }
@@ -780,6 +783,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             </span>
             <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3} disabled={loading} />
           </label>
+          <RemoteConsentPicker fetchEndpoint={fetchEndpoint} value={remoteConsents} onChange={setRemoteConsents} disabled={loading} locale={locale} />
           <div className="research-actions">
             <button
               type="button"

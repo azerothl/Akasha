@@ -233,9 +233,67 @@ pub(crate) fn requires_post_write_read(request: &str) -> bool {
         .is_match(request)
 }
 
+/// Updated only from successful executor receipts, never from model claims.
+#[derive(Default)]
+pub(crate) struct PostMutationRead {
+    paths: std::collections::HashSet<String>,
+    command: bool,
+    pub verified: bool,
+}
+impl PostMutationRead {
+    pub fn observe_success(&mut self, request: &str, tool: &str, args: &[String]) {
+        if crate::studio_tool_contract::is_file_mutation(tool)
+            || matches!(tool,"run_command"|"run_terminal"|"run_in_container"|"rename_path"|"move_tree"|"copy_path") {
+            self.verified=false;
+            let paths=crate::studio_tool_contract::paths_for_tool(tool,args);
+            if paths.is_empty() { self.command=true; }
+            self.paths.extend(paths.iter().map(|path|path_key(path)));
+        } else if tool=="read_file" {
+            let (parts,_,_)=crate::api::parse_read_file_args(args);
+            let path=path_key(&parts.join(" "));
+            self.verified |= self.paths.contains(&path) || (self.command && requested_read_target(request,&path));
+        }
+    }
+}
+fn requested_read_target(request:&str,path:&str)->bool {
+    let pattern=regex::Regex::new(r"(?i)(?:puis|ensuite|then)\s+(?:relis|relire|lis|read|re-read)\b").unwrap();
+    let Some(operation)=pattern.find(request) else{return false;};
+    let tail=path_key(request[operation.end()..].trim_start());
+    if ["-le","-la","-les"].iter().any(|word|tail.starts_with(word)) {return true;}
+    if regex::Regex::new(r"^(?:it|them|le|la|les)\b").unwrap().is_match(&tail){return true;}
+    let name=path.rsplit('/').next().unwrap_or(path);
+    let target=format!(r#"(?:^|[\s"'`])(?:{}|{})(?:$|[\s"'`.,;!?])"#,regex::escape(path),regex::escape(name));
+    regex::Regex::new(&target).unwrap().is_match(&tail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_after_edits_and_replacements_are_verified_without_a_rewrite() {
+        for tool in ["edit_file","search_replace","apply_patch"] {
+            let mut progress=PostMutationRead::default();
+            progress.observe_success("Modify config.txt then read config.txt",tool,&["config.txt".into(),"payload".into()]);
+            assert!(!progress.verified);
+            progress.observe_success("Modify config.txt then read config.txt","read_file",&["config.txt".into()]);
+            assert!(progress.verified,"{tool}");
+            progress.observe_success("Modify config.txt then read config.txt",tool,&["config.txt".into(),"again".into()]);
+            assert!(!progress.verified,"a later mutation requires another read");
+        }
+    }
+    #[test]
+    fn command_readback_requires_a_later_read_of_the_requested_file() {
+        let request="Generate config.txt using a command, then read config.txt.";
+        let mut progress=PostMutationRead::default();
+        progress.observe_success(request,"read_file",&["config.txt".into()]);assert!(!progress.verified);
+        progress.observe_success(request,"run_command",&["generate".into()]);
+        progress.observe_success(request,"read_file",&["unrelated.txt".into()]);assert!(!progress.verified);
+        progress.observe_success(request,"read_file",&["C:/work/config.txt".into()]);assert!(progress.verified);
+        progress.observe_success(request,"read_file",&["unrelated.txt".into()]);assert!(progress.verified);
+        assert!(requested_read_target("Crée le fichier puis relis-le.","config.txt"));
+        assert!(!requested_read_target("Create config.txt then read other.txt","config.txt"));
+    }
 
     #[test]
     fn literal_bytes_and_separate_read_request_are_preserved() {
