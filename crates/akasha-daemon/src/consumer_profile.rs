@@ -4,6 +4,11 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 const POINTER: &str = "consumer_active_profile.json";
+pub fn ensure_vault_scope(data:&Path)->Result<()>{
+    let path=data.join("consumer_profile_scope.json");if path.exists(){let value:Value=serde_json::from_slice(&std::fs::read(path)?)?;Uuid::parse_str(value["id"].as_str().context("Identité du coffre de profil invalide")?)?;return Ok(());}
+    let id=data.file_name().and_then(|name|name.to_str()).and_then(|name|name.strip_prefix("akasha-restored-")).and_then(|name|Uuid::parse_str(name).ok()).unwrap_or_else(Uuid::new_v4);
+    std::fs::create_dir_all(data)?;let mut file=tempfile::NamedTempFile::new_in(data)?;use std::io::Write;file.write_all(&serde_json::to_vec(&json!({"schema_version":1,"id":id}))?)?;file.as_file().sync_all()?;file.persist_noclobber(path)?;Ok(())
+}
 pub fn resolve(root: &Path) -> Result<PathBuf> {
     if !cfg!(feature = "consumer-beta") {
         return Ok(root.into());

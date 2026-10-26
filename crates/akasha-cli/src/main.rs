@@ -793,7 +793,12 @@ fn daemon_doctor_check_status_label(check: &serde_json::Value) -> &'static str {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // Pin one absolute root before any child or embedded backend can read environment files.
-    std::env::set_var("AKASHA_DATA_DIR", akasha_data_dir());
+    let previous=akasha_data_dir();
+    let bootstrap=std::env::var_os("AKASHA_PROFILE_BOOTSTRAP_DIR").map(PathBuf::from).unwrap_or_else(||previous.clone());
+    let selected=akasha_core::data_dir::resolve_active_profile(&bootstrap)?;
+    if selected!=bootstrap {for key in akasha_core::data_dir::restored_environment_keys(&bootstrap,&previous,&std::env::vars().map(|(key,_)|key).collect::<Vec<_>>()){std::env::remove_var(key);}}
+    std::env::set_var("AKASHA_PROFILE_BOOTSTRAP_DIR",&bootstrap);
+    std::env::set_var("AKASHA_DATA_DIR",&selected);
 
     match cli.command {
         Commands::Up => cmd_up(),

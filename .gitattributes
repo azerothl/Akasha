@@ -1,2 +1,3 @@
 # This source is hash-pinned in spec/ocr_runtime.json on every platform.
 /native/ocr/akasha_utf8.cpp text eol=lf
+*.pdf -text

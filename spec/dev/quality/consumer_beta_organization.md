@@ -66,3 +66,12 @@ de qualification matérielle. Les dialogues natifs n’ont pas été pilotés de
 un installateur distribué. La restauration sur un autre compte Windows reste à
 éprouver physiquement ; le test de portabilité qui efface la clé d’origine ne
 remplace pas cet essai. La campagne auprès des dix personnes n’a pas commencé.
+
+La revue de la PR conserve désormais les chemins standards `/v1` et `/api/v1`
+dans les adresses de services sauvegardées. Le lanceur sélectionne le profil
+restauré avant de lire ses fichiers d’environnement ; les identifiants hérités
+du profil précédent sont retirés et les coffres Windows des profils sont isolés.
+Les contrôles ciblés vérifient la sélection du répertoire sans base vide et une
+vraie clé Windows lisible dans son seul profil, avec refus d’une identité corrompue.
+Une reprise de conversion de mémoire peut réutiliser son archive après contrôle
+de la phrase et de l’empreinte de la source antérieure.

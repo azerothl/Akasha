@@ -62,7 +62,8 @@ fn public_endpoint(value: &str) -> Option<String> {
     url.set_username("").ok()?; url.set_password(None).ok()?;
     url.set_query(None); url.set_fragment(None);
     // Preserve the origin only: custom paths may themselves embed credentials.
-    Some(url.origin().ascii_serialization())
+    let origin=url.origin().ascii_serialization();let path=url.path().trim_end_matches('/');
+    Some(if matches!(path,"/v1"|"/api/v1"|"/v1beta"){format!("{origin}{path}")}else{origin})
 }
 fn sanitized_router(path: &Path) -> anyhow::Result<Vec<u8>> {
     let mut config = akasha_llm::config::RoutingConfig::load_from_path(path)
@@ -161,6 +162,7 @@ fn gather(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> anyhow::Resu
 
 fn create(data_dir: &Path, store: &Path, id: Uuid, passphrase: &str) -> anyhow::Result<Receipt> {
     progress(store, id, 5, "Préparation des données à sauvegarder")?;
+    anyhow::ensure!(data_dir.join("memory.db").is_file()||!data_dir.join("memory.db.protection.json").exists(),"Mémoire verrouillée : la base protégée est absente. Utilisez l’archive précédente ; aucune sauvegarde vide ne sera publiée.");
     let root = std::fs::canonicalize(data_dir)?;
     let mut paths = Vec::new();
     for name in ROOT_FILES.iter().chain(ROOT_DIRS) {
@@ -280,6 +282,8 @@ fn validate(archive: &Path, passphrase: &str) -> anyhow::Result<Bundle> {
             "backup_integrity_failed"
         );
     }
+    anyhow::ensure!(bundle.files.iter().any(|file|file.path=="akasha.db"),"La sauvegarde du profil ne contient pas sa base principale");
+    anyhow::ensure!(bundle.memory_key.is_none()||bundle.files.iter().any(|file|file.path=="memory.db"),"Clé de mémoire sans base correspondante dans l’archive");
     Ok(bundle)
 }
 
@@ -375,6 +379,7 @@ fn restore(
 struct Input {
     passphrase: String,
     archive: Option<PathBuf>,
+    recovery_backup_id: Option<Uuid>,
     #[serde(default)]
     confirmed: bool,
 }
@@ -484,6 +489,13 @@ pub fn route(
                 let memory=data_dir.join("memory.db");
                 let state=akasha_store::memory_protection::status(&memory);
                 if state["state"]=="encrypted" {return Ok(serde_json::json!({"response":"La mémoire est déjà chiffrée.","memory":state}));}
+                if let Some(backup)=input.recovery_backup_id {
+                    let archive=data_dir.join("backups").join(format!("{backup}.akbk"));let checked=validate(&archive,&password)?;
+                    let legacy=if memory.with_extension("db.migration-source").exists(){memory.with_extension("db.migration-source")}else{memory.clone()};
+                    anyhow::ensure!(checked.memory_source_sha256==Some(digest(&std::fs::read(&legacy)?)),"Cette archive ne correspond pas à la mémoire avant conversion. Utilisez la restauration isolée.");
+                    cancelled(&store_for_job,id)?;akasha_store::memory_protection::migrate(&memory,true)?;
+                    return Ok(serde_json::json!({"response":"La protection interrompue a repris après vérification de son archive. Redémarrez Akasha pour déverrouiller sa mémoire.","restart_required":true,"memory":akasha_store::memory_protection::status(&memory)}));
+                }
                 if !memory.exists() {
                     drop(akasha_store::memory_protection::open_connection(&memory)?);
                     return Ok(serde_json::json!({"response":"La mémoire chiffrée a été préparée. Redémarrez Akasha pour l’utiliser.","restart_required":true,"memory":akasha_store::memory_protection::status(&memory)}));
@@ -530,6 +542,8 @@ mod tests {
     use super::*;
     #[test]
     fn settings_backup_keeps_routes_but_excludes_provider_credentials() {
+        assert_eq!(public_endpoint("https://api.openai.com/v1?key=secret").as_deref(),Some("https://api.openai.com/v1"));
+        assert_eq!(public_endpoint("https://openrouter.ai/api/v1").as_deref(),Some("https://openrouter.ai/api/v1"));
         let root=tempfile::tempdir().unwrap();let router=root.path().join("llm_router.yaml");
         std::fs::write(&router,r#"{"providers":{"openai":{"api_key_ref":"PRIVATE_TOKEN","base_url":"https://user:PRIVATE_TOKEN@example.test/PRIVATE_TOKEN?key=PRIVATE_TOKEN","organization":"PRIVATE_TOKEN"}},"task_types":{"conversation":{"primary":{"provider":"openai","model":"synthetic","config":{"temperature":0.2,"api_key":"PRIVATE_TOKEN"}}}}}"#).unwrap();
         let bytes=sanitized_router(&router).unwrap();assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_TOKEN"));let config=akasha_llm::config::RoutingConfig::from_yaml_str(std::str::from_utf8(&bytes).unwrap()).unwrap();assert_eq!(config.providers["openai"].base_url.as_deref(),Some("https://example.test"));assert_eq!(config.task_types["conversation"].primary.as_ref().unwrap().config.as_ref().unwrap()["temperature"],0.2);

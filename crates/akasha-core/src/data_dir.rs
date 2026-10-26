@@ -3,6 +3,23 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
 };
+/// Select the restored profile before a launcher reads any profile environment.
+/// The daemon additionally verifies database integrity and its Windows key.
+pub fn resolve_active_profile(root:&Path)->anyhow::Result<PathBuf>{
+    let pointer=root.join("consumer_active_profile.json");if !pointer.exists(){return Ok(root.into());}
+    anyhow::ensure!(std::fs::metadata(&pointer)?.len()<=16384,"Réglage du profil actif invalide");
+    let value:serde_json::Value=serde_json::from_slice(&std::fs::read(&pointer)?)?;anyhow::ensure!(value["schema_version"]==1,"Version du profil actif incompatible");
+    let target=PathBuf::from(value["path"].as_str().ok_or_else(||anyhow::anyhow!("Profil restauré sans chemin"))?);
+    let target=std::fs::canonicalize(&target)?;let parent=std::fs::canonicalize(root.parent().ok_or_else(||anyhow::anyhow!("Parent du profil absent"))?)?;
+    anyhow::ensure!(target.parent()==Some(parent.as_path())&&target.file_name().and_then(|name|name.to_str()).is_some_and(|name|name.strip_prefix("akasha-restored-").is_some_and(|id|uuid::Uuid::parse_str(id).is_ok()))&&target.join("akasha.db").is_file(),"Profil restauré absent ou invalide ; aucune base vide ne sera créée");Ok(target)
+}
+/// Names only: never include credential values in a launch/recovery receipt.
+pub fn restored_environment_keys(root:&Path,previous:&Path,inherited:&[String])->std::collections::HashSet<String>{
+    let mut names=std::collections::HashSet::new();
+    for directory in [root,previous]{for file in ["connectors.env","akasha.env"]{if let Ok(text)=std::fs::read_to_string(directory.join(file)){names.extend(crate::parse_env_file_content(&text).0.into_keys());}}}
+    names.extend(inherited.iter().filter(|key|key.ends_with("_API_KEY")||key.ends_with("_TOKEN")||key.ends_with("_SECRET")||key.ends_with("_PASSWORD")||key.as_str()=="GOOGLE_APPLICATION_CREDENTIALS").cloned());
+    names.retain(|key|!["PATH","Path","SYSTEMROOT","SystemRoot","WINDIR","USERPROFILE","HOME","TEMP","TMP","AKASHA_PORT","AKASHA_BIND","AKASHA_SPEC_DIR","AKASHA_SUPERVISOR","AKASHA_OCR_RUNTIME_DIR","AKASHA_OCR_LOCK_SHA256"].contains(&key.as_str())&&!crate::env_file::ENV_FILE_SKIP_KEYS.contains(&key.as_str()));names
+}
 
 /// Preserve legacy bootstrap settings in the default profile, but follow at most one redirect.
 pub fn resolve_bootstrap_data_dir(
@@ -57,6 +74,10 @@ pub fn resolve_data_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]fn restored_selection_is_resolved_before_environment_and_does_not_import_old_credentials(){
+        let directory=tempfile::tempdir().unwrap();let root=directory.path().join("original");std::fs::create_dir(&root).unwrap();let target=directory.path().join(format!("akasha-restored-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&target).unwrap();std::fs::write(target.join("akasha.db"),b"schema verified by daemon").unwrap();std::fs::write(root.join("consumer_active_profile.json"),serde_json::to_vec(&serde_json::json!({"schema_version":1,"path":target})).unwrap()).unwrap();std::fs::write(root.join("connectors.env"),"OPENAI_API_KEY=PRIVATE_OLD_KEY\nAKASHA_PORT=4001\n").unwrap();
+        assert_eq!(resolve_active_profile(&root).unwrap(),std::fs::canonicalize(&target).unwrap());let removed=restored_environment_keys(&root,&root,&["TAVILY_API_KEY".into(),"PATH".into()]);assert!(removed.contains("OPENAI_API_KEY"));assert!(removed.contains("TAVILY_API_KEY"));assert!(!removed.contains("AKASHA_PORT"));assert!(!removed.contains("PATH"));assert!(!target.join("connectors.env").exists());
+    }
     #[test]
     fn default_and_tilde_use_the_same_home_from_any_launcher() {
         let home = tempfile::tempdir().unwrap();
