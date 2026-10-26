@@ -1,0 +1,111 @@
+{
+  "corpus_version": "1.0.1",
+  "binary_identity": {
+    "binary_sha256": "73bf1a0e4048b6dcc6cde56de068b9215ebdd33392ec170792f4f8bc3635f23e",
+    "configuration_sha256": "a73a8bb6725ac67068de9b6c95f3d89e44632b017245c5d6d0fb4daa7077ace4",
+    "engine": "ollama:0.40.11",
+    "hardware_profile": {
+      "models_for_tier": [
+        "smollm2-360m-instruct-q4",
+        "qwen3.5-0.8b-q4",
+        "qwen3-0.6b-q4"
+      ],
+      "profile": {
+        "cpu_model": null,
+        "cuda_compiled": false,
+        "cuda_runtime": false,
+        "gpu_name": "NVIDIA GeForce RTX 4080 SUPER",
+        "ram_gb": 16,
+        "tier_id": "cpu_only",
+        "vram_mb": 16376
+      },
+      "static_candidates": [
+        {
+          "engine": "llama_cpp_cpu",
+          "model_id": "smollm2-360m-instruct-q4",
+          "n_gpu_layers": 0
+        },
+        {
+          "engine": "llama_cpp_cpu",
+          "model_id": "qwen3.5-0.8b-q4",
+          "n_gpu_layers": 0
+        },
+        {
+          "engine": "llama_cpp_cpu",
+          "model_id": "qwen3-0.6b-q4",
+          "n_gpu_layers": 0
+        }
+      ]
+    },
+    "hardware_sha256": "5bac8a0a3ed2a94c90f3c24cc6b61349ac240f9cf79d92ec3a1155562d9aeda2",
+    "model": "qwen3.5:9b",
+    "model_bytes": 6603314868,
+    "model_digest": "c97eb11d70b1acdc88af01eef566c1fe4f7fbe93eb1afc06871132f293ff425a",
+    "package_version": "0.12.1",
+    "provider": "ollama",
+    "source_dirty": false,
+    "source_revision": "c85e8fd7a35879b16922cde7d2441a970e6765ab"
+  },
+  "controlled": {
+    "passed": 50,
+    "total": 50,
+    "counts": {
+      "correct_result": 36,
+      "expected_refusal": 14
+    },
+    "passed_gate": true
+  },
+  "real_runs": [
+    {
+      "run_id": "a83c956a-ab6a-4ba5-928a-01a05d5526b7",
+      "series_id": "69928d8b-f546-4e75-a447-4ec75a8d3f7d",
+      "sequence_number": 1,
+      "passed": 50,
+      "total": 50,
+      "counts": {
+        "correct_result": 36,
+        "expected_refusal": 14
+      },
+      "passed_gate": true
+    },
+    {
+      "run_id": "5f7d1eea-c702-4d69-9a7b-de28d9fa5281",
+      "series_id": "69928d8b-f546-4e75-a447-4ec75a8d3f7d",
+      "sequence_number": 2,
+      "passed": 50,
+      "total": 50,
+      "counts": {
+        "correct_result": 36,
+        "expected_refusal": 14
+      },
+      "passed_gate": true
+    },
+    {
+      "run_id": "0cedfe83-e25a-48ae-ab14-ffb5187a9768",
+      "series_id": "69928d8b-f546-4e75-a447-4ec75a8d3f7d",
+      "sequence_number": 3,
+      "passed": 50,
+      "total": 50,
+      "counts": {
+        "correct_result": 36,
+        "expected_refusal": 14
+      },
+      "passed_gate": true
+    }
+  ],
+  "three_consecutive_development_runs_passed": true,
+  "public_distribution_qualified": false,
+  "native_controls_cache": "Unchanged native controls reuse a source- and log-hash verified receipt. HTTP workflows and real semantic responses are rerun.",
+  "archive": {
+    "path": "qualification-corpus-1.0.1.zip",
+    "sha256": "56c1915ff56f23bd913e8c0b52bb2fce53d686aa2220e903c7489a100c7cea78",
+    "bytes": 1428133
+  },
+  "remaining_gates": [
+    "merged_validated_prerequisites",
+    "published_candidate_cpu_only_windows",
+    "published_candidate_nvidia_cuda_windows",
+    "restore_other_windows_account",
+    "four_week_ten_person_pilot"
+  ]
+}

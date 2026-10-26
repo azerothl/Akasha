@@ -1,0 +1,72 @@
+{
+  "binary_sha256": "73bf1a0e4048b6dcc6cde56de068b9215ebdd33392ec170792f4f8bc3635f23e",
+  "mode": "live",
+  "model_identity": {
+    "provider": "ollama",
+    "model": "qwen3.5:9b",
+    "digest": "c97eb11d70b1acdc88af01eef566c1fe4f7fbe93eb1afc06871132f293ff425a",
+    "bytes": 6603314868,
+    "engine_version": "0.40.11"
+  },
+  "model_identity_after": {
+    "provider": "ollama",
+    "model": "qwen3.5:9b",
+    "digest": "c97eb11d70b1acdc88af01eef566c1fe4f7fbe93eb1afc06871132f293ff425a",
+    "bytes": 6603314868,
+    "engine_version": "0.40.11"
+  },
+  "playwright_exit_code": 0,
+  "model_receipts": [
+    {
+      "elapsed_ms": 1473,
+      "model_used": "qwen3.5:9b",
+      "provider_used": "ollama",
+      "raw_response": "{\"answer\":\"Le montant à payer est de 42 euros, avec une échéance au 10 novembre 2026 [1], [2], [3], [4].\",\"citations\":[1,2,3,4],\"missing\":[\"Aucune information absente ou incertaine dans les sources fournies.\"]}"
+    }
+  ],
+  "verified": true,
+  "tasks": {
+    "tasks": [
+      {
+        "assigned_agent": "ask",
+        "created_at": "2026-10-26T21:53:24.846226700+00:00",
+        "id": "9707e15d-9863-4ef9-a393-f397e055c1a9",
+        "label": "Quel montant dois-je payer et à quelle date ? Cite les pages.",
+        "parent_task_id": null,
+        "session_id": "day-2026-10-26",
+        "status": "completed",
+        "updated_at": "2026-10-26T21:53:26.409470+00:00"
+      },
+      {
+        "assigned_agent": "document_import",
+        "created_at": "2026-10-26T21:53:21.907965+00:00",
+        "id": "07b317f2-cf0f-47f4-a7bb-7d714cc96493",
+        "label": "Lecture documentaire locale",
+        "parent_task_id": null,
+        "session_id": null,
+        "status": "completed",
+        "updated_at": "2026-10-26T21:53:23.618334300+00:00"
+      },
+      {
+        "assigned_agent": "document_import",
+        "created_at": "2026-10-26T21:53:21.857847400+00:00",
+        "id": "79b05ec0-dc10-429a-80f6-a215486bd5e9",
+        "label": "Lecture documentaire locale",
+        "parent_task_id": null,
+        "session_id": null,
+        "status": "completed",
+        "updated_at": "2026-10-26T21:53:23.501934300+00:00"
+      },
+      {
+        "assigned_agent": "document_import",
+        "created_at": "2026-10-26T21:53:21.817216600+00:00",
+        "id": "e6c14b07-9474-4182-acfd-426ded25c31c",
+        "label": "Lecture documentaire locale",
+        "parent_task_id": null,
+        "session_id": null,
+        "status": "completed",
+        "updated_at": "2026-10-26T21:53:23.835311800+00:00"
+      }
+    ]
+  }
+}

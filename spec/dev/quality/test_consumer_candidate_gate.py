@@ -25,7 +25,7 @@ class CandidateGateTests(unittest.TestCase):
             manifest = {"schema_version":1,"edition":"consumer-beta","source_dirty":True}
             (root / "consumer-package.json").write_text(json.dumps(manifest), encoding="utf-8")
             self.assertFalse(candidate.evaluate([root], root)["ready_for_pilot"])
-            manifest.update(source_dirty=False,variant="cpu",source_revision="synthetic",files=[{"path":"component.exe","sha256":"0"*64}])
+            manifest.update(source_dirty=False,packaging_source_dirty=False,variant="cpu",source_revision="synthetic",files=[{"path":"component.exe","sha256":"0"*64}])
             (root / "component.exe").write_bytes(b"altered synthetic fixture")
             (root / "consumer-package.json").write_text(json.dumps(manifest), encoding="utf-8")
             result = candidate.evaluate([root], root)

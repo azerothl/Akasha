@@ -45,7 +45,7 @@ Ces résultats sont distincts d'une qualification des paquets de publication :
   14 refus attendus, aucun faux succès. Les reçus proviennent de processus de
   tests natifs, d'appels HTTP et du worker OCR, pas de déclarations du modèle.
 - Magasin SQLCipher : 37 tests ; routeur/modèles : 127 tests et un ignoré ;
-  daemon particuliers : 752 tests et un ignoré. Les échecs intermédiaires sont
+  daemon particuliers : 755 tests et un ignoré. Les échecs intermédiaires sont
   conservés dans les journaux, puis les contrôles concernés sont rejoués après
   correction.
 - Interface : 83 tests unitaires, compilation et 11 parcours Chromium aux
@@ -87,6 +87,29 @@ cités ne choisissent pas cette voie. Le reçu de l'ancien faux positif est
 conservé dans `evidence/consumer-beta-20261026/version-false-positive-before-fix.json`.
 Le build réévalue aussi l'état Git après une modification non indexée des
 sources : une ancienne identité propre ne peut pas être réutilisée à tort.
+
+Le corpus 1.0.1 passe à **50/50 en déterministe**, puis **50/50 sur chacun des
+trois passages avec Ollama Qwen3.5 9B**. Les contrôles natifs inchangés réutilisent
+un reçu dont sources et journaux sont vérifiés par empreinte ; les parcours HTTP
+et réponses sémantiques réelles sont rejoués. L'import HTTP des trois preuves
+expose les trois usages pour cette configuration exacte. Un doublon est refusé ;
+modifier le routeur retire immédiatement les recommandations et rend l'import
+précédent périmé. Le [bilan machine](evidence/consumer-beta-20261026/qualification-summary.json)
+et l'[archive des reçus](evidence/consumer-beta-20261026/qualification-corpus-1.0.1.zip)
+identifient explicitement le binaire de développement éprouvé. Ils ne valident
+pas les paquets de publication.
+
+Le lint UI passe sans erreur ; les tests de mise à jour Windows passent avec
+un chemin 8.3, dont le contenu d'origine est vérifié après normalisation. Le
+test vidéo vérifie la réponse seule, séparément des extraits cités : montant
+42 euros et date du 10 novembre. Son reçu lie le modèle réellement appelé,
+son empreinte avant/après, le moteur et le binaire. Le contrôle de diffusion
+refuse une vidéo faite avec un autre binaire ou un autre modèle.
+
+L'assemblage lit une métadonnée intégrée au binaire sans l'exécuter : la variante
+CUDA peut être préparée sur un poste sans pilote NVIDIA. Un fichier ancien,
+ambigu ou dont l'empreinte OCR diffère est refusé. La révision du binaire et
+celle de l'assemblage sont distinctes ; une source modifiée bloque la diffusion.
 
 ## Reproduction
 

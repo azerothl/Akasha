@@ -47,6 +47,7 @@ def evaluate(packages, evidence_root):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             require(manifest["schema_version"] == 1 and manifest["edition"] == "consumer-beta", "Incomplete acceptance evidence")
             require(manifest["source_dirty"] is False, "A clean committed build is required")
+            require(manifest.get("packaging_source_dirty") is False, "A clean committed package assembly is required")
             variant = manifest["variant"]
             require(variant in {"cpu", "nvidia"} and variant not in variants, "Duplicate or invalid package variant")
             variants.add(variant)
@@ -94,6 +95,9 @@ def evaluate(packages, evidence_root):
             require((variant == "cpu" and hardware["gpu"] is None) or (variant == "nvidia" and "nvidia" in hardware["gpu"].lower()), "Use the requested physical hardware")
             video = contained(evidence_root, proof["document_video"]["path"])
             require(video.stat().st_size > 0 and digest(video) == proof["document_video"]["sha256"], "Incomplete acceptance evidence")
+            video_receipt=json.loads(contained(evidence_root,proof["document_video"]["receipt"]).read_text(encoding="utf-8"))
+            require(video_receipt.get("verified") is True and video_receipt.get("binary_sha256")==binary_sha,"Video belongs to another binary or has not been verified")
+            require(video_receipt["model_identity"]==video_receipt["model_identity_after"] and video_receipt["model_identity"]["digest"]==reports[0]["identity"]["model_digest"],"Video model changed or differs from the qualified model")
         except (OSError, ValueError, KeyError, AssertionError, StopIteration, TypeError) as error:
             errors.append(package.name + ": " + (str(error) or "Incomplete acceptance evidence"))
     if variants != {"cpu", "nvidia"}:

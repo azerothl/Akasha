@@ -6,7 +6,7 @@
       "manifest_sha256": null,
       "deterministic_report": "cpu/controlled/report.json",
       "live_reports": ["cpu/live/run-1/report.json", "cpu/live/run-2/report.json", "cpu/live/run-3/report.json"],
-      "document_video": {"path": "cpu/document.webm", "sha256": null},
+      "document_video": {"path": "cpu/document.webm", "sha256": null, "receipt": "cpu/video-receipt.json"},
       "physical_checks": {
         "windows_hardware": {
           "operator": null, "performed_at": null, "windows_build": null,

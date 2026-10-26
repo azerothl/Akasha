@@ -8,6 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Exit code when restart is requested via POST /api/restart. Supervisor treats non-zero as "respawn".
 const RESTART_EXIT_CODE: i32 = 85;
+const BUILD_METADATA:&str=concat!("AKASHA_CONSUMER_INFO_V1:",env!("AKASHA_CONSUMER_BUILD_INFO"),":END_AKASHA_CONSUMER_INFO_V1");
 
 /// Keep the non-blocking log worker alive for the process lifetime.
 static LOG_WORKER_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
@@ -61,7 +62,8 @@ fn init_tracing(data_dir: &Path) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref()==Some("--consumer-build-info") {
-        println!("{}",serde_json::json!({"consumer_beta":cfg!(feature="consumer-beta"),"version":env!("CARGO_PKG_VERSION"),"source_revision":env!("AKASHA_SOURCE_REVISION"),"source_dirty":env!("AKASHA_SOURCE_DIRTY")=="true","ocr_lock_sha256":option_env!("AKASHA_OCR_LOCK_SHA256").unwrap_or(""),"cuda":cfg!(feature="embedded-llama-cpp-cuda")}));
+        let metadata=std::hint::black_box(BUILD_METADATA);
+        println!("{}",metadata.strip_prefix("AKASHA_CONSUMER_INFO_V1:").and_then(|value|value.strip_suffix(":END_AKASHA_CONSUMER_INFO_V1")).expect("build metadata"));
         return Ok(());
     }
     if let Some(code) = akasha_daemon::document_worker::entry() { std::process::exit(code); }

@@ -5,6 +5,7 @@ import {ConsumerOrganizationPanel} from "./ConsumerOrganizationPanel";
 import {ConsumerWatchPanel} from "./ConsumerWatchPanel";
 import {ConsumerBackupPanel} from "./ConsumerBackupPanel";
 import {MemoryEntryActions} from "./MemoryEntryActions";
+import type {PrivacyFetch} from "./RemotePrivacy";
 vi.mock("@tauri-apps/api/core",()=>({invoke:vi.fn(async(command:string)=>command==="choose_profile_backup"?"C:/synthetic/profile.akbk":null)}));
 afterEach(()=>cleanup());
 function response(value:unknown,ok=true){return{ok,status:ok?200:400,text:JSON.stringify(value)};}
@@ -36,5 +37,5 @@ it("keeps a failed restore isolated and never offers activation",async()=>{
  fireEvent.click(screen.getByText("Choisir une sauvegarde Akasha"));await screen.findByText(/Archive choisie/);fireEvent.change(screen.getByLabelText(/Phrase de sauvegarde/),{target:{value:"une phrase synthétique"}});fireEvent.click(screen.getByLabelText(/Je confirme la restauration/));fireEvent.click(screen.getByText("Vérifier la phrase et restaurer"));await screen.findByRole("alert");expect(screen.queryByText("Choisir le profil restauré")).toBeNull();expect(fetch.mock.calls.some(([path])=>path==="/api/backup/activate")).toBe(false);
 });
 it("requires an explicit memory correction and sends the original entry id",async()=>{
- const fetch=vi.fn(async(_path:string,_init?:RequestInit)=>response({updated:true}));const changed=vi.fn();render(<MemoryEntryActions id="stable-id" content="Ancien fait" fetchEndpoint={fetch} onChanged={changed}/>);fireEvent.click(screen.getByText("Corriger ce souvenir"));fireEvent.change(screen.getByLabelText(/Contenu corrigé/),{target:{value:"Fait corrigé"}});expect((screen.getByText("Enregistrer la correction") as HTMLButtonElement).disabled).toBe(true);fireEvent.click(screen.getByLabelText(/Je confirme cette correction/));fireEvent.click(screen.getByText("Enregistrer la correction"));await waitFor(()=>expect(changed).toHaveBeenCalledOnce());expect(fetch.mock.calls[0][0]).toBe("/api/memory/long-term/stable-id");expect(fetch.mock.calls[0][1]?.method).toBe("PUT");
+ const fetch=vi.fn<PrivacyFetch>(async()=>response({updated:true}));const changed=vi.fn();render(<MemoryEntryActions id="stable-id" content="Ancien fait" fetchEndpoint={fetch} onChanged={changed}/>);fireEvent.click(screen.getByText("Corriger ce souvenir"));fireEvent.change(screen.getByLabelText(/Contenu corrigé/),{target:{value:"Fait corrigé"}});expect((screen.getByText("Enregistrer la correction") as HTMLButtonElement).disabled).toBe(true);fireEvent.click(screen.getByLabelText(/Je confirme cette correction/));fireEvent.click(screen.getByText("Enregistrer la correction"));await waitFor(()=>expect(changed).toHaveBeenCalledOnce());expect(fetch.mock.calls[0][0]).toBe("/api/memory/long-term/stable-id");expect(fetch.mock.calls[0][1]?.method).toBe("PUT");
 });

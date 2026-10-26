@@ -1,5 +1,6 @@
 """Record a synthetic document flow against a real local daemon and model."""
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -47,7 +48,7 @@ def main():
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=240)
             (args.output / "browser.log").write_bytes(process.stdout)
             print(process.stdout.decode(errors="replace"))
-            with sqlite3.connect(f"file:{data / 'akasha.db'}?mode=ro", uri=True) as connection:
+            with closing(sqlite3.connect(f"file:{data / 'akasha.db'}?mode=ro", uri=True)) as connection:
                 receipts = [json.loads(row[0]) for row in connection.execute(
                     "SELECT payload_json FROM task_events WHERE event_type='consumer_model_receipt'")]
             after = model_identity()

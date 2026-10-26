@@ -9,6 +9,11 @@ Les PR doivent d’abord être intégrées puis le paquet, les autorisations,
 le chiffrement et la restauration doivent franchir le contrôle de qualification.
 Il n’existe pas encore de configuration matérielle recommandée pour cette bêta.
 
+La [démonstration documentaire filmée](../docs/demos/consumer-beta-document.webm)
+utilise des données fictives et un binaire de développement identifié dans son
+reçu. Elle illustre le parcours ; chaque candidat doit conserver ses propres
+preuves de qualification.
+
 ## Premier lancement
 
 1. Récupérez le paquet complet `akasha-consumer-beta-candidate-cpu` fourni avec
