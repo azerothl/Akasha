@@ -340,6 +340,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python spec/dev/quality/document_workflow_audit.py --controlled --binary target/debug/akasha-daemon.exe --runtime "$env:RUNNER_TEMP/ocr-runtime" --fixtures "$env:RUNNER_TEMP/document-fixtures-éété" --output "$env:RUNNER_TEMP/document-workflow.json"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path apps/akasha-ui/src-tauri/Cargo.toml --lib desktop_transport_tests
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

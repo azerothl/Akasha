@@ -1058,7 +1058,7 @@ async fn daemon_get_text(path: String, port: Option<u16>) -> Result<serde_json::
     Ok(serde_json::json!({ "ok": ok, "status": status, "text": text }))
 }
 
-/// Generic daemon HTTP passthrough (GET/POST) for settings panels.
+/// Generic daemon HTTP passthrough preserving the requested mutation method.
 #[tauri::command]
 async fn daemon_request(
     method: String,
@@ -1078,13 +1078,11 @@ async fn daemon_request(
     let client = http_client();
     let m = method.trim().to_uppercase();
     let timeout = request_timeout_for_path(p, &m);
-    let resp = match m.as_str() {
-        "POST" => {
-            let b = body.unwrap_or_else(|| "{}".to_string());
-            client.post(&url).header("Content-Type", "application/json").body(b)
-        }
-        _ => client.get(&url),
-    }
+    if !matches!(m.as_str(),"GET"|"POST"|"PUT"|"PATCH"|"DELETE") {return Err("unsupported_method".into());}
+    let method=reqwest::Method::from_bytes(m.as_bytes()).map_err(|_|"unsupported_method".to_string())?;
+    let mut request=client.request(method,&url);
+    if m!="GET" {request=request.header("Content-Type","application/json").body(body.unwrap_or_else(||"{}".into()));}
+    let resp = request
     .timeout(timeout)
     .send()
     .await
@@ -1093,6 +1091,28 @@ async fn daemon_request(
     let ok = resp.status().is_success();
     let text = resp.text().await.map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "ok": ok, "status": status, "text": text }))
+}
+
+#[cfg(test)] mod desktop_transport_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+    #[tokio::test]
+    async fn document_delete_reaches_the_daemon_as_delete() {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port=listener.local_addr().unwrap().port();
+        let server=tokio::spawn(async move {
+            let (mut socket,_)=listener.accept().await.unwrap();let mut received=Vec::new();let mut buffer=[0;2048];
+            loop {let count=socket.read(&mut buffer).await.unwrap();if count==0{break;}received.extend_from_slice(&buffer[..count]);if received.windows(4).any(|bytes|bytes==b"\r\n\r\n")&&received.ends_with(b"{}"){break;}}
+            assert!(String::from_utf8_lossy(&received).starts_with("DELETE /api/user-rag/documents/example HTTP/1.1\r\n"));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").await.unwrap();
+        });
+        let result=daemon_request("DELETE".into(),"/api/user-rag/documents/example".into(),Some("{}".into()),Some(port)).await.unwrap();
+        assert_eq!(result["status"],200);server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn unsupported_method_never_silently_becomes_a_read() {
+        assert_eq!(daemon_request("CONNECT".into(),"/api/status".into(),None,Some(1)).await.unwrap_err(),"unsupported_method");
+    }
 }
 
 /// POST /api/migrate/openclaw/preview

@@ -83,3 +83,5 @@ Les reçus datés sont dans `spec/dev/quality/evidence/`. Ce sont des essais de
 développement, pas la qualification du paquet Windows, des matériels CPU/NVIDIA
 ou du corpus complet de 50 cas. Les arrêts forcés, documents difficiles et PDF
 effectivement enregistrés complètent le gate de distribution du lot 6.
+
+Le transport Tauri conserve aussi la méthode DELETE lors de la suppression d’un document. Un test HTTP du véritable pont Rust vérifie la méthode reçue par le serveur, et les méthodes non prises en charge sont refusées. Le banc navigateur remplace ce pont : ce test natif couvre donc une frontière distincte.
