@@ -33,9 +33,18 @@ def load_corpus(path=CORPUS):
 
 
 def assess(case, evidence):
-    if evidence is None:
+    if not isinstance(evidence, dict):
         return {"id": case["id"], "classification": "not_run", "passed": False, "missing": case["checks"]}
     checks = evidence.get("checks", {})
+    if not isinstance(checks, dict):
+        checks = {}
+    incomplete = [name for name in case["checks"] if type(checks.get(name)) is not bool]
+    if evidence.get("observed") not in ("result", "refusal", "failure"):
+        incomplete.append("observed")
+    if not isinstance(evidence.get("receipt"),dict) or not evidence["receipt"]:
+        incomplete.append("receipt")
+    if incomplete and checks.get("no_false_success") is not False:
+        return {"id": case["id"], "classification": "not_run", "passed": False, "missing": incomplete}
     missing = [name for name in case["checks"] if checks.get(name) is not True]
     # A terminal success without effects is a critical error even when the
     # language model says its work is complete. Drivers supply observed facts.
@@ -53,15 +62,16 @@ def report(corpus, evidence):
     supplied = evidence.get("cases", {})
     rows = [assess(case, supplied.get(case["id"])) for case in corpus["cases"]]
     identity = evidence.get("identity", {})
-    identity_ok = all(identity.get(key) for key in ("binary_sha256", "source_revision", "model", "model_digest", "engine", "configuration_sha256"))
+    identity_ok = isinstance(identity, dict) and all(isinstance(identity.get(key),str) and identity[key].strip() for key in ("binary_sha256", "source_revision", "model", "model_digest", "engine", "configuration_sha256"))
     mode = evidence.get("mode")
     passed = sum(row["passed"] for row in rows)
     critical = any(row.get("critical_failures") or row["classification"] == "false_success" for row in rows)
     complete = all(row["classification"] != "not_run" for row in rows)
     qualifies = mode == "live" and identity_ok and complete and not critical and passed / len(rows) >= .95
     return {"schema_version": 1, "corpus_version": corpus["version"],
+            "corpus_file_sha256": hashlib.sha256(CORPUS.read_bytes()).hexdigest(),
             "corpus_sha256": hashlib.sha256(json.dumps(corpus, sort_keys=True).encode()).hexdigest(),
-            "mode": mode, "run_id": evidence.get("run_id"), "identity": identity, "passed": passed, "total": len(rows),
+            "mode": mode, "run_id": evidence.get("run_id"), "series_id":evidence.get("series_id"), "sequence_number":evidence.get("sequence_number"), "previous_run_id":evidence.get("previous_run_id"), "identity": identity, "passed": passed, "total": len(rows),
             "counts": dict(Counter(row["classification"] for row in rows)), "cases": rows,
             "complete": complete, "critical_failure": critical, "qualifies_this_run": qualifies,
             "passed_gate": identity_ok and complete and not critical and (passed == len(rows) if mode == "deterministic" else qualifies)}
@@ -70,9 +80,35 @@ def report(corpus, evidence):
 def qualify(reports):
     if len(reports) != 3:
         return False
+    # Recompute from the current contract and retained case observations. Cached
+    # booleans, stale corpus fingerprints and partial rows are never evidence.
+    corpus = load_corpus()
+    expected_ids = {case["id"] for case in corpus["cases"]}
+    verified = []
+    try:
+        for cached in reports:
+            if cached["schema_version"] != 1 or cached["mode"] != "live":
+                return False
+            rows = cached["cases"]
+            if len(rows) != len(expected_ids) or {row["id"] for row in rows} != expected_ids:
+                return False
+            fresh = report(corpus, {**cached, "cases": {row["id"]: row["evidence"] for row in rows}})
+            if any(cached.get(key) != fresh[key] for key in ("corpus_sha256", "corpus_file_sha256", "corpus_version")):
+                return False
+            if not fresh["qualifies_this_run"]:
+                return False
+            for category in ("conversation", "documents", "organization"):
+                ids = {case["id"] for case in corpus["cases"] if case["category"] == category}
+                if sum(row["passed"] for row in fresh["cases"] if row["id"] in ids) / len(ids) < .95:
+                    return False
+            verified.append(fresh)
+    except (KeyError, TypeError, ValueError):
+        return False
+    reports = verified
     fingerprints = [json.dumps({"identity": r.get("identity"), "corpus_sha256": r.get("corpus_sha256")}, sort_keys=True) for r in reports]
     run_ids = [r.get("run_id") for r in reports]
-    return (all(run_ids) and len(set(run_ids)) == 3 and len(set(fingerprints)) == 1
+    chain=bool(reports[0].get("series_id")) and all(report.get("series_id")==reports[0]["series_id"] and report.get("sequence_number")==index+1 and (index==0 or report.get("previous_run_id")==reports[index-1]["run_id"]) for index,report in enumerate(reports))
+    return (chain and all(run_ids) and len(set(run_ids)) == 3 and len(set(fingerprints)) == 1
             and all(r.get("mode") == "live" and r.get("qualifies_this_run") for r in reports))
 
 

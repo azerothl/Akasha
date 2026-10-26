@@ -1886,8 +1886,7 @@ pub(crate) async fn run_message_via_llm(
         let mut chat_mutation_succeeded = false;
         let mut chat_effect_repairs = 0u32;
         let mut chat_completion_repairs = 0u32;
-        let mut chat_written_paths = std::collections::HashSet::new();
-        let mut chat_read_after_write = false;
+        let mut chat_readback = crate::chat_contract::PostMutationRead::default();
         let mut chat_search_succeeded = false;
         let mut chat_source_fetched = false;
         let mut chat_literal_rejections = 0u32;
@@ -4271,15 +4270,7 @@ pub(crate) async fn run_message_via_llm(
                             run_outcome.successful_tool_calls += 1;
                             if actual_tool == "web_search" { chat_search_succeeded = true; }
                             if actual_tool == "web_fetch" { chat_source_fetched = true; }
-                            if matches!(actual_tool.as_str(), "write_file" | "write_code") {
-                                if let Some((path, _)) = crate::api::parse_write_file_request(tool_args) {
-                                    chat_written_paths.insert(crate::chat_contract::path_key(&path));
-                                }
-                            }
-                            if actual_tool == "read_file" {
-                                let (parts, _, _) = parse_read_file_args(tool_args);
-                                if chat_written_paths.contains(&crate::chat_contract::path_key(&parts.join(" "))) { chat_read_after_write = true; }
-                            }
+                            chat_readback.observe_success(clean_message,&actual_tool,tool_args);
                             if crate::studio_tool_contract::is_file_mutation(&actual_tool)
                                 || matches!(actual_tool.as_str(), "run_command" | "run_terminal" | "run_in_container" | "rename_path" | "move_tree" | "copy_path") {
                                 chat_mutation_succeeded = true;
@@ -5051,7 +5042,7 @@ pub(crate) async fn run_message_via_llm(
             let missing_source = !code_studio_disk_task && crate::chat_contract::requires_source_fetch(clean_message)
                 && chat_search_succeeded && !chat_source_fetched;
             let missing_read = !code_studio_disk_task && chat_mutation_succeeded
-                && crate::chat_contract::requires_post_write_read(clean_message) && !chat_read_after_write;
+                && crate::chat_contract::requires_post_write_read(clean_message) && !chat_readback.verified;
             if missing_source || missing_read {
                 let missing = if missing_source { "Open the actual result source with web_fetch and cite its content; search snippets alone do not fulfill the user's explicit request to open the source." }
                     else { "Read the file you actually wrote with read_file, then answer from its observed contents. The user's requested post-write read is still missing." };
