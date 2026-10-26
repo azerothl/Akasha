@@ -1,7 +1,7 @@
 {
-  "corpus_version": "1.0.1",
+  "corpus_version": "1.0.2",
   "binary_identity": {
-    "binary_sha256": "73bf1a0e4048b6dcc6cde56de068b9215ebdd33392ec170792f4f8bc3635f23e",
+    "binary_sha256": "ce60def53d32b99f6c4cc0c12d8858d4b75a5a5d7f8f52a3a62a40357c4104fb",
     "configuration_sha256": "a73a8bb6725ac67068de9b6c95f3d89e44632b017245c5d6d0fb4daa7077ace4",
     "engine": "ollama:0.40.11",
     "hardware_profile": {
@@ -44,7 +44,7 @@
     "package_version": "0.12.1",
     "provider": "ollama",
     "source_dirty": false,
-    "source_revision": "c85e8fd7a35879b16922cde7d2441a970e6765ab"
+    "source_revision": "bd4912f97ac8a15694319ed0b5306f6b2bb16aac"
   },
   "controlled": {
     "passed": 50,
@@ -57,8 +57,8 @@
   },
   "real_runs": [
     {
-      "run_id": "a83c956a-ab6a-4ba5-928a-01a05d5526b7",
-      "series_id": "69928d8b-f546-4e75-a447-4ec75a8d3f7d",
+      "run_id": "bcd1cd6d-1784-4aa8-9cdf-3c8a71395d0f",
+      "series_id": "9bea923c-f271-47df-badd-0a6a82329e2c",
       "sequence_number": 1,
       "passed": 50,
       "total": 50,
@@ -69,8 +69,8 @@
       "passed_gate": true
     },
     {
-      "run_id": "5f7d1eea-c702-4d69-9a7b-de28d9fa5281",
-      "series_id": "69928d8b-f546-4e75-a447-4ec75a8d3f7d",
+      "run_id": "bd771b04-b173-4d1e-a381-160b594ff5b0",
+      "series_id": "9bea923c-f271-47df-badd-0a6a82329e2c",
       "sequence_number": 2,
       "passed": 50,
       "total": 50,
@@ -81,8 +81,8 @@
       "passed_gate": true
     },
     {
-      "run_id": "0cedfe83-e25a-48ae-ab14-ffb5187a9768",
-      "series_id": "69928d8b-f546-4e75-a447-4ec75a8d3f7d",
+      "run_id": "9e34b4eb-1258-4d63-b7d8-79d70b7141fc",
+      "series_id": "9bea923c-f271-47df-badd-0a6a82329e2c",
       "sequence_number": 3,
       "passed": 50,
       "total": 50,
@@ -96,10 +96,65 @@
   "three_consecutive_development_runs_passed": true,
   "public_distribution_qualified": false,
   "native_controls_cache": "Unchanged native controls reuse a source- and log-hash verified receipt. HTTP workflows and real semantic responses are rerun.",
+  "observed_latency": {
+    "conversation": {
+      "samples": 13,
+      "median_ms": 1188,
+      "maximum_ms": 21844,
+      "measurement": "whole workflow wall-clock time for cases with a real model call; not token throughput"
+    },
+    "documents": {
+      "samples": 6,
+      "median_ms": 1078.5,
+      "maximum_ms": 1359,
+      "measurement": "whole workflow wall-clock time for cases with a real model call; not token throughput"
+    },
+    "organization": {
+      "samples": 3,
+      "median_ms": 1218,
+      "maximum_ms": 1266,
+      "measurement": "whole workflow wall-clock time for cases with a real model call; not token throughput"
+    }
+  },
+  "test_suites": {
+    "daemon": {
+      "passed": 757,
+      "ignored": 1
+    },
+    "store": {
+      "passed": 37
+    },
+    "router": {
+      "passed": 127,
+      "ignored": 1
+    },
+    "ui_unit": {
+      "passed": 87
+    },
+    "browser": {
+      "passed": 13
+    },
+    "native_ui": {
+      "passed": 5
+    },
+    "proof_contract": {
+      "passed": 13
+    }
+  },
+  "initial_secure_storage_failure": {
+    "failed_test": "an_encrypted_snapshot_is_rekeyed_without_the_original_device_identity",
+    "observed_error": "No matching entry found in secure storage",
+    "first_store_suite_passed": 36,
+    "first_store_suite_failed": 1,
+    "full_replay_passed": 37,
+    "targeted_replays_passed": 5,
+    "no_insecure_fallback_added": true,
+    "failure_log": "additional-receipts/initial-windows-key-storage-failure.log"
+  },
   "archive": {
-    "path": "qualification-corpus-1.0.1.zip",
-    "sha256": "56c1915ff56f23bd913e8c0b52bb2fce53d686aa2220e903c7489a100c7cea78",
-    "bytes": 1428133
+    "path": "qualification-corpus-1.0.2.zip",
+    "sha256": "aed76d7c20b8ade62be82c9ec39305d0873027b2ec2a35265b582083196ed33c",
+    "bytes": 1646566
   },
   "remaining_gates": [
     "merged_validated_prerequisites",

@@ -1,5 +1,5 @@
 {
-  "binary_sha256": "73bf1a0e4048b6dcc6cde56de068b9215ebdd33392ec170792f4f8bc3635f23e",
+  "binary_sha256": "ce60def53d32b99f6c4cc0c12d8858d4b75a5a5d7f8f52a3a62a40357c4104fb",
   "mode": "live",
   "model_identity": {
     "provider": "ollama",
@@ -18,7 +18,7 @@
   "playwright_exit_code": 0,
   "model_receipts": [
     {
-      "elapsed_ms": 1473,
+      "elapsed_ms": 1520,
       "model_used": "qwen3.5:9b",
       "provider_used": "ollama",
       "raw_response": "{\"answer\":\"Le montant à payer est de 42 euros, avec une échéance au 10 novembre 2026 [1], [2], [3], [4].\",\"citations\":[1,2,3,4],\"missing\":[\"Aucune information absente ou incertaine dans les sources fournies.\"]}"
@@ -29,43 +29,43 @@
     "tasks": [
       {
         "assigned_agent": "ask",
-        "created_at": "2026-10-26T21:53:24.846226700+00:00",
-        "id": "9707e15d-9863-4ef9-a393-f397e055c1a9",
+        "created_at": "2026-10-26T23:03:14.396977300+00:00",
+        "id": "249b2ccf-06ee-4a97-94c5-57f35ff5422a",
         "label": "Quel montant dois-je payer et à quelle date ? Cite les pages.",
         "parent_task_id": null,
         "session_id": "day-2026-10-26",
         "status": "completed",
-        "updated_at": "2026-10-26T21:53:26.409470+00:00"
+        "updated_at": "2026-10-26T23:03:16.006230900+00:00"
       },
       {
         "assigned_agent": "document_import",
-        "created_at": "2026-10-26T21:53:21.907965+00:00",
-        "id": "07b317f2-cf0f-47f4-a7bb-7d714cc96493",
+        "created_at": "2026-10-26T23:03:11.463334700+00:00",
+        "id": "b9b1d04e-4800-4fd9-9f92-a7c3634eaf9c",
         "label": "Lecture documentaire locale",
         "parent_task_id": null,
         "session_id": null,
         "status": "completed",
-        "updated_at": "2026-10-26T21:53:23.618334300+00:00"
+        "updated_at": "2026-10-26T23:03:13.275391+00:00"
       },
       {
         "assigned_agent": "document_import",
-        "created_at": "2026-10-26T21:53:21.857847400+00:00",
-        "id": "79b05ec0-dc10-429a-80f6-a215486bd5e9",
+        "created_at": "2026-10-26T23:03:11.426753700+00:00",
+        "id": "d3a5cf5a-a284-4640-92a5-e620850601a7",
         "label": "Lecture documentaire locale",
         "parent_task_id": null,
         "session_id": null,
         "status": "completed",
-        "updated_at": "2026-10-26T21:53:23.501934300+00:00"
+        "updated_at": "2026-10-26T23:03:13.092176200+00:00"
       },
       {
         "assigned_agent": "document_import",
-        "created_at": "2026-10-26T21:53:21.817216600+00:00",
-        "id": "e6c14b07-9474-4182-acfd-426ded25c31c",
+        "created_at": "2026-10-26T23:03:11.362093400+00:00",
+        "id": "8c88be93-7da6-46ed-90da-50c3b505fd50",
         "label": "Lecture documentaire locale",
         "parent_task_id": null,
         "session_id": null,
         "status": "completed",
-        "updated_at": "2026-10-26T21:53:23.835311800+00:00"
+        "updated_at": "2026-10-26T23:03:13.438715900+00:00"
       }
     ]
   }

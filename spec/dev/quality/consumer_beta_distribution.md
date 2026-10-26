@@ -39,7 +39,7 @@ l'édition particuliers. Les écritures de l'ancien scheduler ne permettent pas
 de modifier le périmètre immuable d'une veille autorisée. Les rappels et veilles
 passent par les parcours confirmés ; l'édition développeur garde ses API.
 
-## Vérifications de développement du 26 octobre 2026
+## Vérifications de développement des 26 et 27 octobre 2026
 
 Ces résultats sont distincts d'une qualification des paquets de publication :
 
@@ -81,7 +81,7 @@ restantes interdisent une recommandation. Les quatre modèles restent candidats.
 La première série de 50 cas réels a également révélé un contrôle de version
 trop permissif : la réponse contenait le numéro local, mais effectuait une
 recherche et mélangeait la publication distante. Son ancien gate favorable
-est **invalide pour qualifier le candidat**. Le corpus **1.0.1** exige désormais
+est **invalide pour qualifier le candidat**. Le corpus **1.0.1** a introduit
 un reçu de version du moteur et aucun outil réseau. La demande originale
 persistée choisit une réponse native, sans génération ni sélecteur de modèle ;
 elle est conservée dans la session pour les relances. Les documents et exemples
@@ -91,16 +91,33 @@ conservé dans `evidence/consumer-beta-20261026/version-false-positive-before-fi
 Le build réévalue aussi l'état Git après une modification non indexée des
 sources : une ancienne identité propre ne peut pas être réutilisée à tort.
 
-Le corpus 1.0.1 passe à **50/50 en déterministe**, puis **50/50 sur chacun des
+Le corpus 1.0.2 passe à **50/50 en déterministe**, puis **50/50 sur chacun des
 trois passages avec Ollama Qwen3.5 9B**. Les contrôles natifs inchangés réutilisent
 un reçu dont sources et journaux sont vérifiés par empreinte ; les parcours HTTP
 et réponses sémantiques réelles sont rejoués. L'import HTTP des trois preuves
 expose les trois usages pour cette configuration exacte. Un doublon est refusé ;
 modifier le routeur retire immédiatement les recommandations et rend l'import
 précédent périmé. Le [bilan machine](evidence/consumer-beta-20261026/qualification-summary.json)
-et l'[archive des reçus](evidence/consumer-beta-20261026/qualification-corpus-1.0.1.zip)
+et l'[archive des reçus](evidence/consumer-beta-20261026/qualification-corpus-1.0.2.zip)
 identifient explicitement le binaire de développement éprouvé. Ils ne valident
 pas les paquets de publication.
+L'archive 1.0.1 reste historique et ne qualifie plus le contrat courant. Le
+binaire courant correspond à la révision propre `bd4912f` ; la vidéo et l'import
+HTTP des trois preuves utilisent son empreinte. L'import refuse aussi une ligne
+incomplète malgré un indicateur global de réussite.
+
+Sur le poste de développement (16 Go, RTX 4080 SUPER, Ollama 0.40.11 et
+Qwen3.5 9B), les médianes des parcours avec appel réel sont 1 188 ms pour
+la conversation (13 observations, maximum 21 844 ms), 1 078,5 ms pour les
+réponses documentaires (6, maximum 1 359 ms) et 1 218 ms pour les propositions
+d'actions (3, maximum 1 266 ms). Ces mesures portent sur la tâche complète,
+pas sur un débit de génération ni sur un matériel sans GPU.
+
+Un essai de restauration a échoué avec « No matching entry found in secure
+storage » au contrôle de la clé Windows. Le journal 36/37 est conservé dans
+l'archive. La suite complète rejouée passe à 37/37, puis le cas ciblé passe
+cinq fois ; la série finale utilise un nouveau reçu complet à 37/37. Aucun
+contournement du coffre ni stockage en clair n'a été ajouté.
 
 Le lint UI passe sans erreur ; les tests de mise à jour Windows passent avec
 un chemin 8.3, dont le contenu d'origine est vérifié après normalisation. Le
