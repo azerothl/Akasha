@@ -49,7 +49,8 @@ def assess(case, evidence):
     # A terminal success without effects is a critical error even when the
     # language model says its work is complete. Drivers supply observed facts.
     false_success = checks.get("no_false_success") is False
-    critical = [name for name in CRITICAL if name in case["checks"] and checks.get(name) is not True]
+    critical = [name for name in case["checks"]
+                if (name in CRITICAL or case.get("category") == "protection") and checks.get(name) is not True]
     status_ok = evidence.get("observed") == ("refusal" if case["expect"] == "refusal" else "result")
     classification = "false_success" if false_success else (
         "expected_refusal" if not missing and status_ok and case["expect"] == "refusal" else
@@ -107,7 +108,13 @@ def qualify(reports):
     reports = verified
     fingerprints = [json.dumps({"identity": r.get("identity"), "corpus_sha256": r.get("corpus_sha256")}, sort_keys=True) for r in reports]
     run_ids = [r.get("run_id") for r in reports]
-    chain=bool(reports[0].get("series_id")) and all(report.get("series_id")==reports[0]["series_id"] and report.get("sequence_number")==index+1 and (index==0 or report.get("previous_run_id")==reports[index-1]["run_id"]) for index,report in enumerate(reports))
+    start = reports[0].get("sequence_number")
+    chain=(type(start) is int and start > 0 and bool(reports[0].get("series_id"))
+           and all(report.get("series_id")==reports[0]["series_id"]
+                   and type(report.get("sequence_number")) is int
+                   and report["sequence_number"]==start+index
+                   and (index==0 or report.get("previous_run_id")==reports[index-1]["run_id"])
+                   for index,report in enumerate(reports)))
     return (chain and all(run_ids) and len(set(run_ids)) == 3 and len(set(fingerprints)) == 1
             and all(r.get("mode") == "live" and r.get("qualifies_this_run") for r in reports))
 
