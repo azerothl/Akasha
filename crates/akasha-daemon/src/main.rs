@@ -71,6 +71,11 @@ async fn main() -> anyhow::Result<()> {
     let bootstrap_path=if cfg!(feature="consumer-beta"){std::env::var_os("AKASHA_PROFILE_BOOTSTRAP_DIR").map(std::path::PathBuf::from).unwrap_or_else(||previous.clone())}else{previous.clone()};
     let data_path=akasha_daemon::consumer_profile::resolve(&bootstrap_path)?;
     if data_path!=bootstrap_path {for key in akasha_core::data_dir::restored_environment_keys(&bootstrap_path,&previous,&std::env::vars().map(|(key,_)|key).collect::<Vec<_>>()){std::env::remove_var(key);}}
+    if data_path==bootstrap_path {
+    for (key, value) in akasha_core::data_dir::legacy_bootstrap_environment(std::env::var_os("AKASHA_DATA_DIR").as_deref(), dirs::home_dir().as_deref())? {
+        if std::env::var_os(&key).is_none() { std::env::set_var(key, value); }
+    }
+    }
     std::fs::create_dir_all(&data_path)?;
     // Embedded model paths and every subsystem must see exactly the same absolute root.
     std::env::set_var("AKASHA_DATA_DIR", &data_path);

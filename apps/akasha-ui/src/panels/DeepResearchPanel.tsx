@@ -46,6 +46,7 @@ export type ResearchRun = {
   reportMeta?: ReportMeta;
   searchDegraded?: boolean;
   error?: string;
+  pendingPermission?: RemoteConsent & { scope: string };
 };
 
 class ResearchPollingError extends Error {
@@ -72,6 +73,7 @@ type ServerRun = {
   report_meta?: ReportMeta | null;
   search_degraded: boolean;
   error?: string | null;
+  pending_permission?: (RemoteConsent & { scope: string }) | null;
   finished_at?: string | null;
 };
 
@@ -150,6 +152,7 @@ function serverToRun(server: ServerRun, existing?: ResearchRun): ResearchRun {
     reportMeta: server.report_meta ?? undefined,
     searchDegraded: server.search_degraded,
     error: server.error ?? undefined,
+    pendingPermission: server.pending_permission ?? undefined,
   };
 }
 
@@ -210,6 +213,7 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
   const [phase, setPhase] = useState<ResearchPhase>("idle");
   const [loading, setLoading] = useState(false);
   const [remoteConsents, setRemoteConsents] = useState<RemoteConsent[]>([]);
+  const [permissionBusy, setPermissionBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [apiReady, setApiReady] = useState<boolean | null>(null);
   const [reportTheme, setReportTheme] = useState<ResearchReportTheme>(() => loadResearchReportTheme());
@@ -783,6 +787,18 @@ export function DeepResearchPanel({ fetchEndpoint, locale, onDiscussReport }: Pr
             </span>
             <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3} disabled={loading} />
           </label>
+          {loading && activeRun?.pendingPermission ? <section className="remote-privacy" aria-label={en ? "Source permission" : "Autorisation de la source"}>
+            <p role="status">{en ? "Research is waiting for permission to open this source." : "La recherche attend votre accord pour consulter cette source."}</p>
+            <p>{activeRun.pendingPermission.recipient}<br />{en ? "Only the page address is sent. Research resumes automatically after approval." : "Seule l’adresse de la page est transmise. La recherche reprend automatiquement après votre accord."}</p>
+            <button type="button" className="btn-secondary" disabled={permissionBusy} onClick={() => {
+              const permission = activeRun.pendingPermission!;
+              setPermissionBusy(true);
+              void fetchEndpoint("/api/permissions/remote", { method: "POST", body: JSON.stringify({ confirmed: true, scope: permission.scope, consents: [{ recipient: permission.recipient, data_classes: permission.data_classes }] }) })
+                .then(result => { if (!result.ok) throw new Error("permission failed"); })
+                .catch(() => setErr(en ? "Permission could not be saved. Retry or cancel this research." : "L’autorisation n’a pas pu être enregistrée. Réessayez ou annulez cette recherche."))
+                .finally(() => setPermissionBusy(false));
+            }}>{en ? "Allow this source for this research" : "Autoriser cette source pour cette recherche"}</button>
+          </section> : null}
           <RemoteConsentPicker fetchEndpoint={fetchEndpoint} value={remoteConsents} onChange={setRemoteConsents} disabled={loading} locale={locale} />
           <div className="research-actions">
             <button

@@ -100,12 +100,15 @@ async fn tick(
                 .unwrap_or(RruleTz::UTC);
             for planned_for in slots
                 .into_iter()
-                .filter(|pf| {
-                    let d = pf.with_timezone(&tz_for_exceptions).date_naive();
-                    !exceptions.iter().any(|e| e.type_ == ScheduleExceptionType::Skip && e.date == d)
-                })
                 .take(MAX_CATCHUP)
             {
+                let date=planned_for.with_timezone(&tz_for_exceptions).date_naive();
+                if exceptions.iter().any(|e|e.type_==ScheduleExceptionType::Skip && e.date==date) {
+                    if cfg!(feature="consumer-beta") && !schedule.rrule.trim().is_empty() {
+                        schedule_store.record_resume_cursor(schedule.id,planned_for)?;
+                    }
+                    continue;
+                }
                 let dedup_key = format!("{}:{}", schedule.id, planned_for.timestamp());
                 if schedule_store.dedup_key_exists(&dedup_key)? {
                     continue;
@@ -509,6 +512,23 @@ fn due_slots_interval(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature="consumer-beta")]
+    #[tokio::test]
+    async fn skipped_rrule_occurrence_advances_without_losing_the_next_run() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("akasha.db");
+        let store=ScheduleStore::open(&path).unwrap();let now=Utc::now();
+        let start=(now.date_naive()-Duration::days(1)).and_hms_opt(0,0,0).unwrap().and_utc();
+        let id=Uuid::new_v4();
+        store.insert_schedule(&Schedule{id,name:"Synthetic recurring task".into(),description:String::new(),enabled:true,timezone:"UTC".into(),rrule:"FREQ=DAILY".into(),interval_seconds:None,start_at:start,end_at:None,channel_context:None,created_at:now,updated_at:now}).unwrap();
+        store.insert_exception(&akasha_store::ScheduleException{id:Uuid::new_v4(),schedule_id:id,type_:ScheduleExceptionType::Skip,date:start.date_naive(),override_payload:None}).unwrap();
+        let (tx,mut rx)=mpsc::channel(4);let (bus,_)=crate::agents::new_event_bus();
+        tick(&path,&tx,&bus).await.unwrap();assert!(rx.try_recv().is_err());
+        assert_eq!(store.resume_cursor(id).unwrap(),Some(start));
+        tick(&path,&tx,&bus).await.unwrap();assert!(rx.try_recv().is_ok());
+        assert_eq!(store.list_task_runs(Some(id),10).unwrap().len(),1);
+        tick(&path,&tx,&bus).await.unwrap();assert!(rx.try_recv().is_err());
+        assert_eq!(store.list_task_runs(Some(id),10).unwrap().len(),1);
+    }
     use tempfile::NamedTempFile;
     #[cfg(feature="consumer-beta")]
     #[test]fn rrule_resume_cursor_prevents_replaying_the_offline_backlog(){

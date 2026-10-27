@@ -419,10 +419,20 @@ impl UserRagStore {
                 if !scored.is_empty() {
                     scored
                         .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                    return Ok(scored
+                    // Fuse semantic and keyword ranks: a new OCR/text index
+                    // without embeddings must remain eligible beside old indexes.
+                    let mut ranks=vec![0.0_f64;chunks.len()];
+                    for (rank,(_,index)) in scored.iter().enumerate() {ranks[*index]+=1.0/(61+rank) as f64;}
+                    let coverage:Vec<usize>=chunks.iter().map(|chunk|{let text=chunk.content.to_lowercase();terms.iter().filter(|term|text.contains(term.as_str())).count()}).collect();
+                    let mut lexical:Vec<usize>=(0..chunks.len()).filter(|index|coverage[*index]>0).collect();
+                    lexical.sort_by_key(|index| std::cmp::Reverse(coverage[*index]));
+                    for (rank,index) in lexical.into_iter().enumerate() {ranks[index]+=1.0/(61+rank) as f64;}
+                    let mut combined:Vec<usize>=(0..chunks.len()).filter(|index|ranks[*index]>0.0).collect();
+                    combined.sort_by(|a,b|ranks[*b].total_cmp(&ranks[*a]).then(coverage[*b].cmp(&coverage[*a])));
+                    return Ok(combined
                         .into_iter()
                         .take(k)
-                        .map(|(_, i)| RetrievedPassage {
+                        .map(|i| RetrievedPassage {
                             content: chunks[i].content.clone(),
                             reference: chunks[i].reference.clone().expect("reference attached"),
                         })
@@ -605,6 +615,18 @@ impl UserRagStore {
 mod tests {
     use super::UserRagStore;
     use base64::Engine;
+    #[test]
+    fn hybrid_retrieval_keeps_unembedded_document_passages_and_their_references() {
+        let dir=tempfile::tempdir().unwrap();let store=UserRagStore::new(dir.path());
+        let old=store.add_document(&base64::engine::general_purpose::STANDARD.encode(b"A previous document"),"previous.txt","text/plain").unwrap();
+        store.save_chunk_embeddings(&old,vec![("Unrelated previous document".into(),[1.0_f32,0.0].iter().flat_map(|v|v.to_le_bytes()).collect())]).unwrap();
+        let new=store.add_document(&base64::engine::general_purpose::STANDARD.encode(b"Assurance montant quarante-deux euros"),"assurance.TXT","text/plain").unwrap();
+        store.save_extracted_pages(&new,&[crate::document_worker::Page{page:1,text:"Assurance montant quarante-deux euros".into(),method:"utf8_text".into(),confidence:None,warning:None}]).unwrap();
+        let result=store.retrieve_passages("assurance montant",Some(&[1.0,0.0]),1).unwrap();
+        assert_eq!(result.len(),1);assert_eq!(result[0].reference.document_id,new);
+        assert_eq!(result[0].reference.page,Some(1));assert!(result[0].content.contains("quarante-deux"));
+        assert_eq!(store.retrieve_passages("",Some(&[1.0,0.0]),1).unwrap()[0].reference.document_id,old);
+    }
 
     #[test]
     fn oversized_source_is_rejected_before_persistence(){

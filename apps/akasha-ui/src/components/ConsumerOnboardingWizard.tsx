@@ -115,7 +115,17 @@ export function ConsumerOnboardingWizard({ locale, daemonOk, fetchEndpoint, onCo
     try {
       if (candidate.remote) {await request("/api/router/route",{category:"conversation",provider:candidate.provider,model:candidate.model});setReady(true);setBusy(false);}
       else if (candidate.provider === "ollama") { await request("/api/router/route", { category: "conversation", provider: candidate.provider, model: candidate.model }); setReady(true); setBusy(false); }
-      else { setDownloadId(candidate.model); await request("/api/router/embedded/download", { id: candidate.model }); setDownloading(true); }
+      else {
+        const capabilities = await request("/api/capabilities");
+        const installed = (capabilities.models ?? []).some((model: { id: string; gguf_on_disk?: boolean }) => model.id === candidate.model && model.gguf_on_disk === true);
+        if (installed) {
+          await request("/api/router/embedded/runtime", { model_id: candidate.model, engine_mode: "auto" });
+          await request("/api/router/route", { category: "conversation", provider: candidate.provider, model: candidate.model });
+          setReady(true); setBusy(false);
+        } else {
+          setDownloadId(candidate.model); await request("/api/router/embedded/download", { id: candidate.model }); setDownloading(true);
+        }
+      }
     } catch { setBusy(false); setError(en ? "This local model could not be prepared. Retry or select another candidate." : "Ce modèle local n’a pas pu être préparé. Réessayez ou choisissez un autre candidat."); }
   }
   async function connectService(){setBusy(true);setError("");try{const prior=await request("/api/privacy");await request("/api/consumer/services",{provider:serviceProvider,model:serviceModel,api_key:serviceKey,confirmed:serviceConfirmed});setServiceKey("");setServiceConfirmed(false);setProgress("Clé protégée. Redémarrage du moteur ; aucune donnée n’a été autorisée pour l’instant.");await request("/api/restart",{});const deadline=Date.now()+90000;let reloaded=false;while(Date.now()<deadline){await new Promise(resolve=>window.setTimeout(resolve,700));try{const current=await request("/api/privacy");if(current.process_id&&current.process_id!==prior.process_id){reloaded=true;break;}}catch{/* Restart temporarily disconnects the API. */}}if(!reloaded)throw Error("Relancez Akasha depuis son raccourci Windows pour terminer la connexion du service.");setServiceRefresh(value=>value+1);setProgress("Service enregistré. Choisissez son modèle ci-dessus ; l’accord d’envoi restera à confirmer pour la tâche.");}catch(error){setError(String(error));}finally{setBusy(false);}}

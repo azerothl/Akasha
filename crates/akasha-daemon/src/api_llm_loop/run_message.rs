@@ -1905,7 +1905,7 @@ pub(crate) async fn run_message_via_llm(
         let mut chat_mutation_succeeded = false;
         let mut chat_effect_repairs = 0u32;
         let mut chat_completion_repairs = 0u32;
-        let mut chat_readback = crate::chat_contract::PostMutationRead::default();
+        let mut chat_readback = crate::chat_contract::PostMutationRead::new(tool_disk_workspace_root.clone());
         let mut chat_search_succeeded = false;
         let mut chat_source_fetched = false;
         let mut chat_literal_rejections = 0u32;
@@ -2653,7 +2653,8 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
 
-            let mut parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
+            let requested_tool_example = !code_studio_disk_task && crate::chat_contract::requested_tool_example(clean_message, &response);
+            let mut parsed_tool_calls = tools_executor_snapshot.as_ref().filter(|_| !requested_tool_example).and_then(|_| {
                 let calls = if code_studio_disk_task {super::studio_conversation::parse_calls_for_turn(&response,turn_tool_names.as_deref())} else {parse_tool_calls(&response)};
                 if calls.is_empty() {
                     None
@@ -2695,7 +2696,7 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
             let mut no_parseable_tools_this_round = parsed_tool_calls.is_none();
-            let unparsed_chat_call = crate::chat_contract::unparsed_tool_request(&response);
+            let unparsed_chat_call = !requested_tool_example && crate::chat_contract::unparsed_tool_request(&response);
             if !code_studio_disk_task && no_parseable_tools_this_round
                 && (unparsed_chat_call || crate::chat_contract::unfinished_action_promise(clean_message, &response)) {
                 chat_protocol_repairs += 1;
@@ -5384,7 +5385,8 @@ pub(crate) async fn run_message_via_llm(
             let sem = extract_semaphore();
             let data_dir_for_extract = data_dir.to_path_buf();
             let agent_profile_cache_for_extract = agent_profile_cache.clone();
-            tokio::spawn(async move {
+            let extraction_scope = akasha_core::privacy::current();
+            tokio::spawn(akasha_core::privacy::scoped_optional(extraction_scope, async move {
                 let _permit = match sem.try_acquire() {
                     Ok(p) => p,
                     Err(_) => {
@@ -5526,7 +5528,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                         Err(e) => tracing::debug!(error = %e, "Promote task join error"),
                     }
                 }
-            });
+            }));
         }
     }
 
