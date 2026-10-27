@@ -25,6 +25,9 @@ jobs:
           cache: npm
           cache-dependency-path: apps/akasha-ui/package-lock.json
       - uses: ilammy/msvc-dev-cmd@v1
+      - name: Select matching Clang library and headers
+        shell: pwsh
+        run: ./scripts/ci/prepare-llvm-windows.ps1
       - uses: ./.github/actions/cargo-cache
         with:
           variant: consumer-beta-candidate-${{ matrix.cuda }}
