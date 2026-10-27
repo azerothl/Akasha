@@ -38,6 +38,12 @@ python spec/dev/quality/consumer_model_probe.py --binary target/debug/akasha-dae
 Le lanceur utilise un profil temporaire et son propre port, puis arrête
 uniquement son daemon. Il ne modifie pas l'installation personnelle.
 
+Le corpus complet `consumer_beta_run.py --live` conserve aussi
+`identity-checks.json` : empreintes du modèle et du binaire, version du moteur,
+avant et après les parcours conversation, documents, organisation et sondes.
+Une identité indisponible ou modifiée, une sonde échouée ou son signal de
+changement interdit la production du nouveau rapport de qualification.
+
 ## Observations du 26 octobre 2026
 
 - Ollama `qwen3.5:9b`, moteur 0.40.11 : 27 réponses correctes sur 27 dans

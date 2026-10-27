@@ -8,13 +8,16 @@ Missing checks remain failures, never inferred from a model's success statement.
 import argparse,hashlib,json,os,re,subprocess,sys,time,uuid
 from pathlib import Path
 import consumer_beta_eval as gate
+from consumer_live_identity import LiveIdentityGuard
 ROOT=gate.ROOT
-def digest(path):return hashlib.file_digest(Path(path).open('rb'),'sha256').hexdigest()
+def digest(path):
+ with Path(path).open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
 def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--runtime',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--live',action='store_true');p.add_argument('--model',default='qwen3.5:9b');p.add_argument('--repeat',type=int,choices=[1,3],default=1);p.add_argument('--series');p.add_argument('--position',type=int,default=1);p.add_argument('--previous-id');p.add_argument('--skip-native',action='store_true',help='Reuse this output directory’s immutable native test receipt, verified against current sources');a=p.parse_args();a.binary=a.binary.resolve();a.runtime=a.runtime.resolve();a.output=a.output.resolve();a.output.mkdir(parents=True,exist_ok=True)
  os.environ['AKASHA_OCR_LOCK_SHA256']=digest(a.runtime/'runtime-lock.json')
  if a.repeat==3:
   import shutil
+  (a.output/'qualification.json').unlink(missing_ok=True)
   series=str(uuid.uuid4());previous=None;reports=[]
   for position in range(1,4):
    folder=a.output/f'run-{position}';folder.mkdir(exist_ok=True)
@@ -24,13 +27,19 @@ def main():
     shutil.copy2(a.output/'run-1/native.json',folder/'native.json')
     for log in ['akasha-daemon.log','akasha-store.log','akasha-llm.log']:shutil.copy2(a.output/'run-1'/log,folder/log)
     command+=['--skip-native']
-   subprocess.run(command,cwd=ROOT,check=False);report=json.loads((folder/'report.json').read_text(encoding='utf-8'));reports.append(report);previous=report['run_id']
+   if subprocess.run(command,cwd=ROOT,check=False).returncode:return 1
+   report=json.loads((folder/'report.json').read_text(encoding='utf-8'));reports.append(report);previous=report['run_id']
   qualified=gate.qualify(reports);(a.output/'qualification.json').write_text(json.dumps({'qualified':qualified,'reports':[str(Path(f'run-{index}')/'report.json') for index in range(1,4)]},indent=2)+'\n',encoding='utf-8');return 0 if qualified else 1
+ # A failed retry must never leave a previous report looking like new evidence.
+ for name in ['report.json','evidence.json']:(a.output/name).unlink(missing_ok=True)
  corpus=gate.load_corpus();cases={};native={};source=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
  def execute(name,command,timeout=1800):
   print(json.dumps({'phase':name,'state':'running'}),flush=True);started=time.monotonic();process=subprocess.run(command,cwd=ROOT,env={**os.environ,'CARGO_INCREMENTAL':'0','CARGO_TERM_COLOR':'never'},stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=timeout);output=process.stdout.decode('utf-8',errors='replace');log=a.output/(name+'.log');log.write_text(output,encoding='utf-8');record={'exit_code':process.returncode,'duration_ms':round((time.monotonic()-started)*1000),'log':log.name,'log_sha256':digest(log)};print(json.dumps({'phase':name,**record}),flush=True)
   if process.returncode:print(output[-3500:],flush=True)
   return output,record
+ identity_guard=LiveIdentityGuard(a.binary,a.model,a.output/'identity-checks.json') if a.live else None
+ def workflow(name,command):
+  return identity_guard.workflow(name,command,execute) if identity_guard else execute(name,command)
  native_path=a.output/'native.json'
  # Bind cached native controls to every source file they compile. This is not a
  # source-only acceptance test: the cached receipt comes from real test processes.
@@ -54,13 +63,13 @@ def main():
  chat=a.output/'chat.json';execute('chat',[sys.executable,str(Path(__file__).with_name('chat_agent_audit.py')),'--daemon',str(a.binary),'--cases','qa,followup,installed_version,ask_denied,lfm_repair,json_stuck,cancel,delegation_failure,example','--output',str(chat)])
  controlled=json.loads(chat.read_text(encoding='utf-8'));conversations={row['case']:row for row in controlled['results']}
  if a.live:
-  live_chat=a.output/'chat-live.json';execute('chat-live',[sys.executable,str(Path(__file__).with_name('chat_agent_audit.py')),'--daemon',str(a.binary),'--model',a.model,'--cases','qa,followup,installed_version,ask_denied,example','--output',str(live_chat)])
+  live_chat=a.output/'chat-live.json';workflow('chat-live',[sys.executable,str(Path(__file__).with_name('chat_agent_audit.py')),'--daemon',str(a.binary),'--model',a.model,'--cases','qa,followup,installed_version,ask_denied,example','--output',str(live_chat)])
   conversations.update({row['case']:row for row in json.loads(live_chat.read_text(encoding='utf-8'))['results']})
  for case_id,name in {'conversation.fact':'qa','conversation.followup':'followup','conversation.version':'installed_version','conversation.ask_readonly':'ask_denied','conversation.malformed_repair':'lfm_repair','conversation.malformed_exhausted':'json_stuck','conversation.cancel':'cancel','conversation.child_failed':'delegation_failure','conversation.dependency_failed':'delegation_failure','conversation.syntax_example':'example'}.items():
   row=conversations.get(name,{});put(case_id,row.get('passed',False),row,a.live and row.get('model_executed',False),row.get('duration_ms',0))
  worker=a.output/'worker.json';execute('worker',[sys.executable,str(Path(__file__).with_name('document_worker_audit.py')),'--binary',str(a.binary),'--runtime',str(a.runtime),'--output',str(worker)])
  workers=json.loads(worker.read_text(encoding='utf-8'))
- documents=a.output/'documents.json';execute('documents',[sys.executable,str(Path(__file__).with_name('document_workflow_audit.py')),'--binary',str(a.binary),'--runtime',str(a.runtime),'--fixtures',str(a.output/'document-fixtures-éété'),'--model',a.model,'--output',str(documents),*([] if a.live else ['--controlled'])])
+ documents=a.output/'documents.json';workflow('documents',[sys.executable,str(Path(__file__).with_name('document_workflow_audit.py')),'--binary',str(a.binary),'--runtime',str(a.runtime),'--fixtures',str(a.output/'document-fixtures-éété'),'--model',a.model,'--output',str(documents),*([] if a.live else ['--controlled'])])
  docs=json.loads(documents.read_text(encoding='utf-8'));docrows=docs['cases'];imports={row['name']:row for row in docrows if row['kind']=='import'}
  for case_id,name in {'documents.text':'unicode-été.txt','documents.unicode':'unicode-été.txt','documents.pdf_text':'text.pdf','documents.pdf_scan':'scan.pdf','documents.pdf_mixed':'mixed.pdf','documents.photo_jpg':'photo.jpg','documents.photo_png':'photo.png'}.items():
   row=imports.get(name,{});passed=row.get('passed',False)
@@ -73,7 +82,7 @@ def main():
  for case_id,name in [('documents.rotation','rotation.png'),('documents.page_limit','too-many-pages.pdf')]:
   row=next((row for row in workers['cases'] if row['file']==name),{});put(case_id,row.get('passed',False),row)
  native_case('documents.size_limit','akasha-daemon','oversized_source_is_rejected_before_persistence');native_case('documents.batch_limit','akasha-daemon','batch_limit_is_enforced_on_the_server_before_import')
- organization=a.output/'organization.json';execute('organization',[sys.executable,str(Path(__file__).with_name('consumer_organization_audit.py')),'--binary',str(a.binary),'--model',a.model,'--output',str(organization),*([] if a.live else ['--controlled'])]);org=json.loads(organization.read_text(encoding='utf-8'));orgrows={row['id']:row for row in org['cases']}
+ organization=a.output/'organization.json';workflow('organization',[sys.executable,str(Path(__file__).with_name('consumer_organization_audit.py')),'--binary',str(a.binary),'--model',a.model,'--output',str(organization),*([] if a.live else ['--controlled'])]);org=json.loads(organization.read_text(encoding='utf-8'));orgrows={row['id']:row for row in org['cases']}
  for case_id,name in {'organization.note':'restart_uses_restored_profile_without_replaying_reminders','organization.preview':'preview_without_effects','organization.ambiguous':'ambiguous_date_and_missing_confirmation_rejected','organization.confirm':'confirmation_persists_once','organization.timezone':'confirmation_persists_once','organization.duplicate':'confirmation_persists_once','organization.restart':'restart_uses_restored_profile_without_replaying_reminders','protection.wrong_password':'wrong_password','protection.tampered_archive':'tampered_archive','protection.restore':'restore_isolated'}.items():
   row=orgrows.get(name,{});passed=row.get('passed',False)
   if case_id=='organization.timezone':passed=passed and row['actions']['actions'][0]['timezone']=='UTC'
@@ -86,6 +95,6 @@ def main():
  for case_id,name in [('protection.encrypted_memory','actual_windows_device_key_protects_all_memory_tables'),('protection.missing_key','missing_key_cannot_reinitialize_or_truncate_database'),('protection.migration','legacy_migration_preserves_schema_ids_and_embedding_bytes')]:native_case(case_id,'akasha-store',name)
  identity={'binary_sha256':digest(a.binary),'source_revision':source,'model':'controlled-fixture','model_digest':digest(Path(__file__).with_name('chat_agent_audit.py')),'engine':'controlled-http-and-native-assertions','configuration_sha256':source_digest}
  if a.live:
-  probe=a.output/'model-probe.json';execute('model-probe',[sys.executable,str(Path(__file__).with_name('consumer_model_probe.py')),'--binary',str(a.binary),'--model',a.model,'--output',str(probe)]);identity=json.loads(probe.read_text(encoding='utf-8')).get('identity',{})
+  probe=a.output/'model-probe.json';_,receipt=workflow('model-probe',[sys.executable,str(Path(__file__).with_name('consumer_model_probe.py')),'--binary',str(a.binary),'--model',a.model,'--output',str(probe)]);identity=identity_guard.verify_probe(json.loads(probe.read_text(encoding='utf-8')),receipt)
  evidence={'run_id':str(uuid.uuid4()),'series_id':a.series or str(uuid.uuid4()),'sequence_number':a.position,'previous_run_id':a.previous_id,'mode':'live' if a.live else 'deterministic','identity':identity,'cases':cases};(a.output/'evidence.json').write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+'\n',encoding='utf-8');report=gate.report(corpus,evidence);(a.output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8');print(json.dumps({'passed':report['passed'],'total':report['total'],'counts':report['counts'],'passed_gate':report['passed_gate']}),flush=True);return 0 if report['passed_gate'] else 1
 if __name__=='__main__':raise SystemExit(main())
