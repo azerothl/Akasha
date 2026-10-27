@@ -1,6 +1,6 @@
 import { defineConfig } from "@playwright/test";
 export default defineConfig({
-  testDir: "./e2e", testMatch: ["privacy.ui.ts", "consumer-onboarding.ui.ts", "consumer-documents.ui.ts", "consumer-flows.ui.ts", "consumer-home.ui.ts", "consumer-runtime-port.ui.ts", "consumer-calendar.ui.ts"], workers: 1,
+  testDir: "./e2e", testMatch: ["privacy.ui.ts", "consumer-onboarding.ui.ts", "consumer-documents.ui.ts", "consumer-flows.ui.ts", "consumer-home.ui.ts", "consumer-runtime-port.ui.ts", "consumer-calendar.ui.ts", "runtime-update.spec.ts"], workers: 1,
   use: { baseURL: "http://127.0.0.1:4197" },
   // These fixtures replace Tauri IPC, so build that transport explicitly even
   // after the ordinary HTTP E2E suite. Never proxy to an installed user daemon.
