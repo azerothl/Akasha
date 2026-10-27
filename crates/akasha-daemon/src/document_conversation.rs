@@ -122,6 +122,14 @@ fn parse_response(text: &str, request: &DocumentRequest) -> Result<Value> {
                 .is_some_and(|n| n > 0 && n <= request.passages.len() as u64)),
         "La réponse cite un passage inexistant"
     );
+    let declared: std::collections::BTreeSet<u64> = citations.iter().map(|n| n.as_u64().unwrap()).collect();
+    let pattern = regex::Regex::new(r"\[([0-9]+)\]").expect("citation marker pattern");
+    let mut mentioned = std::collections::BTreeSet::new();
+    for marker in pattern.captures_iter(answer["answer"].as_str().unwrap()) {
+        mentioned.insert(marker[1].parse::<u64>().context("Numéro de citation invalide")?);
+    }
+    ensure!(!mentioned.is_empty() && mentioned == declared,
+        "Les numéros cités dans la synthèse ne correspondent pas aux références fournies");
     ensure!(
         answer["missing"]
             .as_array()
@@ -228,5 +236,15 @@ mod tests {
             &request
         )
         .is_err());
+    }
+    #[test]
+    fn answer_markers_must_match_declared_and_available_references() {
+        let request: DocumentRequest = serde_json::from_value(json!({"passages":[{"content":"42 euros","reference":{"document_id":"one","document_name":"test.txt","page":1,"char_start":0,"char_end":8,"method":"utf8_text","ocr_confidence":null,"warning":null,"source_sha256":"synthetic","index_version":2,"source_url":"/source"}}],"warnings":[],"omitted_passages":0})).unwrap();
+        for text in [r#"{"answer":"42 euros [99]","citations":[1],"missing":[]}"#,
+                     r#"{"answer":"42 euros","citations":[1],"missing":[]}"#,
+                     r#"{"answer":"42 euros [1] [2]","citations":[1],"missing":[]}"#] {
+            assert!(parse_response(text,&request).is_err());
+        }
+        assert!(parse_response(r#"{"answer":"42 euros [1]","citations":[1],"missing":[]}"#,&request).is_ok());
     }
 }
