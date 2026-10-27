@@ -29,3 +29,6 @@ optional = true
 default = []
 web = ["reqwest", "urlencoding"]
 container = ["tempfile"]
+
+[dev-dependencies]
+tempfile = "3"

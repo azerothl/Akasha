@@ -76,6 +76,11 @@ fn studio_paths_equivalent(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
     }
+    #[cfg(windows)]
+    if let (Some(a), Some(b)) = (
+        crate::studio::canonicalize_path_for_studio_check(a),
+        crate::studio::canonicalize_path_for_studio_check(b),
+    ) { return a == b; }
     a.to_string_lossy().replace('\\', "/") == b.to_string_lossy().replace('\\', "/")
 }
 
@@ -669,7 +674,7 @@ pub(crate) fn validate_record_paths(
 ) -> Result<(), String> {
     let project_root = crate::studio::resolve_studio_project_dir(data_dir, &record.project_id)?;
     let recorded_root = PathBuf::from(&record.project_root);
-    if recorded_root != project_root {
+    if !studio_paths_equivalent(&recorded_root, &project_root) {
         return Err("invalid_project_root".to_string());
     }
     if !crate::studio::is_strictly_under_studio_root(&recorded_root, &project_root) {
@@ -874,8 +879,8 @@ mod tests {
     }
 
     fn path_in_git_output(path: &Path, git_text: &str) -> bool {
-        let normalized = path.to_string_lossy().replace('\\', "/");
-        git_text.replace('\\', "/").contains(normalized.as_str())
+        git_text.lines().filter_map(|line| line.strip_prefix("worktree "))
+            .any(|listed| studio_paths_equivalent(path, Path::new(listed)))
     }
 
     fn git(dir: &Path, args: &[&str]) {
@@ -947,7 +952,7 @@ mod tests {
 
         assert!(second.worktree_path.exists());
         let worktree_list =
-            git_output(&project_root, &["worktree", "list"]).expect("worktree list");
+            git_output(&project_root, &["worktree", "list", "--porcelain"]).expect("worktree list");
         assert!(path_in_git_output(&second.worktree_path, &worktree_list));
 
         cleanup_worktree_paths(data_dir.path(), &second).expect("cleanup");
