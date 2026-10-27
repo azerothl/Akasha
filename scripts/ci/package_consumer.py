@@ -9,9 +9,12 @@ def binary_build_info(path):
     # from its build host. The same embedded record powers the diagnostic flag.
     with path.open('rb') as file:
         with mmap.mmap(file.fileno(),0,access=mmap.ACCESS_READ) as data:
-            records=re.findall(rb'AKASHA_CONSUMER_INFO_V1:(\{[^\x00]{1,2048}?\}):END_AKASHA_CONSUMER_INFO_V1',data)
+            records=set(re.findall(rb'AKASHA_CONSUMER_INFO_V1:(\{[^\x00]{1,2048}?\}):END_AKASHA_CONSUMER_INFO_V1',data))
+    # Optimized code can retain identical copies in different codegen units.
+    # Only byte-identical records describe one identity; differing records
+    # remain ambiguous and must never be chosen by position in the executable.
     if len(records)!=1:raise ValueError('Missing or ambiguous consumer build metadata')
-    return json.loads(records[0])
+    return json.loads(next(iter(records)))
 def package(daemon,ui,runtime,output,cuda=False,embeddings=None):
     packaging_revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
     packaging_dirty=bool(subprocess.check_output(['git','status','--porcelain'],cwd=ROOT,text=True).strip())

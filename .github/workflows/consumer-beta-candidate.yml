@@ -28,10 +28,23 @@ jobs:
       - name: Select matching Clang library and headers
         shell: pwsh
         run: ./scripts/ci/prepare-llvm-windows.ps1
-      - uses: ./.github/actions/cargo-cache
+      - name: Locate NVIDIA native cache
+        if: matrix.cuda
+        id: native_cache
+        shell: pwsh
+        run: '"directory=$(Join-Path $env:LOCALAPPDATA llcb)" >> $env:GITHUB_OUTPUT'
+      - uses: Swatinem/rust-cache@v2
         with:
-          variant: consumer-beta-candidate-${{ matrix.cuda }}
-          cuda: ${{ matrix.cuda }}
+          prefix-key: akasha-consumer-deps-v1
+          shared-key: windows-2022-${{ matrix.cuda }}-${{ hashFiles('vendor/**', 'scripts/build-windows-daemon-cuda.ps1', 'scripts/ci/prepare-llvm-windows.ps1', '.github/workflows/consumer-beta-candidate.yml') }}
+          env-vars: CARGO CC CFLAGS CXX CMAKE RUST CUDA LIBCLANG CLANG BINDGEN LLAMA NVCC ESAXX
+          workspaces: |
+            . -> target
+            apps/akasha-ui/src-tauri -> target
+          cache-directories: ${{ steps.native_cache.outputs.directory }}
+          cache-on-failure: true
+          cache-bin: false
+          cache-workspace-crates: false
       - name: Prepare SQLCipher and pinned OCR
         shell: pwsh
         run: |
@@ -76,5 +89,18 @@ jobs:
           path: candidate-*/
           if-no-files-found: error
           retention-days: 30
+      - name: Retain compiler inputs for packaging diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: consumer-beta-build-inputs-cuda-${{ matrix.cuda }}
+          path: |
+            target/release/akasha-daemon.exe
+            target/x86_64-pc-windows-msvc/release/akasha-daemon.exe
+            apps/akasha-ui/src-tauri/target/release/akasha-ui.exe
+            ${{ runner.temp }}/ocr-runtime/
+            ${{ runner.temp }}/embedding-model/
+          if-no-files-found: warn
+          retention-days: 7
       # This workflow only creates candidates. It never tags, publishes or emails.
       # Hosted Windows runners do not prove real NVIDIA inference or second-account restore.
