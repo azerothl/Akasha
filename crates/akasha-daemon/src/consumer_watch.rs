@@ -2,6 +2,7 @@
 //! Only the subject/site query and explicitly chosen URLs leave the application.
 use akasha_store::{Schedule, ScheduleStore, Task, TaskRun, TaskRunStatus, TaskStatus, TaskStore};
 use akasha_tools::ToolsPolicy;
+use akasha_vault::Vault;
 use anyhow::{ensure, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,9 @@ fn configured_policy(data: &Path) -> Result<ToolsPolicy> {
     } else {
         ToolsPolicy::default()
     };
+    if let Ok(vault) = akasha_vault::open_vault(data) {
+        policy.apply_vault_api_keys(|key| vault.get(key).ok());
+    }
     policy.web_search_enabled = true;
     Ok(policy)
 }
@@ -427,6 +431,20 @@ pub fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn search_credentials_are_loaded_from_the_selected_profile_vault() {
+        let data=tempfile::tempdir().unwrap();let other=tempfile::tempdir().unwrap();
+        for directory in [data.path(),other.path()] {
+            std::fs::write(directory.join("consumer_profile_scope.json"),json!({"id":Uuid::new_v4()}).to_string()).unwrap();
+        }
+        let vault=akasha_vault::open_vault(data.path()).unwrap();
+        vault.set("brave_api_key","synthetic-watch-credential").unwrap();
+        let configured=configured_policy(data.path()).unwrap();
+        assert_eq!(configured.brave_api_key.as_deref(),Some("synthetic-watch-credential"));
+        assert!(akasha_tools::privacy_search_services(&configured).iter().any(|service|service["name"]=="brave"));
+        assert!(configured_policy(other.path()).unwrap().brave_api_key.is_none());
+        vault.delete("brave_api_key").unwrap();
+    }
     #[tokio::test]
     async fn watch_needs_its_own_grant_tracks_seen_items_and_stops_after_revocation() {
         use std::io::{Read, Write};
