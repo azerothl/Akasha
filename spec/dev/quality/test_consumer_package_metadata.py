@@ -21,7 +21,15 @@ class BuildMetadataTests(unittest.TestCase):
             with patch.object(package.subprocess,"check_output",side_effect=AssertionError("Target must never execute")):
                 self.assertTrue(package.binary_build_info(path)["cuda"])
 
-    def test_missing_or_duplicate_records_cannot_identify_a_candidate(self):
+    def test_identical_release_records_have_one_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"optimized-image.exe"
+            record=self.record()
+            path.write_bytes(b"section1\0"+record+b"\0section2\0"+record+b"\0section3\0"+record)
+            with patch.object(package.subprocess,"check_output",side_effect=AssertionError("Target must never execute")):
+                self.assertEqual(package.binary_build_info(path),json.loads(record.split(b':',1)[1].removesuffix(b':END_AKASHA_CONSUMER_INFO_V1')))
+
+    def test_missing_or_conflicting_records_cannot_identify_a_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/"image"
             for data in [b"older image",self.record()+b"\0"+self.record(False)]:
@@ -31,6 +39,12 @@ class BuildMetadataTests(unittest.TestCase):
     def test_truncated_metadata_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/"image";path.write_bytes(self.record()[:-4])
+            with self.assertRaises(ValueError):package.binary_build_info(path)
+
+    def test_same_variant_with_different_source_identity_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"image"
+            path.write_bytes(self.record()+b"\0"+self.record().replace(b'synthetic',b'another-source'))
             with self.assertRaises(ValueError):package.binary_build_info(path)
 
 if __name__=="__main__":unittest.main()
