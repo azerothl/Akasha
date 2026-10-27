@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-const DAEMON_PORT = 3876;
+import { DAEMON_PORT } from "../daemonPort";
 
 type MetricsEntry = {
   total_requests?: number;

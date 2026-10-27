@@ -5,14 +5,13 @@ import json
 import os
 import urllib.request,urllib.error
 from pathlib import Path
-import shutil
 import sqlite3
 import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from datetime import datetime,timedelta,timezone
-from real_agentic_eval import ROOT,Daemon,clean_env,choose_port,http_json,write_router
+from real_agentic_eval import ROOT,Daemon,clean_env,choose_port,http_json,write_router,copy_daemon_with_runtime
 from document_workflow_audit import wait
 
 def rejected(base,path,body):
@@ -40,7 +39,7 @@ def main():
                 self.send_response(200);self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
         fixture=ThreadingHTTPServer(("127.0.0.1",0),Provider);threading.Thread(target=fixture.serve_forever,daemon=True).start()
     with tempfile.TemporaryDirectory(prefix="akasha-organization-audit-") as temporary:
-        root=Path(temporary);data=root/"profile";data.mkdir();binary=root/args.binary.name;shutil.copy2(args.binary,binary)
+        root=Path(temporary);data=root/"profile";data.mkdir();binary=copy_daemon_with_runtime(args.binary,root/args.binary.name)
         write_router(data,args.model,"http://127.0.0.1:11434","auto");consent=[]
         if fixture:
             endpoint=f"http://127.0.0.1:{fixture.server_port}/v1";route={"primary":{"provider":"openai","model":"organization-fixture"},"fallback":[]}

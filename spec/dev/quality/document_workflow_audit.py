@@ -8,13 +8,12 @@ import base64
 import hashlib
 import json
 import os
-import shutil
 from pathlib import Path
 import tempfile
 import time
 import threading
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-from real_agentic_eval import ROOT,Daemon,clean_env,choose_port,http_json,write_router
+from real_agentic_eval import ROOT,Daemon,clean_env,choose_port,http_json,write_router,copy_daemon_with_runtime
 
 
 def wait(base,identifier):
@@ -53,7 +52,7 @@ def main():
     results=[]
     with tempfile.TemporaryDirectory(prefix="akasha-documents-audit-") as temporary:
         root=Path(temporary);data=root/"profile";data.mkdir()
-        binary=root/args.binary.name;shutil.copy2(args.binary,binary)
+        binary=copy_daemon_with_runtime(args.binary,root/args.binary.name)
         write_router(data,args.model,"http://127.0.0.1:11434","auto")
         consent=[]
         if fixture:

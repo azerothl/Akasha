@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { InfoTip } from "./Tooltip";
 import { CalDavAccountsPanel } from "./CalDavAccountsPanel";
 
-const DAEMON_PORT = 3876;
+import { DAEMON_PORT } from "../daemonPort";
 
 type ConnectorRow = {
   id: string;

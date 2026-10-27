@@ -5,11 +5,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import sqlite3
 import subprocess
 import tempfile
-from real_agentic_eval import ROOT, Daemon, clean_env, choose_port, write_router, http_json
+from real_agentic_eval import ROOT, Daemon, clean_env, choose_port, write_router, http_json, copy_daemon_with_runtime
 
 def model_identity():
     base = "http://127.0.0.1:11434"
@@ -28,8 +27,7 @@ def main():
         root = Path(temporary)
         data = root / "profile"
         data.mkdir()
-        binary = root / args.binary.name
-        shutil.copy2(args.binary, binary)
+        binary = copy_daemon_with_runtime(args.binary, root / args.binary.name)
         write_router(data, "qwen3.5:9b", "http://127.0.0.1:11434", "auto")
         env = {key: value for key, value in clean_env().items() if not key.startswith("AKASHA_")}
         env.update(AKASHA_DATA_DIR=str(data), AKASHA_SPEC_DIR=str(ROOT / "spec"),

@@ -8,7 +8,7 @@ import time
 import shutil
 import os
 from pathlib import Path
-from real_agentic_eval import ROOT, Daemon, clean_env, choose_port, http_json, write_router
+from real_agentic_eval import ROOT, Daemon, clean_env, choose_port, http_json, write_router, copy_daemon_with_runtime
 
 
 def main():
@@ -40,7 +40,7 @@ def main():
         port = choose_port()
         env.update(AKASHA_DATA_DIR=str(data), AKASHA_PORT=str(port), AKASHA_SPEC_DIR=str(ROOT / "spec"))
         if args.provider=="akasha_core":env.update(AKASHA_EMBEDDED_BACKEND="llama_cpp",AKASHA_EMBEDDED_N_GPU_LAYERS="0")
-        binary=root/args.binary.name;shutil.copy2(args.binary,binary)
+        binary=copy_daemon_with_runtime(args.binary,root/args.binary.name)
         daemon = Daemon(binary, env, root / "daemon.log", f"http://127.0.0.1:{port}")
         try:
             daemon.start()
