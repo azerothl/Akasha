@@ -276,19 +276,27 @@ impl PostMutationRead {
         } else if tool=="read_file" {
             let (parts,_,_)=crate::api::parse_read_file_args(args);
             let path=self.resolved_key(&parts.join(" "));
-            self.verified |= self.paths.contains(&path) || (self.command && requested_read_target(request,&path));
+            let requested = requested_read_target(request);
+            let matches = match requested {
+                Some(target) => self.resolved_key(&target)==path,
+                None => self.paths.contains(&path) || self.command,
+            };
+            self.verified |= (!self.paths.is_empty() || self.command) && matches;
         }
     }
 }
-fn requested_read_target(request:&str,path:&str)->bool {
+fn requested_read_target(request:&str)->Option<String> {
     let pattern=regex::Regex::new(r"(?i)(?:puis|ensuite|then)\s+(?:relis|relire|lis|read|re-read)\b").unwrap();
-    let Some(operation)=pattern.find(request) else{return false;};
-    let tail=path_key(request[operation.end()..].trim_start());
-    if ["-le","-la","-les"].iter().any(|word|tail.starts_with(word)) {return true;}
-    if regex::Regex::new(r"^(?:it|them|le|la|les)\b").unwrap().is_match(&tail){return true;}
-    let name=path.rsplit('/').next().unwrap_or(path);
-    let target=format!(r#"(?:^|[\s"'`])(?:{}|{})(?:$|[\s"'`.,;!?])"#,regex::escape(path),regex::escape(name));
-    regex::Regex::new(&target).unwrap().is_match(&tail)
+    let operation=pattern.find(request)?;
+    let mut tail=request[operation.end()..].trim_start();
+    for prefix in ["the file ","le fichier ","file ","fichier "] {
+        if tail.to_lowercase().starts_with(prefix) {tail=&tail[prefix.len()..];break;}
+    }
+    if regex::Regex::new(r"(?i)^(?:-le|-la|-les|it|them|le|la|les|son contenu)(?:\b|$)").unwrap().is_match(tail) {return None;}
+    let target=if let Some(quote)=tail.chars().next().filter(|ch|matches!(ch,'\"'|'\''|'`')) {
+        tail[quote.len_utf8()..].split_once(quote)?.0
+    } else {tail.split_whitespace().next()?.trim_end_matches(['.',',',';','!','?'])};
+    (!target.is_empty()).then(||target.to_string())
 }
 
 #[cfg(test)]
@@ -332,14 +340,29 @@ mod tests {
     #[test]
     fn command_readback_requires_a_later_read_of_the_requested_file() {
         let request="Generate config.txt using a command, then read config.txt.";
-        let mut progress=PostMutationRead::default();
+        let root=tempfile::tempdir().unwrap();
+        let mut progress=PostMutationRead::new(root.path().into());
         progress.observe_success(request,"read_file",&["config.txt".into()]);assert!(!progress.verified);
         progress.observe_success(request,"run_command",&["generate".into()]);
         progress.observe_success(request,"read_file",&["unrelated.txt".into()]);assert!(!progress.verified);
-        progress.observe_success(request,"read_file",&["C:/work/config.txt".into()]);assert!(progress.verified);
+        progress.observe_success(request,"read_file",&[root.path().join("config.txt").display().to_string()]);assert!(progress.verified);
         progress.observe_success(request,"read_file",&["unrelated.txt".into()]);assert!(progress.verified);
-        assert!(requested_read_target("Crée le fichier puis relis-le.","config.txt"));
-        assert!(!requested_read_target("Create config.txt then read other.txt","config.txt"));
+        assert!(requested_read_target("Crée le fichier puis relis-le.").is_none());
+        assert_eq!(requested_read_target("Create config.txt then read other.txt").as_deref(),Some("other.txt"));
+    }
+
+    #[test]
+    fn a_following_read_verifies_its_explicit_target_after_a_different_mutation() {
+        let root=tempfile::tempdir().unwrap();
+        for request in ["Delete obsolete.txt then read config.txt", "Modifie obsolete.txt puis lis le fichier `folder/config.txt`."] {
+            let target=requested_read_target(request).unwrap();
+            let mut progress=PostMutationRead::new(root.path().into());
+            let tool=if request.starts_with("Delete") {"delete_file"} else {"write_file"};
+            progress.observe_success(request,tool,&["obsolete.txt".into(),"fixture".into()]);
+            progress.observe_success(request,"read_file",&["obsolete.txt".into()]);assert!(!progress.verified);
+            progress.observe_success(request,"read_file",&[root.path().join("other/config.txt").display().to_string()]);assert!(!progress.verified);
+            progress.observe_success(request,"read_file",&[root.path().join(target).display().to_string()]);assert!(progress.verified);
+        }
     }
 
     #[test]
