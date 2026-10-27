@@ -127,6 +127,7 @@ fn strip_thinking_tokens(text: &str) -> &str {
 /// These correspond to the non-None branches of `agent_role_system_prompt` (api.rs).
 /// "conversation" is intentionally absent — it is the default fallback.
 const SPECIALIST_AGENTS: &[&str] = &[
+    "ask",
     "search",
     "code",
     "creative",
@@ -511,8 +512,9 @@ User message:\n{}",
         // Determine a preliminary assigned_agent (without LLM) so the task can be persisted
         // immediately, satisfying the "ack < 500ms" guarantee and ensuring the task_id is in
         // the DB before any events that carry it as a correlation ID.
+        let routing_message = display_request.unwrap_or(message);
         let execution_mode = if forward_to_orchestrator {
-            Some(classify_execution_mode(message))
+            Some(classify_execution_mode(routing_message))
         } else {
             None
         };
@@ -570,7 +572,7 @@ User message:\n{}",
         let mut message_for_llm = message.to_string();
         // Keep the unmodified user message for routing decisions (recall detection, selector).
         // The studio prefix is only for the LLM prompt — routing logic should see the original intent.
-        let original_user_message = message.to_string();
+        let original_user_message = routing_message.to_string();
         if let Some(ref b) = studio_evolution_branch {
             message_for_llm = format!(
                 "[Studio: apply changes on git branch `{b}`]\n\n{}",
@@ -636,7 +638,7 @@ User message:\n{}",
                 SelectorRunResult {
                     decision: Some(SelectorDecision {
                         answer_mode: SelectorAnswerMode::Direct,
-                        task_type: Some("code_generation".to_string()),
+                        task_type: Some(if agent == "ask" { "conversation" } else { "code_generation" }.to_string()),
                         target_agent: Some(agent),
                         reason: Some("studio_assigned_agent".to_string()),
                     }),
@@ -646,7 +648,7 @@ User message:\n{}",
                 }
             } else if forward_to_orchestrator && !skip_selector_for_recall {
                 emit_timeline_for_task(&agent_clone.bus, Some(store_path), task_id, "selector_start", None);
-                agent_clone.system_selector_decision(message).await
+                agent_clone.system_selector_decision(original_message).await
             } else {
                 SelectorRunResult {
                     decision: None,

@@ -9,6 +9,14 @@ pub(crate) fn restricted_role(role: &str) -> bool {
 }
 
 pub(crate) fn allows_tool(role: &str, tool: &str) -> bool {
+    if role.eq_ignore_ascii_case("ask") {
+        return matches!(tool, "read_file" | "read_code" | "list_dir" | "list_tools"
+            | "modules_list" | "search_files" | "grep_content" | "web_search" | "web_fetch"
+            | "memory_search" | "calendar_query" | "notes_list" | "notes_read" | "notes_search"
+            | "file_diff" | "diff_unified" | "dir_compare" | "git_status" | "git_diff"
+            | "git_log" | "git_rev_parse" | "ask_user" | "list_skills" | "read_skill"
+            | "budget_status" | "workspace_graph_search" | "user_rag_search");
+    }
     if role.eq_ignore_ascii_case("studio_project_manager") {
         // The project manager owns Kanban state and dispatch, not application
         // implementation. Keep verification commands available while forcing
@@ -77,6 +85,9 @@ pub(crate) fn check(
     root: Option<&Path>,
 ) -> Result<(), String> {
     if !allows_tool(role, tool) {
+        if role == "ask" {
+            return Err(format!("Le mode Question autorise uniquement la lecture. L’action `{tool}` nécessite le mode Code ou Agent."));
+        }
         return Err(format!("[{tool}] forbidden for `{role}` by the Studio role policy; use the tools assigned to this role."));
     }
     if role.eq_ignore_ascii_case("studio_planner") && tool == "write_file" {

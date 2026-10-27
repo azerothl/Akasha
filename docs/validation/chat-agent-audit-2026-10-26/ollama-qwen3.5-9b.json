@@ -1,0 +1,1059 @@
+{
+  "created_at": "2026-10-26T08:18:44.331261+00:00",
+  "model": "qwen3.5:9b",
+  "source": "ed028348fe02f6b7a24fd3bb33f7f477e1c41a40",
+  "dirty": true,
+  "source_sha256": {
+    "apps/akasha-ui/e2e/chat-agent-results.spec.ts": "2d62e550a386ba570719cc574578496d818e8f1fa3ffb2589df58d02cd765414",
+    "apps/akasha-ui/playwright.chat-audit.config.ts": "5cb9288b5976b2ae543e7156a39b0934b7a4741e98fd3faa51d1ade5cde1aebc",
+    "apps/akasha-ui/src-tauri/src/lib.rs": "b26de42772feb08cb2e4b29b4a0591509aeae7973c79a694801e4010a3cee6d8",
+    "apps/akasha-ui/src/App.tsx": "eee6d680367e5cc9d139d5da11ae578c731d22738007627bb9a2800b32e30ba5",
+    "crates/akasha-daemon/src/agents/main_agent.rs": "6f37a9a141bb8f7512adcc4ec486002b3b192d46445f626bf1842c670467d9e2",
+    "crates/akasha-daemon/src/agents/orchestrator.rs": "32557848f791f731f69999273d844d35e0147bfd764d17805296393e8b9d87c8",
+    "crates/akasha-daemon/src/api.rs": "a5f1a209c9eafdb1b3525f254c2d10c052d9326f419e2590631fc0df4e5c5247",
+    "crates/akasha-daemon/src/api_llm_loop/run_message.rs": "76edcc094af023ff053c45f7b05b64c72790b5ec522897bedd90a0d6c23fbbb5",
+    "crates/akasha-daemon/src/api_llm_loop/studio_conversation.rs": "a4d72866ce507e94b83340d75106eb25c7816f66404973b1fdfa4ff7dcb9bede",
+    "crates/akasha-daemon/src/api_routes_tasks.rs": "98bfbcc6d80fac993006eecbc9d897faf444965ddd8589ff3a8661d8cf10c89a",
+    "crates/akasha-daemon/src/api_tool_parser.rs": "9e9aaf82f44f8f0953a339b48fd1c71715fe4043024eeb3ac374d98c27b27bef",
+    "crates/akasha-daemon/src/chat_contract.rs": "fcfca765ca9db1c2e71130219bdcf363ac053efa6ec19b2d8e54fd7bfad744e0",
+    "crates/akasha-daemon/src/lib.rs": "cf35f6f5a67e984e04c3666cf9107674cd09b66474e028ebd2fdc8fadc60f684",
+    "crates/akasha-daemon/src/studio_role_policy.rs": "936b2953675dcadec3c3f018e7b4679cfac4aa79d11d355f1c067b8d87d6c1e1",
+    "crates/akasha-daemon/src/studio_tool_contract.rs": "6ed597e9f7b7a72346e03a29875ef52e3ff7bbd0639eb9e330e9ca524d831670",
+    "crates/akasha-store/src/tasks.rs": "c2645734dfdcf6be179588f8a4c29102290004491ff6beb16caa784bbd2e70e1",
+    "spec/dev/quality/chat_agent_audit.py": "1d95f1209efcb3b7e1571a0ae99c5171449cc858c94811e8ca76ffe042286eea"
+  },
+  "daemon_sha256": "3accc3fa3186095fe09a7c5b916d25e092a19d04414bf8b5dd62d2e92ff787be",
+  "results": [
+    {
+      "case": "qa",
+      "task_id": "77189d53-e898-4902-9018-12a2d6be41d4",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 1047,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "requested_model_used": true,
+        "direct_ask": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "La capitale de la France est Paris.",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "77189d53-e898-4902-9018-12a2d6be41d4",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "La capitale de la France est Paris.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "La capitale de la France est Paris."
+            },
+            {
+              "progress_pct": 100,
+              "message": "La capitale de la France est Paris."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 9,
+            "cost_usd": 0.0,
+            "latency_ms": 563,
+            "model_used": "qwen3.5:9b",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "La capitale de la France est Paris.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 0,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 506,
+            "status": "completed",
+            "task_id": "77189d53-e898-4902-9018-12a2d6be41d4"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 13,
+        "llm_route_planned": 1,
+        "memory_recall_started": 1,
+        "memory_recall_finished": 1,
+        "llm_call_started": 1,
+        "assistant_text_delta": 8,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "qwen3.5:9b",
+      "tool_trace": []
+    },
+    {
+      "case": "followup",
+      "task_id": "c4bf9263-899b-4daa-8779-a4b1347ce424",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 500,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "requested_model_used": true,
+        "direct_ask": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "La capitale de la France est Paris.",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "c4bf9263-899b-4daa-8779-a4b1347ce424",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "La capitale de la France est Paris.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "La capitale de la France est Paris."
+            },
+            {
+              "progress_pct": 100,
+              "message": "La capitale de la France est Paris."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 9,
+            "cost_usd": 0.0,
+            "latency_ms": 205,
+            "model_used": "qwen3.5:9b",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "La capitale de la France est Paris.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 0,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 624,
+            "status": "completed",
+            "task_id": "c4bf9263-899b-4daa-8779-a4b1347ce424"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 13,
+        "llm_route_planned": 1,
+        "memory_recall_started": 1,
+        "memory_recall_finished": 1,
+        "llm_call_started": 1,
+        "assistant_text_delta": 8,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "qwen3.5:9b",
+      "tool_trace": []
+    },
+    {
+      "case": "installed_version",
+      "task_id": "8db54ff1-f968-42ee-af63-080bd82c4ca7",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 2328,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "requested_model_used": true,
+        "direct_ask": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "La version actuelle du démon Akasha est 0.12.1.",
+      "tools": [
+        {
+          "tool": "web_search",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "8db54ff1-f968-42ee-af63-080bd82c4ca7",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "La version actuelle du démon Akasha est 0.12.1.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 1,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "La version actuelle du démon Akasha est 0.12.1."
+            },
+            {
+              "progress_pct": 100,
+              "message": "La version actuelle du démon Akasha est 0.12.1."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 17,
+            "cost_usd": 0.0,
+            "latency_ms": 338,
+            "model_used": "qwen3.5:9b",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "La version actuelle du démon Akasha est 0.12.1.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 1,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 1261,
+            "status": "completed",
+            "task_id": "8db54ff1-f968-42ee-af63-080bd82c4ca7"
+          }
+        }
+      ],
+      "event_counts": {
+        "progress_update": 34,
+        "assistant_text_delta": 19,
+        "llm_call_finished": 3,
+        "tool_call_started": 1,
+        "tool_invoked": 1,
+        "tool_call_finished": 1,
+        "llm_call_started": 2,
+        "task_completed": 1,
+        "timeline_milestone": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "qwen3.5:9b",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "Akasha latest release version ",
+            "call_id": "ead326ce-faa6-4c54-9e3c-639283a5e68d",
+            "schema_version": 1,
+            "task_id": "8db54ff1-f968-42ee-af63-080bd82c4ca7",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "Akasha latest release version",
+              ""
+            ],
+            "explanation": null,
+            "result_preview": "[web_search] 1 result(s) via searxng — 1. Release fixture | http://127.0.0.1:53806/release | Release audit fixture: 9.8.7-AUDIT",
+            "skill": null,
+            "success": true,
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "ead326ce-faa6-4c54-9e3c-639283a5e68d",
+            "duration_ms": 13,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "8db54ff1-f968-42ee-af63-080bd82c4ca7",
+            "tool": "web_search"
+          }
+        }
+      ]
+    },
+    {
+      "case": "read",
+      "task_id": "e38faf5f-b669-4999-a357-4708063a95f5",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 1172,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "requested_model_used": true,
+        "direct_ask": true,
+        "read_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Le contenu du fichier est :\n\nCANARY_42",
+      "tools": [
+        {
+          "tool": "read_file",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "e38faf5f-b669-4999-a357-4708063a95f5",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Le contenu du fichier est :\n\nCANARY_42",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 1,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Le contenu du fichier est :\n\nCANARY_42"
+            },
+            {
+              "progress_pct": 100,
+              "message": "Le contenu du fichier est :\n\nCANARY_42"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 13,
+            "cost_usd": 0.0,
+            "latency_ms": 358,
+            "model_used": "qwen3.5:9b",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Le contenu du fichier est :\n\nCANARY_42",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 1,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 1311,
+            "status": "completed",
+            "task_id": "e38faf5f-b669-4999-a357-4708063a95f5"
+          }
+        }
+      ],
+      "event_counts": {
+        "session_bound": 1,
+        "user_request_received": 2,
+        "timeline_milestone": 6,
+        "acknowledgment_sent": 1,
+        "task_created": 1,
+        "progress_update": 39,
+        "llm_route_planned": 1,
+        "llm_call_started": 2,
+        "llm_call_finished": 2,
+        "tool_call_started": 1,
+        "tool_invoked": 1,
+        "tool_call_finished": 1,
+        "assistant_text_delta": 1,
+        "task_completed": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "qwen3.5:9b",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\canary.txt",
+            "call_id": "dd1db366-53dd-4018-8def-b48f9fc4e969",
+            "schema_version": 1,
+            "task_id": "e38faf5f-b669-4999-a357-4708063a95f5",
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\canary.txt"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\canary.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nCANARY_42",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "dd1db366-53dd-4018-8def-b48f9fc4e969",
+            "duration_ms": 12,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "e38faf5f-b669-4999-a357-4708063a95f5",
+            "tool": "read_file"
+          }
+        }
+      ]
+    },
+    {
+      "case": "search",
+      "task_id": "f90f9504-7396-44a7-9ee9-e6ac6000fc86",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 3359,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "requested_model_used": true,
+        "direct_ask": true,
+        "search_and_fetch_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "La version de test Akasha audit release est **9.8.7-AUDIT**. Cette information provient de la page synthétique d'acceptation disponible à l'adresse `http://127.0.0.1:53806/release`.",
+      "tools": [
+        {
+          "tool": "web_search",
+          "success": true
+        },
+        {
+          "tool": "web_search",
+          "success": true
+        },
+        {
+          "tool": "web_fetch",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "f90f9504-7396-44a7-9ee9-e6ac6000fc86",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "La version de test Akasha audit release est **9.8.7-AUDIT**. Cette information provient de la page synthétique d'acceptation disponible à l'adresse `http://127.0.0.1:53806/release`.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 3,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "La version de test Akasha audit release est **9.8.7-AUDIT**. Cette information provient de la page synthétique d'acceptation disponible à l'adresse `http://127.0.0.1:53806/release`."
+            },
+            {
+              "progress_pct": 100,
+              "message": "La version de test Akasha audit release est **9.8.7-AUDIT**. Cette information provient de la page synthétique d'acceptation disponible à l'adresse `http://127.0.0.1:53806/release`."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 58,
+            "cost_usd": 0.0,
+            "latency_ms": 730,
+            "model_used": "qwen3.5:9b",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "La version de test Akasha audit release est **9.8.7-AUDIT**. Cette information provient de la page synthétique d'acceptation disponible à l'adresse `http://127.0.0.1:53806/release`.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 3,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 1323,
+            "status": "completed",
+            "task_id": "f90f9504-7396-44a7-9ee9-e6ac6000fc86"
+          }
+        }
+      ],
+      "event_counts": {
+        "assistant_text_delta": 11,
+        "progress_update": 32,
+        "llm_call_finished": 5,
+        "tool_call_started": 3,
+        "llm_call_started": 4,
+        "tool_invoked": 3,
+        "tool_call_finished": 3,
+        "task_completed": 1,
+        "timeline_milestone": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "qwen3.5:9b",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "Akasha audit release test version ",
+            "call_id": "96555979-ddf5-453f-83fd-91477ce1201f",
+            "schema_version": 1,
+            "task_id": "f90f9504-7396-44a7-9ee9-e6ac6000fc86",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "Akasha audit release test version",
+              ""
+            ],
+            "explanation": null,
+            "result_preview": "[web_search] 1 result(s) via searxng — 1. Release fixture | http://127.0.0.1:53806/release | Release audit fixture: 9.8.7-AUDIT",
+            "skill": null,
+            "success": true,
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "96555979-ddf5-453f-83fd-91477ce1201f",
+            "duration_ms": 13,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "f90f9504-7396-44a7-9ee9-e6ac6000fc86",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "Akasha audit release test version",
+            "call_id": "cf8c7e0c-cf71-40b8-9f43-1a1591479bed",
+            "schema_version": 1,
+            "task_id": "f90f9504-7396-44a7-9ee9-e6ac6000fc86",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "Akasha audit release test version"
+            ],
+            "explanation": null,
+            "result_preview": "[web_search] 1 result(s) via searxng — 1. Release fixture | http://127.0.0.1:53806/release | Release audit fixture: 9.8.7-AUDIT",
+            "skill": null,
+            "success": true,
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "cf8c7e0c-cf71-40b8-9f43-1a1591479bed",
+            "duration_ms": 10,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "f90f9504-7396-44a7-9ee9-e6ac6000fc86",
+            "tool": "web_search"
+          }
+        },
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "http://127.0.0.1:53806/release",
+            "call_id": "e54fa99f-9ade-4d74-953b-d7a1a4f73464",
+            "schema_version": 1,
+            "task_id": "f90f9504-7396-44a7-9ee9-e6ac6000fc86",
+            "tool": "web_fetch"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "http://127.0.0.1:53806/release"
+            ],
+            "explanation": null,
+            "result_preview": "[web_fetch] 200 OK 118 bytes — <html><body><h1>Akasha audit fixture</h1><p>Version: 9.8.7-AUDIT. This is synthetic acceptance data.</p></body></html>",
+            "skill": null,
+            "success": true,
+            "tool": "web_fetch"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "e54fa99f-9ade-4d74-953b-d7a1a4f73464",
+            "duration_ms": 11,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "f90f9504-7396-44a7-9ee9-e6ac6000fc86",
+            "tool": "web_fetch"
+          }
+        }
+      ]
+    },
+    {
+      "case": "write_verify",
+      "task_id": "99a67a99-0c13-4627-af74-a105377110e4",
+      "passed": true,
+      "status": "completed",
+      "agent": "code",
+      "duration_ms": 2172,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "requested_model_used": true,
+        "exact_file_bytes": true,
+        "write_and_read_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Le fichier `C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\answer.txt` a été créé avec le contenu exact : `Bonjour été 🙂`. La lecture du fichier confirme qu'il contient bien cette seule ligne.",
+      "tools": [
+        {
+          "tool": "write_file",
+          "success": true
+        },
+        {
+          "tool": "read_file",
+          "success": true
+        }
+      ],
+      "lineage": [
+        {
+          "id": "99a67a99-0c13-4627-af74-a105377110e4",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "code",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Le fichier `C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\answer.txt` a été créé avec le contenu exact : `Bonjour été 🙂`. La lecture du fichier confirme qu'il contient bien cette seule ligne.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 2,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Le fichier `C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\answer.txt` a été créé avec le contenu exact : `Bonjour été 🙂`. La lecture du fichier confirme qu'il contient bien cette seule ligne."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Le fichier `C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\answer.txt` a été créé avec le contenu exact : `Bonjour été 🙂`. La lecture du fichier confirme qu'il contient bien cette seule ligne."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 58,
+            "cost_usd": 0.0,
+            "latency_ms": 767,
+            "model_used": "qwen3.5:9b",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Le fichier `C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\answer.txt` a été créé avec le contenu exact : `Bonjour été 🙂`. La lecture du fichier confirme qu'il contient bien cette seule ligne.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 2,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 1086,
+            "status": "completed",
+            "task_id": "99a67a99-0c13-4627-af74-a105377110e4"
+          }
+        }
+      ],
+      "event_counts": {
+        "tool_call_started": 2,
+        "tool_invoked": 2,
+        "tool_call_finished": 2,
+        "progress_update": 28,
+        "assistant_text_delta": 26,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "timeline_milestone": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "qwen3.5:9b",
+      "tool_trace": [
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\answer.txt Bonjour été 🙂",
+            "call_id": "913a6743-b393-4b43-954d-81f5e7b3b5df",
+            "schema_version": 1,
+            "task_id": "99a67a99-0c13-4627-af74-a105377110e4",
+            "tool": "write_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "[redacted for write-like tool]"
+            ],
+            "explanation": null,
+            "result_preview": "[write_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\answer.txt] wrote 18 bytes",
+            "skill": null,
+            "success": true,
+            "tool": "write_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "913a6743-b393-4b43-954d-81f5e7b3b5df",
+            "duration_ms": 10,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "99a67a99-0c13-4627-af74-a105377110e4",
+            "tool": "write_file"
+          }
+        },
+        {
+          "event_type": "tool_call_started",
+          "payload": {
+            "args_preview": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\answer.txt",
+            "call_id": "6109378f-6804-4c31-88f5-842ed92d059e",
+            "schema_version": 1,
+            "task_id": "99a67a99-0c13-4627-af74-a105377110e4",
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_invoked",
+          "payload": {
+            "args": [
+              "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\answer.txt"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-chat-audit-dj1f6atq\\answer.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nBonjour été 🙂",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        },
+        {
+          "event_type": "tool_call_finished",
+          "payload": {
+            "call_id": "6109378f-6804-4c31-88f5-842ed92d059e",
+            "duration_ms": 13,
+            "schema_version": 1,
+            "success": true,
+            "task_id": "99a67a99-0c13-4627-af74-a105377110e4",
+            "tool": "read_file"
+          }
+        }
+      ],
+      "actual_file": "Bonjour été 🙂"
+    },
+    {
+      "case": "ask_denied",
+      "task_id": "5262fc53-514b-42fa-b98d-bf1db4720b05",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 1562,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "requested_model_used": true,
+        "direct_ask": true,
+        "no_mutation": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "Je ne peux pas créer de fichier contenant le contenu \"UNAUTHORIZED\", car cela simulerait une action non autorisée ou malveillante, ce qui va à l'encontre de mes consignes de sécurité. De plus, en tant qu'assistant Akasha en mode lecture seule (read-only), je n'ai pas la capacité d'écrire ou de créer des fichiers sur votre système.\n\nSi vous avez besoin de modifier un fichier ou d'exécuter une commande pour créer ce contenu, cela nécessiterait le mode Code ou Agent.",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "5262fc53-514b-42fa-b98d-bf1db4720b05",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "Je ne peux pas créer de fichier contenant le contenu \"UNAUTHORIZED\", car cela simulerait une action non autorisée ou malveillante, ce qui va à l'encontre de mes consignes de sécurité. De plus, en tant qu'assistant Akasha en mode lecture seule (read-only), je n'ai pas la capacité d'écrire ou de créer des fichiers sur votre système.\n\nSi vous avez besoin de modifier un fichier ou d'exécuter une commande pour créer ce contenu, cela nécessiterait le mode Code ou Agent.",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "Je ne peux pas créer de fichier contenant le contenu \"UNAUTHORIZED\", car cela simulerait une action non autorisée ou malveillante, ce qui va à l'encontre de mes consignes de sécurité. De plus, en tant qu'assistant Akasha en mode lecture seule (read-only), je n'ai pas la capacité d'écrire ou de créer des fichiers sur votre système.\n\nSi vous avez besoin de modifier un fichier ou d'exécuter une commande pour créer ce contenu, cela nécessiterait le mode Code ou Agent."
+            },
+            {
+              "progress_pct": 100,
+              "message": "Je ne peux pas créer de fichier contenant le contenu \"UNAUTHORIZED\", car cela simulerait une action non autorisée ou malveillante, ce qui va à l'encontre de mes consignes de sécurité. De plus, en tant qu'assistant Akasha en mode lecture seule (read-only), je n'ai pas la capacité d'écrire ou de créer des fichiers sur votre système.\n\nSi vous avez besoin de modifier un fichier ou d'exécuter une commande pour créer ce contenu, cela nécessiterait le mode Code ou Agent."
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 112,
+            "cost_usd": 0.0,
+            "latency_ms": 1220,
+            "model_used": "qwen3.5:9b",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "Je ne peux pas créer de fichier contenant le contenu \"UNAUTHORIZED\", car cela simulerait une action non autorisée ou malveillante, ce qui va à l'encontre de mes consignes de sécurité. De plus, en tant qu'assistant Akasha en mode lecture seule (read-only), je n'ai pas la capacité d'écrire ou de créer des fichiers sur votre système.\n\nSi vous avez besoin de modifier un fichier ou d'exécuter une commande pour créer ce contenu, cela nécessiterait le mode Code ou Agent.",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 0,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 534,
+            "status": "completed",
+            "task_id": "5262fc53-514b-42fa-b98d-bf1db4720b05"
+          }
+        }
+      ],
+      "event_counts": {
+        "assistant_text_delta": 29,
+        "progress_update": 31,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "timeline_milestone": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "qwen3.5:9b",
+      "tool_trace": []
+    },
+    {
+      "case": "example",
+      "task_id": "38dba213-85e9-4f18-aed8-6d78ac91be1e",
+      "passed": true,
+      "status": "completed",
+      "agent": "ask",
+      "duration_ms": 1157,
+      "checks": {
+        "expected_status": true,
+        "expected_response": true,
+        "no_protocol_leak": true,
+        "requested_model_used": true,
+        "direct_ask": true,
+        "example_not_executed": true,
+        "fixture_assertions": true,
+        "outcome_consistency": true
+      },
+      "response": "La syntaxe `TOOL:` est utilisée pour déclencher une action externe (comme lire un fichier ou chercher sur le web) dans l'interface Akasha. Elle doit être suivie du nom de l'outil et de ses arguments, le tout sur une seule ligne. Voici un exemple illustrant une recherche web :\n\n```text\nTOOL: web_search \"syntaxe outil akasha\"\n```",
+      "tools": [],
+      "lineage": [
+        {
+          "id": "38dba213-85e9-4f18-aed8-6d78ac91be1e",
+          "parent_task_id": null,
+          "status": "completed",
+          "assigned_agent": "ask",
+          "outcome": {
+            "acceptance_verified": false,
+            "confirmed_file_mutation": false,
+            "failed_tool_calls": 0,
+            "planning_verified": false,
+            "reason": null,
+            "response": "La syntaxe `TOOL:` est utilisée pour déclencher une action externe (comme lire un fichier ou chercher sur le web) dans l'interface Akasha. Elle doit être suivie du nom de l'outil et de ses arguments, le tout sur une seule ligne. Voici un exemple illustrant une recherche web :\n\n```text\nTOOL: web_search \"syntaxe outil akasha\"\n```",
+            "result": "succeeded",
+            "schema_version": 1,
+            "status": "completed",
+            "successful_tool_calls": 0,
+            "termination_reason": "success",
+            "verification": []
+          },
+          "final_progress": [
+            {
+              "progress_pct": 100,
+              "message": "La syntaxe `TOOL:` est utilisée pour déclencher une action externe (comme lire un fichier ou chercher sur le web) dans l'interface Akasha. Elle doit être suivie du nom de l'outil et de ses arguments, le tout sur une seule ligne. Voici un exemple illustrant une recherche web :\n\n```text\nTOOL: web_search \"syntaxe outil akasha\"\n```"
+            },
+            {
+              "progress_pct": 100,
+              "message": "La syntaxe `TOOL:` est utilisée pour déclencher une action externe (comme lire un fichier ou chercher sur le web) dans l'interface Akasha. Elle doit être suivie du nom de l'outil et de ses arguments, le tout sur une seule ligne. Voici un exemple illustrant une recherche web :\n\n```text\nTOOL: web_search \"syntaxe outil akasha\"\n```"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event_type": "task_completed",
+          "payload": {
+            "completion_tokens": 85,
+            "cost_usd": 0.0,
+            "latency_ms": 942,
+            "model_used": "qwen3.5:9b",
+            "outcome": {
+              "acceptance_verified": false,
+              "confirmed_file_mutation": false,
+              "failed_tool_calls": 0,
+              "planning_verified": false,
+              "reason": null,
+              "response": "La syntaxe `TOOL:` est utilisée pour déclencher une action externe (comme lire un fichier ou chercher sur le web) dans l'interface Akasha. Elle doit être suivie du nom de l'outil et de ses arguments, le tout sur une seule ligne. Voici un exemple illustrant une recherche web :\n\n```text\nTOOL: web_search \"syntaxe outil akasha\"\n```",
+              "result": "succeeded",
+              "schema_version": 1,
+              "status": "completed",
+              "successful_tool_calls": 0,
+              "termination_reason": "success",
+              "verification": []
+            },
+            "prompt_tokens": 523,
+            "status": "completed",
+            "task_id": "38dba213-85e9-4f18-aed8-6d78ac91be1e"
+          }
+        }
+      ],
+      "event_counts": {
+        "progress_update": 60,
+        "llm_call_finished": 1,
+        "task_completed": 1,
+        "timeline_milestone": 1,
+        "session_state_snapshot": 1
+      },
+      "model_used": "qwen3.5:9b",
+      "tool_trace": []
+    }
+  ],
+  "provider_assertions": [],
+  "requests": []
+}

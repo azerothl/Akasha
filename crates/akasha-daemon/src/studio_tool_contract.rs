@@ -445,6 +445,36 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
         {
             vec![envelope.arguments.to_string()]
         }
+        "web_search" => {
+            if envelope.arguments.get("argv").is_some() {
+                legacy_web_arguments(&envelope.arguments)?
+            } else {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Search { query: String, max_results: Option<u32> }
+            let arg: Search = serde_json::from_value(envelope.arguments.clone())
+                .map_err(|error| format!("invalid web_search arguments: {error}"))?;
+            if arg.query.trim().is_empty() { return Err("web_search requires a non-empty query".into()); }
+            let mut args = vec![arg.query];
+            if let Some(limit) = arg.max_results { args.push(limit.clamp(1, 20).to_string()); }
+            args
+            }
+        }
+        "web_fetch" => {
+            if envelope.arguments.get("argv").is_some() {
+                legacy_web_arguments(&envelope.arguments)?
+            } else {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Fetch { url: String }
+            let arg: Fetch = serde_json::from_value(envelope.arguments.clone())
+                .map_err(|error| format!("invalid web_fetch arguments: {error}"))?;
+            if !arg.url.starts_with("https://") && !arg.url.starts_with("http://") {
+                return Err("web_fetch requires an http(s) URL".into());
+            }
+            vec![arg.url]
+            }
+        }
         _ => {
             let arg: Argv = serde_json::from_value(envelope.arguments.clone())
                 .map_err(|_| "this tool requires {argv:[string,...]}")?;
@@ -560,6 +590,14 @@ mod read_window_tests {
     }
 }
 
+fn legacy_web_arguments(value: &Value) -> Result<Vec<String>, String> {
+    let arg: Argv = serde_json::from_value(value.clone()).map_err(|_| "invalid legacy web arguments")?;
+    if arg.argv.is_empty() || arg.argv.len() > 128 || arg.argv.iter().any(|s|s.contains('\0')) {
+        return Err("invalid legacy web argv".into());
+    }
+    Ok(arg.argv)
+}
+
 pub(crate) fn supports_typed(tool: &str) -> bool {
     !matches!(
         tool,
@@ -576,6 +614,12 @@ pub(crate) fn supports_typed(tool: &str) -> bool {
 }
 
 pub(crate) fn argument_schema(tool: &str) -> Value {
+    if tool == "web_search" {
+        return json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1},"max_results":{"type":"integer","minimum":1,"maximum":20}}});
+    }
+    if tool == "web_fetch" {
+        return json!({"type":"object","additionalProperties":false,"required":["url"],"properties":{"url":{"type":"string","pattern":"^https?://"}}});
+    }
     if tool == "studio_review_ticket" {
         return json!({"type":"object","additionalProperties":false,"required":["ticket_id","outcome"],"properties":{
             "ticket_id":{"type":"string","minLength":1},

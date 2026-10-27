@@ -316,7 +316,7 @@ impl TaskStore {
         )?;
         if count > max_events {
             self.conn.execute(
-                "DELETE FROM task_events WHERE task_id = ?1 AND seq IN (SELECT seq FROM task_events WHERE task_id = ?1 ORDER BY seq ASC LIMIT ?2)",
+                "DELETE FROM task_events WHERE task_id = ?1 AND seq IN (SELECT seq FROM task_events WHERE task_id = ?1 ORDER BY CASE WHEN event_type IN ('tool_invoked','tool_call_started','tool_call_finished','chat_literal_rejected','task_completed','task_failed','task_cancelled') THEN 1 ELSE 0 END, seq ASC LIMIT ?2)",
                 rusqlite::params![task_id.to_string(), count - max_events],
             )?;
         }
@@ -556,6 +556,19 @@ impl TaskStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_text_does_not_evict_tool_receipts() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let id = Uuid::new_v4();
+        let now = Utc::now().to_rfc3339();
+        store.insert_event(id,"tool_invoked",Some(&serde_json::json!({"tool":"write_file","success":true})),&now).unwrap();
+        for _ in 0..256 { store.insert_event(id,"assistant_text_delta",Some(&serde_json::json!({"delta":"text"})),&now).unwrap(); }
+        let events = store.get_events(id).unwrap();
+        assert_eq!(events.len(), MAX_TASK_EVENTS_PER_TASK);
+        assert!(events.iter().any(|event|event.event_type=="tool_invoked"));
+    }
 
     #[test]
     fn lease_lifecycle_and_expiry() {
