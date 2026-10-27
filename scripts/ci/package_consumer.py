@@ -15,10 +15,17 @@ def binary_build_info(path):
     # remain ambiguous and must never be chosen by position in the executable.
     if len(records)!=1:raise ValueError('Missing or ambiguous consumer build metadata')
     return json.loads(next(iter(records)))
+
+def validate_source_provenance(build,revision,dirty):
+    if build.get('source_dirty') is not False or dirty:
+        raise ValueError('Consumer packages require clean compilation and packaging sources')
+    if build.get('source_revision')!=revision:
+        raise ValueError('Compiled daemon revision differs from packaging sources')
 def package(daemon,ui,runtime,output,cuda=False,embeddings=None):
     packaging_revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
     packaging_dirty=bool(subprocess.check_output(['git','status','--porcelain'],cwd=ROOT,text=True).strip())
     build=binary_build_info(daemon)
+    validate_source_provenance(build,packaging_revision,packaging_dirty)
     if build.get('consumer_beta') is not True or build.get('cuda')!=cuda:raise ValueError('Wrong daemon edition or CUDA variant')
     if build.get('ocr_lock_sha256')!=digest(runtime/'runtime-lock.json'):raise ValueError('OCR components do not match the compiled daemon pin')
     if output.exists():raise ValueError('Use a new empty candidate directory')
