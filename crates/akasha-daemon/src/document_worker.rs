@@ -506,6 +506,10 @@ fn png(gray: &[u8], w: u32, h: u32) -> Result<String> {
     )?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
+pub(crate) fn plain_text_name(name: &str) -> bool {
+    Path::new(name).extension().and_then(|e|e.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt") || extension.eq_ignore_ascii_case("md"))
+}
 pub fn execute(input: &WorkerInput) -> Result<WorkerOutput> {
     ensure!(
         matches!(input.operation.as_str(), "inspect" | "extract" | "render"),
@@ -516,12 +520,7 @@ pub fn execute(input: &WorkerInput) -> Result<WorkerOutput> {
         "Limite de 25 Mio par fichier dépassée"
     );
     let bytes = std::fs::read(&input.source)?;
-    let extension = Path::new(&input.name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if matches!(extension.as_str(), "txt" | "md") {
+    if plain_text_name(&input.name) {
         ensure!(
             input.operation != "render",
             "Le texte original est accessible dans la source"

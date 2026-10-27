@@ -186,6 +186,16 @@ async fn index(
 mod tests {
     use super::*;
     #[test]
+    fn uppercase_text_files_are_read_without_a_native_runtime() {
+        let dir=tempfile::tempdir().unwrap();let source=dir.path().join("source");
+        std::fs::write(&source,"Montant : 42 euros").unwrap();
+        for name in ["notes.TXT","notes.MD","notes.TxT","notes.md"] {
+            assert!(document_worker::plain_text_name(name));
+            let output=document_worker::execute(&WorkerInput{source:source.clone(),name:name.into(),runtime:dir.path().join("not-installed"),operation:"extract".into(),page:1}).unwrap();
+            assert_eq!(output.page.unwrap().text,"Montant : 42 euros");
+        }
+    }
+    #[test]
     fn text_expansion_is_bounded_and_the_omitted_page_is_explicit() {
         let mut used = MAX_EXTRACTED_BYTES - 1;
         let page = retain_page(

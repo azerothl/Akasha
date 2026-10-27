@@ -21,6 +21,28 @@ pub fn restored_environment_keys(root:&Path,previous:&Path,inherited:&[String])-
     names.retain(|key|!["PATH","Path","SYSTEMROOT","SystemRoot","WINDIR","USERPROFILE","HOME","TEMP","TMP","AKASHA_PORT","AKASHA_BIND","AKASHA_SPEC_DIR","AKASHA_SUPERVISOR","AKASHA_OCR_RUNTIME_DIR","AKASHA_OCR_LOCK_SHA256"].contains(&key.as_str())&&!crate::env_file::ENV_FILE_SKIP_KEYS.contains(&key.as_str()));names
 }
 
+/// Recover settings only when following the default profile's legacy redirect.
+/// Target files override legacy files; akasha.env overrides connectors.env.
+/// Callers keep explicit process variables above these fallback assignments.
+pub fn legacy_bootstrap_environment(
+    configured: Option<&OsStr>, home: Option<&Path>,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut settings = std::collections::HashMap::new();
+    if configured.is_some() { return Ok(settings); }
+    let default = resolve_data_dir(None, home)?;
+    let selected = resolve_bootstrap_data_dir(None, home)?;
+    if selected == default { return Ok(settings); }
+    for root in [&default, &selected] {
+        for name in ["connectors.env", "akasha.env"] {
+            if let Ok(text) = std::fs::read_to_string(root.join(name)) {
+                settings.extend(crate::parse_env_file_content(&text).0);
+            }
+        }
+    }
+    settings.retain(|key, _| !crate::env_file::ENV_FILE_SKIP_KEYS.contains(&key.as_str()));
+    Ok(settings)
+}
+
 /// Preserve legacy bootstrap settings in the default profile, but follow at most one redirect.
 pub fn resolve_bootstrap_data_dir(
     configured: Option<&OsStr>,
@@ -80,6 +102,21 @@ mod tests {
     #[test]fn restored_selection_is_resolved_before_environment_and_does_not_import_old_credentials(){
         let directory=tempfile::tempdir().unwrap();let root=directory.path().join("original");std::fs::create_dir(&root).unwrap();let target=directory.path().join(format!("akasha-restored-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&target).unwrap();std::fs::write(target.join("akasha.db"),b"schema verified by daemon").unwrap();std::fs::write(root.join("consumer_active_profile.json"),serde_json::to_vec(&serde_json::json!({"schema_version":1,"path":target})).unwrap()).unwrap();std::fs::write(root.join("connectors.env"),"OPENAI_API_KEY=PRIVATE_OLD_KEY\nAKASHA_PORT=4001\n").unwrap();
         assert_eq!(resolve_active_profile(&root).unwrap(),std::fs::canonicalize(&target).unwrap());let removed=restored_environment_keys(&root,&root,&["TAVILY_API_KEY".into(),"PATH".into()]);assert!(removed.contains("OPENAI_API_KEY"));assert!(removed.contains("TAVILY_API_KEY"));assert!(!removed.contains("AKASHA_PORT"));assert!(!removed.contains("PATH"));assert!(!target.join("connectors.env").exists());
+    }
+    #[test]
+    fn redirected_environment_preserves_fallbacks_with_target_precedence() {
+        let home=tempfile::tempdir().unwrap(); let root=home.path().join("akasha");
+        let custom=home.path().join("custom");
+        for dir in [&root,&custom] { std::fs::create_dir(dir).unwrap(); }
+        std::fs::write(root.join("connectors.env"),"OPENAI_API_KEY=legacy-fixture\nSETTING=legacy-connectors\n").unwrap();
+        std::fs::write(root.join("akasha.env"),format!("AKASHA_DATA_DIR={}\nSETTING=legacy-env\n",custom.display())).unwrap();
+        std::fs::write(custom.join("connectors.env"),"SETTING=target-connectors\n").unwrap();
+        std::fs::write(custom.join("akasha.env"),"SETTING=target-env\nAKASHA_DATA_DIR=ignored\n").unwrap();
+        let settings=legacy_bootstrap_environment(None,Some(home.path())).unwrap();
+        assert_eq!(settings["OPENAI_API_KEY"],"legacy-fixture");
+        assert_eq!(settings["SETTING"],"target-env");
+        assert!(!settings.contains_key("AKASHA_DATA_DIR"));
+        assert!(legacy_bootstrap_environment(Some(custom.as_os_str()),Some(home.path())).unwrap().is_empty());
     }
     #[test]
     fn unreadable_optional_settings_do_not_block_default_profile_or_other_redirects() {

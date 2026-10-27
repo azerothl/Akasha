@@ -859,7 +859,7 @@ pub async fn try_handle(
             Ok(id) => {
                 let data_dir = store_path.parent().unwrap_or(store_path).to_path_buf();
                 let runtime_available=crate::document_worker::runtime_dir().is_ok_and(|path|path.join("runtime-lock.json").is_file());
-                let task=if cfg!(feature="consumer-beta")||runtime_available||name.ends_with(".txt")||name.ends_with(".md") {
+                let task=if cfg!(feature="consumer-beta")||runtime_available||crate::document_worker::plain_text_name(&name) {
                     match crate::document_import::start(data_dir,store_path.into(),user_rag_store.clone(),id.clone()) {Ok(id)=>Some(id),Err(error)=>{let _=store.set_index_status(&id,"failed",None,Some(&error.to_string()));None}}
                 }else{crate::api_routes_kinbot::spawn_user_rag_index(data_dir,id.clone());None};
                 let body = serde_json::json!({ "id": id, "task_id":task, "name": name, "message": "Document ajouté. Lecture en cours.", "index_status": "pending" });

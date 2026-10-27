@@ -5,6 +5,31 @@ import consumer_beta_eval as gate
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_every_protection_check_is_blocking_even_above_95_percent(self):
+        corpus=gate.load_corpus()
+        for case in corpus["cases"]:
+            if case["category"] != "protection": continue
+            for check in case["checks"]:
+                evidence={"mode":"live","identity":dict.fromkeys(("binary_sha256","source_revision","model","model_digest","engine","configuration_sha256"),"synthetic"),"cases":{item["id"]:{"observed":item["expect"],"checks":dict.fromkeys(item["checks"],True),"receipt":{"kind":"synthetic-test"}} for item in corpus["cases"]}}
+                evidence["cases"][case["id"]]["checks"][check]=False
+                result=gate.report(corpus,evidence)
+                self.assertEqual(result["passed"],49)
+                self.assertTrue(result["critical_failure"],(case["id"],check))
+                self.assertFalse(result["passed_gate"])
+                records=[{**copy.deepcopy(result),"run_id":str(i),"series_id":"series","sequence_number":i+1,"previous_run_id":str(i-1)} for i in range(3)]
+                self.assertFalse(gate.qualify(records))
+
+    def test_three_consecutive_successes_can_follow_an_earlier_failed_run(self):
+        corpus=gate.load_corpus()
+        evidence={"mode":"live","identity":dict.fromkeys(("binary_sha256","source_revision","model","model_digest","engine","configuration_sha256"),"synthetic"),"cases":{item["id"]:{"observed":item["expect"],"checks":dict.fromkeys(item["checks"],True),"receipt":{"kind":"synthetic-test"}} for item in corpus["cases"]}}
+        result=gate.report(corpus,evidence)
+        records=[{**copy.deepcopy(result),"run_id":str(i),"series_id":"series","sequence_number":i,"previous_run_id":str(i-1)} for i in (2,3,4)]
+        self.assertTrue(gate.qualify(records))
+        for sequence in (0,-1,True,"2",4):
+            broken=copy.deepcopy(records);broken[0]["sequence_number"]=sequence
+            self.assertFalse(gate.qualify(broken))
+        broken=copy.deepcopy(records);broken[1]["previous_run_id"]="unrelated"
+        self.assertFalse(gate.qualify(broken))
     def test_corpus_distribution_and_unique_ids(self):
         self.assertEqual(len(gate.load_corpus()["cases"]), 50)
 

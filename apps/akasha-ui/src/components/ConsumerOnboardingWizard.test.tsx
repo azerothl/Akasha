@@ -4,6 +4,32 @@ import { afterEach, expect, it, vi } from "vitest";
 import { ConsumerOnboardingWizard } from "./ConsumerOnboardingWizard";
 afterEach(cleanup);
 
+it.each([true, false])("prepares an embedded candidate with installed=%s without a redundant download", async (installed) => {
+  const calls: { path: string; body?: unknown }[] = [];
+  const fetchEndpoint = vi.fn(async (path: string, init?: RequestInit) => {
+    calls.push({ path, body: init?.body ? JSON.parse(init.body as string) : undefined });
+    let value: unknown = {};
+    if (path === "/api/router/embedded/models") value = { models: [{ id: "local-fixture", label: "Local fixture" }] };
+    if (path === "/api/capabilities") value = { models: [{ id: "local-fixture", gguf_on_disk: installed }, { id: "another-model", gguf_on_disk: true }] };
+    if (path === "/api/router/embedded/download") {
+      if (installed) throw new Error("Offline: a local model must not be downloaded");
+    }
+    return { ok: true, status: 200, text: JSON.stringify(value) };
+  });
+  render(<ConsumerOnboardingWizard locale="fr" daemonOk fetchEndpoint={fetchEndpoint} onComplete={vi.fn()} onDismiss={vi.fn()} />);
+  await screen.findByRole("option", { name: "Local fixture" });
+  fireEvent.click(screen.getByRole("button", { name: "Préparer ce modèle" }));
+  if (installed) {
+    await screen.findByText("Modèle local sélectionné. La démonstration vérifiera sa réponse.");
+    expect(calls.filter(call => call.path === "/api/router/embedded/download")).toHaveLength(0);
+    expect(calls).toContainEqual({ path: "/api/router/embedded/runtime", body: { model_id: "local-fixture", engine_mode: "auto" } });
+    expect(calls).toContainEqual({ path: "/api/router/route", body: { category: "conversation", provider: "akasha_core", model: "local-fixture" } });
+  } else {
+    await waitFor(() => expect(calls).toContainEqual({ path: "/api/router/embedded/download", body: { id: "local-fixture" } }));
+    expect(calls.filter(call => call.path === "/api/router/route")).toHaveLength(0);
+  }
+});
+
 function setup(answer: string) {
   const fetchEndpoint = vi.fn().mockImplementation((path: string, init?: RequestInit) => {
     let value: unknown = {};
