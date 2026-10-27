@@ -104,9 +104,7 @@ async fn tick(
             {
                 let date=planned_for.with_timezone(&tz_for_exceptions).date_naive();
                 if exceptions.iter().any(|e|e.type_==ScheduleExceptionType::Skip && e.date==date) {
-                    if cfg!(feature="consumer-beta") && !schedule.rrule.trim().is_empty() {
-                        schedule_store.record_resume_cursor(schedule.id,planned_for)?;
-                    }
+                    schedule_store.record_resume_cursor(schedule.id,planned_for)?;
                     continue;
                 }
                 let dedup_key = format!("{}:{}", schedule.id, planned_for.timestamp());
@@ -429,7 +427,7 @@ fn due_slots_rrule(
     let runs = schedule_store.list_task_runs(Some(schedule.id), 1)?;
     let last_planned = runs.into_iter().next().map(|r| r.planned_for);
     let mut after = last_planned.unwrap_or_else(|| schedule.start_at - Duration::seconds(1));
-    if cfg!(feature="consumer-beta"){if let Some(cursor)=schedule_store.resume_cursor(schedule.id)?{after=after.max(cursor);}}
+    if let Some(cursor)=schedule_store.resume_cursor(schedule.id)?{after=after.max(cursor);}
     let before = now + Duration::seconds(1);
     let chrono_tz = chrono_tz::Tz::from_str(&schedule.timezone)
         .map_err(|e| anyhow::anyhow!("invalid schedule timezone {}: {:?}", schedule.timezone, e))?;
@@ -489,7 +487,15 @@ fn due_slots_interval(
     // If there are existing runs, start from the slot after the last known run.
     // If there are no runs yet, the first candidate is start_at itself (the schedule's first
     // occurrence is at start_at, not start_at + delta).
-    let first_candidate = if last_run.is_some() { base + delta } else { base };
+    let mut first_candidate = if last_run.is_some() { base + delta } else { base };
+    if let Some(cursor)=schedule_store.resume_cursor(schedule.id)? {
+        if cursor>=first_candidate {
+            let steps=(cursor-first_candidate).num_seconds()/interval_secs+1;
+            let seconds=steps.checked_mul(interval_secs).ok_or_else(||anyhow::anyhow!("schedule cursor overflow"))?;
+            let advance=Duration::try_seconds(seconds).ok_or_else(||anyhow::anyhow!("schedule cursor out of range"))?;
+            first_candidate=first_candidate.checked_add_signed(advance).ok_or_else(||anyhow::anyhow!("schedule cursor date overflow"))?;
+        }
+    }
     if first_candidate>now {return Ok(vec![]);}
     let consumer_watch=schedule.channel_context.as_deref().is_some_and(|context|context.contains("consumer:watch:"));
     if cfg!(feature="consumer-beta")||consumer_watch {
@@ -512,6 +518,21 @@ fn due_slots_interval(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature="consumer-beta"))]
+    #[tokio::test]
+    async fn hourly_catchup_advances_past_more_than_ten_skipped_occurrences() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("akasha.db");let store=ScheduleStore::open(&path).unwrap();let now=Utc::now();
+        let start=(now.date_naive()-Duration::days(1)).and_hms_opt(0,0,0).unwrap().and_utc();let id=Uuid::new_v4();
+        store.insert_schedule(&Schedule{id,name:"Synthetic hourly task".into(),description:String::new(),enabled:true,timezone:"UTC".into(),rrule:String::new(),interval_seconds:Some(3600),start_at:start,end_at:None,channel_context:None,created_at:now,updated_at:now}).unwrap();
+        store.insert_exception(&akasha_store::ScheduleException{id:Uuid::new_v4(),schedule_id:id,type_:ScheduleExceptionType::Skip,date:start.date_naive(),override_payload:None}).unwrap();
+        let (tx,mut rx)=mpsc::channel(16);let (bus,_)=crate::agents::new_event_bus();
+        tick(&path,&tx,&bus).await.unwrap();assert!(rx.try_recv().is_err());
+        tick(&path,&tx,&bus).await.unwrap();assert!(rx.try_recv().is_err());
+        tick(&path,&tx,&bus).await.unwrap();assert!(rx.try_recv().is_ok());
+        let runs=store.list_task_runs(Some(id),100).unwrap();assert!(!runs.is_empty());
+        assert!(runs.iter().all(|run|run.planned_for.date_naive()>start.date_naive()));
+        assert_eq!(runs.iter().map(|run|run.dedup_key.clone()).collect::<std::collections::HashSet<_>>().len(),runs.len());
+    }
     #[cfg(feature="consumer-beta")]
     #[tokio::test]
     async fn skipped_rrule_occurrence_advances_without_losing_the_next_run() {
