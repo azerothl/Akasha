@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
 import { clearResearchPreviewHtml, parseResearchPreviewHash, readResearchPreviewHtml } from "./researchReportExport";
 
 export function ResearchPreviewPage() {
   const { key, autoPrint } = useMemo(() => parseResearchPreviewHash(window.location.hash), []);
   const [html, setHtml] = useState<string | null>(null);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const loadedRef = useRef(false);
+  const autoPrintRequestedRef = useRef(false);
+  const printTimeoutRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     if (!key || loadedRef.current) return;
@@ -16,10 +17,22 @@ export function ResearchPreviewPage() {
   }, [key]);
 
   useEffect(() => {
-    if (!autoPrint || !html) return;
-    const iframe = iframeRef.current;
-    if (!iframe) return;
+    return () => {
+      if (printTimeoutRef.current !== undefined) {
+        window.clearTimeout(printTimeoutRef.current);
+        printTimeoutRef.current = undefined;
+      }
+    };
+  }, []);
+
+  const onIframeLoad = (event: SyntheticEvent<HTMLIFrameElement>) => {
+    if (key) clearResearchPreviewHtml(key);
+    const iframe = event.currentTarget;
     const triggerPrint = () => {
+      if (printTimeoutRef.current !== undefined) {
+        window.clearTimeout(printTimeoutRef.current);
+      }
+      printTimeoutRef.current = undefined;
       try {
         iframe.contentWindow?.focus();
         iframe.contentWindow?.print();
@@ -27,14 +40,14 @@ export function ResearchPreviewPage() {
         /* user may cancel */
       }
     };
-    const onLoad = () => window.setTimeout(triggerPrint, 400);
-    iframe.addEventListener("load", onLoad);
-    if (iframe.contentDocument?.readyState === "complete") onLoad();
-    return () => iframe.removeEventListener("load", onLoad);
-  }, [autoPrint, html]);
+    // The native preview CSP blocks inline onclick attributes.
+    const printButton = iframe.contentDocument?.querySelector<HTMLButtonElement>(".research-report-print-bar button");
+    if (printButton) printButton.onclick = triggerPrint;
 
-  const onIframeLoad = () => {
-    if (key) clearResearchPreviewHtml(key);
+    if (!autoPrint || autoPrintRequestedRef.current) return;
+    // Consume the request before print() blocks, including any later load events.
+    autoPrintRequestedRef.current = true;
+    printTimeoutRef.current = window.setTimeout(triggerPrint, 400);
   };
 
   if (!key) {
@@ -55,7 +68,6 @@ export function ResearchPreviewPage() {
 
   return (
     <iframe
-      ref={iframeRef}
       title="Research report preview"
       className="research-preview-frame"
       srcDoc={html}
