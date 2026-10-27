@@ -132,7 +132,7 @@ pub(crate) fn unparsed_tool_request(text: &str) -> bool {
 
 /// An explicitly requested JSON example is a deliverable, not an operation.
 pub(crate) fn requested_tool_example(request: &str, response: &str) -> bool {
-    let asks_example = regex::Regex::new(r"(?i)\b(?:donne|montre|fournis|génère|écris|give|show|provide|return|output|write)\b[^\n.!?]{0,160}\b(?:exemple|example|schéma|schema)\b").unwrap().is_match(request);
+    let asks_example = regex::Regex::new(r"(?i)\b(?:donne|montre|fournis|génère|écris|give|show|provide|return|output|write)\b[^\n.!?]{0,160}\b(?:exemple|example|schéma|schema)(?:\s|$|[.,;!?](?:\s|$))").unwrap().is_match(request);
     asks_example && unparsed_tool_request(response)
 }
 
@@ -299,6 +299,8 @@ mod tests {
         for response in [r#"{"name":"read_file","arguments":{"path":"example.txt"}}"#, "```json\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"example.txt\"}}\n```"] {
             assert!(requested_tool_example("Donne uniquement un exemple JSON d’appel d’outil, sans explication.",response));
             assert!(!requested_tool_example("Lis example.txt puis donne son contenu.",response));
+            assert!(!requested_tool_example("Show example.txt as JSON",response));
+            assert!(!requested_tool_example("Montre exemple.txt",response));
         }
     }
     #[test]
