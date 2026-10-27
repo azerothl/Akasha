@@ -1177,14 +1177,14 @@
     },
     {
       "id": "flow-capabilities",
-      "label": "Capabilities / evidence",
       "description": "UI or doctor queries GET /api/capabilities and embedded-status before marking GGUF/vision ready.",
       "steps": [
         "ui-tauri",
         "http-api",
         "llm-embedded",
         "llm-router"
-      ]
+      ],
+      "name": "Capabilities / evidence"
     },
     {
       "id": "flow-companion-lan",
