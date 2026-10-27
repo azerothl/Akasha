@@ -165,7 +165,9 @@ fn verify_model(path: &Path, expected: Option<&str>) -> Result<(), String> {
     }
     let mut hash = Sha256::new();
     hash.update(magic);
-    let mut buffer = [0; 1024 * 1024];
+    // Windows CLI main threads may have a 1 MiB stack. Hash large models with
+    // the same chunk size on the heap, without exhausting that thread's stack.
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
         if count == 0 {
@@ -185,6 +187,22 @@ fn verify_model(path: &Path, expected: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod integrity_tests {
     use super::*;
+    #[test]
+    fn model_integrity_check_fits_a_small_windows_stack() {
+        use sha2::{Digest, Sha256};
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let bytes = b"GGUFsynthetic model fixture";
+        std::fs::write(file.path(), bytes).unwrap();
+        let path = file.path().to_path_buf();
+        let expected = format!("{:x}", Sha256::digest(bytes));
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || verify_model(&path, Some(&expected)))
+            .unwrap()
+            .join()
+            .unwrap()
+            .unwrap();
+    }
     #[test]
     fn html_or_wrong_model_bytes_are_not_activated() {
         let file = tempfile::NamedTempFile::new().unwrap();
