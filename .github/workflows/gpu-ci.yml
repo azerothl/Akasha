@@ -19,6 +19,7 @@ on:
       - "spec/dev/quality/bench_ar_protocol.json"
       - "spec/dev/quality/bench_embedded*.ps1"
       - "scripts/ci/prepare-gpu-ci.ps1"
+      - "scripts/ci/gpu-daemon-ownership.ps1"
       - "spec/dev/quality/bench_gpu_matrix.py"
   workflow_dispatch:
     inputs:
@@ -117,12 +118,13 @@ jobs:
           ) -PassThru -WindowStyle Hidden -RedirectStandardOutput $gpuSamples -RedirectStandardError $gpuErrors
           $daemon = Start-Process -FilePath "$ReleaseDir\akasha-daemon.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput $daemonOut -RedirectStandardError $daemonErr
           try {
+            . ./scripts/ci/gpu-daemon-ownership.ps1
             $ok = $false
+            $readinessError = 'No connection verified for the owned daemon.'
             for ($i = 0; $i -lt 60; $i++) {
               if ($daemon.HasExited) { throw "daemon exited before becoming ready; see $daemonErr" }
               try {
-                $owners = @(Get-NetTCPConnection -LocalPort $env:AKASHA_PORT -State Listen -ErrorAction SilentlyContinue)
-                if (-not ($owners | Where-Object { $_.OwningProcess -eq $daemon.Id })) {
+                if (-not (Test-GpuDaemonPortOwnership -Port $env:AKASHA_PORT -ExpectedProcessId $daemon.Id)) {
                   Start-Sleep -Seconds 2
                   continue
                 }
@@ -132,10 +134,11 @@ jobs:
                 break
               } catch {
                 if ($daemon.HasExited) { throw "daemon exited before becoming ready; see $daemonErr" }
+                $readinessError = $_.Exception.Message
                 Start-Sleep -Seconds 2
               }
             }
-            if (-not $ok) { throw "daemon did not become ready" }
+            if (-not $ok) { throw "daemon did not become ready: $readinessError" }
             $status = Invoke-RestMethod -Uri "http://127.0.0.1:$env:AKASHA_PORT/api/router/embedded-status"
             if ($status.embedded_available -ne $true) { throw "embedded model is unavailable: $($status | ConvertTo-Json -Compress)" }
             if ($status.engine_mode -ne "cuda" -or [int]$status.n_gpu_layers -lt 1) {
