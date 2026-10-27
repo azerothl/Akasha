@@ -57,6 +57,7 @@ pub fn allowed(path: &str) -> bool {
             | "/api/router/embedded/models"
             | "/api/router/embedded/hardware"
             | "/api/router/embedded/runtime"
+            | "/api/router/embedded/reload"
             | "/api/router/embedded/download"
             | "/api/router/embedded/download/status"
             | "/api/router/embedded/calibrate"
@@ -100,6 +101,8 @@ mod tests {
             "/api/system/run-command",
             "/api/update/download",
             "/api/notes-evil",
+            "/api/router/embedded/reload-remote",
+            "/api/router/embedded/reload/remote",
         ] {
             assert!(!allowed(path), "{path}");
         }
@@ -109,6 +112,7 @@ mod tests {
             "/api/consumer/watch",
             "/api/backup/activate",
             "/api/tasks/123/cancel",
+            "/api/router/embedded/reload",
         ] {
             assert!(allowed(path), "{path}");
         }
