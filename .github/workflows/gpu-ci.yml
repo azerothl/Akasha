@@ -1,12 +1,12 @@
 # GPU smoke + embedded bench on self-hosted runner (NVIDIA).
-# Requires a machine with labels: self-hosted, gpu, nvidia
+# Requires a Windows runner guarded for main, with label akasha-nvidia-main.
 # See spec/dev/quality/GPU_SELF_HOSTED_CI.md
 
 name: GPU CI
 
 on:
   push:
-    branches: [main, "0.*"]
+    branches: [main]
     paths:
       - "crates/akasha-embedded-llm/**"
       - "crates/akasha-daemon/**"
@@ -18,18 +18,8 @@ on:
       - "spec/dev/quality/bench_ar_protocol.py"
       - "spec/dev/quality/bench_ar_protocol.json"
       - "spec/dev/quality/bench_embedded*.ps1"
-  pull_request:
-    paths:
-      - "crates/akasha-embedded-llm/**"
-      - "crates/akasha-daemon/**"
-      - "crates/akasha-llm/**"
-      - ".github/workflows/gpu-ci.yml"
-      - ".github/workflows/release.yml"
-      - "scripts/install.ps1"
-      - "scripts/build-windows-daemon-cuda.ps1"
-      - "spec/dev/quality/bench_ar_protocol.py"
-      - "spec/dev/quality/bench_ar_protocol.json"
-      - "spec/dev/quality/bench_embedded*.ps1"
+      - "scripts/ci/prepare-gpu-ci.ps1"
+      - "spec/dev/quality/bench_gpu_matrix.py"
   workflow_dispatch:
     inputs:
       run_model_matrix:
@@ -38,20 +28,38 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+concurrency:
+  group: gpu-main
+  cancel-in-progress: false
+
 jobs:
   gpu-smoke:
-    runs-on: [self-hosted, gpu, nvidia]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, Windows, X64, akasha-nvidia-main]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare isolated GPU task
+        shell: pwsh
+        run: ./scripts/ci/prepare-gpu-ci.ps1
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Verify Python
+        shell: pwsh
+        run: |
+          python -c "import sys; assert sys.version_info >= (3, 11); print(sys.version)"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Build CUDA daemon
         shell: pwsh
@@ -65,15 +73,14 @@ jobs:
             }
           }
           # CLI only (CPU); daemon must stay CUDA — do not rebuild akasha-daemon with default features.
-          cargo build --release --target $Target -p akasha-cli
+          cargo build --locked --release --target $Target -p akasha-cli
+          if ($LASTEXITCODE) { throw "CLI build failed: $LASTEXITCODE" }
           .\scripts\build-windows-daemon-cuda.ps1 -Target $Target
 
       - name: Prepare data dir and GGUF
         shell: pwsh
-        env:
-          AKASHA_DATA_DIR: ${{ runner.temp }}\akasha-gpu-ci
         run: |
-          $ReleaseDir = "target\x86_64-pc-windows-msvc\release"
+          $ReleaseDir = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
           New-Item -ItemType Directory -Force -Path $env:AKASHA_DATA_DIR | Out-Null
           & "$ReleaseDir\akasha.exe" init --defaults
           if ($LASTEXITCODE -ne 0) { throw "Akasha data initialization failed with exit code $LASTEXITCODE" }
@@ -87,8 +94,6 @@ jobs:
       - name: Run live CUDA inference protocol
         shell: pwsh
         env:
-          AKASHA_DATA_DIR: ${{ runner.temp }}\akasha-gpu-ci
-          AKASHA_PORT: "3876"
           AKASHA_EMBEDDED_BACKEND: llama_cpp
           AKASHA_EMBEDDED_N_GPU_LAYERS: "99"
         run: |
@@ -96,7 +101,7 @@ jobs:
             $cudaFallback = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
             if (Test-Path (Join-Path $cudaFallback "bin\nvcc.exe")) { $env:CUDA_PATH = $cudaFallback }
           }
-          $ReleaseDir = "target\x86_64-pc-windows-msvc\release"
+          $ReleaseDir = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
           $evidenceDir = $env:AKASHA_DATA_DIR
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           $daemonOut = Join-Path $evidenceDir "daemon.stdout.log"
@@ -114,8 +119,15 @@ jobs:
           try {
             $ok = $false
             for ($i = 0; $i -lt 60; $i++) {
+              if ($daemon.HasExited) { throw "daemon exited before becoming ready; see $daemonErr" }
               try {
+                $owners = @(Get-NetTCPConnection -LocalPort $env:AKASHA_PORT -State Listen -ErrorAction SilentlyContinue)
+                if (-not ($owners | Where-Object { $_.OwningProcess -eq $daemon.Id })) {
+                  Start-Sleep -Seconds 2
+                  continue
+                }
                 Invoke-RestMethod -Uri "http://127.0.0.1:$env:AKASHA_PORT/api/status" -TimeoutSec 2 | Out-Null
+                if ($daemon.HasExited) { throw "owned daemon exited during readiness" }
                 $ok = $true
                 break
               } catch {
@@ -155,24 +167,26 @@ jobs:
             if ($daemon -and -not $daemon.HasExited) { Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue }
           }
 
+      - name: Bench embedded models matrix
+        if: github.event_name == 'workflow_dispatch' && inputs.run_model_matrix
+        shell: pwsh
+        run: |
+          $daemon = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/akasha-daemon.exe'
+          python spec/dev/quality/bench_gpu_matrix.py --daemon $daemon --data-dir $env:AKASHA_DATA_DIR
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
       - name: Preserve CUDA inference evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gpu-inference-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}\akasha-gpu-ci\bench-ar-qwen25-cuda.json
-            ${{ runner.temp }}\akasha-gpu-ci\daemon.stdout.log
-            ${{ runner.temp }}\akasha-gpu-ci\daemon.stderr.log
-            ${{ runner.temp }}\akasha-gpu-ci\gpu-samples.csv
-            ${{ runner.temp }}\akasha-gpu-ci\gpu-samples.err
+            ${{ env.AKASHA_DATA_DIR }}\bench-ar-qwen25-cuda.json
+            ${{ env.AKASHA_DATA_DIR }}\daemon.stdout.log
+            ${{ env.AKASHA_DATA_DIR }}\daemon.stderr.log
+            ${{ env.AKASHA_DATA_DIR }}\gpu-samples.csv
+            ${{ env.AKASHA_DATA_DIR }}\gpu-samples.err
+            ${{ env.AKASHA_DATA_DIR }}\embedded-matrix.json
+            ${{ env.AKASHA_DATA_DIR }}\matrix-*\daemon.log
           if-no-files-found: warn
           retention-days: 30
-
-      - name: Bench embedded models matrix
-        if: github.event_name == 'workflow_dispatch' && inputs.run_model_matrix
-        shell: pwsh
-        env:
-          AKASHA_DATA_DIR: ${{ runner.temp }}\akasha-gpu-ci
-        run: |
-          pwsh ./spec/dev/quality/bench_embedded_models.ps1 -Matrix -SimulatedTier gpu_low_4gb -NglValues 0,99
