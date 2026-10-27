@@ -2,6 +2,7 @@
 
 pub mod config_merge;
 pub mod data_dir;
+pub mod privacy;
 pub mod env_file;
 pub mod events;
 pub mod security;

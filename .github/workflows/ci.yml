@@ -294,15 +294,42 @@ jobs:
       - name: Validate Windows PowerShell updater and component publication
         run: python -m unittest discover -s scripts/ci/tests -p test_package_updates.py -v
 
+  consumer-beta-protection-windows:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ./.github/actions/cargo-cache
+        with:
+          variant: consumer-beta-sqlcipher-windows
+      - name: Prepare pinned Perl for vendored OpenSSL
+        shell: pwsh
+        run: ./scripts/ci/prepare-sqlcipher-windows.ps1
+      - name: Test SQLCipher and portable backup protection
+        run: |
+          cargo test --locked -p akasha-store --features memory-sqlcipher --lib
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked -p akasha-vault --lib protected_archive
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked -p akasha-daemon --no-default-features --features consumer-beta --lib privacy::
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked -p akasha-daemon --no-default-features --features consumer-beta --lib profile_backup::
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
   # Preserve the existing required "test" check, including docs-only changes.
   test:
     if: always()
-    needs: [changes, rust-tests, ui-e2e, windows-updater]
+    needs: [changes, rust-tests, ui-e2e, windows-updater, consumer-beta-protection-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Check all required outcomes
         env:
           PLAN_RESULT: ${{ needs.changes.result }}
+          PROTECTION_RESULT: ${{ needs.consumer-beta-protection-windows.result }}
           RUST_RESULT: ${{ needs.rust-tests.result }}
           UI_RESULT: ${{ needs.ui-e2e.result }}
           UPDATE_RESULT: ${{ needs.windows-updater.result }}
@@ -311,5 +338,6 @@ jobs:
         run: |
           [[ "$PLAN_RESULT" == success ]]
           [[ "$UPDATE_RESULT" == success ]]
+          if [[ "$RUST_REQUIRED" == true ]]; then [[ "$PROTECTION_RESULT" == success ]]; else [[ "$PROTECTION_RESULT" == skipped ]]; fi
           if [[ "$RUST_REQUIRED" == true ]]; then [[ "$RUST_RESULT" == success ]]; else [[ "$RUST_RESULT" == skipped ]]; fi
           if [[ "$UI_REQUIRED" == true ]]; then [[ "$UI_RESULT" == success ]]; else [[ "$UI_RESULT" == skipped ]]; fi

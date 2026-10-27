@@ -9606,3 +9606,12 @@ input, textarea { caret-color: var(--akasha-accent); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+.remote-privacy { max-width: 75ch; margin: .5rem auto; padding: .5rem 1rem; font-size: .875rem; overflow-wrap: anywhere; }
+.remote-privacy summary { cursor: pointer; padding: .5rem 0; }
+.remote-privacy p { margin: .5rem 0 1rem; line-height: 1.5; }
+.remote-privacy-choice { display: flex; align-items: flex-start; gap: .75rem; padding: .75rem 0; }
+.remote-privacy-choice input { margin-top: .25rem; flex-shrink: 0; }
+.remote-privacy-grant { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-bottom: 1rem; }
+.remote-privacy-grant p { flex: 1 1 15rem; margin: 0; }
+.permissions-bell-drawer { position: fixed; top: 4rem; right: 1rem; max-height: min(80vh, 48rem); overflow: auto; }

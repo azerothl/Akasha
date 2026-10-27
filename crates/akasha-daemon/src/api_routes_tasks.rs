@@ -2818,6 +2818,12 @@ if method == "POST" && path == "/api/message" {
     );
     envelope.display_request = Some(display_request);
     envelope.studio_execution = studio_execution;
+    if let Some(consents) = body_json.as_ref().and_then(|body|body.get("remote_consents")) {
+        match serde_json::from_value::<Vec<crate::privacy::Consent>>(consents.clone()) {
+            Ok(consents) => envelope.remote_consents = consents,
+            Err(_) => return Some(json_response("400 Bad Request",r#"{"error":"invalid_remote_consents"}"#)),
+        }
+    }
     envelope.studio_disk_root = studio_disk_root.clone();
     envelope.studio_forced_agent = studio_forced_agent;
     envelope.studio_evolution_branch = studio_evolution_branch;

@@ -35,8 +35,12 @@ test.beforeEach(async ({ page, request }) => {
       const result = await request.post(`${daemon}/api/message`, { data: {
         message: args.message, display_message: args.displayMessage,
         session_id: args.sessionId || `ui-${Date.now()}`, composer_mode: args.composerMode, incognito: true,
+        remote_consents: args.remoteConsents,
       } });
       value = await result.json();
+    } else if (command === "daemon_get_text" || command === "daemon_request") {
+      const response = await request.fetch(`${daemon}${args.path}`, { method: command === "daemon_get_text" ? "GET" : args.method, data: args.body ? JSON.parse(args.body) : undefined });
+      value = { ok: response.ok(), status: response.status(), text: await response.text() };
     } else if (command === "get_task_status") value = await (await request.get(`${daemon}/api/tasks/${args.taskId}`)).text();
     else if (command === "get_task_events") value = await (await request.get(`${daemon}/api/tasks/${args.taskId}/events`)).json();
     else if (command === "get_tasks") value = { tasks: [] };
@@ -49,6 +53,9 @@ test.beforeEach(async ({ page, request }) => {
   await expect(page.getByPlaceholder("Votre message…")).toBeVisible();
 });
 
+// Drain background IPC requests before Playwright disposes its request context.
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: "wait" }); });
+
 for (const scenario of [
   { id: "qa", question: "Quelle est la capitale de la France ?", result: "La capitale de la France est Paris.", error: false },
   { id: "json_repair", question: "Recherche Akasha audit release et ouvre sa source pour donner sa version de test.", result: "9.8.7-AUDIT", error: false },
@@ -56,6 +63,9 @@ for (const scenario of [
 ]) {
   test(`chat displays the actual result: ${scenario.id}`, async ({ page, request }) => {
     await request.post(`${provider}/control`, { data: { case: scenario.id } });
+    const consent = page.locator("details.remote-privacy");
+    await consent.locator("summary").click();
+    await consent.getByRole("checkbox", { name: /Modèle distant · openai / }).check();
     await page.getByPlaceholder("Votre message…").fill(scenario.question);
     await page.getByRole("button", { name: "Envoyer le message", exact: true }).click();
     const answer = page.locator(".message.assistant").filter({ hasText: scenario.result }).last();

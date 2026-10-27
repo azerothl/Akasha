@@ -363,6 +363,12 @@ async fn scoped_studio_write_reaches_disk_and_records_disk_version() {
     let decoded = call("write_file", json!({"path":"workspace:/proof.txt","content":"real disk","expected_version":"missing"}), Uuid::new_v4());
     let raw = serde_json::to_string(&json!({"schema_version":1,"operation_id":decoded.envelope.operation_id,"tool":"write_file","arguments":decoded.envelope.arguments})).unwrap();
     let (success, result, _) = crate::api_tool_dispatch::execute_tool_call(ctx, &executor, "studio_call", &[raw]).await;
+    if cfg!(feature="consumer-beta") {
+        assert!(!success,"the consumer package cannot write arbitrary configuration files");
+        assert!(!root.join("proof.txt").exists());
+        assert_eq!(serde_json::from_str::<Value>(&result).unwrap()["file_version"],"missing");
+        return;
+    }
     assert!(success, "{result}");
     assert_eq!(std::fs::read_to_string(root.join("proof.txt")).unwrap(), "real disk");
     assert_ne!(serde_json::from_str::<Value>(&result).unwrap()["file_version"], "missing");

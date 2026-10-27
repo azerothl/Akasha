@@ -216,6 +216,12 @@ impl Daemon {
     /// Run the daemon (blocks until shutdown)
     pub async fn run(&self) -> anyhow::Result<RunOutcome> {
         log_upgrade_heritage_reminder(&self.data_dir);
+        if cfg!(feature="consumer-beta") {
+            let memory=self.data_dir.join("memory.db");
+            if !memory.exists() && !memory.with_extension("db.protection.json").exists() {
+                if let Err(error)=akasha_store::memory_protection::open_connection(&memory) {warn!(%error,"Memory locked: Windows protection unavailable");}
+            }
+        }
         // Load specs at startup
         match load_specs(&self.spec_dir) {
             Ok(specs) => {
@@ -252,7 +258,7 @@ impl Daemon {
             .unwrap_or(DEFAULT_PORT);
         let mut channel_config = crate::channels::ChannelConfig::default();
         channel_config.port = port;
-        if std::env::var("AKASHA_SLACK_ENABLED").as_deref() == Ok("1") {
+        if !cfg!(feature="consumer-beta") && std::env::var("AKASHA_SLACK_ENABLED").as_deref() == Ok("1") {
             if let Ok(v) = &vault {
                 if let Ok(secret) = v.get("slack_signing_secret") {
                     channel_config.slack_signing_secret = Some(secret);
@@ -260,7 +266,7 @@ impl Daemon {
                 }
             }
         }
-        if std::env::var("AKASHA_TEAMS_ENABLED").as_deref() == Ok("1") {
+        if !cfg!(feature="consumer-beta") && std::env::var("AKASHA_TEAMS_ENABLED").as_deref() == Ok("1") {
             if let Ok(v) = &vault {
                 if let (Ok(app_id), Ok(app_password)) = (v.get("teams_app_id"), v.get("teams_app_password")) {
                     channel_config.teams_app_id = Some(app_id);
@@ -571,7 +577,7 @@ impl Daemon {
         } else {
             vec![]
         };
-        let cluster_enabled = std::env::var("AKASHA_CLUSTER_ENABLED").as_deref() == Ok("1");
+        let cluster_enabled = !cfg!(feature="consumer-beta") && std::env::var("AKASHA_CLUSTER_ENABLED").as_deref() == Ok("1");
         if !cluster_enabled {
             if let Ok(log) = ImmutableLog::open(&log_path) {
                 if log.verify().unwrap_or(false) {
@@ -1044,7 +1050,8 @@ impl Daemon {
                                         return;
                                     }
                                 };
-                                run_message_via_llm(
+                                let privacy_scope = crate::privacy::task_scope(&store_path, task_id);
+                                akasha_core::privacy::scoped(privacy_scope, run_message_via_llm(
                                     bus,
                                     llm_router,
                                     store_path,
@@ -1075,7 +1082,7 @@ impl Daemon {
                                     studio_reg,
                                     studio_worktree_registry,
                                     incognito,
-                                )
+                                ))
                                 .instrument(span)
                                 .await;
                                 drop(permit);
@@ -1151,7 +1158,8 @@ impl Daemon {
                                         return;
                                     }
                                 };
-                                run_message_via_llm(
+                                let privacy_scope = crate::privacy::task_scope(&store_path, task_id);
+                                akasha_core::privacy::scoped(privacy_scope, run_message_via_llm(
                                     bus,
                                     llm_router,
                                     store_path,
@@ -1182,7 +1190,7 @@ impl Daemon {
                                     studio_reg,
                                     studio_worktree_registry,
                                     incognito,
-                                )
+                                ))
                                 .instrument(span)
                                 .await;
                                 drop(permit);
@@ -1361,7 +1369,7 @@ impl Daemon {
             });
 
             // Phase 4: Discord bot (optional)
-            let discord_enabled = if std::env::var("AKASHA_DISCORD_ENABLED").as_deref() == Ok("1") {
+            let discord_enabled = if !cfg!(feature="consumer-beta") && std::env::var("AKASHA_DISCORD_ENABLED").as_deref() == Ok("1") {
                 if let Ok(v) = &vault {
                     if let Ok(token) = v.get("discord_bot_token") {
                         let discord_port = port;
@@ -1385,7 +1393,7 @@ impl Daemon {
             };
 
             // Phase 4 rattrapage: Telegram bot (optional)
-            let telegram_enabled = if std::env::var("AKASHA_TELEGRAM_ENABLED").as_deref() == Ok("1") {
+            let telegram_enabled = if !cfg!(feature="consumer-beta") && std::env::var("AKASHA_TELEGRAM_ENABLED").as_deref() == Ok("1") {
                 if let Ok(v) = &vault {
                     if let Ok(token) = v.get("telegram_bot_token") {
                         let daemon_url = format!("http://127.0.0.1:{}", port);

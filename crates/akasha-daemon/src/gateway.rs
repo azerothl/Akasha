@@ -32,6 +32,7 @@ impl ChannelType {
 /// Normalized message envelope produced by channel adapters and consumed by the core.
 #[derive(Debug, Clone)]
 pub struct MessageEnvelope {
+    pub remote_consents: Vec<crate::privacy::Consent>,
     /// Source channel type.
     pub channel_type: ChannelType,
     /// Optional channel identifier (e.g. Slack channel id, Teams conversation id).
@@ -88,6 +89,7 @@ impl MessageEnvelope {
             studio_evolution_branch: None,
             incognito,
             studio_execution: None,
+            remote_consents: vec![],
         }
     }
 
@@ -111,6 +113,7 @@ impl MessageEnvelope {
             studio_evolution_branch: None,
             incognito: false,
             studio_execution: None,
+            remote_consents: vec![],
         }
     }
 
@@ -134,6 +137,7 @@ impl MessageEnvelope {
             studio_evolution_branch: None,
             incognito: false,
             studio_execution: None,
+            remote_consents: vec![],
         }
     }
 }
@@ -174,6 +178,7 @@ pub async fn handle_envelope(
         envelope.studio_evolution_branch.clone(),
         envelope.incognito,
         envelope.studio_execution,
+        envelope.remote_consents,
     )
         .await
 }

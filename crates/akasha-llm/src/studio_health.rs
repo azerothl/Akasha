@@ -142,6 +142,9 @@ impl StudioHealth {
         };
         let result=tokio::time::timeout_at(deadline,result).await
             .unwrap_or_else(|_|Err("studio_qualification_timeout: aucun appel d'outil complet reçu en 20 s maximum ; vérifiez le service ou choisissez une autre route".into()));
+        if let Err(message)=&result {
+            if message.contains("remote_consent_"){return Err(message.clone());}
+        }
         let record=Qualification {status:if result.is_ok(){"qualified"}else{"quarantined"}.into(), detail:result.clone().err().unwrap_or_else(||"Appel d'outil structuré vérifié sans exécution ; contexte configuré et latence du probe enregistrés. La livraison du projet reste à valider.".into()), checked_at:chrono::Utc::now().to_rfc3339(), latency_ms:started.elapsed().as_millis() as u64, context_window_tokens:request.num_ctx};
         self.entries
             .lock()

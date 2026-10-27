@@ -153,7 +153,7 @@ pub struct MemorySearchFilter {
 
 impl LongTermStore {
     pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = crate::memory_protection::open_connection(path)?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS memory_entries (
@@ -1141,6 +1141,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "memory-sqlcipher"))]
     #[test]
     fn memory_db_content_readable_without_encryption_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -1178,6 +1179,7 @@ mod tests {
         assert_eq!(backup_content, marker);
     }
 
+    #[cfg(not(feature = "memory-sqlcipher"))]
     #[test]
     fn memory_db_remains_plaintext_with_and_without_encryption_flag() {
         const CHILD: &str = "AKASHA_MEMORY_ENCRYPT_PLAINTEXT_TEST_CHILD";

@@ -9,7 +9,7 @@ sauvegardes chiffrées. Les trois parcours réutilisent les tâches du daemon.
 | Lot | Livraison | Acceptation restante |
 |---|---|---|
 | 1 — Résultat attendu | Corpus versionné de 50 scénarios ; classification des preuves et gate à trois runs réels | Exécution complète sur les composants des lots suivants et les paquets distribués |
-| 2 — Consentement et protection | En cours | Contrôles réseau, migration et clé Windows |
+| 2 — Consentement et protection | Socle : accords par tâche, transports protégés, SQLCipher, clé Windows, API de sauvegarde/restauration | Voir consumer_beta_privacy.md : validation du paquet, périmètre documentaire, reprise HTTP et second compte Windows |
 | 3 — Modèles et démarrage | À livrer | Trois parcours et qualification réelle |
 | 4 — Documents et OCR | À livrer | PDF mixtes, photos, références et paquet OCR |
 | 5 — Organisation, veille, sauvegarde | À livrer | Persistance, restauration sur autre compte |

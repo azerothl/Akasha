@@ -2256,12 +2256,13 @@ pub(crate) async fn run_message_via_llm(
                     let _=observer_bus.send(EventEnvelope::new(EventType::ProgressUpdate,Some(serde_json::json!({"task_id":task_id,"progress_pct":24,"message":message}))).with_correlation(task_id));
                 }
             });
-            let mut stream_join = tokio::spawn(async move {
+            let privacy_scope = crate::privacy::task_scope(&store_path,task_id);
+            let mut stream_join = tokio::spawn(akasha_core::privacy::scoped(privacy_scope, async move {
                 if code_studio_disk_task {
                     router.complete_stream_bounded(&request,selected_route.as_ref(),recovered_route.as_ref(),stream_tx,turn_budget.saturating_sub(std::time::Duration::from_millis(100)),observer).await
                 } else if let Some(route) = selected_route { router.complete_stream_for_entry(&request, &route, stream_tx).await }
                 else { router.complete_stream(&request, stream_tx).await }
-            });
+            }));
             let mut accumulated = String::new();
             let mut visible_stream_bytes = 0usize;
             let mut first_wait = true;
@@ -5365,7 +5366,8 @@ pub(crate) async fn run_message_via_llm(
             let sem = extract_semaphore();
             let data_dir_for_extract = data_dir.to_path_buf();
             let agent_profile_cache_for_extract = agent_profile_cache.clone();
-            tokio::spawn(async move {
+            let extraction_scope = akasha_core::privacy::current();
+            tokio::spawn(akasha_core::privacy::scoped_optional(extraction_scope, async move {
                 let _permit = match sem.try_acquire() {
                     Ok(p) => p,
                     Err(_) => {
@@ -5507,7 +5509,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                         Err(e) => tracing::debug!(error = %e, "Promote task join error"),
                     }
                 }
-            });
+            }));
         }
     }
 

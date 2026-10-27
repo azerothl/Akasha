@@ -7,7 +7,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 fn open_conn<P: AsRef<Path>>(path: P) -> anyhow::Result<Connection> {
-    let conn = Connection::open(path)?;
+    let conn = crate::memory_protection::open_connection(path)?;
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS wakeups (

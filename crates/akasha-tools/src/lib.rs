@@ -28,7 +28,7 @@ pub use agent_catalog::{arxiv_search, github_repo_info, http_probe, search_skill
 #[cfg(feature = "web")]
 pub use tools::{web_crawl_start, web_crawl_status, web_fetch, web_search};
 #[cfg(feature = "web")]
-pub use web_search::any_provider_available;
+pub use web_search::{any_provider_available, privacy_search_services};
 
 #[cfg(feature = "container")]
 pub use container::{run_container, run_code_in_container, ContainerRunOptions, ContainerRunResult};

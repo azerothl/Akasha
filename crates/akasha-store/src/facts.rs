@@ -23,7 +23,7 @@ pub struct FactsStore {
 impl FactsStore {
     /// Open the facts store. Uses the same DB path as long-term memory; creates facts table if missing.
     pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = crate::memory_protection::open_connection(path)?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS facts (

@@ -5,6 +5,7 @@ edition = "2021"
 description = "Machine tools for agents: file read/write/search, run command, diff, web fetch; policy and safety"
 
 [dependencies]
+akasha-core = { path = "../akasha-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 anyhow = "1.0"

@@ -72,14 +72,15 @@ pub fn csrf_reject_response(
     // Delivery reads use the operator's GitHub identity, so browser origin checks
     // apply to them as well as mutations (including opaque sandbox origins).
     let delivery_read = method == "GET" && (path.starts_with("/api/studio/projects/") && path.contains("/delivery/") || path=="/api/tasks" || path.starts_with("/api/tasks/") || path=="/api/pending-human-input" || path=="/api/permissions/queue" || path.starts_with("/api/permissions/queue/") || path=="/api/events" || path.starts_with("/api/events/"));
+    let delivery_read=delivery_read || cfg!(feature="consumer-beta") && matches!(method,"GET"|"HEAD") && path.starts_with("/api/");
     if !delivery_read && !matches!(method, "POST" | "PUT" | "DELETE" | "PATCH") {return None;}
     // Local webviews/proxies can legitimately be cross-site across loopback hosts.
-    if headers.get("origin").is_some_and(|origin|origin_is_local(origin.trim()) && !(delivery_read && origin.trim()=="null")) {return None;}
+    if headers.get("origin").is_some_and(|origin|origin_is_local(origin.trim()) && !((delivery_read || cfg!(feature="consumer-beta")) && origin.trim()=="null")) {return None;}
     if delivery_read && headers.get("sec-fetch-site").is_some_and(|site|site=="cross-site") {
         return Some(json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#));
     }
     let origin = headers.get("origin")?.trim();
-    if origin_is_local(origin) && !(delivery_read && origin=="null") {
+    if origin_is_local(origin) && !((delivery_read || cfg!(feature="consumer-beta")) && origin=="null") {
         return None;
     }
     tracing::warn!(
@@ -97,6 +98,18 @@ pub fn csrf_reject_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature="consumer-beta")]
+    #[test]
+    fn personal_reads_are_not_exposed_to_foreign_or_opaque_browser_origins() {
+        for path in ["/api/user-rag/documents","/api/privacy","/api/notes","/api/memory/export"] {
+            for origin in ["https://foreign.example","null","http://localhost.evil.example"] {
+                assert!(csrf_reject_response("GET",path,&header_map_origin(origin)).is_some(),"{path} {origin}");
+            }
+            assert!(csrf_reject_response("GET",path,&header_map_origin("http://tauri.localhost")).is_none());
+            assert!(csrf_reject_response("GET",path,&HashMap::new()).is_none());
+        }
+    }
 
     fn header_map_origin(origin: &str) -> HashMap<String, String> {
         let mut m = HashMap::new();
@@ -132,7 +145,7 @@ mod tests {
         assert!(origin_allowed("http://127.0.0.1:3876"));
         assert!(origin_allowed("https://tauri.localhost/"));
         assert!(origin_allowed("tauri://localhost"));
-        assert!(origin_allowed("null"));
+        assert_eq!(origin_allowed("null"),!cfg!(feature="consumer-beta"));
     }
 
     #[test]
@@ -150,9 +163,9 @@ mod tests {
     }
 
     #[test]
-    fn csrf_get_never_blocked_by_origin() {
+    fn csrf_get_policy_matches_distribution() {
         let m = header_map_origin("https://evil.example");
-        assert!(csrf_reject_response("GET", "/api/foo", &m).is_none());
+        assert_eq!(csrf_reject_response("GET", "/api/foo", &m).is_none(),!cfg!(feature="consumer-beta"));
     }
 
     #[test]

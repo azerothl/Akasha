@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::warn;
 
+fn transport_client() -> reqwest::Client {
+    // A redirect is a different recipient and must not receive a request body
+    // under the original endpoint's consent (including a loopback endpoint).
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("HTTP transport configuration")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
     /// Require an initial tool for an explicit execution request; never implies successful completion.
@@ -801,6 +807,8 @@ pub struct TokenUsage {
 
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
+    /// Actual immutable transport endpoint, independent of reloadable route metadata.
+    fn endpoint(&self) -> Option<&str> { None }
     fn name(&self) -> &str;
     fn is_available(&self) -> bool;
     fn is_local(&self) -> bool {
@@ -837,6 +845,8 @@ pub trait LLMProvider: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    #[error("{0}")]
+    ConsentRequired(String),
     #[error("timeout (HTTP request deadline exceeded; logs should include base_url, model, timeout_secs)")]
     Timeout,
     #[error("api error: {0}")]
@@ -1119,6 +1129,32 @@ impl OllamaProvider {
         }
     }
 
+    /// A loopback Ollama server can proxy cloud models, including aliases.
+    /// Inspect its recipient metadata before sending any conversation bytes.
+    async fn check_model_destination(&self,model:&str,timeout:Duration)->Result<(),ProviderError> {
+        let mut response=transport_client().get(format!("{}/api/tags",self.base_url.trim_end_matches('/')))
+            .timeout(timeout.min(Duration::from_secs(10))).send().await
+            .map_err(|_|ProviderError::Api("model_privacy_unverified: métadonnées Ollama indisponibles".into()))?;
+        if !response.status().is_success(){return Err(ProviderError::Api("model_privacy_unverified: métadonnées Ollama indisponibles".into()));}
+        let mut bytes=Vec::new();
+        while let Some(chunk)=response.chunk().await.map_err(|_|ProviderError::Unavailable)? {
+            if bytes.len()+chunk.len()>8*1024*1024{return Err(ProviderError::Api("Ollama metadata exceeds 8 MiB".into()));}
+            bytes.extend_from_slice(&chunk);
+        }
+        let tags:serde_json::Value=serde_json::from_slice(&bytes).map_err(|_|ProviderError::Unavailable)?;
+        let normalized=if model.rsplit('/').next().is_some_and(|name|name.contains(':')){model.to_string()}else{format!("{model}:latest")};
+        let metadata=tags["models"].as_array().and_then(|items|items.iter().find(|value|value["name"]==model || value["model"]==model || value["name"]==normalized || value["model"]==normalized))
+            .ok_or_else(||ProviderError::Api("model_privacy_unverified: modèle absent des métadonnées Ollama".into()))?;
+        let remote=metadata["remote_host"].as_str().filter(|value|!value.is_empty());
+        if let Some(host)=remote {
+            let recipient=format!("model:ollama-cloud:{}",akasha_core::privacy::endpoint_identity(host));
+            akasha_core::privacy::check(&recipient,&["message","history","memory","documents","tool_results"]).map_err(ProviderError::ConsentRequired)?;
+        } else if metadata["remote_model"].as_str().is_some_and(|value|!value.is_empty()) || model.contains(":cloud") || model.ends_with("-cloud") {
+            return Err(ProviderError::Api("model_privacy_unverified: destinataire du modèle distant inconnu".into()));
+        }
+        Ok(())
+    }
+
     async fn prepare_conversation(
         &self,
         request: &CompletionRequest,
@@ -1136,7 +1172,7 @@ impl OllamaProvider {
         }
         // Custom completion-only Modelfiles (e.g. `{{ .Prompt }}`) discard chat
         // messages. Inspect the actual template rather than guessing from model name.
-        let mut response = reqwest::Client::new()
+        let mut response = transport_client()
             .post(format!("{}/api/show", self.base_url))
             .json(&serde_json::json!({"model":model,"verbose":false}))
             .timeout(timeout)
@@ -1342,7 +1378,8 @@ impl OllamaProvider {
     }
 
     async fn complete_prepared_async(&self, request: &CompletionRequest, model: &str, timeout: Duration) -> Result<CompletionResponse, ProviderError> {
-        let client = reqwest::Client::new();
+        if akasha_core::privacy::current().is_some(){self.check_model_destination(model,timeout).await?;}
+        let client = transport_client();
         let (url, body) = self.build_generate_body(request, model, false);
         let resp = client
             .post(&url)
@@ -1498,13 +1535,14 @@ impl OllamaProvider {
         timeout: Duration,
         chunk_tx: &std::sync::mpsc::Sender<String>,
     ) -> Result<CompletionResponse, ProviderError> {
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let started = std::time::Instant::now();
         self.prepare_conversation(request, model, timeout).await?;
         let remaining = timeout.checked_sub(started.elapsed()).ok_or(ProviderError::Timeout)?;
         let bounded = self.prepare_model_context(request, model, remaining).await?;
         let timeout = timeout.checked_sub(started.elapsed()).ok_or(ProviderError::Timeout)?;
         let (url, body) = self.build_generate_body(&bounded, model, true);
+        if akasha_core::privacy::current().is_some(){self.check_model_destination(model,timeout).await?;}
         let mut resp = client
             .post(&url)
             .json(&body)
@@ -1703,6 +1741,7 @@ impl OllamaProvider {
 
 #[async_trait]
 impl LLMProvider for OllamaProvider {
+    fn endpoint(&self) -> Option<&str> { Some(&self.base_url) }
     fn name(&self) -> &str {
         "ollama"
     }
@@ -1729,6 +1768,7 @@ impl LLMProvider for OllamaProvider {
         model_override: Option<&str>,
     ) -> Result<CompletionResponse, ProviderError> {
         let model = model_override.unwrap_or("llama3.2");
+        self.check_model_destination(model,timeout).await?;
         self.complete_async(request, model, timeout).await
     }
 
@@ -1740,8 +1780,41 @@ impl LLMProvider for OllamaProvider {
         chunk_tx: std::sync::mpsc::Sender<String>,
     ) -> Result<CompletionResponse, ProviderError> {
         let model = model_override.unwrap_or("llama3.2");
+        self.check_model_destination(model,timeout).await?;
         self.complete_stream_async(request, model, timeout, &chunk_tx)
             .await
+    }
+}
+
+#[cfg(test)]
+mod ollama_cloud_privacy_tests {
+    use super::*;
+    #[tokio::test]
+    async fn a_local_alias_to_a_cloud_model_never_receives_a_private_prompt_without_consent() {
+        use std::io::{Read,Write};
+        for stream in [false,true] {
+            let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address=listener.local_addr().unwrap();
+            let server=std::thread::spawn(move || {
+                let (mut socket,_)=listener.accept().unwrap();let mut buffer=[0u8;4096];
+                let count=socket.read(&mut buffer).unwrap();
+                let request=String::from_utf8_lossy(&buffer[..count]);
+                assert!(request.starts_with("GET /api/tags "));
+                assert!(!request.contains("PRIVATE_PROMPT_CANARY"));
+                let body=r#"{"models":[{"name":"innocent-local-name:latest","remote_model":"cloud-model","remote_host":"https://ollama.com:443"}]}"#;
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            });
+            let provider=OllamaProvider::new(Some(format!("http://{address}")));
+            let request:CompletionRequest=serde_json::from_value(serde_json::json!({"prompt":"PRIVATE_PROMPT_CANARY"})).unwrap();
+            let result=if stream {
+                let (sender,_)=std::sync::mpsc::channel();
+                provider.complete_stream(&request,Duration::from_secs(5),Some("innocent-local-name"),sender).await
+            } else {provider.complete(&request,Duration::from_secs(5),Some("innocent-local-name")).await};
+            let error=result.err().expect("cloud alias must fail before inference").to_string();
+            assert!(error.contains("remote_consent_required"),"{error}");
+            assert!(error.contains("model:ollama-cloud:https://ollama.com"),"{error}");
+            server.join().unwrap();
+        }
     }
 }
 
@@ -1831,7 +1904,7 @@ impl OpenAIProvider {
         if self.api_key.is_empty() {
             return Err(ProviderError::Auth("missing API key".into()));
         }
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_chat_completions_body(request, model);
 
@@ -1910,6 +1983,7 @@ impl OpenAIProvider {
 
 #[async_trait]
 impl LLMProvider for OpenAIProvider {
+    fn endpoint(&self) -> Option<&str> { Some(&self.base_url) }
     fn name(&self) -> &str {
         "openai"
     }
@@ -1948,7 +2022,7 @@ impl LLMProvider for OpenAIProvider {
             return Err(ProviderError::Auth("missing API key".into()));
         }
         let model = model_override.unwrap_or("gpt-4o-mini");
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_chat_completions_body(request, model);
         let key = self.api_key.clone();
@@ -2086,6 +2160,7 @@ impl OpenRouterProvider {
 
 #[async_trait]
 impl LLMProvider for OpenRouterProvider {
+    fn endpoint(&self) -> Option<&str> { Some(&self.base_url) }
     fn name(&self) -> &str {
         if self.free_only { "openrouter_free" } else { "openrouter" }
     }
@@ -2108,7 +2183,7 @@ impl LLMProvider for OpenRouterProvider {
             return Err(ProviderError::Auth("missing API key".into()));
         }
         let model = model_override.unwrap_or("openai/gpt-4o-mini");
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_chat_completions_body(request, model);
 
@@ -2204,7 +2279,7 @@ impl LLMProvider for OpenRouterProvider {
             return Err(ProviderError::Auth("missing API key".into()));
         }
         let model = model_override.unwrap_or("openai/gpt-4o-mini");
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_chat_completions_body(request, model);
         let api_key = self.api_key.clone();
@@ -2276,6 +2351,7 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl LLMProvider for AnthropicProvider {
+    fn endpoint(&self) -> Option<&str> { Some(&self.base_url) }
     fn name(&self) -> &str {
         "anthropic"
     }
@@ -2295,7 +2371,7 @@ impl LLMProvider for AnthropicProvider {
             return Err(ProviderError::Auth("missing API key".into()));
         }
         let model = model_override.unwrap_or("claude-3-5-sonnet-20241022");
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = format!("{}/v1/messages", self.base_url);
         let body = self.build_messages_body(request, model);
         let resp = client
@@ -2368,7 +2444,7 @@ impl LLMProvider for AnthropicProvider {
             return Err(ProviderError::Auth("missing API key".into()));
         }
         let model = model_override.unwrap_or("claude-3-5-sonnet-20241022");
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = format!("{}/v1/messages", self.base_url);
         let mut body = self.build_messages_body(request, model);
         body["stream"] = serde_json::json!(true);
@@ -2458,6 +2534,7 @@ impl AzureOpenAIProvider {
 
 #[async_trait]
 impl LLMProvider for AzureOpenAIProvider {
+    fn endpoint(&self) -> Option<&str> { Some(&self.base_url) }
     fn name(&self) -> &str {
         "azure_openai"
     }
@@ -2477,7 +2554,7 @@ impl LLMProvider for AzureOpenAIProvider {
             return Err(ProviderError::Auth("missing API key".into()));
         }
         let deployment = model_override.unwrap_or("gpt-4o-mini");
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = format!(
             "{}/openai/deployments/{}/chat/completions?api-version=2024-02-15-preview",
             self.base_url.trim_end_matches('/'),
@@ -2563,7 +2640,7 @@ impl LLMProvider for AzureOpenAIProvider {
             return Err(ProviderError::Auth("missing API key".into()));
         }
         let deployment = model_override.unwrap_or("gpt-4o-mini");
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = format!(
             "{}/openai/deployments/{}/chat/completions?api-version=2024-02-15-preview",
             self.base_url.trim_end_matches('/'),
@@ -2647,6 +2724,7 @@ impl GoogleAIProvider {
 
 #[async_trait]
 impl LLMProvider for GoogleAIProvider {
+    fn endpoint(&self) -> Option<&str> { Some(&self.base_url) }
     fn name(&self) -> &str {
         "google"
     }
@@ -2666,7 +2744,7 @@ impl LLMProvider for GoogleAIProvider {
             return Err(ProviderError::Auth("missing API key".into()));
         }
         let model = model_override.unwrap_or("gemini-1.5-flash");
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = format!(
             "{}/v1beta/models/{}:generateContent?key={}",
             self.base_url, model, self.api_key
@@ -2747,7 +2825,7 @@ impl LLMProvider for GoogleAIProvider {
             return Err(ProviderError::Auth("missing API key".into()));
         }
         let model = model_override.unwrap_or("gemini-1.5-flash");
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = format!(
             "{}/v1beta/models/{}:streamGenerateContent?key={}",
             self.base_url, model, self.api_key
@@ -2849,7 +2927,7 @@ impl BitNetProvider {
         model: &str,
         timeout: Duration,
     ) -> Result<CompletionResponse, ProviderError> {
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = self.chat_completions_url();
         let body = self.build_chat_completions_body(request, model);
 
@@ -2919,6 +2997,7 @@ impl BitNetProvider {
 
 #[async_trait]
 impl LLMProvider for BitNetProvider {
+    fn endpoint(&self) -> Option<&str> { Some(&self.base_url) }
     fn name(&self) -> &str {
         "bitnet"
     }
@@ -2964,7 +3043,7 @@ impl LLMProvider for BitNetProvider {
         chunk_tx: std::sync::mpsc::Sender<String>,
     ) -> Result<CompletionResponse, ProviderError> {
         let model = model_override.unwrap_or("default");
-        let client = reqwest::Client::new();
+        let client = transport_client();
         let url = self.chat_completions_url();
         let body = self.build_chat_completions_body(request, model);
         streaming::post_openai_chat_completions_stream(

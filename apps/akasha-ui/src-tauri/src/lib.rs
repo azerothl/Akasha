@@ -119,6 +119,7 @@ async fn send_message_ack(
     priority: Option<String>,
     incognito: Option<bool>,
     composer_mode: Option<String>,
+    remote_consents: Option<Vec<serde_json::Value>>,
     port: Option<u16>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
@@ -186,6 +187,7 @@ async fn send_message_ack(
             body["composer_mode"] = serde_json::Value::String(m);
         }
     }
+    if let Some(consents)=remote_consents { body["remote_consents"]=serde_json::json!(consents); }
     let resp = client
         .post(&url)
         .json(&body)

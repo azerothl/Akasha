@@ -124,6 +124,17 @@ pub(crate) async fn execute_tool_call_impl(
     session_id: Option<&str>,
     approved_delivery_identity: Option<&str>,
 ) -> (bool, String, Option<String>) {
+    // The consumer package exposes only transports with a recipient-aware
+    // consent boundary. Shells and opaque connectors can bypass that boundary;
+    // they remain available in the separate developer distribution.
+    if cfg!(feature="consumer-beta") && !matches!(tool_name,
+        "read_file"|"search_files"|"file_search"|"grep"|"grep_content"|
+        "read_todos"|"write_todos"|"update_todo"|"merge_todos"|"web_search"|"web_fetch"|
+        "memory_search"|"memory_store"|"memory_delete"|"memory_update"|"memory_forget"|"memory_stats"|"memory_gc"|
+        "user_rag_search"|"notes_list"|"notes_read"|"notes_write"|"notes_search"|
+        "sessions_list"|"sessions_spawn"|"session_status"|"ask_user"|"list_tools"|"list_skills"|"read_skill"|"pdf"|"budget_status") {
+        return (false,"Ce connecteur avancé n’est pas disponible dans la bêta particuliers : son envoi de données ne dispose pas encore du contrôle de destinataire requis.".into(),None);
+    }
     let studio_project_id = store_path.and_then(|sp| TaskStore::open(sp).ok())
         .and_then(|store| store.lineage_root_studio_project_id(task_id).ok().flatten());
     let studio_ticket_workspace = studio_project_id.as_deref().and_then(|pid| {
@@ -170,6 +181,9 @@ pub(crate) async fn execute_tool_call_impl(
         };
         let server = descriptor.server;
         let mcp_tool = descriptor.tool;
+        if let Err(reason)=akasha_core::privacy::check(&format!("connector:mcp:{server}"),&["connector_payload"]) {
+            return (false,reason,None);
+        }
         if !executor.policy.can_use_mcp_tool(&server, &mcp_tool) {
             return (
                 false,
@@ -4082,7 +4096,7 @@ mod tests {
         .await;
 
         assert!(!success);
-        assert!(message.contains("policy"));
+        assert!(message.contains("policy") || cfg!(feature="consumer-beta") && message.contains("bêta particuliers"));
         let workspace = workspace_store.read().await;
         assert!(workspace.get(&task_id).map_or(true, |files| files.is_empty()));
     }
@@ -4123,6 +4137,12 @@ mod tests {
         )
         .await;
 
+        if cfg!(feature="consumer-beta") {
+            assert!(!success,"arbitrary file writes must not modify privacy controls");
+            assert!(!output.join("result.txt").exists());
+            assert!(message.contains("bêta particuliers"));
+            return;
+        }
         assert!(success, "{message}");
         assert_eq!(
             tokio::fs::read_to_string(output.join("result.txt"))
@@ -4185,7 +4205,7 @@ mod tests {
         .await;
 
         assert!(!success, "{message}");
-        assert!(message.contains("policy"), "{message}");
+        assert!(message.contains("policy") || cfg!(feature="consumer-beta") && message.contains("bêta particuliers"), "{message}");
         assert_eq!(
             tokio::fs::read_to_string(&protected).await.unwrap(),
             "unchanged"

@@ -18,6 +18,7 @@ import { useI18n } from "./useI18n";
 
 import { AppNavigation } from "./components/AppNavigation";
 import { FreeModelsPanel } from "./components/FreeModelsPanel";
+import { RemoteConsentPicker, type RemoteConsent } from "./components/RemotePrivacy";
 import { PermissionsBell } from "./components/PermissionsBell";
 import { SteeringQueueBell } from "./components/SteeringQueueBell";
 import { OnboardingWizard, readSetupWizardPending } from "./components/OnboardingWizard";
@@ -1460,6 +1461,7 @@ function App() {
     return "comfortable";
   });
   const [chatAgentMode, setChatAgentMode] = useState(() => localStorage.getItem(CHAT_AGENT_MODE_KEY) !== "0");
+  const [remoteConsents, setRemoteConsents] = useState<RemoteConsent[]>([]);
   const [composerMode, setComposerMode] = useState<ComposerMode>(loadComposerModeInitial);
   const [chatWebSearch, setChatWebSearch] = useState(() => localStorage.getItem(CHAT_WEB_SEARCH_KEY) === "1");
   const [chatIncognito, setChatIncognito] = useState(() => localStorage.getItem(CHAT_INCOGNITO_KEY) === "1");
@@ -5921,6 +5923,8 @@ function App() {
     const attachmentsPayload = attachments.length > 0
       ? attachments.map((a) => ({ type: a.typ, name: a.name, content_base64: a.content_base64, mime_type: a.mime_type }))
       : undefined;
+    const taskConsents = remoteConsents;
+    setRemoteConsents([]);
     setAttachments([]);
     setLoading(true);
     try {
@@ -5939,6 +5943,7 @@ function App() {
       }>("send_message_ack", {
         message: messageToSend,
         displayMessage: userMessage,
+        remoteConsents: taskConsents,
         sessionId: sessionId,
         attachments: attachmentsPayload,
         newSession: useNewSession ? true : undefined,
@@ -7276,6 +7281,7 @@ function App() {
               disabled={loading}
             />
             </div>
+            <RemoteConsentPicker fetchEndpoint={fetchSystemEndpoint} value={remoteConsents} onChange={setRemoteConsents} disabled={loading} locale={locale} />
             <div className="input-area">
               <input
                 ref={fileInputRef}

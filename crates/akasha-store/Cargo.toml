@@ -4,8 +4,11 @@ version.workspace = true
 edition = "2021"
 description = "SQLite task store and append-only immutable log"
 
+[features]
+memory-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl", "dep:akasha-vault", "dep:rand", "dep:hex"]
+
 [dependencies]
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 sha2 = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -14,6 +17,9 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 thiserror = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
+akasha-vault = { path = "../akasha-vault", optional = true }
+rand = { version = "0.8", optional = true }
+hex = { version = "0.4", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

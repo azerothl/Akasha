@@ -1357,7 +1357,7 @@ impl Orchestrator {
             let execution_mode = task.execution_mode;
             let preferred_task_type = task.preferred_task_type;
             tokio::spawn(async move {
-                if let Err(e) = process_root_task(
+                if let Err(e) = akasha_core::privacy::scoped(crate::privacy::task_scope(&store_path,root_task_id), process_root_task(
                     bus,
                     store_path.as_path(),
                     spec_dir.as_path(),
@@ -1374,7 +1374,7 @@ impl Orchestrator {
                     short_term,
                     execution_mode,
                     preferred_task_type,
-                )
+                ))
                 .await
                 {
                     tracing::error!(error = %e, task_id = %root_task_id, "Orchestrator failed");
@@ -1903,7 +1903,8 @@ async fn process_root_task(
     let child_activity_timeout = child_first_activity_timeout();
     let retry_timeout = deliverable_retry_timeout();
     let mut startup_watchdog_tx = startup_watchdog_tx;
-    tokio::spawn(async move {
+    let aggregate_scope=crate::privacy::task_scope(store_path,root_task_id);
+    tokio::spawn(akasha_core::privacy::scoped(aggregate_scope,async move {
         let _active_execution = _active_execution;
         let workspace_root = store_path_buf
             .parent()
@@ -3195,7 +3196,7 @@ Formatting rules (Markdown):
             )
             .with_correlation(root_task_id),
         );
-    });
+    }));
     Ok(())
 }
 
