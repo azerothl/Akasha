@@ -11,6 +11,33 @@ package=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
 
 class BuildMetadataTests(unittest.TestCase):
+    def test_source_provenance_requires_clean_matching_revisions(self):
+        clean={"source_revision":"main-revision","source_dirty":False}
+        package.validate_source_provenance(clean,"main-revision",False)
+        for build,revision,dirty in [
+            ({**clean,"source_dirty":True},"main-revision",False),
+            (clean,"main-revision",True),
+            (clean,"different-revision",False),
+            ({"source_revision":"main-revision"},"main-revision",False),
+        ]:
+            with self.subTest(build=build,revision=revision,dirty=dirty):
+                with self.assertRaises(ValueError):
+                    package.validate_source_provenance(build,revision,dirty)
+
+    def test_cuda_installer_is_ignored_but_source_changes_are_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            package.subprocess.run(["git","init",str(root)],check=True,capture_output=True)
+            (root/".gitignore").write_bytes((path.parents[2]/".gitignore").read_bytes())
+            (root/"cuda_download").mkdir()
+            installer=root/"cuda_download/vendor-installer.exe"
+            installer.write_bytes(b"synthetic-vendor-installer")
+            result=package.subprocess.run(["git","check-ignore",str(installer)],cwd=root,capture_output=True)
+            self.assertEqual(result.returncode,0)
+            source=root/"source.rs";source.write_text("changed source")
+            result=package.subprocess.run(["git","check-ignore",str(source)],cwd=root,capture_output=True)
+            self.assertEqual(result.returncode,1)
+
     def record(self, cuda=True):
         return b"AKASHA_CONSUMER_INFO_V1:"+json.dumps({"consumer_beta":True,"cuda":cuda,"source_revision":"synthetic"}).encode()+b":END_AKASHA_CONSUMER_INFO_V1"
 

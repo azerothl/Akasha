@@ -59,6 +59,12 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: '12.9.1'
+      - name: Verify clean source provenance before compilation
+        shell: pwsh
+        run: |
+          $sourceStatus = git status --porcelain
+          if ($LASTEXITCODE) { throw 'Unable to inspect source provenance' }
+          if ($sourceStatus) { $sourceStatus; throw 'Candidate compilation requires a clean checkout' }
       - name: Compile CPU candidate
         if: '!matrix.cuda'
         run: cargo build --locked --release -p akasha-daemon --no-default-features --features consumer-beta,embedded,embedded-llama-cpp,embeddings-tract
