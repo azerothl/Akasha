@@ -23,6 +23,23 @@ if (-not $Worker) {
     foreach ($folder in @($Root, $application, $hooks, $logs, (Join-Path $Root 'work'), (Join-Path $Root 'temp'), (Join-Path $Root 'state'), (Join-Path $Root 'profile'), (Join-Path $Root 'state/roaming'))) {
         New-Item -ItemType Directory -Path $folder -Force | Out-Null
     }
+    $acl = Get-Acl -LiteralPath $Root
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) { $acl.RemoveAccessRuleAll($rule) }
+    foreach ($sid in @([Security.Principal.WindowsIdentity]::GetCurrent().User, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'), [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))) {
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+    }
+    Set-Acl -LiteralPath $Root -AclObject $acl
+    # Bootstrap private shims from an existing trusted Rust installation. The
+    # Rust action can then update this copy without changing the user's tools.
+    $rustup = Get-Command rustup -ErrorAction SilentlyContinue
+    if ($rustup) {
+        $bin = Join-Path $Root 'cargo/bin'
+        New-Item -ItemType Directory -Path $bin -Force | Out-Null
+        foreach ($name in @('rustup.exe', 'cargo.exe', 'rustc.exe', 'rustdoc.exe')) {
+            if (-not (Test-Path (Join-Path $bin $name))) { Copy-Item -LiteralPath $rustup.Source -Destination (Join-Path $bin $name) }
+        }
+    }
     $archive = Join-Path $Root "actions-runner-win-x64-$runnerVersion.zip"
     if (-not (Test-Path $archive)) {
         Invoke-WebRequest "https://github.com/actions/runner/releases/download/v$runnerVersion/actions-runner-win-x64-$runnerVersion.zip" -OutFile $archive
@@ -83,6 +100,7 @@ try {
             }
             $start.Environment['ACTIONS_RUNNER_HOOK_JOB_STARTED'] = Join-Path $hooks 'assert-nvidia-main-job.ps1'
             $start.Environment['CARGO_HOME'] = Join-Path $Root 'cargo'
+            $start.Environment['PATH'] = (Join-Path $Root 'cargo/bin') + ';' + $start.Environment['PATH']
             $start.Environment['CARGO_TARGET_DIR'] = Join-Path $Root 'target'
             $start.Environment['RUSTUP_HOME'] = Join-Path $Root 'rustup'
             $start.Environment['LOCALAPPDATA'] = Join-Path $Root 'state'

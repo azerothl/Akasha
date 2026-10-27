@@ -16,10 +16,12 @@ gestionnaire local inscrit un exécuteur à usage unique avec l'étiquette
 redémarre à l'ouverture de session grâce au raccourci utilisateur
 `Akasha NVIDIA CI`. Il n'installe pas de service administrateur.
 
-Les caches, outils, profils et journaux restent dans `C:/AkashaCI`. Les
-variables et configurations du profil personnel ne sont pas héritées par le
-worker ; les jetons d'inscription restent dans le gestionnaire. Les journaux
-locaux du runner sont conservés dans le dossier d'application et `logs/`.
+Les caches, outils, profils et journaux restent dans `C:/AkashaCI`. Le
+worker reçoit uniquement les variables système nécessaires et utilise des
+répertoires CI pour ses configurations. Le jeton GitHub d'administration
+n'est pas transmis au worker. Le dossier est accessible au compte courant,
+à SYSTEM et aux administrateurs. Les journaux locaux du runner sont conservés
+dans le dossier d'application et `logs/`.
 
 Avant le checkout, le hook installé hors de l'application vérifie le dépôt,
 `refs/heads/main`, l'événement push/manuel et l'empreinte courante de `main`
@@ -38,6 +40,11 @@ session ouverte pour que le gestionnaire soit disponible ; un ordinateur
 Déclenchement manuel : `gh workflow run gpu-ci.yml --ref main`. Le résultat
 exige cinq générations réelles CUDA et conserve les réponses, empreintes,
 mesures de tokens, latence et échantillons NVIDIA dans les artefacts du run.
+L'option `run_model_matrix` utilise `bench_gpu_matrix.py` : les modèles du
+catalogue sont téléchargés et vérifiés dans le profil CI, puis mesurés avec
+0 et 99 couches GPU via des daemons distincts. Une erreur de téléchargement
+ou une génération manquante fait échouer la matrice ; aucun modèle n'est
+recherché dans le profil personnel.
 
 Références : [exécuteurs éphémères](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#ephemeral-runners-for-autoscaling),
 [hooks avant les jobs](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/run-scripts).

@@ -19,6 +19,7 @@ on:
       - "spec/dev/quality/bench_ar_protocol.json"
       - "spec/dev/quality/bench_embedded*.ps1"
       - "scripts/ci/prepare-gpu-ci.ps1"
+      - "spec/dev/quality/bench_gpu_matrix.py"
   workflow_dispatch:
     inputs:
       run_model_matrix:
@@ -166,6 +167,14 @@ jobs:
             if ($daemon -and -not $daemon.HasExited) { Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue }
           }
 
+      - name: Bench embedded models matrix
+        if: github.event_name == 'workflow_dispatch' && inputs.run_model_matrix
+        shell: pwsh
+        run: |
+          $daemon = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/akasha-daemon.exe'
+          python spec/dev/quality/bench_gpu_matrix.py --daemon $daemon --data-dir $env:AKASHA_DATA_DIR
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
       - name: Preserve CUDA inference evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -177,11 +186,7 @@ jobs:
             ${{ env.AKASHA_DATA_DIR }}\daemon.stderr.log
             ${{ env.AKASHA_DATA_DIR }}\gpu-samples.csv
             ${{ env.AKASHA_DATA_DIR }}\gpu-samples.err
+            ${{ env.AKASHA_DATA_DIR }}\embedded-matrix.json
+            ${{ env.AKASHA_DATA_DIR }}\matrix-*\daemon.log
           if-no-files-found: warn
           retention-days: 30
-
-      - name: Bench embedded models matrix
-        if: github.event_name == 'workflow_dispatch' && inputs.run_model_matrix
-        shell: pwsh
-        run: |
-          pwsh ./spec/dev/quality/bench_embedded_models.ps1 -Matrix -SimulatedTier gpu_low_4gb -NglValues 0,99
