@@ -130,6 +130,12 @@ pub(crate) fn unparsed_tool_request(text: &str) -> bool {
         && (payload.contains("\"tool_use\"") || payload.contains("\"tool_calls\""))
 }
 
+/// An explicitly requested JSON example is a deliverable, not an operation.
+pub(crate) fn requested_tool_example(request: &str, response: &str) -> bool {
+    let asks_example = regex::Regex::new(r"(?i)\b(?:donne|montre|fournis|génère|écris|give|show|provide|return|output|write)\b[^\n.!?]{0,160}\b(?:exemple|example|schéma|schema)\b").unwrap().is_match(request);
+    asks_example && unparsed_tool_request(response)
+}
+
 pub(crate) fn unfinished_action_promise(request: &str, response: &str) -> bool {
     let text = response.trim();
     let lower = text.to_lowercase();
@@ -236,21 +242,40 @@ pub(crate) fn requires_post_write_read(request: &str) -> bool {
 /// Updated only from successful executor receipts, never from model claims.
 #[derive(Default)]
 pub(crate) struct PostMutationRead {
+    root: std::path::PathBuf,
     paths: std::collections::HashSet<String>,
     command: bool,
     pub verified: bool,
 }
 impl PostMutationRead {
+    pub fn new(root: std::path::PathBuf) -> Self { Self { root, ..Self::default() } }
+    fn resolved_key(&self, raw: &str) -> String {
+        let path = crate::api::resolve_tool_disk_path(raw, Some(&self.root));
+        let path = path.canonicalize().unwrap_or_else(|_| {
+            let mut normalized = std::path::PathBuf::new();
+            for part in path.components() {
+                match part {
+                    std::path::Component::CurDir => {},
+                    std::path::Component::ParentDir => { normalized.pop(); },
+                    _ => normalized.push(part.as_os_str()),
+                }
+            }
+            normalized
+        });
+        let key = path_key(&path.to_string_lossy());
+        key.strip_prefix("//?/").unwrap_or(&key).to_string()
+    }
     pub fn observe_success(&mut self, request: &str, tool: &str, args: &[String]) {
         if crate::studio_tool_contract::is_file_mutation(tool)
             || matches!(tool,"run_command"|"run_terminal"|"run_in_container"|"rename_path"|"move_tree"|"copy_path") {
             self.verified=false;
             let paths=crate::studio_tool_contract::paths_for_tool(tool,args);
             if paths.is_empty() { self.command=true; }
-            self.paths.extend(paths.iter().map(|path|path_key(path)));
+            let keys=paths.iter().map(|path|self.resolved_key(path)).collect::<Vec<_>>();
+            self.paths.extend(keys);
         } else if tool=="read_file" {
             let (parts,_,_)=crate::api::parse_read_file_args(args);
-            let path=path_key(&parts.join(" "));
+            let path=self.resolved_key(&parts.join(" "));
             self.verified |= self.paths.contains(&path) || (self.command && requested_read_target(request,&path));
         }
     }
@@ -269,6 +294,26 @@ fn requested_read_target(request:&str,path:&str)->bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_json_examples_are_delivered_without_execution_or_repair() {
+        for response in [r#"{"name":"read_file","arguments":{"path":"example.txt"}}"#, "```json\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"example.txt\"}}\n```"] {
+            assert!(requested_tool_example("Donne uniquement un exemple JSON d’appel d’outil, sans explication.",response));
+            assert!(!requested_tool_example("Lis example.txt puis donne son contenu.",response));
+        }
+    }
+    #[test]
+    fn readback_matches_relative_dot_and_absolute_paths_in_the_executor_root() {
+        let root=tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("config.txt"),"fixture").unwrap();
+        for read in ["./config.txt".to_owned(),root.path().join("config.txt").display().to_string(),"workspace:/config.txt".into()] {
+            let mut progress=PostMutationRead::new(root.path().into());
+            progress.observe_success("Modify config.txt then read it","write_file",&["config.txt".into(),"fixture".into()]);
+            progress.observe_success("Modify config.txt then read it","read_file",&[root.path().join("other/config.txt").display().to_string()]);
+            assert!(!progress.verified,"a same-name file elsewhere must not match");
+            progress.observe_success("Modify config.txt then read it","read_file",&[read]);
+            assert!(progress.verified);
+        }
+    }
 
     #[test]
     fn reads_after_edits_and_replacements_are_verified_without_a_rewrite() {

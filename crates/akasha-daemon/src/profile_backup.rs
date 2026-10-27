@@ -303,6 +303,8 @@ fn restore(
         }
         let wakeups:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='wakeups'",[],|row|row.get(0))?;
         if wakeups>0 {connection.execute("UPDATE wakeups SET status='disabled_restored' WHERE status='pending'",[])?;}
+        let triggers:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='event_triggers'",[],|row|row.get(0))?;
+        if triggers>0 {connection.execute("UPDATE event_triggers SET enabled=0",[])?;}
     }
     progress(
         store,
@@ -514,6 +516,8 @@ mod tests {
             })
             .unwrap();
         akasha_store::ScheduleStore::open(&store).unwrap();
+        let trigger=akasha_store::EventTrigger{id:Uuid::new_v4(),name:"Synthetic watched file".into(),enabled:true,trigger_type:akasha_store::TriggerType::Filesystem,filter:serde_json::json!({"path":"fixture.txt"}),prompt_template:"synthetic automation".into(),assigned_agent:None,execution_mode:None,cooldown_seconds:60,last_fired_at:None,created_at:chrono::Utc::now(),updated_at:chrono::Utc::now()};
+        akasha_store::EventTriggerStore::open(&store).unwrap().insert(&trigger).unwrap();
         let wakeup=Uuid::new_v4();
         akasha_store::WakeupStore::open(&store).unwrap().insert(&akasha_store::Wakeup{id:wakeup,session_id:"beta-history".into(),fire_at:chrono::Utc::now()-chrono::Duration::hours(1),message:"Rappel synthétique".into(),status:"pending".into(),created_by_task_id:Some(id),rrule:None,created_at:chrono::Utc::now()}).unwrap();
         let history=crate::memory::ShortTermStore::with_persistence(20,0.9,Some(data.join("short_term")));
@@ -558,6 +562,9 @@ mod tests {
         let turns=restored_history.get_turns("beta-history").await;
         assert_eq!(turns.len(),1);assert_eq!(turns[0].content,"Souvenir de conversation été");
         assert!(akasha_store::WakeupStore::open(restored.join("akasha.db")).unwrap().list_pending_before(chrono::Utc::now()).unwrap().is_empty());
+        let restored_triggers=akasha_store::EventTriggerStore::open(restored.join("akasha.db")).unwrap().list().unwrap();
+        assert_eq!(restored_triggers.len(),1);assert_eq!(restored_triggers[0].id,trigger.id);assert!(!restored_triggers[0].enabled);
+        assert!(akasha_store::EventTriggerStore::open(&store).unwrap().list().unwrap()[0].enabled);
         assert_eq!(akasha_store::WakeupStore::open(&store).unwrap().list_all().unwrap()[0].status,"pending");
         #[cfg(all(feature = "consumer-beta", windows))]
         {

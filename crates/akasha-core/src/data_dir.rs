@@ -4,6 +4,28 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Recover settings only when following the default profile's legacy redirect.
+/// Target files override legacy files; akasha.env overrides connectors.env.
+/// Callers keep explicit process variables above these fallback assignments.
+pub fn legacy_bootstrap_environment(
+    configured: Option<&OsStr>, home: Option<&Path>,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut settings = std::collections::HashMap::new();
+    if configured.is_some() { return Ok(settings); }
+    let default = resolve_data_dir(None, home)?;
+    let selected = resolve_bootstrap_data_dir(None, home)?;
+    if selected == default { return Ok(settings); }
+    for root in [&default, &selected] {
+        for name in ["connectors.env", "akasha.env"] {
+            if let Ok(text) = std::fs::read_to_string(root.join(name)) {
+                settings.extend(crate::parse_env_file_content(&text).0);
+            }
+        }
+    }
+    settings.retain(|key, _| !crate::env_file::ENV_FILE_SKIP_KEYS.contains(&key.as_str()));
+    Ok(settings)
+}
+
 /// Preserve legacy bootstrap settings in the default profile, but follow at most one redirect.
 pub fn resolve_bootstrap_data_dir(
     configured: Option<&OsStr>,
@@ -60,6 +82,21 @@ pub fn resolve_data_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn redirected_environment_preserves_fallbacks_with_target_precedence() {
+        let home=tempfile::tempdir().unwrap(); let root=home.path().join("akasha");
+        let custom=home.path().join("custom");
+        for dir in [&root,&custom] { std::fs::create_dir(dir).unwrap(); }
+        std::fs::write(root.join("connectors.env"),"OPENAI_API_KEY=legacy-fixture\nSETTING=legacy-connectors\n").unwrap();
+        std::fs::write(root.join("akasha.env"),format!("AKASHA_DATA_DIR={}\nSETTING=legacy-env\n",custom.display())).unwrap();
+        std::fs::write(custom.join("connectors.env"),"SETTING=target-connectors\n").unwrap();
+        std::fs::write(custom.join("akasha.env"),"SETTING=target-env\nAKASHA_DATA_DIR=ignored\n").unwrap();
+        let settings=legacy_bootstrap_environment(None,Some(home.path())).unwrap();
+        assert_eq!(settings["OPENAI_API_KEY"],"legacy-fixture");
+        assert_eq!(settings["SETTING"],"target-env");
+        assert!(!settings.contains_key("AKASHA_DATA_DIR"));
+        assert!(legacy_bootstrap_environment(Some(custom.as_os_str()),Some(home.path())).unwrap().is_empty());
+    }
     #[test]
     fn unreadable_optional_settings_do_not_block_default_profile_or_other_redirects() {
         let home=tempfile::tempdir().unwrap();let root=home.path().join("akasha");

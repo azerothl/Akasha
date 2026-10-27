@@ -109,7 +109,17 @@ export function ConsumerOnboardingWizard({ locale, daemonOk, fetchEndpoint, onCo
     setBusy(true); setError(""); setReady(false);
     try {
       if (candidate.provider === "ollama") { await request("/api/router/route", { category: "conversation", provider: candidate.provider, model: candidate.model }); setReady(true); setBusy(false); }
-      else { setDownloadId(candidate.model); await request("/api/router/embedded/download", { id: candidate.model }); setDownloading(true); }
+      else {
+        const capabilities = await request("/api/capabilities");
+        const installed = (capabilities.models ?? []).some((model: { id: string; gguf_on_disk?: boolean }) => model.id === candidate.model && model.gguf_on_disk === true);
+        if (installed) {
+          await request("/api/router/embedded/runtime", { model_id: candidate.model, engine_mode: "auto" });
+          await request("/api/router/route", { category: "conversation", provider: candidate.provider, model: candidate.model });
+          setReady(true); setBusy(false);
+        } else {
+          setDownloadId(candidate.model); await request("/api/router/embedded/download", { id: candidate.model }); setDownloading(true);
+        }
+      }
     } catch { setBusy(false); setError(en ? "This local model could not be prepared. Retry or select another candidate." : "Ce modèle local n’a pas pu être préparé. Réessayez ou choisissez un autre candidat."); }
   }
   async function launch(kind: "demo" | "protect") {
