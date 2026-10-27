@@ -20,7 +20,7 @@ it.each([true, false])("prepares an embedded candidate with installed=%s without
   await screen.findByRole("option", { name: "Local fixture" });
   fireEvent.click(screen.getByRole("button", { name: "Préparer ce modèle" }));
   if (installed) {
-    await screen.findByText("Modèle local sélectionné. La démonstration vérifiera sa réponse.");
+    await waitFor(() => expect((screen.getByRole("button", { name: "Continuer" }) as HTMLButtonElement).disabled).toBe(false));
     expect(calls.filter(call => call.path === "/api/router/embedded/download")).toHaveLength(0);
     expect(calls).toContainEqual({ path: "/api/router/embedded/runtime", body: { model_id: "local-fixture", engine_mode: "auto" } });
     expect(calls).toContainEqual({ path: "/api/router/route", body: { category: "conversation", provider: "akasha_core", model: "local-fixture" } });
