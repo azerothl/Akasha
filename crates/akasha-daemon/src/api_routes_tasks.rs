@@ -2092,9 +2092,21 @@ if method == "POST" && path == "/api/message" {
         let body = serde_json::json!({ "error": "prompt_injection_rejected", "detail": e.to_string() });
         return Some(json_response("400 Bad Request", &body.to_string()));
     }
-    // Onboarding: if user profile has no how_to_call, try to extract from message and save
+    let incognito = body_json
+        .as_ref()
+        .map(|v| {
+            v.get("incognito")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false)
+                || v.get("no_memory")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    // The consumer wizard never asks for a name. Its first ordinary question
+    // must not be interpreted as one, nor may private messages save a profile.
     let mut message = message;
-    {
+    if !cfg!(feature = "consumer-beta") && !incognito {
         let mut user_profile = UserProfile::load(data_dir);
         if !user_profile.has_how_to_call() && !message.trim().is_empty() {
             let extracted = extract_how_to_call_from_message(message.trim());
@@ -2136,17 +2148,6 @@ if method == "POST" && path == "/api/message" {
             }
         })
         .unwrap_or(TaskPriority::UserNormal);
-    let incognito = body_json
-        .as_ref()
-        .map(|v| {
-            v.get("incognito")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false)
-                || v.get("no_memory")
-                    .and_then(|x| x.as_bool())
-                    .unwrap_or(false)
-        })
-        .unwrap_or(false);
     let studio_code_mode = body_json
         .as_ref()
         .and_then(|v| v.get("studio_code_mode").and_then(|x| x.as_str()))

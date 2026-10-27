@@ -52,12 +52,14 @@ def main():
             cases.append({"id":name,"passed":bool(passed),**evidence});print(json.dumps({"id":name,"passed":bool(passed)}),flush=True)
         try:
             daemon.start();base=daemon.base
+            profile_before=http_json(base,"GET","/api/user-profile")
             note=http_json(base,"POST","/api/notes",{"title":"Note synthétique","content":"Payer la facture synthétique lundi. L’heure reste à confirmer."})
             started=time.monotonic()
             ack=http_json(base,"POST","/api/message",{"message":"Propose les actions de cette note, sans rien enregistrer.","organization_note":{"note_id":note["id"]},"remote_consents":consent,"composer_mode":"ask","incognito":True});task=wait(base,ack["task_id"])
             actions=http_json(base,"GET","/api/consumer/actions");wakeups=http_json(base,"GET","/api/wakeups");children=http_json(base,"GET",f"/api/tasks/{ack['task_id']}/children")
             preview=task.get("outcome",{}).get("preview",{});proposals=preview.get("proposals",[])
-            record("preview_without_effects",task["status"]=="completed" and proposals and not actions.get("actions") and not wakeups.get("wakeups") and not children.get("children"),task=task,actions=actions,wakeups=wakeups,children=children,duration_ms=round((time.monotonic()-started)*1000))
+            profile_after=http_json(base,"GET","/api/user-profile")
+            record("preview_without_effects",task["status"]=="completed" and proposals and not actions.get("actions") and not wakeups.get("wakeups") and not children.get("children") and profile_after==profile_before,task=task,actions=actions,wakeups=wakeups,children=children,profile_before=profile_before,profile_after=profile_after,duration_ms=round((time.monotonic()-started)*1000))
             assert proposals,"model failed to produce proposals"
             action={"proposal_id":proposals[0]["id"],"title":"Payer la facture synthétique","remind_local":"2026-10-25T02:30","timezone":"Europe/Paris"}
             ambiguous=rejected(base,"/api/consumer/actions/confirm",{"preview_id":preview["id"],"confirmed":True,"actions":[action]})
