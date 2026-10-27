@@ -6250,6 +6250,7 @@ function App() {
         {/* Onboarding: first steps modal (dismissible, "Ne plus afficher" stored in localStorage) */}
         {showOnboarding && (
           <OnboardingWizard
+            fetchEndpoint={fetchSystemEndpoint}
             locale={locale}
             daemonOk={!!health?.ok}
             onComplete={() => setShowOnboarding(false)}

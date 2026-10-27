@@ -214,6 +214,15 @@ impl LLMRouter {
             .clone()
     }
 
+    /// Stable identity of all routing options; never expose the configuration's
+    /// credentials as qualification evidence.
+    pub fn configuration_sha256(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let config=self.config.read().unwrap_or_else(|error|error.into_inner());
+        let canonical=serde_json::to_value(&*config).expect("serializable routing config").to_string();
+        format!("{:x}",Sha256::digest(canonical.as_bytes()))
+    }
+
     /// List models per provider from routing config (for GET /api/router/models).
     pub fn provider_configs(
         &self,
@@ -293,12 +302,15 @@ impl LLMRouter {
 
     /// Base URL of the Ollama provider from config (if set).
     pub fn ollama_base_url(&self) -> Option<String> {
+        if let Some(endpoint)=self.providers.get("ollama").and_then(|provider|provider.endpoint()) {
+            return Some(endpoint.to_string());
+        }
         self.config
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .providers
             .get("ollama")
-            .and_then(|c| c.base_url.clone())
+            .and_then(|c| c.base_url.clone()).filter(|url|!url.trim().is_empty())
     }
 
     /// Returns true when the primary provider for `task_type` is Ollama.
@@ -363,6 +375,18 @@ impl LLMRouter {
     #[cfg(feature = "embedded")]
     pub fn embedded_status(&self) -> akasha_embedded_llm::EmbeddedStatus {
         akasha_embedded_llm::EmbeddedLlm::status_snapshot()
+    }
+
+    /// Resolve the installed candidate without requiring a prior inference.
+    /// A Candle inference must never be attributed to an unrelated GGUF file.
+    #[cfg(feature = "embedded")]
+    pub fn embedded_qualification_model_path(&self, model:&str) -> Result<std::path::PathBuf,String> {
+        #[cfg(feature="embedded-llama-cpp")]
+        if matches!(akasha_embedded_llm::config::resolve_backend_choice(),Ok(akasha_embedded_llm::config::ResolvedBackend::LlamaCpp(_))) {
+            return akasha_embedded_llm::config::resolve_gguf_path_for_model(model).ok_or_else(||"GGUF absent : préparez le modèle choisi avant les essais.".into());
+        }
+        let _=model;
+        Err("La qualification du catalogue GGUF nécessite le moteur llama-cpp actif ; Candle ne qualifie pas un fichier GGUF.".into())
     }
 
     /// Camelid-style evidence-gated capabilities for `/api/capabilities`.

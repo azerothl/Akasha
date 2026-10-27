@@ -10,7 +10,7 @@ sauvegardes chiffrées. Les trois parcours réutilisent les tâches du daemon.
 |---|---|---|
 | 1 — Résultat attendu | Corpus versionné de 50 scénarios ; classification des preuves et gate à trois runs réels | Exécution complète sur les composants des lots suivants et les paquets distribués |
 | 2 — Consentement et protection | Socle : accords par tâche, transports protégés, SQLCipher, clé Windows, API de sauvegarde/restauration | Voir consumer_beta_privacy.md : validation du paquet, périmètre documentaire, reprise HTTP et second compte Windows |
-| 3 — Modèles et démarrage | À livrer | Trois parcours et qualification réelle |
+| 3 — Modèles et démarrage | Démarrage en trois étapes, première tâche vérifiée et préqualification synthétique réelle | Classement sur corpus complet, calibration et recours distant ; voir consumer_beta_models.md |
 | 4 — Documents et OCR | À livrer | PDF mixtes, photos, références et paquet OCR |
 | 5 — Organisation, veille, sauvegarde | À livrer | Persistance, restauration sur autre compte |
 | 6 — Distribution et pilote | À livrer | Paquets CPU/NVIDIA ; dix personnes pendant quatre semaines |

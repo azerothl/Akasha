@@ -1123,7 +1123,7 @@ pub struct OllamaProvider {
 impl OllamaProvider {
     pub fn new(base_url: Option<String>) -> Self {
         Self {
-            base_url: base_url.unwrap_or_else(|| "http://localhost:11434".into()),
+            base_url: base_url.filter(|url|!url.trim().is_empty()).unwrap_or_else(|| "http://localhost:11434".into()).trim_end_matches('/').to_string(),
             chat_templates: Default::default(),
             context_limits: Default::default(),
         }

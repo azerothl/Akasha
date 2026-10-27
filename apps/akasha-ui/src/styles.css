@@ -9615,3 +9615,15 @@ input, textarea { caret-color: var(--akasha-accent); }
 .remote-privacy-grant { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-bottom: 1rem; }
 .remote-privacy-grant p { flex: 1 1 15rem; margin: 0; }
 .permissions-bell-drawer { position: fixed; top: 4rem; right: 1rem; max-height: min(80vh, 48rem); overflow: auto; }
+
+.consumer-onboarding-progress { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; margin: 1rem 0 2rem; padding-left: 1.25rem; }
+.consumer-onboarding-progress [aria-current="step"] { font-weight: 700; text-decoration: underline; text-underline-offset: .3em; }
+.consumer-demo-source { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 15rem; overflow: auto; padding: .75rem; background: var(--akasha-bg); color: var(--akasha-text); line-height: 1.5; }
+
+.human-input-modal.consumer-onboarding-modal { width: min(44rem, calc(100vw - 2rem)); max-width: 44rem; }
+.consumer-onboarding-progress { display: block; }
+.consumer-onboarding-progress li { margin-bottom: .4rem; }
+.consumer-onboarding-modal .onboarding-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.consumer-demo-source { font-family: inherit; }
+.consumer-demo-receipt { display: grid; grid-template-columns: auto 1fr; gap: .5rem 1.5rem; }
+.consumer-demo-receipt dd { margin: 0; overflow-wrap: anywhere; }
