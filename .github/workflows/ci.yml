@@ -298,10 +298,13 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: windows-2022
-    timeout-minutes: 50
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: ilammy/msvc-dev-cmd@v1
       - uses: ./.github/actions/cargo-cache
         with:
@@ -319,6 +322,34 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test --locked -p akasha-daemon --no-default-features --features consumer-beta --lib profile_backup::
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build pinned PDFium and Tesseract runtime
+        shell: pwsh
+        run: |
+          python scripts/prepare-ocr-runtime.py --output "$env:RUNNER_TEMP/ocr-runtime"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $lock = (Get-FileHash "$env:RUNNER_TEMP/ocr-runtime/runtime-lock.json" -Algorithm SHA256).Hash.ToLower()
+          "AKASHA_OCR_LOCK_SHA256=$lock" >> $env:GITHUB_ENV
+      - name: Exercise native parsing and document tasks
+        shell: pwsh
+        run: |
+          python -m pip install Pillow==11.3.0 reportlab==4.4.4
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --locked -p akasha-daemon --no-default-features --features consumer-beta
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python spec/dev/quality/document_worker_audit.py --binary target/debug/akasha-daemon.exe --runtime "$env:RUNNER_TEMP/ocr-runtime" --output "$env:RUNNER_TEMP/document-worker.json"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python spec/dev/quality/document_workflow_audit.py --controlled --binary target/debug/akasha-daemon.exe --runtime "$env:RUNNER_TEMP/ocr-runtime" --fixtures "$env:RUNNER_TEMP/document-fixtures-éété" --output "$env:RUNNER_TEMP/document-workflow.json"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path apps/akasha-ui/src-tauri/Cargo.toml --lib desktop_transport_tests
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: consumer-document-receipts-windows
+          path: |
+            ${{ runner.temp }}/document-worker.json
+            ${{ runner.temp }}/document-workflow.json
+            ${{ runner.temp }}/ocr-runtime/runtime-lock.json
 
   # Preserve the existing required "test" check, including docs-only changes.
   test:

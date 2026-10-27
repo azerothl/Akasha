@@ -29,6 +29,7 @@ pub async fn try_handle(
     body: Option<&[u8]>,
     ctx: &KinbotRouteCtx<'_>,
 ) -> Option<String> {
+    if let Some(response) = crate::document_api::route(method,path,body,ctx).await {return Some(response);}
     // User RAG retrieve (knowledge base test search)
     if method == "GET" && path.starts_with("/api/user-rag/retrieve") {
         let q = query_str
@@ -43,12 +44,14 @@ pub async fn try_handle(
             return Some(json_response("400 Bad Request", r#"{"error":"q_required"}"#));
         }
         let store = ctx.user_rag_store.lock().await;
-        match store.retrieve_hybrid(&q, None, top_k) {
-            Ok(chunks) => {
+        match store.retrieve_passages(&q, None, top_k) {
+            Ok(passages) => {
+                let chunks: Vec<_> = passages.iter().map(|passage|passage.content.clone()).collect();
                 let body = serde_json::json!({
                     "query": q,
                     "top_k": top_k,
                     "chunks": chunks,
+                    "passages": passages,
                     "count": chunks.len(),
                 });
                 return Some(json_response("200 OK", &body.to_string()));

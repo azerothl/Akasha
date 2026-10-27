@@ -2816,6 +2816,12 @@ if method == "POST" && path == "/api/message" {
         priority,
         incognito,
     );
+    if let Some(ids)=body_json.as_ref().and_then(|body|body.get("document_ids")) {
+        match crate::document_conversation::prepare(data_dir,ids,&display_request) {
+            Ok(request)=>{envelope.document_request=Some(request);envelope.incognito=true;},
+            Err(error)=>return Some(json_response("409 Conflict",&serde_json::json!({"error":error.to_string()}).to_string())),
+        }
+    }
     envelope.display_request = Some(display_request);
     envelope.studio_execution = studio_execution;
     if let Some(consents) = body_json.as_ref().and_then(|body|body.get("remote_consents")) {
@@ -2827,6 +2833,7 @@ if method == "POST" && path == "/api/message" {
     envelope.studio_disk_root = studio_disk_root.clone();
     envelope.studio_forced_agent = studio_forced_agent;
     envelope.studio_evolution_branch = studio_evolution_branch;
+    if envelope.document_request.is_some() {envelope.studio_forced_agent=Some("ask".into());}
     match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
         Ok(task_id) => {
             if let (Some(root), Some(ticket_id)) = (studio_disk_root.as_ref(), studio_ticket_id.as_ref()) {

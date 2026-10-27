@@ -1506,7 +1506,7 @@ impl Daemon {
                                                 let update_check_cache_clone = update_check_cache.clone();
                                                 tokio::spawn(async move {
                                     const INITIAL_READ: usize = 65536;
-                                    const MAX_BODY: usize = 10 * 1024 * 1024; // 10 MiB for POST body (e.g. documents in base64)
+                                    const MAX_BODY: usize = 36 * 1024 * 1024; // 36 MiB (one 25 MiB base64 document plus metadata) for POST body (e.g. documents in base64)
                                     let mut buf = vec![0u8; INITIAL_READ];
                                     let n = stream.read(&mut buf).await.unwrap_or(0);
                                     buf.truncate(n);

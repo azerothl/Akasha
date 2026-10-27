@@ -1,0 +1,210 @@
+{
+  "binary_sha256": "b63aabc0de4dfc30a37827cf28aaeedd4785275ab79a558ec3a161f9810018fb",
+  "runtime_lock_sha256": "312f79f5bdfb59f13720e22b5f62ccdc33cf2512d056b67dcdac244cb5dfe1f7",
+  "cases": [
+    {
+      "file": "photo.png",
+      "source_sha256": "bed3455cb022f92cb6485c332563388a143292f5b159442961b511253184b11d",
+      "operation": "extract",
+      "page": 1,
+      "passed": true,
+      "return_code": 0,
+      "output": {
+        "pages": 1,
+        "page": {
+          "page": 1,
+          "text": "DOCUMENT FICTIF - DÉMONSTRATION\nFacture de la famille Exemple\n\nMontant : 42 euros\n\nÉchéance : 10 novembre 2026\n\nRéférence : DEMO-001\n",
+          "method": "tesseract_5_fra_eng",
+          "confidence": 93,
+          "warning": null
+        },
+        "png_base64": null
+      },
+      "stderr": "Error in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nOSD: Weak margin (4.06) for 89 blob text block, but using orientation anyway: 0\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\n"
+    },
+    {
+      "file": "photo.jpg",
+      "source_sha256": "7d6c7055434555a112d7436ef1467aedd0e93e0a7f564d9be64baf1293f2a8e9",
+      "operation": "extract",
+      "page": 1,
+      "passed": true,
+      "return_code": 0,
+      "output": {
+        "pages": 1,
+        "page": {
+          "page": 1,
+          "text": "DOCUMENT FICTIF - DÉMONSTRATION\nFacture de la famille Exemple\n\nMontant : 42 euros\n\nÉchéance : 10 novembre 2026\n\nRéférence : DEMO-001\n",
+          "method": "tesseract_5_fra_eng",
+          "confidence": 93,
+          "warning": null
+        },
+        "png_base64": null
+      },
+      "stderr": "Error in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nOSD: Weak margin (4.77) for 89 blob text block, but using orientation anyway: 0\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\n"
+    },
+    {
+      "file": "rotation.png",
+      "source_sha256": "97613f5da5306718468e2b434d6a31b1b6af0f2a8f7fe24e030a0beaa6edbbd0",
+      "operation": "extract",
+      "page": 1,
+      "passed": true,
+      "return_code": 0,
+      "output": {
+        "pages": 1,
+        "page": {
+          "page": 1,
+          "text": "DOCUMENT FICTIF - DÉMONSTRATION\nFacture de la famille Exemple\n\nMontant : 42 euros\n\nÉchéance : 10 novembre 2026\n\nRéférence : DEMO-001\n",
+          "method": "tesseract_5_fra_eng",
+          "confidence": 93,
+          "warning": null
+        },
+        "png_base64": null
+      },
+      "stderr": "Error in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nOSD: Weak margin (4.69) for 92 blob text block, but using orientation anyway: 3\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\n"
+    },
+    {
+      "file": "scan.pdf",
+      "source_sha256": "8c681d5374becf58f38cd3c20da73d775a85c94d2b967c9b321012574d6c2ea8",
+      "operation": "extract",
+      "page": 1,
+      "passed": true,
+      "return_code": 0,
+      "output": {
+        "pages": 1,
+        "page": {
+          "page": 1,
+          "text": "DOCUMENT FICTIF - DÉMONSTRATION\nFacture de la famille Exemple\nMontant : 42 euros\n\nÉchéance : 10 novembre 2026\n\nRéférence : DEMO-001\n",
+          "method": "tesseract_5_fra_eng",
+          "confidence": 93,
+          "warning": null
+        },
+        "png_base64": null
+      },
+      "stderr": "Error in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nOSD: Weak margin (4.82) for 89 blob text block, but using orientation anyway: 0\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\n"
+    },
+    {
+      "file": "text.pdf",
+      "source_sha256": "e4175c9f05ae00582db664a1724ef38266eb8c57efbea6dc6777a4805ed8ccf6",
+      "operation": "extract",
+      "page": 1,
+      "passed": true,
+      "return_code": 0,
+      "output": {
+        "pages": 1,
+        "page": {
+          "page": 1,
+          "text": "DOCUMENT FICTIF - Facture\r\nMontant : 42 euros\r\nÉchéance : 10 novembre 2026",
+          "method": "pdfium_text",
+          "confidence": null,
+          "warning": null
+        },
+        "png_base64": null
+      },
+      "stderr": ""
+    },
+    {
+      "file": "mixed.pdf",
+      "source_sha256": "e722f611db02f4c3edc4e72ead0f74d49c1c14010f1d60998d93ddc024fe5bd1",
+      "operation": "extract",
+      "page": 1,
+      "passed": true,
+      "return_code": 0,
+      "output": {
+        "pages": 2,
+        "page": {
+          "page": 1,
+          "text": "DOCUMENT FICTIF - Facture\r\nMontant : 42 euros\r\nÉchéance : 10 novembre 2026",
+          "method": "pdfium_text",
+          "confidence": null,
+          "warning": null
+        },
+        "png_base64": null
+      },
+      "stderr": ""
+    },
+    {
+      "file": "mixed.pdf",
+      "source_sha256": "e722f611db02f4c3edc4e72ead0f74d49c1c14010f1d60998d93ddc024fe5bd1",
+      "operation": "extract",
+      "page": 2,
+      "passed": true,
+      "return_code": 0,
+      "output": {
+        "pages": 2,
+        "page": {
+          "page": 2,
+          "text": "DOCUMENT FICTIF - DÉMONSTRATION\nFacture de la famille Exemple\nMontant : 42 euros\n\nÉchéance : 10 novembre 2026\n\nRéférence : DEMO-001\n",
+          "method": "tesseract_5_fra_eng",
+          "confidence": 93,
+          "warning": null
+        },
+        "png_base64": null
+      },
+      "stderr": "Error in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nOSD: Weak margin (4.82) for 89 blob text block, but using orientation anyway: 0\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\nWarning in changeFormatForMissingLib: png library missing; output bmp format\r\n"
+    },
+    {
+      "file": "unreadable.png",
+      "source_sha256": "5a797e727450ff3fdc426c57226be7be8d1648d9dc7a8db65c29fbc8c26dc3ef",
+      "operation": "extract",
+      "page": 1,
+      "passed": true,
+      "return_code": 0,
+      "output": {
+        "pages": 1,
+        "page": {
+          "page": 1,
+          "text": "",
+          "method": "tesseract_5_fra_eng",
+          "confidence": 0,
+          "warning": "Page non lue : aucun texte reconnu"
+        },
+        "png_base64": null
+      },
+      "stderr": "Error in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\nError in pixReadMemTiff: function not present\r\nError in pixReadMem: tiff: no pix returned\r\nError in pixaGenerateFontFromString: pix not made\r\nError in bmfCreate: font pixa not made\r\n"
+    },
+    {
+      "file": "unicode-été.txt",
+      "source_sha256": "c6fb7ec97675a1faf4a5231e08e2b7184a647fac221fc46c1176cc8cabcfb206",
+      "operation": "extract",
+      "page": 1,
+      "passed": true,
+      "return_code": 0,
+      "output": {
+        "pages": 1,
+        "page": {
+          "page": 1,
+          "text": "Facture fictive : 42 euros. Échéance : 10 novembre 2026.\r\n",
+          "method": "utf8_text",
+          "confidence": null,
+          "warning": null
+        },
+        "png_base64": null
+      },
+      "stderr": ""
+    },
+    {
+      "file": "too-many-pages.pdf",
+      "source_sha256": "733a73e6a69470cebbb88bcfc75f1ffc2b3a793ead07a076b123b50b7de416ac",
+      "operation": "inspect",
+      "page": 0,
+      "passed": true,
+      "return_code": 2,
+      "output": null,
+      "stderr": "Limite de 100 pages par fichier dépassée, ou PDF vide\n"
+    },
+    {
+      "file": "mixed.pdf",
+      "source_sha256": "e722f611db02f4c3edc4e72ead0f74d49c1c14010f1d60998d93ddc024fe5bd1",
+      "operation": "render",
+      "page": 2,
+      "passed": true,
+      "return_code": 0,
+      "output": {
+        "pages": 2,
+        "page": null
+      },
+      "stderr": ""
+    }
+  ],
+  "passed": true
+}

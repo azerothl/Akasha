@@ -60,6 +60,7 @@ fn init_tracing(data_dir: &Path) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if let Some(code) = akasha_daemon::document_worker::entry() { std::process::exit(code); }
     for (key, value) in akasha_core::data_dir::legacy_bootstrap_environment(std::env::var_os("AKASHA_DATA_DIR").as_deref(), dirs::home_dir().as_deref())? {
         if std::env::var_os(&key).is_none() { std::env::set_var(key, value); }
     }

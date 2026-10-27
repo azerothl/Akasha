@@ -481,7 +481,7 @@ User message:\n{}",
         studio_evolution_branch: Option<String>,
         incognito: bool,
     ) -> anyhow::Result<Uuid> {
-        self.handle_message_with_execution(store_path, message, display_request, _correlation_id, forward_to_orchestrator, session_id, image_data_urls, priority, studio_disk_root, studio_forced_agent, studio_evolution_branch, incognito, None, vec![]).await
+        self.handle_message_with_execution(store_path, message, display_request, _correlation_id, forward_to_orchestrator, session_id, image_data_urls, priority, studio_disk_root, studio_forced_agent, studio_evolution_branch, incognito, None, vec![], None).await
     }
 
     pub(crate) fn validate_studio_execution(&self, body: &serde_json::Value) -> Result<Option<crate::studio_execution::Execution>, String> {
@@ -504,6 +504,7 @@ User message:\n{}",
         incognito: bool,
         studio_execution: Option<crate::studio_execution::Execution>,
         remote_consents: Vec<crate::privacy::Consent>,
+        document_request: Option<crate::document_conversation::DocumentRequest>,
     ) -> anyhow::Result<Uuid> {
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
@@ -557,6 +558,7 @@ User message:\n{}",
                 studio_project_id,
             };
             store.insert(&task)?;
+            if let Some(request)=&document_request {store.insert_event(task_id,"document_request",Some(&serde_json::to_value(request)?),&Utc::now().to_rfc3339())?;}
             if let Some(options) = &studio_execution {
                 crate::studio_execution::persist(store_path,task_id,options).map_err(anyhow::Error::msg)?;
                 store.insert_event(task_id, "studio_execution", Some(&serde_json::to_value(options)?), &Utc::now().to_rfc3339())?;
@@ -841,6 +843,9 @@ User message:\n{}",
     fn resume_task_admitted(&self,store_path:&Path,task_id:Uuid)->anyhow::Result<()> {
         let store = TaskStore::open(store_path)?;
         let task = store.get(task_id)?.ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        if task.assigned_agent == "document_import" {
+            anyhow::bail!("document_reindex_required: cet import doit être relancé depuis Documents avec Réindexer ; une reprise de conversation ne peut pas lire le document");
+        }
         let studio=store.lineage_root_studio_project_id(task_id)?.is_some();
         let resumable = matches!(
             task.status,
@@ -921,6 +926,18 @@ mod tests {
         is_external_info_request, normalize_task_type, parse_selector_decision,
         strip_thinking_tokens, SelectorAnswerMode,
     };
+
+    #[tokio::test]
+    async fn interrupted_document_import_cannot_enter_the_conversation_queue() {
+        let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let id=uuid::Uuid::new_v4();let now=chrono::Utc::now();
+        let store=akasha_store::TaskStore::open(&db).unwrap();
+        store.insert(&akasha_store::Task{id,parent_task_id:None,status:akasha_store::TaskStatus::Interrupted,assigned_agent:"document_import".into(),created_at:now,updated_at:now,initial_message:Some("Lecture documentaire locale".into()),studio_project_id:None}).unwrap();
+        let (bus,_)=crate::agents::new_event_bus();let (tx,mut rx)=tokio::sync::mpsc::channel(1);
+        let agent=super::MainAgent::new(bus,super::OrchestratorSender::new(tx.clone(),tx.clone()),std::sync::Arc::new(akasha_llm::LLMRouter::new(serde_json::from_str("{}").unwrap())),crate::studio::new_studio_disk_root_registry()).with_direct_conversation_tx(tx);
+        assert!(agent.resume_task(&db,id).unwrap_err().to_string().starts_with("document_reindex_required"));
+        assert_eq!(store.get(id).unwrap().unwrap().status,akasha_store::TaskStatus::Interrupted);
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn initial_task_message_preserves_raw_request_before_truncation() {
