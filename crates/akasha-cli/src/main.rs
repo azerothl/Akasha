@@ -792,6 +792,9 @@ fn daemon_doctor_check_status_label(check: &serde_json::Value) -> &'static str {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    for (key, value) in akasha_core::data_dir::legacy_bootstrap_environment(std::env::var_os("AKASHA_DATA_DIR").as_deref(), dirs::home_dir().as_deref())? {
+        if std::env::var_os(&key).is_none() { std::env::set_var(key, value); }
+    }
     // Pin one absolute root before any child or embedded backend can read environment files.
     std::env::set_var("AKASHA_DATA_DIR", akasha_data_dir());
 

@@ -47,6 +47,12 @@ pub fn current() -> Option<Scope> {
 }
 
 pub fn load(data_dir: &Path) -> anyhow::Result<Grants> {
+    // Also serialize readers: Windows can deny replacing a file while it is
+    // being read, even though publishing the replacement itself is atomic.
+    let _guard = WRITE_LOCK.lock().map_err(|_| anyhow::anyhow!("consent store unavailable"))?;
+    load_unlocked(data_dir)
+}
+fn load_unlocked(data_dir: &Path) -> anyhow::Result<Grants> {
     let path = data_dir.join("remote_consents.json");
     if !path.exists() {
         return Ok(Grants::default());
@@ -63,15 +69,18 @@ pub fn update(
     let _guard = WRITE_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("consent store unavailable"))?;
-    let mut state = load(data_dir)?;
+    let mut state = load_unlocked(data_dir)?;
     operation(&mut state)?;
     std::fs::create_dir_all(data_dir)?;
     let path = data_dir.join("remote_consents.json");
-    // Keep revocation durable before acknowledging. A truncated/corrupt file
-    // causes checks to fail closed, never to grant access.
-    let file = std::fs::File::create(&path)?;
-    serde_json::to_writer_pretty(&file, &state)?;
-    file.sync_all()?;
+    // Readers never observe a truncated grant store. Persist replaces the old
+    // file atomically, on the same filesystem, after the new state is synced.
+    let file = tempfile::NamedTempFile::new_in(data_dir)?;
+    serde_json::to_writer_pretty(file.as_file(), &state)?;
+    file.as_file().sync_all()?;
+    file.persist(&path)?;
+    #[cfg(unix)]
+    std::fs::File::open(data_dir)?.sync_all()?;
     Ok(())
 }
 
@@ -166,6 +175,25 @@ pub fn check_url(url: &str, classes: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn concurrent_updates_never_publish_partial_grants_to_readers() {
+        let dir=tempfile::tempdir().unwrap();
+        let scope=Scope{data_dir:dir.path().into(),id:"task:authorized".into()};
+        update(dir.path(),|state| {state.grants.push(Grant{scope:scope.id.clone(),recipient:"provider:a".into(),data_classes:vec!["message".into()],created_at:chrono::Utc::now().to_rfc3339(),expires_at:(chrono::Utc::now()+chrono::Duration::hours(1)).to_rfc3339(),revoked:false});Ok(())}).unwrap();
+        std::thread::scope(|threads| {
+            for _ in 0..2 {
+                let scope=&scope;
+                threads.spawn(move || { for _ in 0..300 {check_in(scope,"provider:a",&["message"]).unwrap();} });
+            }
+            for i in 0..2 {
+                let root=dir.path();
+                threads.spawn(move || {for j in 0..100 {update(root,|state| {state.requests.push(RemoteRequest{scope:format!("task:{i}:{j}"),recipient:"other".into(),data_classes:vec!["message".into()]});Ok(())}).unwrap();} });
+            }
+        });
+        assert_eq!(load(dir.path()).unwrap().requests.len(),200);
+        update(dir.path(),|state| {state.grants[0].revoked=true;Ok(())}).unwrap();
+        assert!(check_in(&scope,"provider:a",&["message"]).unwrap_err().starts_with("remote_consent_required"));
+    }
     #[test]
     fn loopback_is_exact() {
         for url in [
