@@ -85,6 +85,7 @@ fn spawn_with_id(ctx:ResearchContext,topic:String,config:EngineConfig,run_id:Str
         report_meta: None,
         error: None,
         search_degraded: false,
+        pending_permission: None,
         started_at,
         finished_at: None,
     };
@@ -93,20 +94,25 @@ fn spawn_with_id(ctx:ResearchContext,topic:String,config:EngineConfig,run_id:Str
     let cancel_spawn = cancel.clone();
     tokio::spawn(akasha_core::privacy::scoped(privacy_scope,async move {
         store.insert(run, cancel_spawn).await;
-        let result = run_until_cancelled(&cancel,
-            run_engine(&ctx, &run_id_spawn, &topic, &config, &cancel)).await;
+        let result = run_until_cancelled(&cancel, async {
+            tokio::time::timeout(std::time::Duration::from_secs(config.max_time_secs),
+                run_engine(&ctx, &run_id_spawn, &topic, &config, &cancel)).await
+                .unwrap_or_else(|_| Err("research_timeout: délai maximal atteint, y compris l’attente des autorisations".into()))
+        }).await;
         if result.is_none() {
             store.update(&run_id_spawn, |r| {
                 r.phase = ResearchPhase::Cancelled;
                 r.finished_at = Some(chrono::Utc::now().to_rfc3339());
                 r.report_markdown = None;
                 r.report_meta = None;
+                r.pending_permission = None;
             }).await;
         } else if let Some(Err(e)) = result {
             store
                 .update(&run_id_spawn, |r| {
                     r.phase = ResearchPhase::Error;
                     r.error = Some(e);
+                    r.pending_permission = None;
                     r.finished_at = Some(chrono::Utc::now().to_rfc3339());
                 })
                 .await;
@@ -258,7 +264,7 @@ async fn run_engine(
                 if !urls_fetched.insert(url.clone()) { continue; }
                 set_phase(run_id, ResearchPhase::Reading).await;
                 let reader = add_sub_agent(run_id, &branch_id, "reader", &truncate_label(&url, 40), StepStatus::Running).await;
-                let status = match fetch_and_extract(ctx, &url, &url, topic, config).await {
+                let status = match fetch_and_extract(ctx, run_id, &url, &url, topic, config).await {
                     Some(finding) => {
                         round_findings.push(finding.clone());
                         store.update(run_id, |r| r.findings.push(finding)).await;
@@ -352,7 +358,7 @@ async fn run_engine(
                     )
                     .await;
 
-                    match fetch_and_extract(ctx, &url, &title, topic, config).await {
+                    match fetch_and_extract(ctx, run_id, &url, &title, topic, config).await {
                         Some(finding) => {
                             round_findings.push(finding.clone());
                             store
@@ -894,13 +900,39 @@ async fn web_search(
     }
 }
 
+async fn await_source_permission(run_id: &str, url: &str) -> Result<(), String> {
+    #[cfg(not(feature="consumer-beta"))]
+    { let _=(run_id,url); Ok(()) }
+    #[cfg(feature="consumer-beta")]
+    {
+        let store=ResearchStore::global();
+        loop {
+            match akasha_core::privacy::check_url(url,&["web_url"]) {
+                Ok(())=>{store.update(run_id,|run|run.pending_permission=None).await;return Ok(());}
+                Err(error) if error.starts_with("remote_consent_required")=>{
+                    let scope=akasha_core::privacy::current().ok_or(error)?;
+                    let parsed=url::Url::parse(url).map_err(|error|error.to_string())?;
+                    let permission=super::types::ResearchPermission{scope:scope.id,recipient:format!("web:{}",parsed.origin().ascii_serialization()),data_classes:vec!["web_url".into()]};
+                    store.update(run_id,|run|run.pending_permission=Some(permission)).await;
+                    // The outer run owns cancellation and its absolute deadline.
+                    // No page request is issued until the same scope is authorized.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(error)=>return Err(error),
+            }
+        }
+    }
+}
+
 async fn fetch_and_extract(
     ctx: &ResearchContext,
+    run_id: &str,
     url: &str,
     title: &str,
     goal: &str,
     config: &EngineConfig,
 ) -> Option<ResearchFinding> {
+    await_source_permission(run_id,url).await.ok()?;
     let executor = ctx.executor().await;
     let (body, res) = executor.web_fetch(url).await.ok()?;
     if !res.success {
@@ -1564,7 +1596,7 @@ async fn gather_urls_for_queries(
             }
             urls_this_query += 1;
             urls_fetched.insert(url.clone());
-            if let Some(finding) = fetch_and_extract(ctx, &url, &title, topic, config).await {
+            if let Some(finding) = fetch_and_extract(ctx, run_id, &url, &title, topic, config).await {
                 round_findings.push(finding.clone());
                 store
                     .update(run_id, |r| r.findings.push(finding))
@@ -1751,6 +1783,28 @@ fn truncate_label(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature="consumer-beta")]
+    #[tokio::test]
+    async fn discovered_source_waits_for_its_exact_origin_and_scope_before_continuing() {
+        use super::*;
+        let dir=tempfile::tempdir().unwrap();let task=Uuid::new_v4();let id=format!("permission-{task}");
+        let scope=akasha_core::privacy::Scope{data_dir:dir.path().into(),id:format!("task:{task}")};
+        let run:DeepResearchRun=serde_json::from_value(serde_json::json!({"id":id,"topic":"synthetic","phase":"reading","round":1,"max_rounds":1,"branches":[],"evolving_report":"","findings":[],"category":"general","providers_used":[],"research_plan":"","report_markdown":null,"report_meta":null,"search_degraded":false,"started_at":chrono::Utc::now().to_rfc3339(),"finished_at":null})).unwrap();
+        ResearchStore::global().insert(run,Arc::new(AtomicBool::new(false))).await;
+        let run_id=id.clone();
+        let waiting=tokio::spawn(akasha_core::privacy::scoped(scope.clone(),async move {await_source_permission(&run_id,"https://source.example/article?private-query=omitted").await}));
+        let pending=tokio::time::timeout(std::time::Duration::from_secs(2),async {loop {
+            if let Some(permission)=ResearchStore::global().get(&id).await.unwrap().pending_permission {break permission;}
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }}).await.unwrap();
+        assert_eq!(pending.scope,scope.id);assert_eq!(pending.recipient,"web:https://source.example");assert_eq!(pending.data_classes,vec!["web_url"]);
+        let consent=crate::privacy::Consent{recipient:pending.recipient.clone(),data_classes:pending.data_classes};
+        crate::privacy::grant(dir.path(),&format!("task:{}",Uuid::new_v4()),&[consent.clone()],1).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;assert!(!waiting.is_finished());
+        crate::privacy::grant(dir.path(),&scope.id,&[consent],1).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2),waiting).await.unwrap().unwrap().unwrap();
+        assert!(ResearchStore::global().get(&id).await.unwrap().pending_permission.is_none());
+    }
     #[tokio::test]
     async fn cancellation_drops_in_flight_work_instead_of_resuming_analysis() {
         use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
