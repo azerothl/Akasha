@@ -4,9 +4,11 @@ Retrouvez le montant d’une facture, les démarches indiquées dans un courrier
 ou les actions à préparer à partir d’une note. Chaque réponse documentaire
 renvoie vers les passages du fichier original pour pouvoir la vérifier.
 
-**État : candidat technique, pilote avec données personnelles non ouvert.**
-Les PR doivent d’abord être intégrées puis le paquet, les autorisations,
-le chiffrement et la restauration doivent franchir le contrôle de qualification.
+**Préversion technique Windows 0.13.0-beta.1 ; pilote avec données personnelles non ouvert.**
+Les paquets CPU et NVIDIA et leurs preuves sont disponibles dans la
+[release bêta](https://github.com/azerothl/Akasha/releases/tag/v0.13.0-beta.1).
+Les autorisations, le chiffrement et la restauration doivent franchir le
+contrôle complet de qualification avant le pilote.
 Il n’existe pas encore de configuration matérielle recommandée pour cette bêta.
 
 La [démonstration documentaire filmée](../docs/demos/consumer-beta-document.webm)
@@ -16,8 +18,9 @@ preuves de qualification.
 
 ## Premier lancement
 
-1. Récupérez le paquet complet `akasha-consumer-beta-candidate-cpu` fourni avec
-   son rapport de qualification. La variante NVIDIA n’est proposée comme
+1. Récupérez le paquet complet `akasha-windows-0.13.0-beta.1-cpu.zip` ou
+   `akasha-windows-0.13.0-beta.1-cuda.zip`, avec son rapport d'essai.
+   La variante NVIDIA n’est proposée comme
    recommandée qu’après essai sur la configuration indiquée dans ce rapport.
 2. Décompressez dans un nouveau dossier, puis double-cliquez sur
    **START-AKASHA.cmd**. Ne remplacez pas les fichiers d’une installation existante.

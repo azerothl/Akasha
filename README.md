@@ -4,7 +4,7 @@
 
 Akasha vous aide à **comprendre vos documents**, **préparer des actions à partir de vos notes** et **suivre les sujets qui vous intéressent**. Chaque réponse documentaire renvoie aux passages du fichier original ; les actions et dates sont vérifiées avant enregistrement.
 
-La **bêta Windows pour particuliers** est en préparation : [premier lancement, démonstration et limites](spec/consumer-beta-windows.md). Modèles locaux par défaut, mémoire long terme et sauvegardes chiffrées. Conversations, notes et documents importés restent hors du chiffrement applicatif pendant la bêta.
+La **préversion Windows 0.13.0-beta.1 pour particuliers** propose deux paquets CPU et NVIDIA : [premier lancement, démonstration et limites](spec/consumer-beta-windows.md). Modèles locaux par défaut, mémoire long terme et sauvegardes chiffrées. Conversations, notes et documents importés restent hors du chiffrement applicatif pendant la bêta.
 
 **Candidat technique : le pilote avec données personnelles n’est pas encore ouvert.** La diffusion attend les qualifications Windows sans GPU, NVIDIA, du paquet et de la restauration sur un autre compte. [Preuves et contrôles restants](spec/dev/quality/CONSUMER_BETA_DELIVERY.md).
 
