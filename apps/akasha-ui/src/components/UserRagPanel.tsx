@@ -24,6 +24,21 @@ export function UserRagPanel({t,locale,documents:initial,loading,error,onError,o
   const request=useCallback(async(path:string,body?:unknown,method="POST")=>{const result=await fetchEndpoint(path,body===undefined?undefined:{method,body:JSON.stringify(body)});const value=JSON.parse(result.text);if(!result.ok)throw new Error(value.error??value.detail??`HTTP ${result.status}`);return value;},[fetchEndpoint]);
   const refresh=useCallback(async()=>{const result=await request("/api/user-rag/documents");setDocuments(result.documents??[]);onRefresh();},[request,onRefresh]);
   useEffect(()=>setDocuments(initial),[initial]);
+  // Import tasks outlive this panel. Refresh after navigation and continue
+  // observing pending documents even when their in-memory job list was lost.
+  useEffect(()=>{
+    let disposed=false;let timer:number|undefined;
+    async function pollDocuments(){
+      let pending=true;
+      try{
+        const result=await request("/api/user-rag/documents");if(disposed)return;
+        const next:UserRagDocument[]=result.documents??[];setDocuments(next);
+        pending=next.some(doc=>["pending","indexing"].includes(doc.index_status??""));
+      }catch{/* Preserve the last known state and retry after reconnecting. */}
+      if(!disposed&&pending)timer=window.setTimeout(()=>void pollDocuments(),1000);
+    }
+    void pollDocuments();return()=>{disposed=true;window.clearTimeout(timer);};
+  },[request]);
   useEffect(()=>{if(!lastTask)return;let disposed=false;void request(`/api/tasks/${lastTask}`).then(task=>{if(disposed)return;if(task.status==="completed"&&task.outcome?.references)setReport(task.outcome);else if(["pending","running","queued"].includes(task.status))setJobs(current=>current.some(job=>job.id===lastTask)?current:[...current,{id:lastTask,kind:"answer",label:"Synthèse documentaire"}]);}).catch(()=>{ /* A restored profile can have no such task. */ });return()=>{disposed=true;};},[lastTask,request]);
   useEffect(()=>{
     if(jobs.length===0)return;let disposed=false;let timer:number;
