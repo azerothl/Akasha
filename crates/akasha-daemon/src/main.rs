@@ -60,18 +60,19 @@ fn init_tracing(data_dir: &Path) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let data_dir = std::env::var("AKASHA_DATA_DIR").unwrap_or_else(|_| {
-        dirs::home_dir()
-            .map(|p| p.join("akasha").display().to_string())
-            .unwrap_or_else(|| ".akasha".into())
-    });
-    let data_path = std::path::PathBuf::from(&data_dir);
-    std::fs::create_dir_all(&data_path).ok();
+    for (key, value) in akasha_core::data_dir::legacy_bootstrap_environment(std::env::var_os("AKASHA_DATA_DIR").as_deref(), dirs::home_dir().as_deref())? {
+        if std::env::var_os(&key).is_none() { std::env::set_var(key, value); }
+    }
+    let data_path = akasha_core::data_dir::resolve_bootstrap_data_dir(std::env::var_os("AKASHA_DATA_DIR").as_deref(), dirs::home_dir().as_deref())?;
+    std::fs::create_dir_all(&data_path)?;
+    // Embedded model paths and every subsystem must see exactly the same absolute root.
+    std::env::set_var("AKASHA_DATA_DIR", &data_path);
     init_tracing(&data_path)?;
     // `AKASHA_DATA_DIR` in env files is ignored — data_path was resolved above (see ENV_FILE_SKIP_KEYS).
     akasha_core::apply_data_dir_env_files(&data_path);
 
     info!("Akasha daemon starting");
+    info!(data_dir = %data_path.display(), "Using persistent Akasha data directory");
 
     let spec_dir = akasha_core::resolve_spec_dir(data_path.as_path());
 
