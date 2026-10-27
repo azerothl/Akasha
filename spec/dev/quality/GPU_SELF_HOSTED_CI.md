@@ -1,4 +1,48 @@
-# Checklist — runner GPU self-hosted (v0.10)
+# Exécuteur NVIDIA pour la CI de main
+
+## Installation Windows
+
+Le lanceur utilise Windows x64, NVIDIA avec toolkit CUDA, Visual Studio 2022
+C++, LLVM, CMake, Python 3.11+, PowerShell 7 et GitHub CLI connecté avec les
+droits d'administration du dépôt. Prévoir 35 Gio libres sur le disque du runner.
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/ci/start-nvidia-runner.ps1 -Root C:/AkashaCI -InstallStartup
+```
+
+Le paquet officiel Actions Runner 2.338.2 est vérifié par SHA-256. Un
+gestionnaire local inscrit un exécuteur à usage unique avec l'étiquette
+`akasha-nvidia-main`, puis le renouvelle après chaque job. Le gestionnaire
+redémarre à l'ouverture de session grâce au raccourci utilisateur
+`Akasha NVIDIA CI`. Il n'installe pas de service administrateur.
+
+Les caches, outils, profils et journaux restent dans `C:/AkashaCI`. Les
+variables et configurations du profil personnel ne sont pas héritées par le
+worker ; les jetons d'inscription restent dans le gestionnaire. Les journaux
+locaux du runner sont conservés dans le dossier d'application et `logs/`.
+
+Avant le checkout, le hook installé hors de l'application vérifie le dépôt,
+`refs/heads/main`, l'événement push/manuel et l'empreinte courante de `main`
+relue sur GitHub. Une PR, une autre branche ou un ancien commit est refusé
+avant toute étape du job. Ce contrôle ne constitue pas une machine virtuelle :
+les processus tournent sous le compte Windows courant et n'exécutent que le
+code accepté sur `main`. Ne pas ajouter les étiquettes génériques `gpu,nvidia` :
+les anciennes exécutions qui les demandent ne doivent pas atteindre ce runner.
+
+Le workflow utilise un profil neuf et un port loopback libre. Il vérifie que
+le processus qui écoute est le daemon qu'il vient de lancer. L'application
+personnelle sur 3876 reste indépendante. Le matériel doit rester allumé et la
+session ouverte pour que le gestionnaire soit disponible ; un ordinateur
+éteint laisse les tâches en attente sur GitHub.
+
+Déclenchement manuel : `gh workflow run gpu-ci.yml --ref main`. Le résultat
+exige cinq générations réelles CUDA et conserve les réponses, empreintes,
+mesures de tokens, latence et échantillons NVIDIA dans les artefacts du run.
+
+Références : [exécuteurs éphémères](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#ephemeral-runners-for-autoscaling),
+[hooks avant les jobs](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/run-scripts).
+
+## Historique v0.10
 
 Objectif : valider une vraie génération CUDA en CI (non disponible sur GitHub-hosted sans `nvcuda.dll`).
 
