@@ -23,13 +23,8 @@ if (-not $Worker) {
     foreach ($folder in @($Root, $application, $hooks, $logs, (Join-Path $Root 'work'), (Join-Path $Root 'temp'), (Join-Path $Root 'state'), (Join-Path $Root 'profile'), (Join-Path $Root 'state/roaming'))) {
         New-Item -ItemType Directory -Path $folder -Force | Out-Null
     }
-    $acl = Get-Acl -LiteralPath $Root
-    $acl.SetAccessRuleProtection($true, $false)
-    foreach ($rule in @($acl.Access)) { $acl.RemoveAccessRuleAll($rule) }
-    foreach ($sid in @([Security.Principal.WindowsIdentity]::GetCurrent().User, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'), [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))) {
-        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-    }
-    Set-Acl -LiteralPath $Root -AclObject $acl
+    . (Join-Path $PSScriptRoot 'nvidia-runner-access.ps1')
+    Set-NvidiaRunnerAccess -Root $Root
     # Bootstrap private shims from an existing trusted Rust installation. The
     # Rust action can then update this copy without changing the user's tools.
     $rustup = Get-Command rustup -ErrorAction SilentlyContinue
@@ -48,7 +43,7 @@ if (-not $Worker) {
     if (-not (Test-Path (Join-Path $application 'bin/Runner.Listener.exe'))) {
         Expand-Archive -LiteralPath $archive -DestinationPath $application
     }
-    foreach ($name in @('assert-nvidia-main-job.ps1', 'nvidia-main-policy.ps1', 'reset-nvidia-runner-state.ps1')) {
+    foreach ($name in @('assert-nvidia-main-job.ps1', 'nvidia-main-policy.ps1', 'reset-nvidia-runner-state.ps1', 'nvidia-worker-path.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $hooks $name) -Force
     }
     if ([IO.Path]::GetFullPath($PSCommandPath) -ne $manager) { Copy-Item -LiteralPath $PSCommandPath -Destination $manager -Force }
@@ -68,6 +63,7 @@ $mutex = [Threading.Mutex]::new($false, 'Local\AkashaNvidiaRunner')
 if (-not $mutex.WaitOne(0)) { Write-Host 'The NVIDIA runner manager is already active.'; exit 0 }
 try {
     . (Join-Path $hooks 'reset-nvidia-runner-state.ps1')
+    . (Join-Path $hooks 'nvidia-worker-path.ps1')
     while (-not (Test-Path (Join-Path $Root 'stop'))) {
         try {
             $registered = gh api repos/azerothl/Akasha/actions/runners | ConvertFrom-Json
@@ -100,7 +96,7 @@ try {
             }
             $start.Environment['ACTIONS_RUNNER_HOOK_JOB_STARTED'] = Join-Path $hooks 'assert-nvidia-main-job.ps1'
             $start.Environment['CARGO_HOME'] = Join-Path $Root 'cargo'
-            $start.Environment['PATH'] = (Join-Path $Root 'cargo/bin') + ';' + $start.Environment['PATH']
+            $start.Environment['PATH'] = Get-NvidiaWorkerPath (Join-Path $Root 'cargo/bin') (Get-Command git).Source $start.Environment['PATH']
             $start.Environment['CARGO_TARGET_DIR'] = Join-Path $Root 'target'
             $start.Environment['RUSTUP_HOME'] = Join-Path $Root 'rustup'
             $start.Environment['LOCALAPPDATA'] = Join-Path $Root 'state'

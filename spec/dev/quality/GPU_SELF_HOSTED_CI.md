@@ -3,7 +3,8 @@
 ## Installation Windows
 
 Le lanceur utilise Windows x64, NVIDIA avec toolkit CUDA, Visual Studio 2022
-C++, LLVM, CMake, Python 3.11+, PowerShell 7 et GitHub CLI connecté avec les
+C++, LLVM, CMake, Python 3.11+, PowerShell 7, Git pour Windows avec Git Bash,
+et GitHub CLI connecté avec les
 droits d'administration du dépôt. Prévoir 35 Gio libres sur le disque du runner.
 
 ```powershell
