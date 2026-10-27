@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Sync Akasha product version across workspace Cargo.toml and akasha-ui (Tauri) files.
-Usage: python scripts/sync-release-version.py X.Y.Z [REPO_ROOT]
+Usage: python scripts/sync-release-version.py X.Y.Z[-PRERELEASE] [REPO_ROOT]
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+SEMVER_RE = re.compile(r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$")
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -118,8 +118,9 @@ def main() -> None:
     if len(sys.argv) < 2:
         die("Usage: sync-release-version.py X.Y.Z [REPO_ROOT]")
     version = sys.argv[1].strip()
-    if not SEMVER_RE.match(version):
-        die(f"Invalid version (expected MAJOR.MINOR.PATCH): {version!r}")
+    match = SEMVER_RE.fullmatch(version)
+    if not match or (match[1] and any(part.isdigit() and len(part) > 1 and part.startswith('0') for part in match[1].split('.'))):
+        die(f"Invalid version (expected MAJOR.MINOR.PATCH[-PRERELEASE]): {version!r}")
 
     root = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else Path.cwd()
     if not (root / "Cargo.toml").is_file():

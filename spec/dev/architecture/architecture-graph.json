@@ -1,8 +1,8 @@
 {
   "meta": {
     "product": "Akasha",
-    "version": "0.12.1",
-    "description": "Local-first personal agent infrastructure: multi-channel gateway, Main Agent / Orchestrator, LLM router with strict free-model routing, 4-layer memory, vault-backed tools, WASM plugins, MCP stdio, Companion LAN pairing, first-party module catalog, Code Studio project workflows, and Tauri/TUI clients (v0.12.1).",
+    "version": "0.13.0-beta.1",
+    "description": "Akasha: existing agent runtime and isolated Windows consumer beta, with sourced documents and local OCR, confirmed reminders, recurring watches, scoped remote consent, SQLCipher memory and encrypted profile backups.",
     "defaultPort": 3876,
     "dataDir": "~/akasha (or AKASHA_DATA_DIR)",
     "sources": [
@@ -36,7 +36,13 @@
       "crates/akasha-llm/src/free_models.rs",
       "crates/akasha-llm/src/free_routing.rs",
       "apps/akasha-ui/src/components/ModulesPanel.tsx",
-      "apps/akasha-ui/src/components/FreeModelsPanel.tsx"
+      "apps/akasha-ui/src/components/FreeModelsPanel.tsx",
+      "spec/consumer-beta-windows.md",
+      "crates/akasha-daemon/src/document_api.rs",
+      "crates/akasha-daemon/src/consumer_organization.rs",
+      "crates/akasha-daemon/src/consumer_watch.rs",
+      "crates/akasha-daemon/src/profile_backup.rs",
+      "crates/akasha-store/src/memory_protection.rs"
     ]
   },
   "nodes": [
@@ -411,6 +417,94 @@
         "GET /api/router/free-models",
         "POST /api/router/free-models/refresh"
       ]
+    },
+    {
+      "id": "consumer-ui",
+      "label": "Windows consumer beta",
+      "layer": "clients",
+      "crate": "apps/akasha-ui",
+      "description": "Separate portable desktop edition on port 3877, dedicated profile, three onboarding steps and restricted native transport.",
+      "apis": [
+        "GET /api/consumer/demo",
+        "GET /api/privacy"
+      ]
+    },
+    {
+      "id": "consumer-documents",
+      "label": "Documents and local OCR",
+      "layer": "knowledge",
+      "crate": "akasha-daemon",
+      "description": "PDFium and Tesseract 5 in a cancellable worker; source/page/extraction references, model answers, source verification and Markdown export.",
+      "apis": [
+        "POST /api/user-rag/documents",
+        "GET /api/user-rag/documents/:id/source",
+        "GET /api/user-rag/reports/:id"
+      ]
+    },
+    {
+      "id": "remote-consent",
+      "label": "Scoped remote consent",
+      "layer": "security",
+      "crate": "akasha-core",
+      "description": "Every remote model/search request requires an explicit recipient and data scope; child tasks inherit root scope and recurrent watches use revocable grants.",
+      "apis": [
+        "GET /api/privacy"
+      ]
+    },
+    {
+      "id": "memory-protection",
+      "label": "SQLCipher memory",
+      "layer": "security",
+      "crate": "akasha-store",
+      "description": "Consumer beta encrypts the whole long-term memory database. Windows Credential Manager protects a random key; missing keys lock memory instead of creating an empty replacement.",
+      "apis": [
+        "POST /api/memory/protection"
+      ]
+    },
+    {
+      "id": "consumer-organization",
+      "label": "Notes to confirmed reminders",
+      "layer": "runtime",
+      "crate": "akasha-daemon",
+      "description": "Model proposals have no scheduling effects; explicit confirmation resolves ambiguous local dates and persists actions/reminders idempotently.",
+      "apis": [
+        "GET /api/consumer/actions",
+        "POST /api/consumer/actions/confirm"
+      ]
+    },
+    {
+      "id": "consumer-watch",
+      "label": "Personal recurring watch",
+      "layer": "runtime",
+      "crate": "akasha-daemon",
+      "description": "Existing scheduler and search engine produce dated reports with novelty, seen items and unavailable sources; missed periods resume at most once.",
+      "apis": [
+        "GET /api/consumer/watch",
+        "POST /api/consumer/watch"
+      ]
+    },
+    {
+      "id": "profile-backup",
+      "label": "Encrypted profile backup",
+      "layer": "security",
+      "crate": "akasha-daemon",
+      "description": "Argon2id and AES-256-GCM archive; restore validates in a separate directory and activation waits for restart; remote grants and service credentials are excluded.",
+      "apis": [
+        "POST /api/backup/create",
+        "POST /api/backup/restore",
+        "POST /api/backup/activate"
+      ]
+    },
+    {
+      "id": "model-qualification",
+      "label": "Usage qualification evidence",
+      "layer": "llm",
+      "crate": "akasha-daemon",
+      "description": "Synthetic asynchronous probes and version-bound evidence for conversation, documents and actions; catalogue availability alone never recommends a model.",
+      "apis": [
+        "POST /api/router/qualify",
+        "GET /api/capabilities"
+      ]
     }
   ],
   "edges": [
@@ -779,6 +873,90 @@
       "from": "free-model-catalog",
       "to": "llm-cloud",
       "label": "verified provider metadata"
+    },
+    {
+      "id": "e-beta-1",
+      "from": "consumer-ui",
+      "to": "http-api",
+      "label": "restricted native transport"
+    },
+    {
+      "id": "e-beta-2",
+      "from": "http-api",
+      "to": "consumer-documents",
+      "label": "import and source retrieval"
+    },
+    {
+      "id": "e-beta-3",
+      "from": "consumer-documents",
+      "to": "llm-router",
+      "label": "sourced answer"
+    },
+    {
+      "id": "e-beta-4",
+      "from": "llm-router",
+      "to": "remote-consent",
+      "label": "authorize outbound data"
+    },
+    {
+      "id": "e-beta-5",
+      "from": "consumer-ui",
+      "to": "consumer-organization",
+      "label": "preview and confirmation"
+    },
+    {
+      "id": "e-beta-6",
+      "from": "consumer-organization",
+      "to": "scheduler",
+      "label": "persist actual reminders"
+    },
+    {
+      "id": "e-beta-7",
+      "from": "scheduler",
+      "to": "consumer-watch",
+      "label": "one catch-up run"
+    },
+    {
+      "id": "e-beta-8",
+      "from": "consumer-watch",
+      "to": "remote-consent",
+      "label": "revocable recurrence"
+    },
+    {
+      "id": "e-beta-9",
+      "from": "consumer-watch",
+      "to": "tools",
+      "label": "search and crawl"
+    },
+    {
+      "id": "e-beta-10",
+      "from": "consumer-ui",
+      "to": "profile-backup",
+      "label": "create / restore / activate"
+    },
+    {
+      "id": "e-beta-11",
+      "from": "profile-backup",
+      "to": "memory-protection",
+      "label": "portable protected memory"
+    },
+    {
+      "id": "e-beta-12",
+      "from": "memory-protection",
+      "to": "sqlite",
+      "label": "central encrypted connections"
+    },
+    {
+      "id": "e-beta-13",
+      "from": "consumer-ui",
+      "to": "model-qualification",
+      "label": "synthetic qualification"
+    },
+    {
+      "id": "e-beta-14",
+      "from": "consumer-documents",
+      "to": "task-store",
+      "label": "same task lifecycle"
     }
   ],
   "flows": [
@@ -1059,6 +1237,63 @@
         "llm-router",
         "free-model-catalog",
         "llm-cloud"
+      ]
+    },
+    {
+      "id": "flow-consumer-documents",
+      "name": "Understand my documents",
+      "description": "Local page extraction and OCR produce references; the ordinary task lifecycle routes an authorized answer and an export back to the desktop.",
+      "steps": [
+        "consumer-ui",
+        "http-api",
+        "consumer-documents",
+        "task-store",
+        "llm-router",
+        "remote-consent",
+        "consumer-documents",
+        "consumer-ui"
+      ]
+    },
+    {
+      "id": "flow-consumer-organization",
+      "name": "Turn notes into reminders",
+      "description": "The model proposes actions, the user confirms concrete dates, then persisted reminders become visible.",
+      "steps": [
+        "consumer-ui",
+        "consumer-organization",
+        "llm-router",
+        "remote-consent",
+        "consumer-ui",
+        "consumer-organization",
+        "scheduler"
+      ]
+    },
+    {
+      "id": "flow-consumer-watch",
+      "name": "Recurring personal watch",
+      "description": "A separately authorized recurrence uses the existing scheduler and search tools to retain dated reports and avoid duplicate catch-up.",
+      "steps": [
+        "consumer-ui",
+        "consumer-watch",
+        "remote-consent",
+        "scheduler",
+        "consumer-watch",
+        "tools",
+        "task-store",
+        "consumer-ui"
+      ]
+    },
+    {
+      "id": "flow-consumer-restore",
+      "name": "Restore an encrypted profile",
+      "description": "A phrase-protected archive is checked in isolation before activation; the current data remains available until restart.",
+      "steps": [
+        "consumer-ui",
+        "profile-backup",
+        "memory-protection",
+        "sqlite",
+        "profile-backup",
+        "consumer-ui"
       ]
     }
   ]
