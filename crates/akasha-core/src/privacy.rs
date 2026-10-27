@@ -42,6 +42,10 @@ pub struct Grants {
 pub async fn scoped<F: Future>(scope: Scope, future: F) -> F::Output {
     CONTEXT.scope(scope, future).await
 }
+/// Capture `current()` before spawning: task locals do not cross spawn boundaries.
+pub async fn scoped_optional<F: Future>(scope: Option<Scope>, future: F) -> F::Output {
+    match scope { Some(scope) => scoped(scope, future).await, None => future.await }
+}
 pub fn current() -> Option<Scope> {
     CONTEXT.try_with(Clone::clone).ok()
 }
@@ -175,6 +179,19 @@ pub fn check_url(url: &str, classes: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn background_future_keeps_only_its_originating_consent_scope() {
+        let dir=tempfile::tempdir().unwrap();let scope=Scope{data_dir:dir.path().into(),id:"task:origin".into()};
+        update(dir.path(),|state|{state.grants.push(Grant{scope:scope.id.clone(),recipient:"model:authorized".into(),data_classes:vec!["message".into()],created_at:chrono::Utc::now().to_rfc3339(),expires_at:(chrono::Utc::now()+chrono::Duration::hours(1)).to_rfc3339(),revoked:false});Ok(())}).unwrap();
+        let handle=scoped(scope.clone(),async {tokio::spawn(scoped_optional(current(),async {
+            assert!(check("model:authorized",&["message"]).is_ok());
+            assert!(check("model:other",&["message"]).is_err());
+            current().unwrap().id
+        }))}).await;
+        assert_eq!(handle.await.unwrap(),scope.id);
+        assert!(current().is_none());
+        assert!(tokio::spawn(scoped_optional(None,async{check("model:authorized",&["message"])})).await.unwrap().is_err());
+    }
     #[test]
     fn concurrent_updates_never_publish_partial_grants_to_readers() {
         let dir=tempfile::tempdir().unwrap();
