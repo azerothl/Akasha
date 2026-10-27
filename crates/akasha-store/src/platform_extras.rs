@@ -82,7 +82,11 @@ impl WakeupStore {
     }
 
     pub fn insert(&self, w: &Wakeup) -> anyhow::Result<()> {
-        self.conn.execute(
+        Self::insert_on(&self.conn,w)
+    }
+    /// Allows a confirmed action and its reminder to share one transaction.
+    pub fn insert_on(conn:&Connection,w:&Wakeup)->anyhow::Result<()> {
+        conn.execute(
             "INSERT INTO wakeups (id, session_id, fire_at, message, status, created_by_task_id, rrule, created_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
@@ -97,6 +101,19 @@ impl WakeupStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// A reminder notification is persisted in the same transaction as firing.
+    /// Retrying after a restart cannot inject an agent task or duplicate it.
+    pub fn fire_notification(&mut self,id:Uuid,now:DateTime<Utc>)->anyhow::Result<bool>{
+        use rusqlite::OptionalExtension;
+        let tx=self.conn.transaction()?;
+        let due:Option<(String,String)>=tx.query_row("SELECT message,fire_at FROM wakeups WHERE id=?1 AND status='pending' AND fire_at<=?2",params![id.to_string(),now.to_rfc3339()],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let Some((message,planned))=due else{return Ok(false);};
+        let date:DateTime<Utc>=planned.parse()?;let late=now-date>chrono::Duration::minutes(1);
+        tx.execute("INSERT INTO notifications(id,type,title,body,read,task_id,created_at) VALUES(?1,?2,?3,?4,0,NULL,?5)",params![id.to_string(),if late{"consumer_reminder_late"}else{"consumer_reminder"},if late{"Rappel manqué"}else{"Rappel"},message,now.to_rfc3339()])?;
+        tx.execute("UPDATE wakeups SET status=?2 WHERE id=?1 AND status='pending'",params![id.to_string(),if late{"fired_late"}else{"fired"}])?;
+        tx.commit()?;Ok(true)
     }
 
     pub fn list_pending_before(&self, before: DateTime<Utc>) -> anyhow::Result<Vec<Wakeup>> {

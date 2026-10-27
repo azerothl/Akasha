@@ -32,6 +32,7 @@ impl ChannelType {
 /// Normalized message envelope produced by channel adapters and consumed by the core.
 #[derive(Debug, Clone)]
 pub struct MessageEnvelope {
+    pub organization_request: Option<crate::consumer_organization::Request>,
     pub document_request: Option<crate::document_conversation::DocumentRequest>,
     pub remote_consents: Vec<crate::privacy::Consent>,
     /// Source channel type.
@@ -92,6 +93,7 @@ impl MessageEnvelope {
             studio_execution: None,
             remote_consents: vec![],
             document_request: None,
+            organization_request: None,
         }
     }
 
@@ -117,6 +119,7 @@ impl MessageEnvelope {
             studio_execution: None,
             remote_consents: vec![],
             document_request: None,
+            organization_request: None,
         }
     }
 
@@ -142,6 +145,7 @@ impl MessageEnvelope {
             studio_execution: None,
             remote_consents: vec![],
             document_request: None,
+            organization_request: None,
         }
     }
 }
@@ -184,6 +188,7 @@ pub async fn handle_envelope(
         envelope.studio_execution,
         envelope.remote_consents,
         envelope.document_request,
+        envelope.organization_request,
     )
         .await
 }

@@ -315,22 +315,15 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     if !started {notify_task_completion(&task_completion_registry,task_id).await;return;}
-    // Selected documents use the same task/route and privacy scope, with no tools
-    // or unrelated memory. The persisted source snapshot survives a restart.
-    match crate::document_conversation::load(&store_path,task_id) {
-        Ok(Some(request))=>{
-            let data=store_path.parent().unwrap_or(&store_path);
-            let result=crate::document_conversation::run(data,&store_path,task_id,&message,&request,&llm_router).await;
-            if let Ok((status,outcome))=crate::document_conversation::finish(&store_path,task_id,result) {
-                let event=if status==TaskStatus::Completed {EventType::TaskCompleted}else{EventType::TaskFailed};
-                let _=bus.send(EventEnvelope::new(event,Some(serde_json::json!({"task_id":task_id,"response":outcome["response"],"outcome":outcome}))).with_correlation(task_id));
-            }
-            notify_task_completion(&task_completion_registry,task_id).await;return;
-        },
-        Err(error)=>{
-            let _=crate::document_conversation::finish(&store_path,task_id,Err(error));
-            notify_task_completion(&task_completion_registry,task_id).await;return;
-        },Ok(None)=>{}
+    // Explicit consumer workflows keep the existing task, router, and privacy scope.
+    // Only trusted persisted source snapshots select these read-only branches.
+    let data=store_path.parent().unwrap_or(&store_path);
+    if let Some(result)=crate::consumer_workflow::run(data,&store_path,task_id,&message,&llm_router).await {
+        if let Ok((status,outcome))=crate::document_conversation::finish(&store_path,task_id,result) {
+            let event=if status==TaskStatus::Completed {EventType::TaskCompleted}else{EventType::TaskFailed};
+            let _=bus.send(EventEnvelope::new(event,Some(serde_json::json!({"task_id":task_id,"response":outcome["response"],"outcome":outcome}))).with_correlation(task_id));
+        }
+        notify_task_completion(&task_completion_registry,task_id).await;return;
     }
 
 

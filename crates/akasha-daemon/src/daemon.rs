@@ -217,6 +217,7 @@ impl Daemon {
     pub async fn run(&self) -> anyhow::Result<RunOutcome> {
         log_upgrade_heritage_reminder(&self.data_dir);
         if cfg!(feature="consumer-beta") {
+            crate::consumer_profile::ensure_vault_scope(&self.data_dir)?;
             let memory=self.data_dir.join("memory.db");
             if !memory.exists() && !memory.with_extension("db.protection.json").exists() {
                 if let Err(error)=akasha_store::memory_protection::open_connection(&memory) {warn!(%error,"Memory locked: Windows protection unavailable");}

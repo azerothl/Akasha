@@ -12,7 +12,7 @@ sauvegardes chiffrées. Les trois parcours réutilisent les tâches du daemon.
 | 2 — Consentement et protection | Socle : accords par tâche, transports protégés, SQLCipher, clé Windows, API de sauvegarde/restauration | Voir consumer_beta_privacy.md : validation du paquet, périmètre documentaire, reprise HTTP et second compte Windows |
 | 3 — Modèles et démarrage | Démarrage en trois étapes, première tâche vérifiée et préqualification synthétique réelle | Classement sur corpus complet, calibration et recours distant ; voir consumer_beta_models.md |
 | 4 — Documents et OCR | Lecture isolée PDFium/Tesseract, index v2, réponse sourcée, source et export ; essais natifs/HTTP/UI | Qualification du paquet, arrêts forcés et corpus complet ; voir consumer_beta_documents.md |
-| 5 — Organisation, veille, sauvegarde | À livrer | Persistance, restauration sur autre compte |
+| 5 — Organisation, veille, sauvegarde | Propositions confirmées, rappels persistés, veille consentie, correction mémoire, export/restauration et sélection du profil | Second compte Windows, paquet et corpus complet ; voir consumer_beta_organization.md |
 | 6 — Distribution et pilote | À livrer | Paquets CPU/NVIDIA ; dix personnes pendant quatre semaines |
 
 Les PR #273 et #274 sont des prérequis. Tant qu'elles ne sont pas intégrées,

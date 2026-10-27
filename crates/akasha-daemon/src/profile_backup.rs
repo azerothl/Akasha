@@ -19,6 +19,8 @@ const ROOT_FILES: &[&str] = &[
     "second_brain_settings.json",
     "embedded_runtime.json",
     "consumer_settings.json",
+    "llm_router.yaml",
+    "tools_policy.yaml",
 ];
 const ROOT_DIRS: &[&str] = &["notes", "user_rag", "short_term", "document_reports"];
 const MAX_FILES: usize = 10000;
@@ -53,6 +55,40 @@ struct Receipt {
 
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+fn public_endpoint(value: &str) -> Option<String> {
+    let mut url = url::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https") { return None; }
+    url.set_username("").ok()?; url.set_password(None).ok()?;
+    url.set_query(None); url.set_fragment(None);
+    // Preserve the origin only: custom paths may themselves embed credentials.
+    let origin=url.origin().ascii_serialization();let path=url.path().trim_end_matches('/');
+    Some(if matches!(path,"/v1"|"/api/v1"|"/v1beta"){format!("{origin}{path}")}else{origin})
+}
+fn sanitized_router(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut config = akasha_llm::config::RoutingConfig::load_from_path(path)
+        .map_err(|_| anyhow::anyhow!("Réglages des modèles invalides ; aucune sauvegarde partielle n’est publiée"))?;
+    config.free_models = Default::default(); config.model_options.clear();
+    for provider in config.providers.values_mut() {
+        provider.api_key_ref=None; provider.organization=None; provider.site_url=None; provider.app_title=None;
+        provider.base_url=provider.base_url.as_deref().and_then(public_endpoint);
+    }
+    let allowed=["temperature","top_p","top_k","frequency_penalty","presence_penalty","repeat_penalty","num_ctx","num_gpu","max_tokens","max_token","thinking_level"];
+    for task in config.task_types.values_mut() {
+        for route in task.primary.iter_mut().chain(task.fallback.iter_mut()) {
+            let mut selected=serde_json::Map::new();
+            if let Some(value)=&route.config { for key in allowed { let found=value.get(key).or_else(||value.as_array().and_then(|values|values.iter().find_map(|value|value.get(key)))); if let Some(value)=found { if value.is_number() || (key=="thinking_level" && value.as_str().is_some_and(|level|["off","low","medium","high","auto"].contains(&level))) { selected.insert(key.into(),value.clone()); } } } }
+            route.config=Some(serde_json::Value::Object(selected));
+        }
+    }
+    Ok(serde_yaml::to_string(&config)?.into_bytes())
+}
+fn sanitized_tools(path:&Path)->anyhow::Result<Vec<u8>> {
+    let policy=akasha_tools::ToolsPolicy::load_from_path(path).map_err(|_|anyhow::anyhow!("Réglages de recherche invalides ; aucune sauvegarde partielle n’est publiée"))?;
+    let value=serde_json::to_value(policy)?; let mut selected=serde_json::Map::new();
+    for key in ["web_search_enabled","search_provider","search_fallback_chain","allowed_web_domains","blocked_web_domains"] { if let Some(value)=value.get(key){selected.insert(key.into(),value.clone());} }
+    if let Some(endpoint)=value["searxng_url"].as_str().and_then(public_endpoint){selected.insert("searxng_url".into(),endpoint.into());}
+    Ok(serde_yaml::to_string(&selected)?.into_bytes())
 }
 fn cancelled(store: &Path, id: Uuid) -> anyhow::Result<()> {
     let task = TaskStore::open(store)?
@@ -126,6 +162,7 @@ fn gather(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> anyhow::Resu
 
 fn create(data_dir: &Path, store: &Path, id: Uuid, passphrase: &str) -> anyhow::Result<Receipt> {
     progress(store, id, 5, "Préparation des données à sauvegarder")?;
+    anyhow::ensure!(data_dir.join("memory.db").is_file()||!data_dir.join("memory.db.protection.json").exists(),"Mémoire verrouillée : la base protégée est absente. Utilisez l’archive précédente ; aucune sauvegarde vide ne sera publiée.");
     let root = std::fs::canonicalize(data_dir)?;
     let mut paths = Vec::new();
     for name in ROOT_FILES.iter().chain(ROOT_DIRS) {
@@ -163,7 +200,11 @@ fn create(data_dir: &Path, store: &Path, id: Uuid, passphrase: &str) -> anyhow::
         } else {
             path.clone()
         };
-        let bytes = std::fs::read(source)?;
+        let bytes = match relative.as_str() {
+            "llm_router.yaml" => sanitized_router(&source)?,
+            "tools_policy.yaml" => sanitized_tools(&source)?,
+            _ => std::fs::read(source)?,
+        };
         anyhow::ensure!(bytes.len() as u64 <= MAX_BYTES, "backup_file_too_large");
         entries.push(Entry {
             path: relative,
@@ -241,6 +282,8 @@ fn validate(archive: &Path, passphrase: &str) -> anyhow::Result<Bundle> {
             "backup_integrity_failed"
         );
     }
+    anyhow::ensure!(bundle.files.iter().any(|file|file.path=="akasha.db"),"La sauvegarde du profil ne contient pas sa base principale");
+    anyhow::ensure!(bundle.memory_key.is_none()||bundle.files.iter().any(|file|file.path=="memory.db"),"Clé de mémoire sans base correspondante dans l’archive");
     Ok(bundle)
 }
 
@@ -280,6 +323,15 @@ fn restore(
         file.write_all(&bytes)?;
         file.sync_all()?;
     }
+    // Treat old manifests as untrusted inputs too: service credentials never
+    // survive restoration, even if an older archive included provider settings.
+    for (name, sanitize) in [
+        ("llm_router.yaml", sanitized_router as fn(&Path)->anyhow::Result<Vec<u8>>),
+        ("tools_policy.yaml", sanitized_tools as fn(&Path)->anyhow::Result<Vec<u8>>),
+    ] {
+        let path=staging.path().join(name);
+        if path.exists(){std::fs::write(&path,sanitize(&path)?)?;}
+    }
     let memory = staging.path().join("memory.db");
     if memory.exists() {
         akasha_store::memory_protection::restore_key(&memory, bundle.memory_key.as_deref())?;
@@ -303,6 +355,8 @@ fn restore(
         }
         let wakeups:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='wakeups'",[],|row|row.get(0))?;
         if wakeups>0 {connection.execute("UPDATE wakeups SET status='disabled_restored' WHERE status='pending'",[])?;}
+        let calendars:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='caldav_accounts'",[],|row|row.get(0))?;
+        if calendars>0 {connection.execute("UPDATE caldav_accounts SET enabled=0,sync_token=NULL",[])?;}
         let triggers:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='event_triggers'",[],|row|row.get(0))?;
         if triggers>0 {connection.execute("UPDATE event_triggers SET enabled=0",[])?;}
     }
@@ -327,6 +381,7 @@ fn restore(
 struct Input {
     passphrase: String,
     archive: Option<PathBuf>,
+    recovery_backup_id: Option<Uuid>,
     #[serde(default)]
     confirmed: bool,
 }
@@ -339,6 +394,18 @@ pub fn route(
     store: &Path,
 ) -> Option<String> {
     use crate::api_http::json_response;
+    if method=="GET"&&path.starts_with("/api/backup/artifacts") {
+        let result=(||->anyhow::Result<serde_json::Value>{
+            if path=="/api/backup/artifacts" {
+                let directory=data_dir.join("backups");let mut files=Vec::new();if directory.is_dir(){for file in std::fs::read_dir(directory)?.take(1000){let file=file?;let path=file.path();if path.extension().is_some_and(|extension|extension=="akbk"){if let Some(id)=path.file_stem().and_then(|stem|stem.to_str()).and_then(|stem|Uuid::parse_str(stem).ok()){let meta=file.metadata()?;files.push(serde_json::json!({"id":id,"name":file.file_name().to_string_lossy(),"bytes":meta.len()}));}}}}
+                return Ok(serde_json::json!({"artifacts":files}));
+            }
+            let id=Uuid::parse_str(path.trim_start_matches("/api/backup/artifacts/"))?;let path=data_dir.join("backups").join(format!("{id}.akbk"));
+            let metadata=std::fs::symlink_metadata(&path)?;anyhow::ensure!(metadata.is_file()&&!metadata.file_type().is_symlink(),"Archive locale introuvable");
+            use std::io::Read;let mut file=std::fs::File::open(&path)?;let mut header=[0;8];file.read_exact(&mut header)?;anyhow::ensure!(&header==b"AKBK\0\0\0\x01","Format d’archive invalide");
+            Ok(serde_json::json!({"id":id,"path":path,"bytes":metadata.len()}))
+        })();return Some(match result{Ok(value)=>json_response("200 OK",&value.to_string()),Err(error)=>json_response("400 Bad Request",&serde_json::json!({"error":error.to_string()}).to_string())});
+    }
     if method != "POST"
         || !matches!(
             path,
@@ -424,6 +491,13 @@ pub fn route(
                 let memory=data_dir.join("memory.db");
                 let state=akasha_store::memory_protection::status(&memory);
                 if state["state"]=="encrypted" {return Ok(serde_json::json!({"response":"La mémoire est déjà chiffrée.","memory":state}));}
+                if let Some(backup)=input.recovery_backup_id {
+                    let archive=data_dir.join("backups").join(format!("{backup}.akbk"));let checked=validate(&archive,&password)?;
+                    let legacy=if memory.with_extension("db.migration-source").exists(){memory.with_extension("db.migration-source")}else{memory.clone()};
+                    anyhow::ensure!(checked.memory_source_sha256==Some(digest(&std::fs::read(&legacy)?)),"Cette archive ne correspond pas à la mémoire avant conversion. Utilisez la restauration isolée.");
+                    cancelled(&store_for_job,id)?;akasha_store::memory_protection::migrate(&memory,true)?;
+                    return Ok(serde_json::json!({"response":"La protection interrompue a repris après vérification de son archive. Redémarrez Akasha pour déverrouiller sa mémoire.","restart_required":true,"memory":akasha_store::memory_protection::status(&memory)}));
+                }
                 if !memory.exists() {
                     drop(akasha_store::memory_protection::open_connection(&memory)?);
                     return Ok(serde_json::json!({"response":"La mémoire chiffrée a été préparée. Redémarrez Akasha pour l’utiliser.","restart_required":true,"memory":akasha_store::memory_protection::status(&memory)}));
@@ -469,6 +543,15 @@ pub fn route(
 mod tests {
     use super::*;
     #[test]
+    fn settings_backup_keeps_routes_but_excludes_provider_credentials() {
+        assert_eq!(public_endpoint("https://api.openai.com/v1?key=secret").as_deref(),Some("https://api.openai.com/v1"));
+        assert_eq!(public_endpoint("https://openrouter.ai/api/v1").as_deref(),Some("https://openrouter.ai/api/v1"));
+        let root=tempfile::tempdir().unwrap();let router=root.path().join("llm_router.yaml");
+        std::fs::write(&router,r#"{"providers":{"openai":{"api_key_ref":"PRIVATE_TOKEN","base_url":"https://user:PRIVATE_TOKEN@example.test/PRIVATE_TOKEN?key=PRIVATE_TOKEN","organization":"PRIVATE_TOKEN"}},"task_types":{"conversation":{"primary":{"provider":"openai","model":"synthetic","config":{"temperature":0.2,"api_key":"PRIVATE_TOKEN"}}}}}"#).unwrap();
+        let bytes=sanitized_router(&router).unwrap();assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_TOKEN"));let config=akasha_llm::config::RoutingConfig::from_yaml_str(std::str::from_utf8(&bytes).unwrap()).unwrap();assert_eq!(config.providers["openai"].base_url.as_deref(),Some("https://example.test"));assert_eq!(config.task_types["conversation"].primary.as_ref().unwrap().config.as_ref().unwrap()["temperature"],0.2);
+        let tools=root.path().join("tools_policy.yaml");std::fs::write(&tools,"web_search_enabled: true\nsearch_provider: brave\nbrave_api_key: PRIVATE_TOKEN\n").unwrap();let bytes=sanitized_tools(&tools).unwrap();assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_TOKEN"));assert!(String::from_utf8_lossy(&bytes).contains("brave"));
+    }
+    #[test]
     fn archive_paths_cannot_escape_or_restore_credentials() {
         for value in [
             "../secret",
@@ -481,12 +564,13 @@ mod tests {
             "vault.enc",
             "connectors.env",
             "remote_consents.json",
-            "llm_router.yaml",
         ] {
             assert!(!safe_relative(value), "{value}");
         }
         for value in [
             "akasha.db",
+            "llm_router.yaml",
+            "tools_policy.yaml",
             "memory.db",
             "notes/abc/note.md",
             "user_rag/documents/doc.pdf",

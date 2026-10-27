@@ -1488,6 +1488,43 @@ async fn restart_daemon(port: Option<u16>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn choose_profile_backup(app:tauri::AppHandle)->Result<Option<String>,String>{
+    use tauri_plugin_dialog::DialogExt;
+    let(tx,rx)=tokio::sync::oneshot::channel();
+    app.dialog().file().add_filter("Sauvegardes Akasha",&["akbk"]).pick_file(move|path|{let result=path.map(|path|path.into_path().map(|path|path.to_string_lossy().to_string()).map_err(|error|error.to_string())).transpose();let _=tx.send(result);});
+    rx.await.map_err(|error|error.to_string())?
+}
+
+fn copy_encrypted_backup(source:&std::path::Path,destination:&std::path::Path)->Result<(),String>{
+    use std::io::{Read,Write};
+    let mut input=std::fs::File::open(source).map_err(|error|error.to_string())?;let mut header=[0;8];input.read_exact(&mut header).map_err(|error|error.to_string())?;
+    if &header!=b"AKBK\0\0\0\x01" {return Err("Seule une archive chiffrée Akasha peut être exportée".into());}
+    let parent=destination.parent().ok_or("Dossier de destination absent")?;let mut output=tempfile::NamedTempFile::new_in(parent).map_err(|error|error.to_string())?;
+    output.write_all(&header).map_err(|error|error.to_string())?;std::io::copy(&mut input,&mut output).map_err(|error|error.to_string())?;output.as_file().sync_all().map_err(|error|error.to_string())?;output.persist(destination).map_err(|error|error.to_string())?;Ok(())
+}
+#[cfg(test)]mod backup_export_tests {
+    use super::*;
+    #[test]fn export_refuses_plaintext_without_replacing_existing_destination(){
+        let root=tempfile::tempdir().unwrap();let source=root.path().join("source.akbk");let destination=root.path().join("saved.akbk");std::fs::write(&source,b"PRIVATE PLAINTEXT").unwrap();std::fs::write(&destination,b"KEEP EXISTING").unwrap();assert!(copy_encrypted_backup(&source,&destination).is_err());assert_eq!(std::fs::read(&destination).unwrap(),b"KEEP EXISTING");
+    }
+    #[test]fn encrypted_export_copies_exact_bytes_to_unicode_path(){
+        let root=tempfile::tempdir().unwrap();let source=root.path().join("source.akbk");let destination=root.path().join("sauvegarde été.akbk");let bytes=b"AKBK\0\0\0\x01synthetic-encrypted-envelope";std::fs::write(&source,bytes).unwrap();copy_encrypted_backup(&source,&destination).unwrap();assert_eq!(std::fs::read(destination).unwrap(),bytes);
+    }
+}
+#[tauri::command]
+async fn save_profile_backup(app:tauri::AppHandle,artifact_id:String,port:Option<u16>)->Result<Option<String>,String>{
+    use tauri_plugin_dialog::DialogExt;
+    if artifact_id.len()!=36||!artifact_id.chars().all(|ch|ch.is_ascii_hexdigit()||ch=='-'){return Err("Archive invalide".into());}
+    let value=daemon_get_text(format!("/api/backup/artifacts/{artifact_id}"),port).await?;
+    if value["ok"]!=true{return Err("Archive indisponible".into());}
+    let metadata:serde_json::Value=serde_json::from_str(value["text"].as_str().ok_or("Reçu d’archive absent")?).map_err(|error|error.to_string())?;
+    let source=std::path::PathBuf::from(metadata["path"].as_str().ok_or("Chemin d’archive absent")?);
+    let(tx,rx)=tokio::sync::oneshot::channel();app.dialog().file().set_file_name(format!("akasha-{artifact_id}.akbk")).add_filter("Sauvegarde chiffrée Akasha",&["akbk"]).save_file(move|path|{let _=tx.send(path);});
+    let Some(path)=rx.await.map_err(|error|error.to_string())?else{return Ok(None);};let target=path.into_path().map_err(|error|error.to_string())?;
+    let returned=target.to_string_lossy().to_string();tokio::task::spawn_blocking(move||copy_encrypted_backup(&source,&target)).await.map_err(|error|error.to_string())??;Ok(Some(returned))
+}
+
 /// User documentation index: GET /api/docs returns { pages, default }.
 #[tauri::command]
 async fn get_docs_index(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -2826,6 +2863,7 @@ pub fn run() {
     } else { None };
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             if let Some((windows, profile)) = &benchmark_windows {
                 // Absolute paths are ignored by WindowConfig; use the builder explicitly.
@@ -2912,6 +2950,8 @@ pub fn run() {
             get_ollama_models,
             get_router_models,
             restart_daemon,
+            choose_profile_backup,
+            save_profile_backup,
             get_doctor,
             run_akasha_doctor_fix,
             get_update_status,

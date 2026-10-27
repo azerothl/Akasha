@@ -234,6 +234,7 @@ impl LongTermStore {
             CREATE INDEX IF NOT EXISTS idx_memory_relations_to ON memory_relations(to_id);
             "#,
         )?;
+        crate::memory_lineage::install(&conn)?;
         Ok(Self { conn })
     }
 
@@ -290,7 +291,6 @@ impl LongTermStore {
     /// Also removes any relations where this entry is from_id or to_id.
     pub fn delete_by_id(&self, id: Uuid) -> anyhow::Result<bool> {
         let id_s = id.to_string();
-        self.delete_relations_for_entry(&id_s)?;
         let n = self.conn.execute(
             "DELETE FROM memory_entries WHERE id = ?1",
             rusqlite::params![id_s],

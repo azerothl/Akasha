@@ -30,6 +30,8 @@ pub async fn try_handle(
     ctx: &KinbotRouteCtx<'_>,
 ) -> Option<String> {
     if let Some(response) = crate::document_api::route(method,path,body,ctx).await {return Some(response);}
+    if let Some(response)=crate::consumer_organization::route(method,path,body,ctx.data_dir,ctx.store_path) {return Some(response);}
+    if let Some(response)=crate::consumer_watch::route(method,path,body,ctx.data_dir,ctx.store_path) {return Some(response);}
     // User RAG retrieve (knowledge base test search)
     if method == "GET" && path.starts_with("/api/user-rag/retrieve") {
         let q = query_str
@@ -97,6 +99,7 @@ pub async fn try_handle(
     }
     if method == "POST" && path == "/api/wakeups" {
         let j = parse_json(body)?;
+        if cfg!(feature="consumer-beta") && j.get("confirmed").and_then(|value|value.as_bool())!=Some(true) {return Some(json_response("400 Bad Request",r#"{"error":"Confirmez le rappel avant son enregistrement"}"#));}
         let session_id = j.get("session_id")?.as_str()?.to_string();
         let message = j.get("message")?.as_str()?.to_string();
         let fire_at = j
