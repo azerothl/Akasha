@@ -589,6 +589,11 @@ fn compute_root_status(
     }
 }
 
+fn root_work_failed(children: &[Task], step_states: &std::collections::HashMap<String, String>) -> bool {
+    children.iter().any(|task| task.status != TaskStatus::Completed)
+        || step_states.values().any(|state| state != "done")
+}
+
 fn settle_child_wait(store: &TaskStore, id: Uuid) {
     // Only the worker can attest completion. A wait returning is not a success;
     // preserve its actual failed/cancelled/paused outcome and stop active work
@@ -1950,6 +1955,10 @@ async fn process_root_task(
                 };
                 if step.depends_on.iter().any(|dependency| cumulative_problem_sids.contains(dependency)) {
                     cumulative_problem_sids.insert(step.step_id.clone());
+                    step_states.insert(step.step_id.clone(), "blocked".into());
+                    step_notes.insert(step.step_id.clone(), "A prerequisite failed; dependent work was not started.".into());
+                    persist_plan_trace_merged(&workspace_root, &plan_trace_rel, root_task_id,
+                        &user_message, &plan_spawn, &step_states, &step_notes).await;
                     if let Ok(store) = TaskStore::open(&store_path_buf) {
                         let _ = store.insert_event(root_task_id, "subtask_dependency_blocked", Some(&serde_json::json!({"step_id":step.step_id,"depends_on":step.depends_on,"reason":"A prerequisite failed; dependent work was not started."})), &Utc::now().to_rfc3339());
                     }
@@ -2403,7 +2412,8 @@ Use TOOL: write_file <exact_path> with real, substantive content for each entry 
                 }
                 step_states.insert(
                     sid.clone(),
-                    if failed { "failed".to_string() } else { "done".to_string() },
+                    if response_indicates_blocked(&content) { "blocked".to_string() }
+                    else if failed { "failed".to_string() } else { "done".to_string() },
                 );
                 step_notes.insert(
                     sid.clone(),
@@ -2430,6 +2440,7 @@ Use TOOL: write_file <exact_path> with real, substantive content for each entry 
                     problematic_this_wave.insert(sid.clone());
                 }
                 let success = !failed
+                    && !response_indicates_blocked(&content)
                     && !content.trim().is_empty()
                     && missing_after_retry.is_empty();
                 let _ = bus.send(
@@ -3002,7 +3013,7 @@ Formatting rules (Markdown):
         }
         // Ensure the UI receives a readable message (never raw JSON): extract summary or strip trailing contract.
         let display_message_original = user_facing_message(&final_aggregated);
-        let any_failed = children.iter().any(|t| t.status != TaskStatus::Completed);
+        let any_failed = root_work_failed(&children, &step_states);
 
         // If the root fails because we have "No response..." (often after long-running work), provide a richer
         // progress message for the UI so the user is not stuck with a generic "Tâche en échec".
@@ -3308,6 +3319,19 @@ mod tests {
         assert!(!child_output_needs_retry(
             "Voici les différences principales entre Akasha et openClaw, avec les livrables créés."
         ));
+    }
+
+    #[test]
+    fn completed_children_cannot_hide_blocked_or_unexecuted_plan_steps() {
+        use super::*;
+        let now=Utc::now();
+        let children=vec![Task{id:Uuid::new_v4(),parent_task_id:None,status:TaskStatus::Completed,assigned_agent:"conversation".into(),created_at:now,updated_at:now,initial_message:None,studio_project_id:None}];
+        for state in ["blocked","pending","running","failed"] {
+            let steps=std::collections::HashMap::from([("prerequisite".into(),"done".into()),("dependent".into(),state.into())]);
+            assert_eq!(compute_root_status(root_work_failed(&children,&steps),false,"Résumé lisible"),TaskStatus::Failed,"{state}");
+        }
+        let completed=std::collections::HashMap::from([("prerequisite".into(),"done".into()),("dependent".into(),"done".into())]);
+        assert_eq!(compute_root_status(root_work_failed(&children,&completed),false,"Résultat vérifié"),TaskStatus::Completed);
     }
 
     #[test]
