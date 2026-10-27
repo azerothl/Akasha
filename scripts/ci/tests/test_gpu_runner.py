@@ -81,7 +81,7 @@ class NvidiaRunnerTests(unittest.TestCase):
             self.assertEqual(values['CMAKE_CUDA_ARCHITECTURES'], ['89', '89'])
 
     def test_powershell_sources_parse_without_errors(self):
-        for name in ('prepare-gpu-ci.ps1', 'nvidia-main-policy.ps1', 'assert-nvidia-main-job.ps1', 'start-nvidia-runner.ps1', 'reset-nvidia-runner-state.ps1'):
+        for name in ('prepare-gpu-ci.ps1', 'nvidia-main-policy.ps1', 'assert-nvidia-main-job.ps1', 'start-nvidia-runner.ps1', 'reset-nvidia-runner-state.ps1', 'nvidia-worker-path.ps1', 'nvidia-runner-access.ps1'):
             with self.subTest(name=name):
                 result = powershell(f"$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile({quote(ROOT / 'scripts/ci' / name)}, [ref]$tokens, [ref]$errors) | Out-Null; if ($errors.Count) {{ $errors | Out-String | Write-Error; exit 1 }}")
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -98,6 +98,33 @@ class NvidiaRunnerTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(sorted(item.name for item in root.iterdir()), ['work.txt'])
             self.assertEqual((root / 'work.txt').read_text(), 'synthetic fixture')
+
+    @unittest.skipUnless(os.name == 'nt', 'Regression concerns Windows WSL/Git Bash selection')
+    def test_worker_selects_git_bash_and_executes_a_windows_script_path(self):
+        with tempfile.TemporaryDirectory() as folder:
+            script = Path(folder) / 'bash-probe.sh'
+            script.write_text("printf 'gpu-ci-bash-ready\\n'\n", encoding='utf-8')
+            source = (f"$ErrorActionPreference='Stop'; . {quote(ROOT / 'scripts/ci/nvidia-worker-path.ps1')}; "
+                      "$git=(Get-Command git).Source; $gitBin=Join-Path (Split-Path -Parent (Split-Path -Parent $git)) 'bin'; "
+                      f"$env:PATH=Get-NvidiaWorkerPath {quote(Path(folder) / 'cargo')} $git $env:PATH; "
+                      "if ((Get-Command bash).Source -ne (Join-Path $gitBin 'bash.exe')) { throw 'Wrong Bash selected' }; "
+                      f"& bash --noprofile --norc -e -o pipefail {quote(script)}; exit $LASTEXITCODE")
+            result = powershell(source)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('gpu-ci-bash-ready', result.stdout)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows discretionary ACL regression')
+    def test_private_runner_permissions_can_be_reapplied_without_admin(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / 'keep.txt').write_text('unchanged fixture')
+            source = (f"$ErrorActionPreference='Stop'; . {quote(ROOT / 'scripts/ci/nvidia-runner-access.ps1')}; "
+                      f"Set-NvidiaRunnerAccess {quote(folder)}; Set-NvidiaRunnerAccess {quote(folder)}; "
+                      f"$acl=Get-Acl -LiteralPath {quote(folder)}; "
+                      "if (-not $acl.AreAccessRulesProtected) { throw 'ACL inherited' }; "
+                      "if (@($acl.Access).Count -ne 3) { throw 'Unexpected ACL principals' }")
+            result = powershell(source)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((Path(folder) / 'keep.txt').read_text(), 'unchanged fixture')
 
 
 if __name__ == '__main__':
