@@ -8,6 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Exit code when restart is requested via POST /api/restart. Supervisor treats non-zero as "respawn".
 const RESTART_EXIT_CODE: i32 = 85;
+const BUILD_METADATA:&str=concat!("AKASHA_CONSUMER_INFO_V1:",env!("AKASHA_CONSUMER_BUILD_INFO"),":END_AKASHA_CONSUMER_INFO_V1");
 
 /// Keep the non-blocking log worker alive for the process lifetime.
 static LOG_WORKER_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
@@ -60,6 +61,11 @@ fn init_tracing(data_dir: &Path) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref()==Some("--consumer-build-info") {
+        let metadata=std::hint::black_box(BUILD_METADATA);
+        println!("{}",metadata.strip_prefix("AKASHA_CONSUMER_INFO_V1:").and_then(|value|value.strip_suffix(":END_AKASHA_CONSUMER_INFO_V1")).expect("build metadata"));
+        return Ok(());
+    }
     if let Some(code) = akasha_daemon::document_worker::entry() { std::process::exit(code); }
     let previous=akasha_core::data_dir::resolve_bootstrap_data_dir(std::env::var_os("AKASHA_DATA_DIR").as_deref(),dirs::home_dir().as_deref())?;
     let bootstrap_path=if cfg!(feature="consumer-beta"){std::env::var_os("AKASHA_PROFILE_BOOTSTRAP_DIR").map(std::path::PathBuf::from).unwrap_or_else(||previous.clone())}else{previous.clone()};

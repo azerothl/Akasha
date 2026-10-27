@@ -5,8 +5,10 @@ import base64
 import json
 import tempfile
 import time
+import shutil
+import os
 from pathlib import Path
-from real_agentic_eval import ROOT, Daemon, clean_env, choose_port, http_json, write_router
+from real_agentic_eval import ROOT, Daemon, clean_env, choose_port, http_json, write_router, copy_daemon_with_runtime
 
 
 def main():
@@ -16,20 +18,33 @@ def main():
     parser.add_argument("--ollama", default="http://127.0.0.1:11434")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--demo-only", action="store_true")
+    parser.add_argument("--provider",choices=["ollama","akasha_core"],default="ollama")
+    parser.add_argument("--model-dir",type=Path)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="akasha-model-probe-") as temp:
         root = Path(temp)
         data = root / "profile"
         data.mkdir()
         write_router(data, args.model, args.ollama, "auto")
+        if args.provider=="akasha_core":
+            manifest=json.loads((ROOT/"spec/embedded_models.json").read_text(encoding="utf-8"));entry=next(entry for entry in manifest["models"] if entry["id"]==args.model)
+            folder=data/"models/embedded";folder.mkdir(parents=True);source=args.model_dir/entry["filename"]
+            try:os.link(source,folder/entry["filename"])
+            except OSError:shutil.copy2(source,folder/entry["filename"])
+            configuration=json.loads((data/"llm_router.yaml").read_text());
+            for route in configuration["task_types"].values():route["primary"]["provider"]="akasha_core"
+            (data/"llm_router.yaml").write_text(json.dumps(configuration),encoding="utf-8")
         env = clean_env()
         # Clear all inherited app runtime settings, not just API credentials.
         env = {key: value for key, value in env.items() if not key.upper().startswith("AKASHA_")}
         port = choose_port()
         env.update(AKASHA_DATA_DIR=str(data), AKASHA_PORT=str(port), AKASHA_SPEC_DIR=str(ROOT / "spec"))
-        daemon = Daemon(args.binary.resolve(), env, root / "daemon.log", f"http://127.0.0.1:{port}")
+        if args.provider=="akasha_core":env.update(AKASHA_EMBEDDED_BACKEND="llama_cpp",AKASHA_EMBEDDED_N_GPU_LAYERS="0")
+        binary=copy_daemon_with_runtime(args.binary,root/args.binary.name)
+        daemon = Daemon(binary, env, root / "daemon.log", f"http://127.0.0.1:{port}")
         try:
             daemon.start()
+            if args.provider=="akasha_core":http_json(daemon.base,"POST","/api/router/embedded/runtime",{"model_id":args.model,"engine_mode":"cpu"})
             if args.demo_only:
                 source = "DOCUMENT DE DÉMONSTRATION — DONNÉES FICTIVES\nFacture de la famille Exemple\nMontant à payer : 42 euros\nÉchéance : 10 novembre 2026\nRéférence : DEMO-001\n"
                 ack = http_json(daemon.base, "POST", "/api/message", {
@@ -56,7 +71,7 @@ def main():
                         return 0 if passed else 1
                     time.sleep(.5)
                 raise TimeoutError("first demo exceeded 10 minutes")
-            ack = http_json(daemon.base, "POST", "/api/router/qualify", {"provider": "ollama", "model": args.model})
+            ack = http_json(daemon.base, "POST", "/api/router/qualify", {"provider": args.provider, "model": args.model})
             identifier = ack["task_id"]
             deadline = time.monotonic() + 1800
             while time.monotonic() < deadline:

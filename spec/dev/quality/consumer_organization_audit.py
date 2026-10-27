@@ -5,13 +5,13 @@ import json
 import os
 import urllib.request,urllib.error
 from pathlib import Path
-import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from datetime import datetime,timedelta,timezone
-from real_agentic_eval import ROOT,Daemon,clean_env,choose_port,http_json,write_router
+from real_agentic_eval import ROOT,Daemon,clean_env,choose_port,http_json,write_router,copy_daemon_with_runtime
 from document_workflow_audit import wait
 
 def rejected(base,path,body):
@@ -26,6 +26,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary",type=Path,required=True)
     parser.add_argument("--output",type=Path,required=True)
+    parser.add_argument("--model",default="qwen3.5:9b")
     parser.add_argument("--controlled",action="store_true")
     args=parser.parse_args();cases=[];fixture=None
     if args.controlled:
@@ -38,8 +39,8 @@ def main():
                 self.send_response(200);self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
         fixture=ThreadingHTTPServer(("127.0.0.1",0),Provider);threading.Thread(target=fixture.serve_forever,daemon=True).start()
     with tempfile.TemporaryDirectory(prefix="akasha-organization-audit-") as temporary:
-        root=Path(temporary);data=root/"profile";data.mkdir();binary=root/args.binary.name;shutil.copy2(args.binary,binary)
-        write_router(data,"qwen3.5:9b","http://127.0.0.1:11434","auto");consent=[]
+        root=Path(temporary);data=root/"profile";data.mkdir();binary=copy_daemon_with_runtime(args.binary,root/args.binary.name)
+        write_router(data,args.model,"http://127.0.0.1:11434","auto");consent=[]
         if fixture:
             endpoint=f"http://127.0.0.1:{fixture.server_port}/v1";route={"primary":{"provider":"openai","model":"organization-fixture"},"fallback":[]}
             (data/"llm_router.yaml").write_text(json.dumps({"providers":{"openai":{"base_url":endpoint}},"global":{"enable_fallback":False,"default_max_retries":0},"task_types":{kind:route for kind in ["conversation","system","orchestrator"]}}),encoding="utf-8")
@@ -52,10 +53,11 @@ def main():
         try:
             daemon.start();base=daemon.base
             note=http_json(base,"POST","/api/notes",{"title":"Note synthétique","content":"Payer la facture synthétique lundi. L’heure reste à confirmer."})
+            started=time.monotonic()
             ack=http_json(base,"POST","/api/message",{"message":"Propose les actions de cette note, sans rien enregistrer.","organization_note":{"note_id":note["id"]},"remote_consents":consent,"composer_mode":"ask","incognito":True});task=wait(base,ack["task_id"])
             actions=http_json(base,"GET","/api/consumer/actions");wakeups=http_json(base,"GET","/api/wakeups");children=http_json(base,"GET",f"/api/tasks/{ack['task_id']}/children")
             preview=task.get("outcome",{}).get("preview",{});proposals=preview.get("proposals",[])
-            record("preview_without_effects",task["status"]=="completed" and proposals and not actions.get("actions") and not wakeups.get("wakeups") and not children.get("children"),task=task,actions=actions,wakeups=wakeups,children=children)
+            record("preview_without_effects",task["status"]=="completed" and proposals and not actions.get("actions") and not wakeups.get("wakeups") and not children.get("children"),task=task,actions=actions,wakeups=wakeups,children=children,duration_ms=round((time.monotonic()-started)*1000))
             assert proposals,"model failed to produce proposals"
             action={"proposal_id":proposals[0]["id"],"title":"Payer la facture synthétique","remind_local":"2026-10-25T02:30","timezone":"Europe/Paris"}
             ambiguous=rejected(base,"/api/consumer/actions/confirm",{"preview_id":preview["id"],"confirmed":True,"actions":[action]})
@@ -77,7 +79,7 @@ def main():
             daemon.stop();daemon=Daemon(binary,env,root/"restarted.log",base);daemon.start();after=http_json(base,"GET","/api/consumer/actions");notes=http_json(base,"GET","/api/notes")
             record("restart_uses_restored_profile_without_replaying_reminders",len(after["actions"])==1 and after["actions"][0]["id"]==persisted[0]["id"] and after["actions"][0]["reminder_status"]=="disabled_restored" and notes["notes"][0]["id"]==note["id"],actions=after,notes=notes)
         finally:
-            daemon.stop();args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps({"binary_sha256":hashlib.sha256(args.binary.read_bytes()).hexdigest(),"mode":"deterministic" if fixture else "live","model":"organization-fixture" if fixture else "qwen3.5:9b","cases":cases,"passed":len(cases)==9 and all(case["passed"] for case in cases)},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+            daemon.stop();args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps({"binary_sha256":hashlib.sha256(args.binary.read_bytes()).hexdigest(),"mode":"deterministic" if fixture else "live","model":"organization-fixture" if fixture else args.model,"cases":cases,"passed":len(cases)==9 and all(case["passed"] for case in cases)},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
     if fixture:fixture.shutdown();fixture.server_close()
     return 0 if len(cases)==9 and all(case["passed"] for case in cases) else 1
 if __name__=="__main__":raise SystemExit(main())

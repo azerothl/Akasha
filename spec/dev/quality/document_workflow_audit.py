@@ -8,13 +8,12 @@ import base64
 import hashlib
 import json
 import os
-import shutil
 from pathlib import Path
 import tempfile
 import time
 import threading
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-from real_agentic_eval import ROOT,Daemon,clean_env,choose_port,http_json,write_router
+from real_agentic_eval import ROOT,Daemon,clean_env,choose_port,http_json,write_router,copy_daemon_with_runtime
 
 
 def wait(base,identifier):
@@ -33,6 +32,7 @@ def main():
     parser.add_argument("--runtime",type=Path,required=True)
     parser.add_argument("--fixtures",type=Path,required=True)
     parser.add_argument("--output",type=Path,required=True)
+    parser.add_argument("--model",default="qwen3.5:9b")
     parser.add_argument("--controlled",action="store_true",help="Deterministic local provider; never qualifies a real model")
     args=parser.parse_args()
     fixture=None
@@ -44,7 +44,7 @@ def main():
                 content=body.get("messages",[{}])[-1].get("content","")
                 sources=json.loads(content)["sources"]
                 citation=next(source["citation"] for source in sources if "42" in source["content"])
-                text=json.dumps({"answer":f"Le montant est de 42 euros [{citation}].","citations":[citation],"missing":[]})
+                text=json.dumps({"answer":f"La date de naissance est absente des extraits [{citation}].","citations":[citation],"missing":["date de naissance absente"]} if "date de naissance" in json.loads(content)["question"] else {"answer":f"Le montant est de 42 euros [{citation}].","citations":[citation],"missing":[]})
                 data=json.dumps({"choices":[{"message":{"content":text},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":25}}).encode()
                 self.send_response(200);self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(data)));self.end_headers();self.wfile.write(data)
         fixture=ThreadingHTTPServer(("127.0.0.1",0),Provider)
@@ -52,8 +52,8 @@ def main():
     results=[]
     with tempfile.TemporaryDirectory(prefix="akasha-documents-audit-") as temporary:
         root=Path(temporary);data=root/"profile";data.mkdir()
-        binary=root/args.binary.name;shutil.copy2(args.binary,binary)
-        write_router(data,"qwen3.5:9b","http://127.0.0.1:11434","auto")
+        binary=copy_daemon_with_runtime(args.binary,root/args.binary.name)
+        write_router(data,args.model,"http://127.0.0.1:11434","auto")
         consent=[]
         if fixture:
             endpoint=f"http://127.0.0.1:{fixture.server_port}/v1"
@@ -79,6 +79,7 @@ def main():
                 results.append({"kind":"import","name":name,"passed":passed,"task":task,"passages":passages})
                 identifiers.append(ack["id"])
                 print(json.dumps({"kind":"import","name":name,"passed":passed}),flush=True)
+            answer_started=time.monotonic()
             ack=http_json(daemon.base,"POST","/api/message",{"message":"Quel montant dois-je payer ? Cite la source.","document_ids":[identifiers[2],identifiers[-1]],"remote_consents":consent,"composer_mode":"ask","incognito":True})
             task=wait(daemon.base,ack["task_id"])
             children=http_json(daemon.base,"GET",f"/api/tasks/{ack['task_id']}/children")
@@ -89,20 +90,29 @@ def main():
             events=http_json(daemon.base,"GET",f"/api/tasks/{ack['task_id']}/events")
             event_text=json.dumps(events)
             passed=passed and '"tool_invoked"' not in event_text
-            results.append({"kind":"answer_export_injection","passed":passed,"task":task,"children":children,"report":report,"events":events})
+            results.append({"kind":"answer_export_injection","passed":passed,"task":task,"children":children,"report":report,"events":events,"duration_ms":round((time.monotonic()-answer_started)*1000)})
             print(json.dumps({"kind":"answer_export_injection","passed":passed}),flush=True)
+            missing_started=time.monotonic()
+            missing_ack=http_json(daemon.base,"POST","/api/message",{"message":"Quelle est la date de naissance ? Si elle est absente des extraits, dis-le sans l’inventer.","document_ids":[identifiers[0]],"remote_consents":consent,"composer_mode":"ask","incognito":True})
+            missing=wait(daemon.base,missing_ack["task_id"])
+            missing_events=http_json(daemon.base,"GET",f"/api/tasks/{missing_ack['task_id']}/events")
+            results.append({"kind":"missing_fact","passed":missing["status"]=="completed" and bool(missing.get("outcome",{}).get("missing")) and bool(missing.get("outcome",{}).get("references")),"task":missing,"events":missing_events,"duration_ms":round((time.monotonic()-missing_started)*1000)})
+            blank=args.fixtures/"unreadable.png"
+            blank_ack=http_json(daemon.base,"POST","/api/user-rag/documents",{"name":"unreadable.png","content_base64":base64.b64encode(blank.read_bytes()).decode(),"mime_type":"image/png"})
+            blank_task=wait(daemon.base,blank_ack["task_id"])
+            results.append({"kind":"unreadable","passed":blank_task["status"]=="failed" and bool(blank_task.get("outcome",{}).get("warnings")) and blank_task.get("outcome",{}).get("readable") is False,"task":blank_task})
             daemon.stop();daemon=Daemon(binary,env,root/"daemon-restarted.log",f"http://127.0.0.1:{port}");daemon.start()
             documents=http_json(daemon.base,"GET","/api/user-rag/documents")
             retrieval=http_json(daemon.base,"GET","/api/user-rag/retrieve?q=42&top_k=20")
             persisted=http_json(daemon.base,"GET",f"/api/tasks/{ack['task_id']}")
-            passed=len(documents.get("documents",[]))==len(names) and bool(retrieval.get("chunks")) and len(retrieval.get("passages",[]))==len(retrieval.get("chunks",[])) and persisted.get("outcome")==outcome
+            passed=len(documents.get("documents",[]))==len(names)+1 and bool(retrieval.get("chunks")) and len(retrieval.get("passages",[]))==len(retrieval.get("chunks",[])) and persisted.get("outcome")==outcome
             results.append({"kind":"restart","passed":passed,"documents":documents,"retrieval":retrieval})
             print(json.dumps({"kind":"restart","passed":passed}),flush=True)
         finally:
             daemon.stop()
-            args.output.write_text(json.dumps({"binary_sha256":hashlib.sha256(args.binary.read_bytes()).hexdigest(),"mode":"deterministic" if args.controlled else "live","model":"document-fixture" if args.controlled else "qwen3.5:9b","cases":results,"passed":len(results)==9 and all(row["passed"] for row in results)},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+            args.output.write_text(json.dumps({"binary_sha256":hashlib.sha256(args.binary.read_bytes()).hexdigest(),"mode":"deterministic" if args.controlled else "live","model":"document-fixture" if args.controlled else args.model,"cases":results,"passed":len(results)==11 and all(row["passed"] for row in results)},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
     if fixture:fixture.shutdown();fixture.server_close()
-    return 0 if len(results)==9 and all(row["passed"] for row in results) else 1
+    return 0 if len(results)==11 and all(row["passed"] for row in results) else 1
 
 
 if __name__=="__main__":

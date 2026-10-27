@@ -1,0 +1,309 @@
+{
+  "schema_version": 1,
+  "edition": "consumer-beta",
+  "version": "0.12.1",
+  "candidate_only": true,
+  "personal_data_pilot_authorized": false,
+  "source_revision": "bd4912f97ac8a15694319ed0b5306f6b2bb16aac",
+  "source_dirty": false,
+  "packaging_source_revision": "54ef55df72ce129360f2eb106b2def52dc275e4f",
+  "packaging_source_dirty": false,
+  "variant": "cpu",
+  "daemon_port": 3877,
+  "runtime_lock_sha256": "312f79f5bdfb59f13720e22b5f62ccdc33cf2512d056b67dcdac244cb5dfe1f7",
+  "qualification_required": [
+    "full_50_corpus",
+    "three_real_runs",
+    "windows_cpu",
+    "windows_nvidia",
+    "second_account_restore",
+    "distributed_package_install_update_restore"
+  ],
+  "files": [
+    {
+      "path": "akasha-daemon.exe",
+      "sha256": "ce60def53d32b99f6c4cc0c12d8858d4b75a5a5d7f8f52a3a62a40357c4104fb",
+      "bytes": 189463552
+    },
+    {
+      "path": "AkashaBeta.exe",
+      "sha256": "018bc1f2d752b7d870e9090f8fa43add292de13d09d3f36bb084f8c6f6341e55",
+      "bytes": 25723392
+    },
+    {
+      "path": "demo/consumer-beta-document-receipt.json",
+      "sha256": "42eacd01308d8a823217388304e6db9865e041eba29f085ea2a6b2030f3c4f53",
+      "bytes": 2627
+    },
+    {
+      "path": "demo/consumer-beta-document.webm",
+      "sha256": "e98f07564c4b8ae7271b775f1a5fff706e3dad68c5849409c07cbc60e3371a1d",
+      "bytes": 1050068
+    },
+    {
+      "path": "demo/facture-fictive.pdf",
+      "sha256": "901cdc74973501deea5424cb265c399c13115bf15aca634d5f047adb746a5879",
+      "bytes": 49841
+    },
+    {
+      "path": "demo/facture-fictive.txt",
+      "sha256": "c6fb7ec97675a1faf4a5231e08e2b7184a647fac221fc46c1176cc8cabcfb206",
+      "bytes": 60
+    },
+    {
+      "path": "demo/manifest.json",
+      "sha256": "de6576554564c4db6a936f908915f34a1d08dbacc98107f5b983abda76cca9f8",
+      "bytes": 630
+    },
+    {
+      "path": "demo/photo-facture-fictive.jpg",
+      "sha256": "7d6c7055434555a112d7436ef1467aedd0e93e0a7f564d9be64baf1293f2a8e9",
+      "bytes": 124185
+    },
+    {
+      "path": "embedding_model/embedding-lock.json",
+      "sha256": "a96d244f79f8104ed202d5ea20f062dee68846609e708d11c7f9d8004b84a892",
+      "bytes": 702
+    },
+    {
+      "path": "embedding_model/LICENSE-APACHE-2.0.txt",
+      "sha256": "7dcf1ee8ca3f223a4890dd1d3a807e0a85769619f22c92ef1f1130bee4995ef9",
+      "bytes": 11549
+    },
+    {
+      "path": "embedding_model/model.onnx",
+      "sha256": "759c3cd2b7fe7e93933ad23c4c9181b7396442a2ed746ec7c1d46192c469c46e",
+      "bytes": 90387606
+    },
+    {
+      "path": "embedding_model/NOTICE.txt",
+      "sha256": "5df0227e148b03afe855f890d117c8912a48207b5962cabf7414509571fa0fbe",
+      "bytes": 177
+    },
+    {
+      "path": "embedding_model/tokenizer.json",
+      "sha256": "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0",
+      "bytes": 711661
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "7dcf1ee8ca3f223a4890dd1d3a807e0a85769619f22c92ef1f1130bee4995ef9",
+      "bytes": 11549
+    },
+    {
+      "path": "ocr-runtime/licenses/leptonica.txt",
+      "sha256": "87829abb5bbb00b55a107365da89e9a33f86c4250169e5a1e5588505be7d5806",
+      "bytes": 1521
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/abseil.txt",
+      "sha256": "f54fff0b905df5b3464527c652a30e903b172d6dcab4d89b5e6f105d5e4a4603",
+      "bytes": 11564
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/agg23.txt",
+      "sha256": "c110d3ea2ad77467ce0dcff7d3337e6c8be8049a5103f4b9bd5fd911a77972e5",
+      "bytes": 725
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/dragonbox-Apache2-LLVM.txt",
+      "sha256": "4964a7aaf2801a42d2342d2f5bbccd2126be7a5d8d46150e1338a43ea70da5de",
+      "bytes": 12480
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/dragonbox-Boost.txt",
+      "sha256": "beb8e42e9d6b4284e03304d05a81a0755200a965fc8d0a5e0aea1e84cf805d6e",
+      "bytes": 1361
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/fast_float.txt",
+      "sha256": "bf1b57355feca8fce77ee95f48002f8d4789fb71b30ec7599c06cda4901fbb2b",
+      "bytes": 1106
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/freetype.txt",
+      "sha256": "f4b133e25df1f86ad3ffea453aa0e613f0474f34778dbbb3e437e7b2724937d8",
+      "bytes": 6741
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/harfbuzz.txt",
+      "sha256": "bd836c0ddca8ea0bab54a03cd32b6ff7256cbb3840fca2edc1249a4ed92c5b02",
+      "bytes": 2013
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/highway.txt",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "bytes": 11357
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/icu.txt",
+      "sha256": "93679f4389d53b6835d89843f251844fb9bc455b35bab036d3c8e7abe497a47a",
+      "bytes": 28286
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/lcms.txt",
+      "sha256": "7312b68c5b25e9bf2b828706fb4e29588f22705112f411fd42e1f7d84c3d139a",
+      "bytes": 1353
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/libjpeg_turbo.ijg",
+      "sha256": "db16a04128171879c60708d171b88d97345a2dd20f9bfc173680a4497c73f704",
+      "bytes": 13059
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/libjpeg_turbo.md",
+      "sha256": "be2b2b5ab168bce87bc3e31f2a5c5adba4b7f6e9e51d618e958d1d46972ebd95",
+      "bytes": 5755
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/libopenjpeg.txt",
+      "sha256": "c5ab0890a737c2dfa7ba675036554f6d17741d98629b0c2a145354d00617e6b2",
+      "bytes": 1794
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/libpng.txt",
+      "sha256": "452390433ba0f88aa3e2b122c647741b72a0c117cd6ed7a329b49785aecb5511",
+      "bytes": 5479
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/llvm-libc.txt",
+      "sha256": "3b6226c32e168c83b891d8d6f0d3c29c2116dc3ef93dc93c307b54f279ecf383",
+      "bytes": 15418
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/pdfium.txt",
+      "sha256": "961eacd9633fff6d051db7208b755e9210e30efac7adec3e6a6d52798f0ccf0e",
+      "bytes": 12818
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/simdutf.txt",
+      "sha256": "c172a0ba936ff31230febb5dad869e25cb7c1a07480c7a381be8cf011bb52719",
+      "bytes": 1077
+    },
+    {
+      "path": "ocr-runtime/licenses/pdfium/zlib.txt",
+      "sha256": "33fd641c9f3b0e0be64bc78fea9e94807674cdd70c48477599226cb8956565fe",
+      "bytes": 1332
+    },
+    {
+      "path": "ocr-runtime/licenses/tessdata-fast.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bytes": 11358
+    },
+    {
+      "path": "ocr-runtime/licenses/tesseract.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bytes": 11358
+    },
+    {
+      "path": "ocr-runtime/pdfium.dll",
+      "sha256": "a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f",
+      "bytes": 7586816
+    },
+    {
+      "path": "ocr-runtime/runtime-lock.json",
+      "sha256": "312f79f5bdfb59f13720e22b5f62ccdc33cf2512d056b67dcdac244cb5dfe1f7",
+      "bytes": 5015
+    },
+    {
+      "path": "ocr-runtime/tessdata/eng.traineddata",
+      "sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+      "bytes": 4113088
+    },
+    {
+      "path": "ocr-runtime/tessdata/fra.traineddata",
+      "sha256": "ced037562e8c80c13122dece28dd477d399af80911a28791a66a63ac1e3445ca",
+      "bytes": 1130365
+    },
+    {
+      "path": "ocr-runtime/tessdata/osd.traineddata",
+      "sha256": "9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff",
+      "bytes": 10562727
+    },
+    {
+      "path": "ocr-runtime/tesseract55.dll",
+      "sha256": "88137ae3d53d9ed360a58de4fc7703da09fb09f17c0f2fa889e5619da3141de3",
+      "bytes": 5602304
+    },
+    {
+      "path": "qualification/CONSUMER_BETA_DELIVERY.md",
+      "sha256": "d17422d1111919c277b96307d72a5169553bc8dac2beedd836acabd1cf5ea8d9",
+      "bytes": 3337
+    },
+    {
+      "path": "qualification/consumer_beta_distribution.md",
+      "sha256": "30d0082bd6633f909fc48230fe5bbedf495873d93ab79e1821de49b1556fc707",
+      "bytes": 14154
+    },
+    {
+      "path": "qualification/consumer_beta_documents.md",
+      "sha256": "b5f19fc10e24605b8d074de965dce0e3b47f027c81f0a638eebde3d028359b46",
+      "bytes": 5892
+    },
+    {
+      "path": "qualification/consumer_beta_models.md",
+      "sha256": "56aab60d075a10d25056fecc0308a9017f9f12f59cc3f304bcd9c4cf5ee8d5f8",
+      "bytes": 4253
+    },
+    {
+      "path": "qualification/consumer_beta_organization.md",
+      "sha256": "4e74a32e7617ae3760ee29c83007e60b572eaba6b939321c2fa4e2b5811f6b64",
+      "bytes": 5396
+    },
+    {
+      "path": "qualification/consumer_beta_privacy.md",
+      "sha256": "e54522868ee4f432cb0df16a6b4920f2c5b6fdb9251f91512800b19be02be965",
+      "bytes": 8248
+    },
+    {
+      "path": "qualification/DELIVERY.md",
+      "sha256": "d17422d1111919c277b96307d72a5169553bc8dac2beedd836acabd1cf5ea8d9",
+      "bytes": 3337
+    },
+    {
+      "path": "README.md",
+      "sha256": "23cc5d20523424b0bb6297ce0b69381d2ee2251af1f287d6e2d158e4e1bb8a13",
+      "bytes": 6501
+    },
+    {
+      "path": "RECOVER-PROFILE.cmd",
+      "sha256": "6463f3c6988f93b1bc408d913671c49c007244a7435bbc8d6a002fb3e04d2b19",
+      "bytes": 126
+    },
+    {
+      "path": "scripts/consumer-launch.ps1",
+      "sha256": "3b6ce12f806699cc1dd4432e14de4c745285770bc51fad3a655f1a68bdaf8dea",
+      "bytes": 4640
+    },
+    {
+      "path": "spec/09_event_model.yaml",
+      "sha256": "a54e0b82149d9da8d5b6c84f0cc5d0e8b8a5b56a13e0c59193e256835ab94c8d",
+      "bytes": 1206
+    },
+    {
+      "path": "spec/10_data_model.yaml",
+      "sha256": "47e0db96af91fdf944aecb9c04faf24da36bf43dd543c10e92379bce48a5a4f9",
+      "bytes": 1406
+    },
+    {
+      "path": "spec/dev/quality/embedded_profiles.json",
+      "sha256": "57b834e4653b980424708f623dafbdef26933db798cbfeab905108dfbe25306d",
+      "bytes": 2279
+    },
+    {
+      "path": "spec/embedded_models.json",
+      "sha256": "a0faca59dfd9426aea907fea8a8ce383444350ad205785f3b9cd56ecfe829b14",
+      "bytes": 4412
+    },
+    {
+      "path": "spec/tools_policy.example.yaml",
+      "sha256": "00662749fb9e87824b8bd9e1bd4ebd7cc4a9b262389a714d63f0f3f4b41124e7",
+      "bytes": 9436
+    },
+    {
+      "path": "START-AKASHA.cmd",
+      "sha256": "38aec02e327e5b26aa76d7039cae95f2a1e66ea4b935597d7b60597f75d170e8",
+      "bytes": 126
+    }
+  ]
+}

@@ -10,6 +10,15 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 const LONG_LLM_REQUEST_TIMEOUT_SECS: u64 = 600;
 const LONG_COMPARE_REQUEST_TIMEOUT_SECS: u64 = 1800;
 
+fn configured_daemon_port(runtime:Option<&str>,build:Option<&str>)->u16{
+    let parse=|value:&str|value.parse::<u16>().ok().filter(|port|*port>0);
+    runtime.and_then(parse).or_else(||build.and_then(parse)).unwrap_or(DAEMON_PORT)
+}
+fn default_daemon_port()->u16 { configured_daemon_port(std::env::var("AKASHA_PORT").ok().as_deref(),option_env!("VITE_AKASHA_DAEMON_PORT")) }
+
+#[tauri::command]
+fn get_daemon_launch_config()->serde_json::Value {serde_json::json!({"port":default_daemon_port()})}
+
 fn daemon_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{}", port)
 }
@@ -51,7 +60,7 @@ fn http_client() -> &'static reqwest::Client {
 /// Health check: GET / returns {"status":"ok"} when daemon is up.
 #[tauri::command]
 async fn check_health(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -67,7 +76,7 @@ async fn check_health(port: Option<u16>) -> Result<serde_json::Value, String> {
 /// If period is Some("day"|"week"|"month"|"year"), appends ?period= for filtered aggregates from persisted store.
 #[tauri::command]
 async fn get_router_metrics(port: Option<u16>, period: Option<String>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = match period.as_deref().filter(|p| !p.is_empty()) {
         Some(p) => format!("{}/api/router/metrics?period={}", daemon_base_url(port), p),
         None => format!("{}/api/router/metrics", daemon_base_url(port)),
@@ -122,7 +131,7 @@ async fn send_message_ack(
     remote_consents: Option<Vec<serde_json::Value>>,
     port: Option<u16>,
 ) -> Result<SendMessageAckResult, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let base = daemon_base_url(port);
     let url = format!("{}/api/message", base);
     let client = http_client();
@@ -213,7 +222,7 @@ async fn send_message_ack(
 
 #[tauri::command]
 async fn send_message(message: String, session_id: Option<String>, port: Option<u16>) -> Result<SendMessageResult, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let base = daemon_base_url(port);
     let url = format!("{}/api/message", base);
     let client = http_client();
@@ -292,7 +301,7 @@ async fn send_message(message: String, session_id: Option<String>, port: Option<
 /// GET /api/config — vars from akasha.env (for slash /config list|get).
 #[tauri::command]
 async fn get_config(port: Option<u16>) -> Result<std::collections::HashMap<String, String>, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/config", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -315,7 +324,7 @@ async fn get_config(port: Option<u16>) -> Result<std::collections::HashMap<Strin
 /// POST /api/config — set one var (for slash /config set).
 #[tauri::command]
 async fn set_config(key: String, value: String, port: Option<u16>) -> Result<(), String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/config", daemon_base_url(port));
     let client = http_client();
     let body = serde_json::json!({ "key": key, "value": value });
@@ -329,7 +338,7 @@ async fn set_config(key: String, value: String, port: Option<u16>) -> Result<(),
 /// GET /api/vault/keys — list key names (for slash /vault list).
 #[tauri::command]
 async fn get_vault_keys(port: Option<u16>) -> Result<Vec<String>, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/vault/keys", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -348,7 +357,7 @@ async fn get_vault_keys(port: Option<u16>) -> Result<Vec<String>, String> {
 /// GET /api/router/ollama/models (for slash /models).
 #[tauri::command]
 async fn get_ollama_models(port: Option<u16>) -> Result<Vec<String>, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/ollama/models", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -374,7 +383,7 @@ async fn get_ollama_models(port: Option<u16>) -> Result<Vec<String>, String> {
 /// GET /api/router/models — list models from all providers (Ollama live + config for others).
 #[tauri::command]
 async fn get_router_models(port: Option<u16>) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/models", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -405,7 +414,7 @@ async fn get_router_models(port: Option<u16>) -> Result<std::collections::HashMa
 /// GET /api/router/routes — primary + fallback per category (for /routes, /models list).
 #[tauri::command]
 async fn free_models_control(action: String, enabled: Option<bool>, confirm_paid_routes: Option<bool>, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let base = format!("{}/api/router/free-models", daemon_base_url(port.unwrap_or(DAEMON_PORT)));
+    let base = format!("{}/api/router/free-models", daemon_base_url(port.unwrap_or_else(default_daemon_port)));
     let client = http_client();
     let request = match action.as_str() {
         "status" => client.get(&base),
@@ -423,7 +432,7 @@ async fn free_models_control(action: String, enabled: Option<bool>, confirm_paid
 /// GET /api/router/routes — primary + fallback per category (for /routes, /models list).
 #[tauri::command]
 async fn get_router_routes(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/routes", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -437,7 +446,7 @@ async fn get_router_routes(port: Option<u16>) -> Result<serde_json::Value, Strin
 /// POST /api/router/route — set primary provider/model for a category (for /models set).
 #[tauri::command]
 async fn set_router_route(category: String, provider: String, model: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/route", daemon_base_url(port));
     let client = http_client();
     let body = serde_json::json!({ "category": category, "provider": provider, "model": model });
@@ -453,7 +462,7 @@ async fn set_router_route(category: String, provider: String, model: String, por
 /// GET /api/voice/status — whether TTS/STT are configured (voice_router.yaml).
 #[tauri::command]
 async fn get_voice_status(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/voice/status", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -475,7 +484,7 @@ struct VoiceSttPayload {
 /// POST /api/voice/stt — transcribe audio to text. Body: { "data_url" } or { "audio_base64" }.
 #[tauri::command]
 async fn voice_stt_transcribe(port: Option<u16>, payload: VoiceSttPayload) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/voice/stt", daemon_base_url(port));
     let body = if let Some(ref u) = payload.data_url.filter(|s| !s.is_empty()) {
         serde_json::json!({ "data_url": u })
@@ -498,7 +507,7 @@ async fn voice_stt_transcribe(port: Option<u16>, payload: VoiceSttPayload) -> Re
 /// POST /api/voice/tts — synthesize text to audio. Returns { "data_url": "data:audio/wav;base64,...", "message": "..." }.
 #[tauri::command]
 async fn voice_tts(port: Option<u16>, text: String) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/voice/tts", daemon_base_url(port));
     let body = serde_json::json!({ "text": text.trim() });
     let client = http_client();
@@ -515,7 +524,7 @@ async fn voice_tts(port: Option<u16>, text: String) -> Result<serde_json::Value,
 /// GET /api/router/embedded-status — embedded LLM status (for /embedded).
 #[tauri::command]
 async fn get_embedded_status(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/embedded-status", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -529,7 +538,7 @@ async fn get_embedded_status(port: Option<u16>) -> Result<serde_json::Value, Str
 /// POST /api/router/embedded/reload — unload embedded model (for /embedded reload).
 #[tauri::command]
 async fn embedded_reload(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/embedded/reload", daemon_base_url(port));
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -543,7 +552,7 @@ async fn embedded_reload(port: Option<u16>) -> Result<serde_json::Value, String>
 /// GET /api/router/embedded/models — manifest for wizard multi-model picker.
 #[tauri::command]
 async fn get_embedded_models(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/embedded/models", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -560,7 +569,7 @@ async fn embedded_download_start(
     port: Option<u16>,
     model_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/embedded/download", daemon_base_url(port));
     let client = http_client();
     let body = match model_id {
@@ -588,7 +597,7 @@ async fn embedded_download_start(
 /// GET /api/router/embedded/download/status — poll download progress.
 #[tauri::command]
 async fn embedded_download_status(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/embedded/download/status", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -602,7 +611,7 @@ async fn embedded_download_status(port: Option<u16>) -> Result<serde_json::Value
 /// GET /api/router/embedded/hardware — tier + static candidates.
 #[tauri::command]
 async fn get_embedded_hardware(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/embedded/hardware", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -616,7 +625,7 @@ async fn get_embedded_hardware(port: Option<u16>) -> Result<serde_json::Value, S
 /// POST /api/router/embedded/calibrate — start micro-bench.
 #[tauri::command]
 async fn embedded_calibrate_start(port: Option<u16>, maxConfigs: Option<u64>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/embedded/calibrate", daemon_base_url(port));
     let client = http_client();
     let body = serde_json::json!({ "max_configs": maxConfigs.unwrap_or(3) });
@@ -641,7 +650,7 @@ async fn embedded_calibrate_start(port: Option<u16>, maxConfigs: Option<u64>) ->
 /// GET /api/router/embedded/calibrate/status — poll calibration.
 #[tauri::command]
 async fn embedded_calibrate_status(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/embedded/calibrate/status", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -655,7 +664,7 @@ async fn embedded_calibrate_status(port: Option<u16>) -> Result<serde_json::Valu
 /// GET /api/router/embedded/runtime — model + engine mode settings.
 #[tauri::command]
 async fn get_embedded_runtime(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/embedded/runtime", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -678,7 +687,7 @@ async fn set_embedded_runtime(
     modelId: String,
     engineMode: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/embedded/runtime", daemon_base_url(port));
     let client = http_client();
     let body = serde_json::json!({
@@ -706,7 +715,7 @@ async fn set_embedded_runtime(
 /// POST /api/message with akasha_embedded for onboarding wizard first-message test.
 #[tauri::command]
 async fn wizard_test_embedded_message(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let base = daemon_base_url(port);
     let url = format!("{}/api/message", base);
     let client = http_client();
@@ -768,7 +777,7 @@ async fn wizard_test_embedded_message(port: Option<u16>) -> Result<serde_json::V
 /// GET /api/doctor — health checks (for slash /doctor).
 #[tauri::command]
 async fn get_doctor(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/doctor", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -782,7 +791,7 @@ async fn get_doctor(port: Option<u16>) -> Result<serde_json::Value, String> {
 /// Run `akasha doctor --fix` for first-launch setup wizard.
 #[tauri::command]
 async fn run_akasha_doctor_fix(port: Option<u16>) -> Result<String, String> {
-    let _port = port.unwrap_or(DAEMON_PORT);
+    let _port = port.unwrap_or_else(default_daemon_port);
     let output = tokio::task::spawn_blocking(|| {
         std::process::Command::new("akasha")
             .args(["doctor", "--fix"])
@@ -805,7 +814,7 @@ async fn run_akasha_doctor_fix(port: Option<u16>) -> Result<String, String> {
 /// GET /api/update/status — cached latest version info from daemon (for update banner).
 #[tauri::command]
 async fn get_update_status(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/update/status", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -842,7 +851,7 @@ async fn install_runtime_update(confirmed: bool, port: Option<u16>) -> Result<St
         }
         command.args(["update", "install", "--yes"])
             .current_dir(directory)
-            .env("AKASHA_PORT", port.unwrap_or(DAEMON_PORT).to_string()).output()
+            .env("AKASHA_PORT", port.unwrap_or_else(default_daemon_port).to_string()).output()
     }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
     if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -1012,7 +1021,7 @@ async fn install_code_studio_module() -> Result<serde_json::Value, String> {
 /// POST /api/diagnostic/advice — get advice from health (for slash /advice).
 #[tauri::command]
 async fn get_advice(health: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/diagnostic/advice", daemon_base_url(port));
     let client = http_client();
     let body = serde_json::json!({ "health": health });
@@ -1034,7 +1043,7 @@ async fn get_advice(health: serde_json::Value, port: Option<u16>) -> Result<serd
 /// Restricts calls to local API paths for safety.
 #[tauri::command]
 async fn daemon_get_text(path: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let p = path.trim();
     if !p.starts_with('/') || (!p.starts_with("/api/") && p != "/") {
         return Err("invalid_path".to_string());
@@ -1066,7 +1075,7 @@ async fn daemon_request(
     body: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let p = path.trim();
     if !p.starts_with('/') || (!p.starts_with("/api/") && p != "/") {
         return Err("invalid_path".to_string());
@@ -1094,6 +1103,12 @@ async fn daemon_request(
 }
 
 #[cfg(test)] mod desktop_transport_tests {
+    #[test]fn launch_port_takes_precedence_and_beta_default_stays_isolated(){
+        assert_eq!(super::configured_daemon_port(Some("3880"),Some("3877")),3880);
+        assert_eq!(super::configured_daemon_port(None,Some("3877")),3877);
+        assert_eq!(super::configured_daemon_port(Some("invalid"),Some("3877")),3877);
+        assert_eq!(super::configured_daemon_port(None,None),3876);
+    }
     use super::*;
     use tokio::io::{AsyncReadExt,AsyncWriteExt};
     #[tokio::test]
@@ -1179,7 +1194,7 @@ async fn session_handoff(
 /// GET /api/plugins (for slash /plugins).
 #[tauri::command]
 async fn get_plugins(port: Option<u16>) -> Result<Vec<serde_json::Value>, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/plugins", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1193,7 +1208,7 @@ async fn get_plugins(port: Option<u16>) -> Result<Vec<serde_json::Value>, String
 /// POST /api/plugins/reload (for slash /reload).
 #[tauri::command]
 async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/plugins/reload", daemon_base_url(port));
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -1206,7 +1221,7 @@ async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
 /// POST /api/router/reload — hot-reload llm_router.yaml (routes/models; for slash /reload).
 #[tauri::command]
 async fn reload_router(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/router/reload", daemon_base_url(port));
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -1222,7 +1237,7 @@ async fn reload_router(port: Option<u16>) -> Result<serde_json::Value, String> {
 /// POST /api/tools/reload — hot-reload tools_policy.yaml (for slash /reload).
 #[tauri::command]
 async fn reload_tools_policy(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tools/reload", daemon_base_url(port));
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -1238,7 +1253,7 @@ async fn reload_tools_policy(port: Option<u16>) -> Result<serde_json::Value, Str
 /// GET /api/tools/policy — read tools_policy.yaml as structured JSON.
 #[tauri::command]
 async fn get_tools_policy(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tools/policy", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1253,7 +1268,7 @@ async fn get_tools_policy(port: Option<u16>) -> Result<serde_json::Value, String
 /// POST /api/tools/policy — save tools_policy.yaml and hot-reload.
 #[tauri::command]
 async fn post_tools_policy(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tools/policy", daemon_base_url(port));
     let client = http_client();
     let payload = serde_json::json!({ "policy": body });
@@ -1274,7 +1289,7 @@ async fn post_tools_policy(body: serde_json::Value, port: Option<u16>) -> Result
 /// GET /api/tools/device-interfaces — catalog for settings UI (local / network / usb).
 #[tauri::command]
 async fn get_device_interfaces(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tools/device-interfaces", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1289,7 +1304,7 @@ async fn get_device_interfaces(port: Option<u16>) -> Result<serde_json::Value, S
 /// GET /api/connectors — connector enable flags from connectors.env.
 #[tauri::command]
 async fn get_connectors(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/connectors", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1304,7 +1319,7 @@ async fn get_connectors(port: Option<u16>) -> Result<serde_json::Value, String> 
 /// POST /api/connectors — update connector flags and configuration.
 #[tauri::command]
 async fn post_connectors(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/connectors", daemon_base_url(port));
     let client = http_client();
     let resp = client
@@ -1324,7 +1339,7 @@ async fn post_connectors(body: serde_json::Value, port: Option<u16>) -> Result<s
 /// GET /api/discovery/:service — discover local/network instances.
 #[tauri::command]
 async fn get_discovery(service: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/discovery/{}", daemon_base_url(port), service.trim());
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1339,7 +1354,7 @@ async fn get_discovery(service: String, port: Option<u16>) -> Result<serde_json:
 /// POST /api/vault — store a secret key in vault.
 #[tauri::command]
 async fn set_vault_key(key: String, value: String, port: Option<u16>) -> Result<(), String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/vault", daemon_base_url(port));
     let client = http_client();
     let resp = client
@@ -1359,7 +1374,7 @@ async fn set_vault_key(key: String, value: String, port: Option<u16>) -> Result<
 /// POST /api/plugins/{id}/enable or /disable — user-controlled plugin load.
 #[tauri::command]
 async fn set_plugin_enabled(plugin_id: String, enabled: bool, port: Option<u16>) -> Result<(), String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let id = plugin_id.trim();
     if id.is_empty() {
         return Err("plugin_id required".to_string());
@@ -1383,7 +1398,7 @@ async fn set_plugin_enabled(plugin_id: String, enabled: bool, port: Option<u16>)
 /// POST /api/plugins/{id}/uninstall — remove plugin directory from data_dir/plugins.
 #[tauri::command]
 async fn uninstall_plugin(plugin_id: String, port: Option<u16>) -> Result<(), String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let id = plugin_id.trim();
     if id.is_empty() {
         return Err("plugin_id required".to_string());
@@ -1406,7 +1421,7 @@ async fn uninstall_plugin(plugin_id: String, port: Option<u16>) -> Result<(), St
 /// GET /api/skills — list installed skills. Returns array of { name, description, ... }.
 #[tauri::command]
 async fn get_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/skills", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1420,7 +1435,7 @@ async fn get_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
 /// POST /api/skills/reload — reload skills from disk (Agent Skills + YAML). Returns { count }.
 #[tauri::command]
 async fn reload_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/skills/reload", daemon_base_url(port));
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -1434,7 +1449,7 @@ async fn reload_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
 /// POST /api/skills/install — install a skill from a URL. Body: { "url": "<skill_url>" }.
 #[tauri::command]
 async fn install_skill(url: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let api_url = format!("{}/api/skills/install", daemon_base_url(port));
     let client = http_client();
     let body = serde_json::json!({ "url": url.trim() });
@@ -1456,7 +1471,7 @@ async fn install_skill(url: String, port: Option<u16>) -> Result<serde_json::Val
 /// POST /api/skills/uninstall — uninstall a skill by name. Body: { "name": "<skill_name>" }.
 #[tauri::command]
 async fn uninstall_skill(name: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/skills/uninstall", daemon_base_url(port));
     let client = http_client();
     let body = serde_json::json!({ "name": name.trim() });
@@ -1478,7 +1493,7 @@ async fn uninstall_skill(name: String, port: Option<u16>) -> Result<serde_json::
 /// POST /api/restart — request daemon restart (for slash /restart).
 #[tauri::command]
 async fn restart_daemon(port: Option<u16>) -> Result<(), String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/restart", daemon_base_url(port));
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -1528,7 +1543,7 @@ async fn save_profile_backup(app:tauri::AppHandle,artifact_id:String,port:Option
 /// User documentation index: GET /api/docs returns { pages, default }.
 #[tauri::command]
 async fn get_docs_index(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/docs", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1541,7 +1556,7 @@ async fn get_docs_index(port: Option<u16>) -> Result<serde_json::Value, String> 
 /// User documentation page: GET /api/docs/:page_id returns { content, ... }.
 #[tauri::command]
 async fn get_docs_page(port: Option<u16>, page_id: String) -> Result<String, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!(
         "{}/api/docs/{}",
         daemon_base_url(port),
@@ -1564,7 +1579,7 @@ async fn get_docs_page(port: Option<u16>, page_id: String) -> Result<String, Str
 /// User documentation (legacy single-page): GET /api/docs?legacy=1
 #[tauri::command]
 async fn get_docs(port: Option<u16>) -> Result<String, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/docs?legacy=1", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1583,7 +1598,7 @@ async fn get_docs(port: Option<u16>) -> Result<String, String> {
 /// GET /api/autonomous-mission — full mission state (same JSON as HTTP API).
 #[tauri::command]
 async fn get_autonomous_mission(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/autonomous-mission", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1600,7 +1615,7 @@ async fn get_autonomous_mission(port: Option<u16>) -> Result<serde_json::Value, 
 /// GET /api/autonomous-mission/events?limit=N
 #[tauri::command]
 async fn get_autonomous_mission_events(limit: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let lim = limit.unwrap_or(200).min(1000);
     let url = format!(
         "{}/api/autonomous-mission/events?limit={}",
@@ -1619,7 +1634,7 @@ async fn get_autonomous_mission_events(limit: Option<u32>, port: Option<u16>) ->
 /// PUT /api/autonomous-mission — partial JSON body (merge on daemon side).
 #[tauri::command]
 async fn put_autonomous_mission(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/autonomous-mission", daemon_base_url(port));
     let client = http_client();
     let resp = client
@@ -1637,7 +1652,7 @@ async fn put_autonomous_mission(body: serde_json::Value, port: Option<u16>) -> R
 
 #[tauri::command]
 async fn post_autonomous_mission_pause(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/autonomous-mission/pause", daemon_base_url(port));
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -1650,7 +1665,7 @@ async fn post_autonomous_mission_pause(port: Option<u16>) -> Result<serde_json::
 
 #[tauri::command]
 async fn post_autonomous_mission_resume(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/autonomous-mission/resume", daemon_base_url(port));
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -1663,7 +1678,7 @@ async fn post_autonomous_mission_resume(port: Option<u16>) -> Result<serde_json:
 
 #[tauri::command]
 async fn get_task_status(task_id: String, port: Option<u16>) -> Result<String, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tasks/{}", daemon_base_url(port), task_id);
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1677,7 +1692,7 @@ async fn get_task_status(task_id: String, port: Option<u16>) -> Result<String, S
 /// Task list: GET /api/tasks returns { tasks: [ { id, status, ... } ] }.
 #[tauri::command]
 async fn get_tasks(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tasks", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1691,7 +1706,7 @@ async fn get_tasks(port: Option<u16>) -> Result<serde_json::Value, String> {
 /// Task events: GET /api/tasks/:id/events returns { task_id, events: [ { event_type, payload, at } ] }.
 #[tauri::command]
 async fn get_task_events(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tasks/{}/events", daemon_base_url(port), task_id);
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1705,7 +1720,7 @@ async fn get_task_events(task_id: String, port: Option<u16>) -> Result<serde_jso
 /// Cancel a running or pending task: POST /api/tasks/:id/cancel.
 #[tauri::command]
 async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tasks/{}/cancel", daemon_base_url(port), task_id);
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -1721,7 +1736,7 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
 /// Cancel parent + descendants: POST /api/tasks/:id/cancel-tree (P6-B4).
 #[tauri::command]
 async fn cancel_task_tree(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tasks/{}/cancel-tree", daemon_base_url(port), task_id);
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -1747,7 +1762,7 @@ async fn cancel_task_tree(task_id: String, port: Option<u16>) -> Result<serde_js
 /// Pause a running task: POST /api/tasks/:id/pause.
 #[tauri::command]
 async fn pause_task(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tasks/{}/pause", daemon_base_url(port), task_id);
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -1766,7 +1781,7 @@ async fn pause_task(task_id: String, port: Option<u16>) -> Result<serde_json::Va
 /// Human in the loop: GET /api/pending-human-input — list all tasks waiting for user input (for notifications on load or when user was away).
 #[tauri::command]
 async fn get_pending_human_input(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/pending-human-input", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1780,7 +1795,7 @@ async fn get_pending_human_input(port: Option<u16>) -> Result<serde_json::Value,
 /// Human in the loop: GET /api/tasks/:id/human-input — pending question/context/choices for the task (404 if none).
 #[tauri::command]
 async fn get_task_human_input(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tasks/{}/human-input", daemon_base_url(port), task_id);
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1794,7 +1809,7 @@ async fn get_task_human_input(task_id: String, port: Option<u16>) -> Result<serd
 /// Human in the loop: POST /api/tasks/:id/human-reply — submit user response to unblock the agent.
 #[tauri::command]
 async fn post_task_human_reply(task_id: String, response: String, request_id: Option<String>, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/tasks/{}/human-reply", daemon_base_url(port), task_id);
     let client = http_client();
     let body = serde_json::json!({ "response": response, "request_id": request_id });
@@ -1810,7 +1825,7 @@ async fn post_task_human_reply(task_id: String, response: String, request_id: Op
 /// Schedules: GET /api/schedules (FR-028, Calendrier).
 #[tauri::command]
 async fn get_schedules(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/schedules", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1824,7 +1839,7 @@ async fn get_schedules(port: Option<u16>) -> Result<serde_json::Value, String> {
 /// Schedule by id: GET /api/schedules/:id (détail d'une récurrence).
 #[tauri::command]
 async fn get_schedule_by_id(schedule_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1838,7 +1853,7 @@ async fn get_schedule_by_id(schedule_id: String, port: Option<u16>) -> Result<se
 /// Calendar events in range: GET /api/calendar/events?from=...&to=... (for calendar grid view).
 #[tauri::command]
 async fn get_calendar_events(port: Option<u16>, from: String, to: String) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let from_enc = urlencoding::encode(&from);
     let to_enc = urlencoding::encode(&to);
     let url = format!("{}/api/calendar/events?from={}&to={}", daemon_base_url(port), from_enc, to_enc);
@@ -1854,7 +1869,7 @@ async fn get_calendar_events(port: Option<u16>, from: String, to: String) -> Res
 /// Task runs: GET /api/task_runs (optionally ?schedule_id=...) for Calendrier.
 #[tauri::command]
 async fn get_task_runs(port: Option<u16>, schedule_id: Option<String>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = match schedule_id.as_deref() {
         Some(s) if !s.is_empty() => format!("{}/api/task_runs?schedule_id={}", daemon_base_url(port), s),
         _ => format!("{}/api/task_runs", daemon_base_url(port)),
@@ -1876,7 +1891,7 @@ async fn create_schedule(
     interval_seconds: Option<u64>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/schedules", daemon_base_url(port));
     let body = serde_json::json!({
         "name": name,
@@ -1908,7 +1923,7 @@ async fn create_schedule_extended(
     body: serde_json::Value,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/schedules", daemon_base_url(port));
     let client = http_client();
     let resp = client
@@ -1927,7 +1942,7 @@ async fn create_schedule_extended(
 /// List event triggers: GET /api/event-triggers.
 #[tauri::command]
 async fn get_event_triggers(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/event-triggers", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1943,7 +1958,7 @@ async fn create_event_trigger(
     body: serde_json::Value,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/event-triggers", daemon_base_url(port));
     let client = http_client();
     let resp = client
@@ -1961,7 +1976,7 @@ async fn create_event_trigger(
 /// Delete event trigger: DELETE /api/event-triggers/:id.
 #[tauri::command]
 async fn delete_event_trigger(trigger_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!(
         "{}/api/event-triggers/{}",
         daemon_base_url(port),
@@ -1982,7 +1997,7 @@ async fn put_schedule(
     port: Option<u16>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
     let client = http_client();
     let resp = client
@@ -2001,7 +2016,7 @@ async fn put_schedule(
 /// Delete schedule: DELETE /api/schedules/:id.
 #[tauri::command]
 async fn delete_schedule(schedule_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
     let client = http_client();
     let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
@@ -2014,7 +2029,7 @@ async fn delete_schedule(schedule_id: String, port: Option<u16>) -> Result<serde
 /// Memory short-term: GET /api/memory/short-term?session_id=...
 #[tauri::command]
 async fn get_memory_short_term(session_id: Option<String>, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = match session_id.as_deref() {
         Some(s) if !s.is_empty() => format!(
             "{}/api/memory/short-term?session_id={}",
@@ -2035,7 +2050,7 @@ async fn get_memory_short_term(session_id: Option<String>, port: Option<u16>) ->
 /// Delete short-term memory and session state for a session: DELETE /api/memory/session?session_id=...
 #[tauri::command]
 async fn delete_memory_session(session_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let sid = session_id.trim();
     if sid.is_empty() {
         return Err("missing session_id".to_string());
@@ -2057,7 +2072,7 @@ async fn delete_memory_session(session_id: String, port: Option<u16>) -> Result<
 /// Suggest a short chat thread title from the first user message: POST /api/chat/suggest-thread-title
 #[tauri::command]
 async fn suggest_thread_title(message: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/chat/suggest-thread-title", daemon_base_url(port));
     let client = http_client();
     let resp = client
@@ -2076,7 +2091,7 @@ async fn suggest_thread_title(message: String, port: Option<u16>) -> Result<serd
 /// Memory long-term: GET /api/memory/long-term?limit=200&offset=0 (paginated)
 #[tauri::command]
 async fn get_memory_long_term(limit: Option<u32>, offset: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let limit = limit.unwrap_or(200).min(200);
     let offset = offset.unwrap_or(0);
     let url = format!("{}/api/memory/long-term?limit={}&offset={}", daemon_base_url(port), limit, offset);
@@ -2092,7 +2107,7 @@ async fn get_memory_long_term(limit: Option<u32>, offset: Option<u32>, port: Opt
 /// Memory search: GET /api/memory/search?q=...&top_k=...
 #[tauri::command]
 async fn get_memory_search(q: String, top_k: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let q = q.trim();
     if q.is_empty() {
         return Err("missing or empty q".to_string());
@@ -2116,7 +2131,7 @@ async fn get_memory_search(q: String, top_k: Option<u32>, port: Option<u16>) -> 
 /// Memory long-term: DELETE /api/memory/long-term/:id
 #[tauri::command]
 async fn delete_memory_long_term(id: String, port: Option<u16>) -> Result<(), String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let id = id.trim();
     if id.is_empty() {
         return Err("missing id".to_string());
@@ -2135,7 +2150,7 @@ async fn delete_memory_long_term(id: String, port: Option<u16>) -> Result<(), St
 /// Memory long-term: POST /api/memory/rebuild-relations — recompute embedding-tier relations (similar / relates_to)
 #[tauri::command]
 async fn rebuild_memory_relations(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/memory/rebuild-relations", daemon_base_url(port));
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
@@ -2151,7 +2166,7 @@ async fn rebuild_memory_relations(port: Option<u16>) -> Result<serde_json::Value
 /// Schedule run reports: GET /api/schedule_run_reports — completed schedule runs with message (for chat).
 #[tauri::command]
 async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/schedule_run_reports", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -2165,7 +2180,7 @@ async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value
 /// User RAG: GET /api/user-rag/documents
 #[tauri::command]
 async fn get_user_rag_documents(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/user-rag/documents", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -2184,7 +2199,7 @@ async fn add_user_rag_document(
     mime_type: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/user-rag/documents", daemon_base_url(port));
     let client = http_client();
     let body = serde_json::json!({
@@ -2205,7 +2220,7 @@ async fn add_user_rag_document(
 /// User RAG: DELETE /api/user-rag/documents/:id
 #[tauri::command]
 async fn delete_user_rag_document(id: String, port: Option<u16>) -> Result<(), String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/user-rag/documents/{}", daemon_base_url(port), id.trim());
     let client = http_client();
     let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
@@ -2218,7 +2233,7 @@ async fn delete_user_rag_document(id: String, port: Option<u16>) -> Result<(), S
 /// Notes: GET /api/notes
 #[tauri::command]
 async fn get_notes(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/notes", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -2231,7 +2246,7 @@ async fn get_notes(port: Option<u16>) -> Result<serde_json::Value, String> {
 /// Notes: GET /api/notes/:id
 #[tauri::command]
 async fn get_note(id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/notes/{}", daemon_base_url(port), id.trim());
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -2248,7 +2263,7 @@ async fn create_note(
     content: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/notes", daemon_base_url(port));
     let client = http_client();
     let body = serde_json::json!({
@@ -2272,7 +2287,7 @@ async fn update_note(
     content: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/notes/{}", daemon_base_url(port), id.trim());
     let client = http_client();
     let mut body = serde_json::Map::new();
@@ -2299,7 +2314,7 @@ async fn update_note(
 /// Notes: DELETE /api/notes/:id
 #[tauri::command]
 async fn delete_note(id: String, port: Option<u16>) -> Result<(), String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/notes/{}", daemon_base_url(port), id.trim());
     let client = http_client();
     let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
@@ -2318,7 +2333,7 @@ async fn upload_note_asset(
     mime_type: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/notes/{}/assets", daemon_base_url(port), id.trim());
     let client = http_client();
     let body = serde_json::json!({
@@ -2338,7 +2353,7 @@ async fn upload_note_asset(
 /// Workspace knowledge graph status via modern endpoint: GET /api/workspace-graph/workspaces
 #[tauri::command]
 async fn get_workspace_graph_status(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/workspace-graph/workspaces", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -2355,7 +2370,7 @@ async fn put_workspace_graph_config(
     root: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let Some(root) = root.map(|r| r.trim().to_string()).filter(|r| !r.is_empty()) else {
         return Ok(serde_json::json!({
             "ok": true,
@@ -2387,7 +2402,7 @@ async fn post_workspace_graph_rebuild(
     root: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let client = http_client();
     let list_url = format!("{}/api/workspace-graph/workspaces", daemon_base_url(port));
     let list_resp = client.get(&list_url).send().await.map_err(|e| e.to_string())?;
@@ -2450,7 +2465,7 @@ async fn post_workspace_graph_rebuild(
 /// Project knowledge graphs: GET /api/workspace-graph/workspaces
 #[tauri::command]
 async fn list_project_workspaces(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!(
         "{}/api/workspace-graph/workspaces",
         daemon_base_url(port)
@@ -2472,7 +2487,7 @@ async fn create_project_workspace(
     rebuild: Option<bool>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!(
         "{}/api/workspace-graph/workspaces",
         daemon_base_url(port)
@@ -2502,7 +2517,7 @@ async fn create_project_workspace(
 /// DELETE /api/workspace-graph/workspaces/:id
 #[tauri::command]
 async fn delete_project_workspace(id: String, port: Option<u16>) -> Result<(), String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!(
         "{}/api/workspace-graph/workspaces/{}",
         daemon_base_url(port),
@@ -2525,7 +2540,7 @@ async fn rebuild_project_workspace(
     root_path: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!(
         "{}/api/workspace-graph/workspaces/{}/rebuild",
         daemon_base_url(port),
@@ -2555,7 +2570,7 @@ async fn rebuild_project_workspace(
 /// Device bridge: get oldest pending device request (for UI to fulfill camera, mic, etc.).
 #[tauri::command]
 async fn get_device_pending(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/device/pending", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -2575,7 +2590,7 @@ async fn post_device_result(
     data: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/device/result", daemon_base_url(port));
     let body = serde_json::json!({
         "request_id": request_id,
@@ -2601,7 +2616,7 @@ async fn post_device_result(
 /// Agent profile: GET /api/agent-profile (name, personality, rules, can_do, cannot_do).
 #[tauri::command]
 async fn get_agent_profile(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/agent-profile", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -2615,7 +2630,7 @@ async fn get_agent_profile(port: Option<u16>) -> Result<serde_json::Value, Strin
 /// User profile: GET /api/user-profile (first_name, last_name, how_to_call, onboarding_completed).
 #[tauri::command]
 async fn get_user_profile(port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/user-profile", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -2629,7 +2644,7 @@ async fn get_user_profile(port: Option<u16>) -> Result<serde_json::Value, String
 /// User profile: POST /api/user-profile (first_name?, last_name?, how_to_call?, onboarding_completed?, proactive_check_in_enabled?, proactive_check_in_interval_days?).
 #[tauri::command]
 async fn post_user_profile(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/user-profile", daemon_base_url(port));
     let client = http_client();
     let resp = client
@@ -2648,7 +2663,7 @@ async fn post_user_profile(body: serde_json::Value, port: Option<u16>) -> Result
 /// First message (onboarding, daily greeting, proactive): GET /api/first-message?context=...
 #[tauri::command]
 async fn get_first_message(context: String, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let context = context.trim();
     let url = if context.is_empty() {
         format!("{}/api/first-message", daemon_base_url(port))
@@ -2834,7 +2849,7 @@ fn execute_synthetic_input(action: String, params: serde_json::Value) -> Result<
 /// Agent profile: POST /api/agent-profile (merge body: name?, personality?, rules?, can_do?, cannot_do?).
 #[tauri::command]
 async fn post_agent_profile(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
-    let port = port.unwrap_or(DAEMON_PORT);
+    let port = port.unwrap_or_else(default_daemon_port);
     let url = format!("{}/api/agent-profile", daemon_base_url(port));
     let client = http_client();
     let resp = client
@@ -2881,6 +2896,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             startup_probe::record_startup_probe,
             check_health,
+            get_daemon_launch_config,
             get_router_metrics,
             send_message,
             send_message_ack,

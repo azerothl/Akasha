@@ -551,6 +551,10 @@ mod tests {
         assert_eq!(store.list_task_runs(Some(id),10).unwrap().len(),1);
     }
     use tempfile::NamedTempFile;
+    #[cfg(feature="consumer-beta")]
+    #[test]fn rrule_resume_cursor_prevents_replaying_the_offline_backlog(){
+        let db=NamedTempFile::new().unwrap();let store=ScheduleStore::open(db.path()).unwrap();let now=Utc::now();let schedule=Schedule{id:Uuid::new_v4(),name:"Récurrence synthétique".into(),description:String::new(),enabled:true,timezone:"UTC".into(),rrule:"FREQ=DAILY".into(),interval_seconds:None,start_at:now-Duration::days(40),end_at:None,channel_context:None,created_at:now,updated_at:now};store.insert_schedule(&schedule).unwrap();assert_eq!(due_slots_rrule(&store,&schedule,now).unwrap().len(),1);store.record_resume_cursor(schedule.id,now).unwrap();assert!(due_slots_rrule(&store,&schedule,now).unwrap().is_empty());assert!(store.missed(schedule.id).unwrap().unwrap()["count"].as_u64().unwrap()>0);
+    }
 
     #[test]
     fn personal_watch_resumes_once_after_many_missed_deadlines() {

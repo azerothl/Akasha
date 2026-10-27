@@ -3155,14 +3155,16 @@ impl LLMProvider for AkashaCoreProvider {
                 let prompt = akasha_embedded_llm::config::truncate_prompt_for_embedded(&prompt);
                 let max_tokens = request.max_tokens.map(|u| u as usize);
                 let temperature = request.temperature.map(|f| f as f64);
+                let thinking_enabled=normalized_thinking_level(request.thinking_level.as_deref())!=Some("off");
                 let model_id = model_override.map(|s| s.to_string());
                 match tokio::task::spawn_blocking(move || {
                     let llm = akasha_embedded_llm::EmbeddedLlm::new();
-                    llm.complete_for_router_model_with_metrics(
+                    llm.complete_for_router_model_with_reasoning(
                         model_id.as_deref(),
                         &prompt,
                         max_tokens,
                         temperature,
+                        thinking_enabled,
                     )
                 })
                 .await
@@ -3239,15 +3241,17 @@ impl LLMProvider for AkashaEmbeddedProvider {
                 let prompt = akasha_embedded_llm::config::truncate_prompt_for_embedded(&prompt);
                 let max_tokens = request.max_tokens.map(|u| u as usize);
                 let temperature = request.temperature.map(|f| f as f64);
+                let thinking_enabled=normalized_thinking_level(request.thinking_level.as_deref())!=Some("off");
                 let model_id = model_override.map(|s| s.to_string());
                 let model_used_label = model_id.clone().unwrap_or_else(|| "embedded".into());
                 match tokio::task::spawn_blocking(move || {
                     let llm = akasha_embedded_llm::EmbeddedLlm::new();
-                    llm.complete_for_router_model_with_metrics(
+                    llm.complete_for_router_model_with_reasoning(
                         model_id.as_deref(),
                         &prompt,
                         max_tokens,
                         temperature,
+                        thinking_enabled,
                     )
                 })
                 .await
@@ -3286,15 +3290,17 @@ impl LLMProvider for AkashaEmbeddedProvider {
             let prompt = akasha_embedded_llm::config::truncate_prompt_for_embedded(&prompt);
             let max_tokens = request.max_tokens.map(|u| u as usize);
             let temperature = request.temperature.map(|f| f as f64);
-            let model_id = model_override.map(str::to_string);
+            let thinking_enabled=normalized_thinking_level(request.thinking_level.as_deref())!=Some("off");
+                let model_id = model_override.map(str::to_string);
             let model_used_label = model_id.clone().unwrap_or_else(|| "embedded".into());
             match tokio::task::spawn_blocking(move || {
                 let llm = akasha_embedded_llm::EmbeddedLlm::new();
-                llm.complete_stream_with_metrics(
+                llm.complete_stream_with_reasoning(
                     model_id.as_deref(),
                     &prompt,
                     max_tokens,
                     temperature,
+                    thinking_enabled,
                     move |chunk| {
                         let _ = chunk_tx.send(chunk.to_string());
                     },

@@ -1,0 +1,47 @@
+{
+  "consumer_beta": true,
+  "launch": {
+    "profile": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-consumer-final-package-profile",
+    "binary_sha256": "ce60def53d32b99f6c4cc0c12d8858d4b75a5a5d7f8f52a3a62a40357c4104fb",
+    "helper_id": 70896,
+    "manifest_sha256": "12bcc23ea0961e2f049458c54a52622fe220b058e03f687a29022f9ea8b2abcb",
+    "package": "C:\\Users\\azero\\AppData\\Local\\AkashaDevTools\\consumer-candidate-final-debug",
+    "port": 3880
+  },
+  "documents": [
+    {
+      "name": "facture-fictive.pdf",
+      "index_status": "ready",
+      "pages": 2
+    },
+    {
+      "name": "photo-facture-fictive.jpg",
+      "index_status": "ready",
+      "pages": 1
+    },
+    {
+      "name": "facture-fictive.txt",
+      "index_status": "ready",
+      "pages": 1
+    }
+  ],
+  "privacy": {
+    "encrypted_at_rest": true,
+    "scope": "long_term_memory_only",
+    "sqlcipher_compiled": true,
+    "state": "encrypted"
+  },
+  "ui_observation": {
+    "window": {
+      "app": "process:C:\\Users\\azero\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Local\\AkashaDevTools\\consumer-candidate-final-debug\\AkashaBeta.exe",
+      "id": 15278574,
+      "title": "Akasha · bêta particuliers"
+    },
+    "document_text": "Aller au contenu principal\nAkasha\nLocal-first AI assistant\n◀\nPRINCIPAL\nChat\nESPACES DE TRAVAIL\nRecherche\nNotes\nModules\nOPÉRATIONS\nTâches\nAIDE\nDocumentation\nParamètres\nPlus d’outils\nDaemon connecté (port 3880)\nReprendre\nChat\n?\nChat\n￼\n￼\n￼\nSimple\nDaemon connecté\nBêta Windows · espace individuel\nQue souhaitez-vous retrouver ou préparer ?\nCommencez avec la démonstration fictive, puis vérifiez chaque réponse dans sa source.\nOuvrir une conversationConsulter mes souvenirs\nComprendre mes documents\nMes notes en actions\nMa veille personnelle\nSauvegarder mon profil\nComprendre mes documents\nAjoutez vos documents, obtenez une synthèse puis vérifiez chaque référence dans l’original.\nPDF texte ou scanné, JPG, PNG, TXT et Markdown · 25 Mio et 100 pages par fichier · 20 fichiers par lot. Lecture locale ; écriture manuscrite non prise en charge.\nLes documents et conversations ne sont pas chiffrés par Akasha pendant cette bêta.\nChoisir mes documents: Aucun fichier n’a été sélectionné\nAjouter des documentsEssayer le dossier fictif · PDF, photo et texte\n￼\nPrêt · 2 page(s)\nRelire ce document\nSupprimer\n￼\nPrêt · 1 page(s)\nRelire ce document\nSupprimer\n￼\nPrêt · 1 page(s)\nRelire ce document\nSupprimer\nVotre question sur les documents sélectionnés\n￼\nModèles locaux · services distants bloqués\nComprendre ces documents\nModèles locaux par défaut. Recherche Web et modèles distants exigent un accord. Pendant la bêta, les conversations, notes et documents importés restent hors du chiffrement applicatif.\nParticiper au pilote de quatre semaines · facultatif",
+    "observed_connection_port": 3880,
+    "ready_documents": 3,
+    "privacy_settings_modified": false
+  },
+  "closed_daemon_stopped": true,
+  "installed_daemon_preserved": true
+}

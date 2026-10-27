@@ -2,7 +2,13 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Assistant personnel **sécurisé**, **local-first**, conçu comme une infrastructure agentique autonome 24/7. Orchestration d’agents spécialisés, multi-canaux (texte, Slack, Discord, Telegram), protection des secrets (vault), routeur LLM avec fallback.
+Akasha vous aide à **comprendre vos documents**, **préparer des actions à partir de vos notes** et **suivre les sujets qui vous intéressent**. Chaque réponse documentaire renvoie aux passages du fichier original ; les actions et dates sont vérifiées avant enregistrement.
+
+La **bêta Windows pour particuliers** est en préparation : [premier lancement, démonstration et limites](spec/consumer-beta-windows.md). Modèles locaux par défaut, mémoire long terme et sauvegardes chiffrées. Conversations, notes et documents importés restent hors du chiffrement applicatif pendant la bêta.
+
+**Candidat technique : le pilote avec données personnelles n’est pas encore ouvert.** La diffusion attend les qualifications Windows sans GPU, NVIDIA, du paquet et de la restauration sur un autre compte. [Preuves et contrôles restants](spec/dev/quality/CONSUMER_BETA_DELIVERY.md).
+
+L’édition de développement conserve orchestration d’agents spécialisés, multi-canaux, coffre et routeur LLM. Les instructions de compilation et de configuration suivent ci-dessous.
 
 **Vision et principes** : [spec/00_vision.md](spec/00_vision.md)
 

@@ -488,9 +488,20 @@ impl Scope {
                 effect["before"].as_str(),
                 effect["after"].as_str(),
             ) {
-                if self.goals.iter().any(|g| g.path == path) {
-                    before.insert(path.to_owned(), a.to_owned());
-                    after.insert(path.to_owned(), b.to_owned());
+                let goal = self.goals.iter().find(|g| {
+                    if g.path == path { return true; }
+                    // Persisted Windows receipts can use either DOS aliases or
+                    // long names, including for files that have since vanished.
+                    #[cfg(windows)]
+                    if let (Some(expected), Some(actual)) = (
+                        crate::studio::canonicalize_path_for_studio_check(Path::new(&g.path)),
+                        crate::studio::canonicalize_path_for_studio_check(Path::new(path)),
+                    ) { return expected == actual; }
+                    false
+                });
+                if let Some(goal) = goal {
+                    before.insert(goal.path.clone(), a.to_owned());
+                    after.insert(goal.path.clone(), b.to_owned());
                 }
             }
         }

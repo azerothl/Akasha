@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { E2E_WEB, e2eDaemonGetJson } from "../e2eDaemon";
 
 const WIZARD_DONE_KEY = "akasha_setup_wizard_done";
-const DAEMON_PORT = 3876;
+import { DAEMON_PORT } from "../daemonPort";
 
 type Props = {
   locale: "fr" | "en";

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "expected": {
+    "amount_eur": 42,
+    "due_date": "2026-11-10"
+  },
+  "files": [
+    {
+      "name": "facture-fictive.pdf",
+      "sha256": "901cdc74973501deea5424cb265c399c13115bf15aca634d5f047adb746a5879",
+      "bytes": 49841
+    },
+    {
+      "name": "facture-fictive.txt",
+      "sha256": "c6fb7ec97675a1faf4a5231e08e2b7184a647fac221fc46c1176cc8cabcfb206",
+      "bytes": 60
+    },
+    {
+      "name": "photo-facture-fictive.jpg",
+      "sha256": "7d6c7055434555a112d7436ef1467aedd0e93e0a7f564d9be64baf1293f2a8e9",
+      "bytes": 124185
+    }
+  ]
+}

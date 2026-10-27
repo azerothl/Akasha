@@ -63,6 +63,7 @@ export function UserRagPanel({t,locale,documents:initial,loading,error,onError,o
         setSelected(current=>[...current,result.id]);await refresh();}
     }catch(error){onError(String(error));}finally{setUploading(false);}
   }
+  async function importDemo(){setUploading(true);onError(null);try{const value=await request("/api/consumer/demo");const files=(value.files??[]).map((file:{name:string;mime_type:string;content_base64:string})=>new File([Uint8Array.from(atob(file.content_base64),char=>char.charCodeAt(0))],file.name,{type:file.mime_type}));await upload(files);}catch(error){onError(String(error));}finally{setUploading(false);}}
   async function ask(){
     onError(null);setReport(null);
     try{const result=await request("/api/message",{message:question.trim()||"Résume les informations importantes de ces documents et signale les informations manquantes.",document_ids:selected,composer_mode:"ask",incognito:true,remote_consents:consents});setConsents([]);localStorage.setItem("akasha_document_last_task",result.task_id);setLastTask(result.task_id);setJobs(current=>[...current,{id:result.task_id,kind:"answer",label:"Synthèse documentaire"}]);}
@@ -87,9 +88,10 @@ export function UserRagPanel({t,locale,documents:initial,loading,error,onError,o
     {error?<p role="alert">{error}</p>:null}
     <input ref={fileInput} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.txt,.md" className="sr-only" tabIndex={-1} aria-label="Choisir mes documents" onChange={event=>{const files=Array.from(event.target.files??[]);event.target.value="";if(files.length)void upload(files);}}/>
     <button type="button" className="btn-primary" disabled={uploading||loading} onClick={()=>fileInput.current?.click()}>{uploading?"Import en cours…":"Ajouter des documents"}</button>
+    <button type="button" className="btn-secondary" disabled={uploading||jobs.length>0} onClick={()=>void importDemo()}>Essayer le dossier fictif · PDF, photo et texte</button>
     {jobs.map(job=><div key={job.id} role="status"><p>{job.label} · {progress[job.id]??"En attente…"}</p><button type="button" className="btn-secondary" onClick={()=>void request(`/api/tasks/${job.id}/cancel`,{}).catch(error=>onError(String(error)))}>Annuler {job.label}</button></div>)}
     {loading?<p aria-busy="true">{t("common.loading")}</p>:documents.length===0?<p className="empty-state">Ajoutez un premier fichier pour commencer.</p>:<ul className="settings-doc-list">{documents.map(doc=><li key={doc.id} className="settings-doc-item">
-      <label><input type="checkbox" checked={selected.includes(doc.id)} onChange={event=>setSelected(current=>event.target.checked?[...current,doc.id]:current.filter(id=>id!==doc.id))}/>{doc.name}</label>
+<label><input type="checkbox" checked={selected.includes(doc.id)} onChange={event=>setSelected(current=>event.target.checked?[...current,doc.id]:current.filter(id=>id!==doc.id))}/>{doc.name}</label>
       <span>{doc.index_status==="ready"?"Prêt":doc.index_status==="partial"?"Partiellement lu":doc.index_status==="failed"?"Non lu":doc.index_status==="indexing"?"Lecture en cours":"En attente"}{doc.pages?` · ${doc.pages} page(s)`:""}</span>
       {doc.index_error?<p role="alert">{doc.index_error}</p>:null}{doc.warnings?.map(w=><p key={w.page}>Page {w.page} : {w.message}</p>)}
       <button type="button" className="btn-secondary" disabled={jobs.some(job=>job.documentId===doc.id)} onClick={()=>void request(`/api/user-rag/documents/${doc.id}/reindex`,{}).then(result=>setJobs(current=>[...current,{id:result.task_id,documentId:doc.id,kind:"index",label:doc.name}])).catch(error=>onError(String(error)))}>Relire ce document</button>

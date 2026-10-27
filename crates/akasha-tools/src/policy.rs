@@ -9,10 +9,40 @@ fn default_calendar_read_enabled() -> bool {
 }
 
 fn path_normalize(p: &Path) -> PathBuf {
+    // Windows CI and existing profiles may use DOS 8.3 names (RUNNER~1).
+    // Expand only local absolute aliases; do not touch UNC/network paths or
+    // erase raw traversal components before the policy rejects them.
+    #[cfg(windows)]
+    let expanded = if p.to_string_lossy().contains('~')
+        && !p.to_string_lossy().split(['/', '\\']).any(|part| part == "..")
+        && matches!(p.components().next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(),std::path::Prefix::Disk(_)|std::path::Prefix::VerbatimDisk(_)))
+        && p.is_absolute()
+    { expand_windows_alias(p) } else { None };
+    #[cfg(windows)]
+    let p = expanded.as_deref().unwrap_or(p);
     let s = p.to_string_lossy().replace('\\', "/").to_lowercase();
     #[cfg(windows)]
     let s=if let Some(unc)=s.strip_prefix("//?/unc/") {format!("//{unc}")}else{s.strip_prefix("//?/").unwrap_or(&s).to_owned()};
     PathBuf::from(s)
+}
+
+#[cfg(windows)]
+fn expand_windows_alias(path: &Path) -> Option<PathBuf> {
+    let mut ancestor=path;
+    let mut missing=Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(mut resolved)=>{
+                for component in missing.into_iter().rev(){resolved.push(component);}
+                return Some(resolved);
+            }
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{
+                missing.push(ancestor.file_name()?.to_owned());
+                ancestor=ancestor.parent()?;
+            }
+            Err(_)=>return None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1201,5 +1231,27 @@ mod verbatim_path_regressions {
         let policy=ToolsPolicy {allowed_read_paths:vec!["C:/workspace".into()],..Default::default()};
         assert!(policy.can_read(Path::new(r"\\?\C:\workspace\file.txt")));
         assert!(!policy.can_read(Path::new(r"\\?\C:\outside\file.txt")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_short_aliases_keep_the_same_scope_for_existing_and_new_files() {
+        use std::os::windows::ffi::{OsStrExt,OsStringExt};
+        #[link(name="kernel32")]
+        extern "system" {fn GetShortPathNameW(path:*const u16,output:*mut u16,length:u32)->u32;}
+        let root=tempfile::Builder::new().prefix("Akasha policy long directory ").tempdir().unwrap();
+        let input:Vec<u16>=root.path().as_os_str().encode_wide().chain(Some(0)).collect();let mut output=vec![0u16;32768];
+        let length=unsafe{GetShortPathNameW(input.as_ptr(),output.as_mut_ptr(),output.len() as u32)} as usize;
+        assert!(length>0&&length<output.len());
+        let short=PathBuf::from(std::ffi::OsString::from_wide(&output[..length]));
+        let long=root.path().canonicalize().unwrap();
+        std::fs::write(long.join("existing.txt"),"synthetic").unwrap();
+        for (allowed,requested) in [(&short,&long),(&long,&short)] {
+            let policy=ToolsPolicy{allowed_read_paths:vec![allowed.display().to_string()],allowed_write_paths:vec![allowed.display().to_string()],..Default::default()};
+            assert!(policy.can_read(&requested.join("existing.txt")),"short/long aliases must identify one directory");
+            assert!(policy.can_write(&requested.join("new/subdirectory/file.txt")),"a missing leaf keeps its existing parent's identity");
+            assert!(!policy.can_read(&requested.join("../outside.txt")));
+            assert!(!policy.can_write(&requested.with_file_name("another-directory").join("file.txt")));
+        }
     }
 }

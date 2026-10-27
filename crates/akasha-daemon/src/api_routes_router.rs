@@ -30,6 +30,7 @@ pub async fn try_handle(
 ) -> Option<String> {
     let path = full_path(path_only, query_str);
     let data_dir = ctx.data_dir;
+    if let Some(response)=crate::consumer_qualification::route(method,path_only,body,data_dir,ctx.llm_router).await{return Some(response);}
     let store_path = ctx.store_path;
     let llm_router = ctx.llm_router;
     let ollama_base_url = ctx.ollama_base_url;
@@ -319,7 +320,7 @@ if method == "GET" && path == "/api/router/embedded-status" {
             "embedded_available": false,
             "embedded_loaded": false,
             "compiled_backends": [],
-            "consumer":crate::model_qualification::capabilities(data_dir,llm_router),
+            "consumer":crate::consumer_qualification::capabilities(data_dir,llm_router).await,
             "hint": "Recompile daemon with feature embedded"
         })
         .to_string();
@@ -332,7 +333,7 @@ if method == "GET" && path_only == "/api/capabilities" {
     #[cfg(feature = "embedded")]
     {
         let mut body = llm_router.embedded_capabilities();
-        body["consumer"]=crate::model_qualification::capabilities(data_dir,llm_router);
+        body["consumer"]=crate::consumer_qualification::capabilities(data_dir,llm_router).await;
         return Some(json_response("200 OK", &body.to_string()));
     }
     #[cfg(not(feature = "embedded"))]
@@ -357,7 +358,7 @@ if method == "GET" && path_only == "/api/capabilities" {
                 "evidence_only": "Bench evidence only",
                 "groundwork_only": "Docs / watch only"
             },
-            "consumer":crate::model_qualification::capabilities(data_dir,llm_router),
+            "consumer":crate::consumer_qualification::capabilities(data_dir,llm_router).await,
             "hint": "Recompile daemon with feature embedded"
         })
         .to_string();
@@ -741,6 +742,7 @@ if method == "GET" && path == "/api/router/ollama/models" {
             return Some(json_response("404 Not Found", r#"{"error":"ollama_not_configured"}"#));
         }
     };
+    if cfg!(feature="consumer-beta") && !akasha_core::privacy::loopback_url(&base_url){return Some(json_response("403 Forbidden",r#"{"error":"La détection automatique est limitée à Ollama local"}"#));}
     let url = format!("{}/api/tags", base_url);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))

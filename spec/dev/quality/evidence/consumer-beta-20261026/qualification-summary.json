@@ -1,0 +1,166 @@
+{
+  "corpus_version": "1.0.2",
+  "binary_identity": {
+    "binary_sha256": "ce60def53d32b99f6c4cc0c12d8858d4b75a5a5d7f8f52a3a62a40357c4104fb",
+    "configuration_sha256": "a73a8bb6725ac67068de9b6c95f3d89e44632b017245c5d6d0fb4daa7077ace4",
+    "engine": "ollama:0.40.11",
+    "hardware_profile": {
+      "models_for_tier": [
+        "smollm2-360m-instruct-q4",
+        "qwen3.5-0.8b-q4",
+        "qwen3-0.6b-q4"
+      ],
+      "profile": {
+        "cpu_model": null,
+        "cuda_compiled": false,
+        "cuda_runtime": false,
+        "gpu_name": "NVIDIA GeForce RTX 4080 SUPER",
+        "ram_gb": 16,
+        "tier_id": "cpu_only",
+        "vram_mb": 16376
+      },
+      "static_candidates": [
+        {
+          "engine": "llama_cpp_cpu",
+          "model_id": "smollm2-360m-instruct-q4",
+          "n_gpu_layers": 0
+        },
+        {
+          "engine": "llama_cpp_cpu",
+          "model_id": "qwen3.5-0.8b-q4",
+          "n_gpu_layers": 0
+        },
+        {
+          "engine": "llama_cpp_cpu",
+          "model_id": "qwen3-0.6b-q4",
+          "n_gpu_layers": 0
+        }
+      ]
+    },
+    "hardware_sha256": "5bac8a0a3ed2a94c90f3c24cc6b61349ac240f9cf79d92ec3a1155562d9aeda2",
+    "model": "qwen3.5:9b",
+    "model_bytes": 6603314868,
+    "model_digest": "c97eb11d70b1acdc88af01eef566c1fe4f7fbe93eb1afc06871132f293ff425a",
+    "package_version": "0.12.1",
+    "provider": "ollama",
+    "source_dirty": false,
+    "source_revision": "bd4912f97ac8a15694319ed0b5306f6b2bb16aac"
+  },
+  "controlled": {
+    "passed": 50,
+    "total": 50,
+    "counts": {
+      "correct_result": 36,
+      "expected_refusal": 14
+    },
+    "passed_gate": true
+  },
+  "real_runs": [
+    {
+      "run_id": "bcd1cd6d-1784-4aa8-9cdf-3c8a71395d0f",
+      "series_id": "9bea923c-f271-47df-badd-0a6a82329e2c",
+      "sequence_number": 1,
+      "passed": 50,
+      "total": 50,
+      "counts": {
+        "correct_result": 36,
+        "expected_refusal": 14
+      },
+      "passed_gate": true
+    },
+    {
+      "run_id": "bd771b04-b173-4d1e-a381-160b594ff5b0",
+      "series_id": "9bea923c-f271-47df-badd-0a6a82329e2c",
+      "sequence_number": 2,
+      "passed": 50,
+      "total": 50,
+      "counts": {
+        "correct_result": 36,
+        "expected_refusal": 14
+      },
+      "passed_gate": true
+    },
+    {
+      "run_id": "9e34b4eb-1258-4d63-b7d8-79d70b7141fc",
+      "series_id": "9bea923c-f271-47df-badd-0a6a82329e2c",
+      "sequence_number": 3,
+      "passed": 50,
+      "total": 50,
+      "counts": {
+        "correct_result": 36,
+        "expected_refusal": 14
+      },
+      "passed_gate": true
+    }
+  ],
+  "three_consecutive_development_runs_passed": true,
+  "public_distribution_qualified": false,
+  "native_controls_cache": "Unchanged native controls reuse a source- and log-hash verified receipt. HTTP workflows and real semantic responses are rerun.",
+  "observed_latency": {
+    "conversation": {
+      "samples": 13,
+      "median_ms": 1188,
+      "maximum_ms": 21844,
+      "measurement": "whole workflow wall-clock time for cases with a real model call; not token throughput"
+    },
+    "documents": {
+      "samples": 6,
+      "median_ms": 1078.5,
+      "maximum_ms": 1359,
+      "measurement": "whole workflow wall-clock time for cases with a real model call; not token throughput"
+    },
+    "organization": {
+      "samples": 3,
+      "median_ms": 1218,
+      "maximum_ms": 1266,
+      "measurement": "whole workflow wall-clock time for cases with a real model call; not token throughput"
+    }
+  },
+  "test_suites": {
+    "daemon": {
+      "passed": 757,
+      "ignored": 1
+    },
+    "store": {
+      "passed": 37
+    },
+    "router": {
+      "passed": 127,
+      "ignored": 1
+    },
+    "ui_unit": {
+      "passed": 87
+    },
+    "browser": {
+      "passed": 13
+    },
+    "native_ui": {
+      "passed": 5
+    },
+    "proof_contract": {
+      "passed": 13
+    }
+  },
+  "initial_secure_storage_failure": {
+    "failed_test": "an_encrypted_snapshot_is_rekeyed_without_the_original_device_identity",
+    "observed_error": "No matching entry found in secure storage",
+    "first_store_suite_passed": 36,
+    "first_store_suite_failed": 1,
+    "full_replay_passed": 37,
+    "targeted_replays_passed": 5,
+    "no_insecure_fallback_added": true,
+    "failure_log": "additional-receipts/initial-windows-key-storage-failure.log"
+  },
+  "archive": {
+    "path": "qualification-corpus-1.0.2.zip",
+    "sha256": "aed76d7c20b8ade62be82c9ec39305d0873027b2ec2a35265b582083196ed33c",
+    "bytes": 1646566
+  },
+  "remaining_gates": [
+    "merged_validated_prerequisites",
+    "published_candidate_cpu_only_windows",
+    "published_candidate_nvidia_cuda_windows",
+    "restore_other_windows_account",
+    "four_week_ten_person_pilot"
+  ]
+}

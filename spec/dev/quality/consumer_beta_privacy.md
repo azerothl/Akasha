@@ -85,9 +85,10 @@ restaurées sont désactivées et les tâches interrompues ne sont pas rejouées
 
 Sont inclus les bases d'historique et mémoire, notes, documents importés et les
 réglages de profil explicitement listés dans `profile_backup.rs`. Les réglages
-de services et autorisations distantes, secrets, modèles, caches et journaux
-sont exclus. La couverture des autres réglages et la sélection visuelle du
-profil restauré doivent être complétées au lot 5.
+de services sont nettoyés des identifiants ; autorisations distantes, secrets,
+modèles, caches et journaux sont exclus. Le lot 5 ajoute le choix visuel du
+profil restauré, la séparation des identifiants Windows entre profils et la
+neutralisation des rappels/connexions externes restaurés.
 
 La conversion d'une ancienne mémoire effectue un export SQLCipher vers une
 nouvelle base, préserve `user_version`, vérifie l'intégrité et ferme les
@@ -95,8 +96,10 @@ connexions avant renommage. Une sauvegarde chiffrée vérifiée précède cette
 conversion. Le marqueur est écrit avant la bascule pour que toute interruption
 verrouille la mémoire. Les fichiers de reprise ne sont pas supprimés en cas
 d'erreur ; le magasin sait reprendre les deux étapes de renommage interrompues.
-La reprise HTTP d'une conversion interrompue doit encore être reliée à son
-archive vérifiée ; la restauration isolée reste la récupération disponible.
+La reprise HTTP d'une conversion interrompue utilise l'identifiant de son
+archive, sa phrase et l'empreinte de la source vérifiée. L'interface propose
+cette reprise pour les archives conservées ; aucune base active n'est remplacée
+par une archive dont la source ne correspond pas.
 
 ## Vérification reproductible
 

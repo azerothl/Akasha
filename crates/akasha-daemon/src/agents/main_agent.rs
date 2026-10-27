@@ -612,6 +612,7 @@ User message:\n{}",
         let incognito_flag = incognito;
         let store_path_buf = store_path.to_path_buf();
         let preliminary_agent_str = preliminary_agent.to_string();
+        let has_source_workflow=document_request.is_some()||organization_request.is_some();
         tokio::spawn(async move {
             let store_path = store_path_buf.as_path();
             let message = message_owned.as_str();
@@ -622,7 +623,9 @@ User message:\n{}",
             // Run the LLM selector after the task is safely persisted.
             // Use the original (unprefixed) message so studio prefixes don't break recall detection.
             let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(original_message);
-            let selector_result = if let Some(agent) = studio_forced_spawn
+            let selector_result = if !has_source_workflow&&crate::consumer_workflow::runtime_version_request(original_message) {
+                SelectorRunResult{decision:Some(SelectorDecision{answer_mode:SelectorAnswerMode::Direct,task_type:Some("conversation".into()),target_agent:Some("ask".into()),reason:Some("runtime_metadata".into())}),enabled:false,timed_out:false,elapsed_ms:0}
+            } else if let Some(agent) = studio_forced_spawn
                 .as_ref()
                 .filter(|a| is_specialist_agent(a.as_str()))
                 .cloned()

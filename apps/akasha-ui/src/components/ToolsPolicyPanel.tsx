@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { InfoTip } from "./Tooltip";
 import { DeviceInterfaceListEditor } from "./DeviceInterfaceListEditor";
 
-const DAEMON_PORT = 3876;
+import { DAEMON_PORT } from "../daemonPort";
 
 export type ToolsPolicy = {
   allowed_read_paths: string[];

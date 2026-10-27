@@ -34,6 +34,8 @@ pub struct ManifestModel {
     pub filename: String,
     pub url: String,
     #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
     pub size_bytes_hint: u64,
     #[serde(default)]
     pub min_vram_mb: u32,
@@ -113,18 +115,35 @@ pub fn download_model(
     }
 
     set_progress_running(id, entry.size_bytes_hint);
+    if dest.is_file()
+        && entry.sha256.is_some()
+        && verify_model(&dest, entry.sha256.as_deref()).is_ok()
+    {
+        set_progress_done();
+        return Ok(dest);
+    }
 
-    let tmp = dest.with_extension("gguf.part");
-    let download_result = download_url(client, &entry.url, &tmp, entry.size_bytes_hint, |done, total| {
-        set_progress_bytes(done, total);
+    let staging = tempfile::NamedTempFile::new_in(dest.parent().ok_or("model parent missing")?)
+        .map_err(|error| error.to_string())?;
+    let tmp = staging.path().to_path_buf();
+    let download_result = download_url(
+        client,
+        &entry.url,
+        &tmp,
+        entry.size_bytes_hint,
+        |done, total| {
+            set_progress_bytes(done, total);
+        },
+    )
+    .and_then(|_| verify_model(&tmp, entry.sha256.as_deref()))
+    .and_then(|_| {
+        staging.persist(&dest).map(|_| ()).map_err(|error| {
+            format!("Le modèle vérifié n’a pas pu remplacer l’ancien fichier : {error}")
+        })
     });
 
     match download_result {
         Ok(()) => {
-            if dest.exists() {
-                fs::remove_file(&dest).map_err(|e| format!("remove old model: {e}"))?;
-            }
-            fs::rename(&tmp, &dest).map_err(|e| format!("rename model: {e}"))?;
             set_progress_done();
             Ok(dest)
         }
@@ -133,6 +152,47 @@ pub fn download_model(
             let _ = fs::remove_file(&tmp);
             Err(e)
         }
+    }
+}
+fn verify_model(path: &Path, expected: Option<&str>) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut magic = [0; 4];
+    file.read_exact(&mut magic)
+        .map_err(|error| error.to_string())?;
+    if &magic != b"GGUF" {
+        return Err("Le fichier téléchargé n’est pas un modèle GGUF".into());
+    }
+    let mut hash = Sha256::new();
+    hash.update(magic);
+    let mut buffer = [0; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    if let Some(expected) = expected {
+        if format!("{:x}", hash.finalize()) != expected {
+            return Err(
+                "Empreinte du modèle différente du catalogue ; ancien modèle conservé".into(),
+            );
+        }
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+    #[test]
+    fn html_or_wrong_model_bytes_are_not_activated() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"<html>error</html>").unwrap();
+        assert!(verify_model(file.path(), None).is_err());
+        std::fs::write(file.path(), b"GGUFsynthetic").unwrap();
+        assert!(verify_model(file.path(), Some(&"0".repeat(64))).is_err());
+        assert!(verify_model(file.path(), None).is_ok());
     }
 }
 
@@ -212,23 +272,23 @@ where
     if !resp.status().is_success() {
         return Err(format!("GET {url}: HTTP {}", resp.status()));
     }
-    let total = resp
-        .content_length()
-        .unwrap_or(size_hint)
-        .max(size_hint);
+    let total = resp.content_length().unwrap_or(size_hint).max(size_hint);
     let mut file = fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
     let mut buf = [0u8; 64 * 1024];
     let mut done: u64 = 0;
     loop {
-        let n = resp
-            .read(&mut buf)
-            .map_err(|e| format!("read body: {e}"))?;
+        let n = resp.read(&mut buf).map_err(|e| format!("read body: {e}"))?;
         if n == 0 {
             break;
         }
         file.write_all(&buf[..n])
             .map_err(|e| format!("write {}: {e}", dest.display()))?;
         done += n as u64;
+        if size_hint > 0 && done > size_hint.saturating_add(1024 * 1024) {
+            return Err(
+                "Téléchargement plus volumineux que le catalogue ; ancien modèle conservé".into(),
+            );
+        }
         on_progress(done, total);
         if total > 0 {
             let pct = (done as f64 / total as f64 * 100.0).min(100.0);
@@ -238,5 +298,6 @@ where
         }
     }
     eprintln!();
+    file.sync_all().map_err(|error| error.to_string())?;
     Ok(())
 }

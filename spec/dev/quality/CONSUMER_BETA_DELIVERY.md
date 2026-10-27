@@ -8,12 +8,12 @@ sauvegardes chiffrées. Les trois parcours réutilisent les tâches du daemon.
 
 | Lot | Livraison | Acceptation restante |
 |---|---|---|
-| 1 — Résultat attendu | Corpus versionné de 50 scénarios ; classification des preuves et gate à trois runs réels | Exécution complète sur les composants des lots suivants et les paquets distribués |
-| 2 — Consentement et protection | Socle : accords par tâche, transports protégés, SQLCipher, clé Windows, API de sauvegarde/restauration | Voir consumer_beta_privacy.md : validation du paquet, périmètre documentaire, reprise HTTP et second compte Windows |
-| 3 — Modèles et démarrage | Démarrage en trois étapes, première tâche vérifiée et préqualification synthétique réelle | Classement sur corpus complet, calibration et recours distant ; voir consumer_beta_models.md |
+| 1 — Résultat attendu | Corpus de 50 scénarios exécuté par consumer_beta_run.py ; preuves HTTP/natives et CI ; séries de trois passages | Qualification des paquets de publication, distincte des preuves de développement |
+| 2 — Consentement et protection | Accords par tâche/récurrence, transports protégés, SQLCipher, clé Windows, sauvegarde et migration récupérable | Validation du paquet et second compte Windows ; voir consumer_beta_privacy.md |
+| 3 — Modèles et démarrage | Trois étapes, première tâche vérifiée, mesures synthétiques, recours distant explicite, classement des preuves complètes par usage | Modèles et matériels réellement qualifiés à publier ; voir consumer_beta_models.md |
 | 4 — Documents et OCR | Lecture isolée PDFium/Tesseract, index v2, réponse sourcée, source et export ; essais natifs/HTTP/UI | Qualification du paquet, arrêts forcés et corpus complet ; voir consumer_beta_documents.md |
-| 5 — Organisation, veille, sauvegarde | Propositions confirmées, rappels persistés, veille consentie, correction mémoire, export/restauration et sélection du profil | Second compte Windows, paquet et corpus complet ; voir consumer_beta_organization.md |
-| 6 — Distribution et pilote | À livrer | Paquets CPU/NVIDIA ; dix personnes pendant quatre semaines |
+| 5 — Organisation, veille, sauvegarde | Propositions confirmées, rappels persistés, veille consentie, correction mémoire, restauration isolée et sélection du profil | Second compte Windows et paquets de publication ; voir consumer_beta_organization.md |
+| 6 — Distribution et pilote | Accueil Simple, démonstration PDF/photo/TXT, vidéo reproductible, paquets candidats CPU/NVIDIA, gate de diffusion et compteurs volontaires | Acceptation physique des paquets ; dix personnes pendant quatre semaines ; voir consumer_beta_distribution.md |
 
 Les PR #273 et #274 sont des prérequis. Tant qu'elles ne sont pas intégrées,
 les PR de la bêta sont empilées sur leur branche ; cela ne vaut pas validation
@@ -37,3 +37,7 @@ Le pilote exige un export volontaire de compteurs locaux sans contenus,
 chemins, noms de documents ou secrets. Aucun participant n'est contacté
 automatiquement. La présence du code ou d'un plan de pilote ne prouve ni une
 campagne exécutée ni ses résultats.
+
+Le rapport courant et les commandes de reproduction sont dans
+[consumer_beta_distribution.md](consumer_beta_distribution.md). Les observations
+de développement ne remplacent aucune case d'acceptation physique.
