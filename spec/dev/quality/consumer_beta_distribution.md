@@ -110,9 +110,12 @@ et l'[archive des reçus](evidence/consumer-beta-20261026/qualification-corpus-1
 identifient explicitement le binaire de développement éprouvé. Ils ne valident
 pas les paquets de publication.
 L'archive 1.0.1 reste historique et ne qualifie plus le contrat courant. Le
-binaire courant correspond à la révision propre `bd4912f` ; la vidéo et l'import
+binaire éprouvé dans ces archives correspond à la révision propre `bd4912f` ; la vidéo et l'import
 HTTP des trois preuves utilisent son empreinte. L'import refuse aussi une ligne
 incomplète malgré un indicateur global de réussite.
+Les correctifs de review postérieurs à cette révision exigent une nouvelle
+qualification réelle du candidat. Ces mesures historiques ne qualifient pas
+automatiquement un binaire recompilé depuis les PR corrigées.
 
 Sur le poste de développement (16 Go, RTX 4080 SUPER, Ollama 0.40.11 et
 Qwen3.5 9B), les médianes des parcours avec appel réel sont 1 188 ms pour
