@@ -217,7 +217,7 @@ impl TaskStore {
     /// Return task ids with expired leases.
     pub fn expired_leases(&self, now: DateTime<Utc>, limit: usize) -> anyhow::Result<Vec<Uuid>> {
         let mut stmt = self.conn.prepare(
-            "SELECT task_id FROM task_leases WHERE datetime(expires_at) <= datetime(?1) ORDER BY expires_at ASC LIMIT ?2",
+            "SELECT task_id FROM task_leases WHERE julianday(expires_at) <= julianday(?1) ORDER BY expires_at ASC LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![now.to_rfc3339(), limit as i64], |row| {
             let id: String = row.get(0)?;
@@ -577,7 +577,10 @@ mod tests {
         let id = Uuid::new_v4();
 
         store.upsert_lease(id, "orchestrator", 1).expect("upsert lease");
-        let now = Utc::now();
+        // Query recorded instants rather than assuming CI schedules this thread
+        // again before a one-second TTL has elapsed.
+        let heartbeat:String=store.conn.query_row("SELECT heartbeat_at FROM task_leases WHERE task_id=?1",[id.to_string()],|row|row.get(0)).unwrap();
+        let now=DateTime::parse_from_rfc3339(&heartbeat).unwrap().with_timezone(&Utc);
         let expired_now = store.expired_leases(now, 10).expect("expired now");
         assert!(expired_now.is_empty(), "fresh lease should not be expired immediately");
 
@@ -588,5 +591,15 @@ mod tests {
         store.clear_lease(id).expect("clear lease");
         let expired_after_clear = store.expired_leases(future, 10).expect("expired after clear");
         assert!(!expired_after_clear.contains(&id), "cleared lease must not be listed");
+    }
+    #[test]
+    fn leases_keep_fractional_seconds_at_the_expiration_boundary() {
+        let tmp=tempfile::NamedTempFile::new().unwrap();let store=TaskStore::open(tmp.path()).unwrap();let id=Uuid::new_v4();
+        store.upsert_lease(id,"orchestrator",1).unwrap();
+        let deadline=DateTime::parse_from_rfc3339("2030-01-01T12:00:00.900Z").unwrap().with_timezone(&Utc);
+        store.conn.execute("UPDATE task_leases SET expires_at=?1 WHERE task_id=?2",rusqlite::params![deadline.to_rfc3339(),id.to_string()]).unwrap();
+        assert!(!store.expired_leases(deadline-chrono::Duration::milliseconds(100),10).unwrap().contains(&id));
+        assert!(store.expired_leases(deadline,10).unwrap().contains(&id));
+        assert!(store.expired_leases(deadline+chrono::Duration::milliseconds(100),10).unwrap().contains(&id));
     }
 }
