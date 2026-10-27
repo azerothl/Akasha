@@ -843,6 +843,9 @@ User message:\n{}",
     fn resume_task_admitted(&self,store_path:&Path,task_id:Uuid)->anyhow::Result<()> {
         let store = TaskStore::open(store_path)?;
         let task = store.get(task_id)?.ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        if task.assigned_agent == "document_import" {
+            anyhow::bail!("document_reindex_required: cet import doit être relancé depuis Documents avec Réindexer ; une reprise de conversation ne peut pas lire le document");
+        }
         let studio=store.lineage_root_studio_project_id(task_id)?.is_some();
         let resumable = matches!(
             task.status,
@@ -923,6 +926,18 @@ mod tests {
         is_external_info_request, normalize_task_type, parse_selector_decision,
         strip_thinking_tokens, SelectorAnswerMode,
     };
+
+    #[tokio::test]
+    async fn interrupted_document_import_cannot_enter_the_conversation_queue() {
+        let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let id=uuid::Uuid::new_v4();let now=chrono::Utc::now();
+        let store=akasha_store::TaskStore::open(&db).unwrap();
+        store.insert(&akasha_store::Task{id,parent_task_id:None,status:akasha_store::TaskStatus::Interrupted,assigned_agent:"document_import".into(),created_at:now,updated_at:now,initial_message:Some("Lecture documentaire locale".into()),studio_project_id:None}).unwrap();
+        let (bus,_)=crate::agents::new_event_bus();let (tx,mut rx)=tokio::sync::mpsc::channel(1);
+        let agent=super::MainAgent::new(bus,super::OrchestratorSender::new(tx.clone(),tx.clone()),std::sync::Arc::new(akasha_llm::LLMRouter::new(serde_json::from_str("{}").unwrap())),crate::studio::new_studio_disk_root_registry()).with_direct_conversation_tx(tx);
+        assert!(agent.resume_task(&db,id).unwrap_err().to_string().starts_with("document_reindex_required"));
+        assert_eq!(store.get(id).unwrap().unwrap().status,akasha_store::TaskStatus::Interrupted);
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn initial_task_message_preserves_raw_request_before_truncation() {
