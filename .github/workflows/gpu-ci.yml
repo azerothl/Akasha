@@ -79,7 +79,7 @@ jobs:
       - name: Prepare data dir and GGUF
         shell: pwsh
         run: |
-          $ReleaseDir = "target\x86_64-pc-windows-msvc\release"
+          $ReleaseDir = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
           New-Item -ItemType Directory -Force -Path $env:AKASHA_DATA_DIR | Out-Null
           & "$ReleaseDir\akasha.exe" init --defaults
           if ($LASTEXITCODE -ne 0) { throw "Akasha data initialization failed with exit code $LASTEXITCODE" }
@@ -100,7 +100,7 @@ jobs:
             $cudaFallback = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
             if (Test-Path (Join-Path $cudaFallback "bin\nvcc.exe")) { $env:CUDA_PATH = $cudaFallback }
           }
-          $ReleaseDir = "target\x86_64-pc-windows-msvc\release"
+          $ReleaseDir = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
           $evidenceDir = $env:AKASHA_DATA_DIR
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           $daemonOut = Join-Path $evidenceDir "daemon.stdout.log"

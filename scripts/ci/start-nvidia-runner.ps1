@@ -31,7 +31,7 @@ if (-not $Worker) {
     if (-not (Test-Path (Join-Path $application 'bin/Runner.Listener.exe'))) {
         Expand-Archive -LiteralPath $archive -DestinationPath $application
     }
-    foreach ($name in @('assert-nvidia-main-job.ps1', 'nvidia-main-policy.ps1')) {
+    foreach ($name in @('assert-nvidia-main-job.ps1', 'nvidia-main-policy.ps1', 'reset-nvidia-runner-state.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $hooks $name) -Force
     }
     if ([IO.Path]::GetFullPath($PSCommandPath) -ne $manager) { Copy-Item -LiteralPath $PSCommandPath -Destination $manager -Force }
@@ -50,8 +50,21 @@ if (-not $Worker) {
 $mutex = [Threading.Mutex]::new($false, 'Local\AkashaNvidiaRunner')
 if (-not $mutex.WaitOne(0)) { Write-Host 'The NVIDIA runner manager is already active.'; exit 0 }
 try {
+    . (Join-Path $hooks 'reset-nvidia-runner-state.ps1')
     while (-not (Test-Path (Join-Path $Root 'stop'))) {
         try {
+            $registered = gh api repos/azerothl/Akasha/actions/runners | ConvertFrom-Json
+            if ($LASTEXITCODE) { throw 'Cannot inspect existing runners.' }
+            foreach ($old in @($registered.runners | Where-Object { $_.name -eq 'akasha-nvidia-windows' })) {
+                if ($old.status -ne 'offline' -or $old.busy -or 'akasha-nvidia-main' -notin $old.labels.name) {
+                    throw 'An existing NVIDIA runner is still active; it will not be replaced.'
+                }
+                gh api --method DELETE "repos/azerothl/Akasha/actions/runners/$($old.id)" | Out-Null
+                if ($LASTEXITCODE) { throw 'Cannot remove the offline runner registration.' }
+            }
+            $active = @(Get-CimInstance Win32_Process -Filter "Name='Runner.Listener.exe'" | Where-Object { $_.ExecutablePath -eq (Join-Path $application 'bin/Runner.Listener.exe') })
+            if ($active.Count) { throw 'A listener is still running; its configuration will not be changed.' }
+            Reset-NvidiaRunnerState -Application $application
             # The administrative token stays in this manager; it is never inherited by a job.
             $request = @{ name = 'akasha-nvidia-windows'; runner_group_id = 1; labels = @('self-hosted', 'Windows', 'X64', 'akasha-nvidia-main'); work_folder = (Join-Path $Root 'work') } | ConvertTo-Json -Compress
             $configuration = $request | gh api --method POST repos/azerothl/Akasha/actions/runners/generate-jitconfig --input - | ConvertFrom-Json
@@ -70,6 +83,7 @@ try {
             }
             $start.Environment['ACTIONS_RUNNER_HOOK_JOB_STARTED'] = Join-Path $hooks 'assert-nvidia-main-job.ps1'
             $start.Environment['CARGO_HOME'] = Join-Path $Root 'cargo'
+            $start.Environment['CARGO_TARGET_DIR'] = Join-Path $Root 'target'
             $start.Environment['RUSTUP_HOME'] = Join-Path $Root 'rustup'
             $start.Environment['LOCALAPPDATA'] = Join-Path $Root 'state'
             $start.Environment['APPDATA'] = Join-Path $Root 'state/roaming'
@@ -78,7 +92,7 @@ try {
             $start.Environment['TEMP'] = Join-Path $Root 'temp'
             $start.Environment['TMP'] = Join-Path $Root 'temp'
             $start.Environment['GH_CONFIG_DIR'] = Join-Path $Root 'state/gh'
-            $start.Environment['GIT_CONFIG_GLOBAL'] = 'NUL'
+            $start.Environment['GIT_CONFIG_GLOBAL'] = Join-Path $Root 'profile/gitconfig'
             $start.Environment['CARGO_BUILD_JOBS'] = '4'
             $start.Environment['CMAKE_BUILD_PARALLEL_LEVEL'] = '4'
             $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

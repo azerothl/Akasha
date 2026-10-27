@@ -81,10 +81,23 @@ class NvidiaRunnerTests(unittest.TestCase):
             self.assertEqual(values['CMAKE_CUDA_ARCHITECTURES'], ['89', '89'])
 
     def test_powershell_sources_parse_without_errors(self):
-        for name in ('prepare-gpu-ci.ps1', 'nvidia-main-policy.ps1', 'assert-nvidia-main-job.ps1', 'start-nvidia-runner.ps1'):
+        for name in ('prepare-gpu-ci.ps1', 'nvidia-main-policy.ps1', 'assert-nvidia-main-job.ps1', 'start-nvidia-runner.ps1', 'reset-nvidia-runner-state.ps1'):
             with self.subTest(name=name):
                 result = powershell(f"$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile({quote(ROOT / 'scripts/ci' / name)}, [ref]$tokens, [ref]$errors) | Out-Null; if ($errors.Count) {{ $errors | Out-String | Write-Error; exit 1 }}")
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_jit_replacement_clears_only_its_hidden_registration_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ('.runner', '.credentials', '.credentials_rsaparams', 'work.txt'):
+                (root / name).write_text('synthetic fixture')
+            source = f"$ErrorActionPreference='Stop'; . {quote(ROOT / 'scripts/ci/reset-nvidia-runner-state.ps1')}; "
+            if os.name == 'nt':
+                source += f"(Get-Item -Force -LiteralPath {quote(root / '.runner')}).Attributes = [IO.FileAttributes]::Hidden; "
+            result = powershell(source + f"Reset-NvidiaRunnerState -Application {quote(root)}")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(sorted(item.name for item in root.iterdir()), ['work.txt'])
+            self.assertEqual((root / 'work.txt').read_text(), 'synthetic fixture')
 
 
 if __name__ == '__main__':

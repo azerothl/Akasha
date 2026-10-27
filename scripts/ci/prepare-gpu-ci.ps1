@@ -12,7 +12,8 @@ if (-not $env:CUDA_PATH -or -not (Test-Path (Join-Path $env:CUDA_PATH 'bin/nvcc.
 }
 $capability = (& nvidia-smi --query-gpu=compute_cap --format=csv,noheader | Select-Object -First 1).Trim()
 if ($LASTEXITCODE -or $capability -notmatch '^\d+\.\d+$') { throw 'Cannot identify the NVIDIA compute capability.' }
-@("AKASHA_DATA_DIR=$profile", "AKASHA_PORT=$port", "AKASHA_GPU_RUNNER_PROFILE=$profile",
+if (-not $env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR = Join-Path $root 'akasha-cuda-target' }
+@("AKASHA_DATA_DIR=$profile", "AKASHA_PORT=$port", "AKASHA_GPU_RUNNER_PROFILE=$profile", "CARGO_TARGET_DIR=$env:CARGO_TARGET_DIR",
   "CMAKE_CUDA_ARCHITECTURES=$($capability.Replace('.', ''))") | Add-Content -LiteralPath $OutputFile -Encoding utf8
 @((Join-Path $env:CUDA_PATH 'bin'), (Join-Path $env:CUDA_PATH 'bin/x64')) |
     Where-Object { Test-Path -LiteralPath $_ } | Add-Content -LiteralPath $env:GITHUB_PATH -Encoding utf8
