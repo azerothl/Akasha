@@ -2169,6 +2169,7 @@ function App() {
   const [wakeupFormMinutes, setWakeupFormMinutes] = useState("60");
   const [wakeupFormMessage, setWakeupFormMessage] = useState("");
   const [wakeupSaving, setWakeupSaving] = useState(false);
+  const [wakeupError, setWakeupError] = useState("");
   const calendarEventLabel = (ev: { label?: string; task_id?: string; type?: string }) => {
     if (ev.label && ev.label.trim()) return ev.label;
     if (ev.type === "external") return ev.label?.trim() || (locale === "en" ? "External event" : "Événement externe");
@@ -4159,14 +4160,14 @@ function App() {
 
   const fetchWakeups = useCallback(async () => {
     try {
-      const res = await fetch(e2eDaemonHttpUrl("/api/wakeups"));
+      const res = await fetchSystemEndpoint("/api/wakeups");
       if (!res.ok) throw new Error(String(res.status));
-      const data = (await res.json()) as { wakeups?: WakeupRow[] };
+      const data = JSON.parse(res.text) as { wakeups?: WakeupRow[] };
       setWakeups(data.wakeups ?? []);
     } catch {
       setWakeups([]);
     }
-  }, []);
+  }, [fetchSystemEndpoint]);
 
   const fetchCalendarGridEvents = useCallback(async () => {
     const d = calendarGridDate;
@@ -8647,22 +8648,22 @@ function App() {
                     void (async () => {
                       const minutes = parseInt(wakeupFormMinutes, 10);
                       if (!sessionId || !wakeupFormMessage.trim() || !Number.isFinite(minutes) || minutes <= 0) return;
+                      const fire_at = new Date(Date.now() + minutes * 60_000).toISOString();
+                      if (!window.confirm(`${locale === "en" ? "Create this reminder" : "Créer ce rappel"} : ${new Date(fire_at).toLocaleString(locale)}\n${wakeupFormMessage.trim()} ?`)) return;
+                      setWakeupError("");
                       setWakeupSaving(true);
                       try {
-                        const fire_at = new Date(Date.now() + minutes * 60_000).toISOString();
-                        const res = await fetch(e2eDaemonHttpUrl("/api/wakeups"), {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
+                        const res = await requestSystemEndpoint("POST", "/api/wakeups", JSON.stringify({
                             session_id: sessionId,
                             message: wakeupFormMessage.trim(),
                             fire_at,
-                          }),
-                        });
-                        if (res.ok) {
-                          setWakeupFormMessage("");
-                          await fetchWakeups();
-                        }
+                            confirmed: true,
+                          }));
+                        if (!res.ok) throw new Error(res.text || `HTTP ${res.status}`);
+                        setWakeupFormMessage("");
+                        await fetchWakeups();
+                      } catch (error) {
+                        setWakeupError(String(error));
                       } finally {
                         setWakeupSaving(false);
                       }
@@ -8694,6 +8695,7 @@ function App() {
                     {wakeupSaving ? "…" : "Programmer"}
                   </button>
                 </form>
+                {wakeupError && <p role="alert">{wakeupError}</p>}
                 {!sessionId && (
                   <p className="muted">Ouvrez ou démarrez une session de chat pour créer un rappel.</p>
                 )}
@@ -8715,10 +8717,11 @@ function App() {
                             onClick={() => {
                               void (async () => {
                                 try {
-                                  await fetch(e2eDaemonHttpUrl(`/api/wakeups/${encodeURIComponent(w.id)}`), { method: "DELETE" });
+                                  const res=await requestSystemEndpoint("DELETE",`/api/wakeups/${encodeURIComponent(w.id)}`);
+                                  if(!res.ok)throw new Error(res.text || `HTTP ${res.status}`);
                                   await fetchWakeups();
-                                } catch {
-                                  /* ignore */
+                                } catch (error) {
+                                  setWakeupError(String(error));
                                 }
                               })();
                             }}
