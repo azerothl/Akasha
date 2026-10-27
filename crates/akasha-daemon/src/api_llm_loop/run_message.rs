@@ -5057,7 +5057,7 @@ pub(crate) async fn run_message_via_llm(
                 && crate::chat_contract::requires_post_write_read(clean_message) && !chat_readback.verified;
             if missing_source || missing_read {
                 let missing = if missing_source { "Open the actual result source with web_fetch and cite its content; search snippets alone do not fulfill the user's explicit request to open the source." }
-                    else { "Read the file you actually wrote with read_file, then answer from its observed contents. The user's requested post-write read is still missing." };
+                    else { "Use read_file for the subsequent read requested by the user: respect its explicit target, or the changed file when the user refers back to it. Answer from the observed contents. This requested read is still missing." };
                 if chat_completion_repairs < 2 {
                     chat_completion_repairs += 1;
                     current_prompt = format!("{delivered_prompt}\n[Explicit requested check is still missing]\n{missing}\nDo not repeat the completed operations.\n");
