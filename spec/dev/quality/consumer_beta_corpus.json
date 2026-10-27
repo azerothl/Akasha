@@ -1,0 +1,527 @@
+{
+  "version": "1.0.0",
+  "cases": [
+    {
+      "id": "conversation.fact",
+      "category": "conversation",
+      "description": "Répondre à une question factuelle",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "answer"
+      ]
+    },
+    {
+      "id": "conversation.followup",
+      "category": "conversation",
+      "description": "Comprendre une relance dans la session",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "history"
+      ]
+    },
+    {
+      "id": "conversation.version",
+      "category": "conversation",
+      "description": "Donner la version du daemon utilisé",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "runtime_version"
+      ]
+    },
+    {
+      "id": "conversation.ask_readonly",
+      "category": "conversation",
+      "description": "Refuser une écriture en mode Question",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "privacy",
+        "no_mutation"
+      ]
+    },
+    {
+      "id": "conversation.malformed_repair",
+      "category": "conversation",
+      "description": "Réparer un appel mal formé",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "receipt"
+      ]
+    },
+    {
+      "id": "conversation.malformed_exhausted",
+      "category": "conversation",
+      "description": "Signaler un protocole irréparable",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "bounded_retries"
+      ]
+    },
+    {
+      "id": "conversation.cancel",
+      "category": "conversation",
+      "description": "Préserver une annulation",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "terminal_status"
+      ]
+    },
+    {
+      "id": "conversation.child_failed",
+      "category": "conversation",
+      "description": "Préserver un échec de sous-agent",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "lineage"
+      ]
+    },
+    {
+      "id": "conversation.dependency_failed",
+      "category": "conversation",
+      "description": "Bloquer une étape dépendante",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "no_dependent_dispatch"
+      ]
+    },
+    {
+      "id": "conversation.syntax_example",
+      "category": "conversation",
+      "description": "Expliquer sans exécuter un exemple",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "no_mutation"
+      ]
+    },
+    {
+      "id": "documents.text",
+      "category": "documents",
+      "description": "Lire un document texte",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "grounding"
+      ]
+    },
+    {
+      "id": "documents.unicode",
+      "category": "documents",
+      "description": "Conserver accents et caractères Unicode",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "exact_bytes"
+      ]
+    },
+    {
+      "id": "documents.pdf_text",
+      "category": "documents",
+      "description": "Lire un PDF texte",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "page_citation"
+      ]
+    },
+    {
+      "id": "documents.pdf_scan",
+      "category": "documents",
+      "description": "Lire un PDF scanné",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "ocr",
+        "page_citation"
+      ]
+    },
+    {
+      "id": "documents.pdf_mixed",
+      "category": "documents",
+      "description": "Lire un PDF mixte page par page",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "ocr",
+        "page_citation"
+      ]
+    },
+    {
+      "id": "documents.photo_jpg",
+      "category": "documents",
+      "description": "Lire une photo JPG",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "ocr",
+        "source_citation"
+      ]
+    },
+    {
+      "id": "documents.photo_png",
+      "category": "documents",
+      "description": "Lire une image PNG",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "ocr",
+        "source_citation"
+      ]
+    },
+    {
+      "id": "documents.rotation",
+      "category": "documents",
+      "description": "Lire une image tournée",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "ocr"
+      ]
+    },
+    {
+      "id": "documents.unreadable",
+      "category": "documents",
+      "description": "Refuser un fichier illisible",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "explicit_error"
+      ]
+    },
+    {
+      "id": "documents.missing_fact",
+      "category": "documents",
+      "description": "Signaler une information absente",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "grounding"
+      ]
+    },
+    {
+      "id": "documents.size_limit",
+      "category": "documents",
+      "description": "Refuser plus de 25 Mio",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "limit"
+      ]
+    },
+    {
+      "id": "documents.page_limit",
+      "category": "documents",
+      "description": "Refuser plus de 100 pages",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "limit"
+      ]
+    },
+    {
+      "id": "documents.batch_limit",
+      "category": "documents",
+      "description": "Refuser plus de 20 fichiers",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "limit"
+      ]
+    },
+    {
+      "id": "documents.injection",
+      "category": "documents",
+      "description": "Traiter les instructions du document comme données",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "privacy",
+        "no_mutation"
+      ]
+    },
+    {
+      "id": "documents.restart",
+      "category": "documents",
+      "description": "Retrouver les sources après redémarrage",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "grounding",
+        "persisted"
+      ]
+    },
+    {
+      "id": "organization.note",
+      "category": "organization",
+      "description": "Enregistrer et retrouver une note",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "persisted"
+      ]
+    },
+    {
+      "id": "organization.preview",
+      "category": "organization",
+      "description": "Proposer les actions sans les créer",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "no_mutation"
+      ]
+    },
+    {
+      "id": "organization.ambiguous",
+      "category": "organization",
+      "description": "Faire préciser une date ambiguë",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "clarification",
+        "no_mutation"
+      ]
+    },
+    {
+      "id": "organization.confirm",
+      "category": "organization",
+      "description": "Créer un rappel confirmé",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "persisted"
+      ]
+    },
+    {
+      "id": "organization.timezone",
+      "category": "organization",
+      "description": "Conserver le fuseau du rappel",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "timezone"
+      ]
+    },
+    {
+      "id": "organization.duplicate",
+      "category": "organization",
+      "description": "Ne pas dupliquer une confirmation",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "idempotence"
+      ]
+    },
+    {
+      "id": "organization.cancel",
+      "category": "organization",
+      "description": "Annuler un rappel",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "persisted"
+      ]
+    },
+    {
+      "id": "organization.restart",
+      "category": "organization",
+      "description": "Retrouver un rappel après redémarrage",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "persisted"
+      ]
+    },
+    {
+      "id": "organization.missed",
+      "category": "organization",
+      "description": "Reprendre une seule échéance manquée",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "single_catchup"
+      ]
+    },
+    {
+      "id": "organization.memory_edit",
+      "category": "organization",
+      "description": "Corriger un souvenir et retrouver sa provenance",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "persisted",
+        "provenance"
+      ]
+    },
+    {
+      "id": "watch.sources",
+      "category": "watch",
+      "description": "Produire une veille sourcée",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "source_citation"
+      ]
+    },
+    {
+      "id": "watch.novelty",
+      "category": "watch",
+      "description": "Distinguer les nouveautés des éléments vus",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "persisted",
+        "novelty"
+      ]
+    },
+    {
+      "id": "watch.unavailable",
+      "category": "watch",
+      "description": "Signaler les sources indisponibles",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "explicit_error"
+      ]
+    },
+    {
+      "id": "watch.revoke",
+      "category": "watch",
+      "description": "Révoquer une autorisation récurrente",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "privacy",
+        "no_remote_request"
+      ]
+    },
+    {
+      "id": "watch.missed",
+      "category": "watch",
+      "description": "Reprendre une seule veille après arrêt",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "single_catchup"
+      ]
+    },
+    {
+      "id": "protection.local_default",
+      "category": "protection",
+      "description": "Bloquer le cloud par défaut",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "privacy",
+        "no_remote_request"
+      ]
+    },
+    {
+      "id": "protection.grant",
+      "category": "protection",
+      "description": "Autoriser le destinataire et les données choisis",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "privacy",
+        "recipient"
+      ]
+    },
+    {
+      "id": "protection.inherit",
+      "category": "protection",
+      "description": "Transmettre la portée autorisée aux sous-agents",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "privacy",
+        "recipient"
+      ]
+    },
+    {
+      "id": "protection.changed_recipient",
+      "category": "protection",
+      "description": "Bloquer un destinataire différent",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "privacy",
+        "no_remote_request"
+      ]
+    },
+    {
+      "id": "protection.encrypted_memory",
+      "category": "protection",
+      "description": "Lire la mémoire uniquement avec sa clé",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "integrity",
+        "encryption"
+      ]
+    },
+    {
+      "id": "protection.missing_key",
+      "category": "protection",
+      "description": "Afficher mémoire verrouillée sans réinitialisation",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "integrity",
+        "no_mutation"
+      ]
+    },
+    {
+      "id": "protection.migration",
+      "category": "protection",
+      "description": "Migrer une mémoire existante sans perte",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "integrity",
+        "persisted"
+      ]
+    },
+    {
+      "id": "protection.wrong_password",
+      "category": "protection",
+      "description": "Refuser un mot de passe de sauvegarde incorrect",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "integrity",
+        "no_mutation"
+      ]
+    },
+    {
+      "id": "protection.tampered_archive",
+      "category": "protection",
+      "description": "Refuser une sauvegarde altérée",
+      "expect": "refusal",
+      "checks": [
+        "no_false_success",
+        "integrity",
+        "no_mutation"
+      ]
+    },
+    {
+      "id": "protection.restore",
+      "category": "protection",
+      "description": "Restaurer sur un autre profil sans secrets de services",
+      "expect": "result",
+      "checks": [
+        "no_false_success",
+        "integrity",
+        "persisted",
+        "no_credentials"
+      ]
+    }
+  ]
+}
