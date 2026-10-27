@@ -5366,7 +5366,8 @@ pub(crate) async fn run_message_via_llm(
             let sem = extract_semaphore();
             let data_dir_for_extract = data_dir.to_path_buf();
             let agent_profile_cache_for_extract = agent_profile_cache.clone();
-            tokio::spawn(async move {
+            let extraction_scope = akasha_core::privacy::current();
+            tokio::spawn(akasha_core::privacy::scoped_optional(extraction_scope, async move {
                 let _permit = match sem.try_acquire() {
                     Ok(p) => p,
                     Err(_) => {
@@ -5508,7 +5509,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                         Err(e) => tracing::debug!(error = %e, "Promote task join error"),
                     }
                 }
-            });
+            }));
         }
     }
 
