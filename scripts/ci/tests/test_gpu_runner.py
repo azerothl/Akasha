@@ -5,6 +5,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -81,7 +82,7 @@ class NvidiaRunnerTests(unittest.TestCase):
             self.assertEqual(values['CMAKE_CUDA_ARCHITECTURES'], ['89', '89'])
 
     def test_powershell_sources_parse_without_errors(self):
-        for name in ('prepare-gpu-ci.ps1', 'nvidia-main-policy.ps1', 'assert-nvidia-main-job.ps1', 'start-nvidia-runner.ps1', 'reset-nvidia-runner-state.ps1', 'nvidia-worker-path.ps1', 'nvidia-runner-access.ps1'):
+        for name in ('prepare-gpu-ci.ps1', 'nvidia-main-policy.ps1', 'assert-nvidia-main-job.ps1', 'start-nvidia-runner.ps1', 'reset-nvidia-runner-state.ps1', 'nvidia-worker-path.ps1', 'nvidia-runner-access.ps1', 'gpu-daemon-ownership.ps1'):
             with self.subTest(name=name):
                 result = powershell(f"$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile({quote(ROOT / 'scripts/ci' / name)}, [ref]$tokens, [ref]$errors) | Out-Null; if ($errors.Count) {{ $errors | Out-String | Write-Error; exit 1 }}")
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -125,6 +126,36 @@ class NvidiaRunnerTests(unittest.TestCase):
             result = powershell(source)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((Path(folder) / 'keep.txt').read_text(), 'unchanged fixture')
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows TCP ownership regression')
+    def test_connected_port_requires_the_actual_server_pid(self):
+        with socket.socket() as server:
+            server.bind(('127.0.0.1', 0))
+            server.listen()
+            server.settimeout(.2)
+            stopping = threading.Event()
+            clients = []
+            def accept():
+                while not stopping.is_set():
+                    try:
+                        client, _ = server.accept()
+                        clients.append(client)
+                    except socket.timeout:
+                        continue
+            thread = threading.Thread(target=accept, daemon=True)
+            thread.start()
+            try:
+                for process, expected in ((os.getpid(), '$true'), (os.getpid() + 1, '$false')):
+                    source = (f"$ErrorActionPreference='Stop'; . {quote(ROOT / 'scripts/ci/gpu-daemon-ownership.ps1')}; "
+                              f"$owned=Test-GpuDaemonPortOwnership -Port {server.getsockname()[1]} -ExpectedProcessId {process}; "
+                              f"if ($owned -ne {expected}) {{ throw 'Wrong socket ownership result' }}")
+                    result = powershell(source)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            finally:
+                stopping.set()
+                thread.join(timeout=2)
+                for client in clients:
+                    client.close()
 
 
 if __name__ == '__main__':
