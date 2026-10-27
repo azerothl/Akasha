@@ -18,6 +18,8 @@ pub fn validate(reports: &[Value], current: &Value) -> Result<Value> {
         "actions".to_string(),
     ]);
     let mut samples = Vec::new();
+    let first_sequence=reports[0]["sequence_number"].as_u64().filter(|value|*value>0)
+        .ok_or_else(||anyhow::anyhow!("Numéro de passage invalide"))?;
     for (index, report) in reports.iter().enumerate() {
         ensure!(report["schema_version"] == 1 && report["corpus_version"] == corpus["version"],
             "Le contrat du rapport est incomplet ou périmé");
@@ -26,7 +28,7 @@ pub fn validate(reports: &[Value], current: &Value) -> Result<Value> {
                 .as_str()
                 .is_some_and(|value| !value.is_empty())
                 && report["series_id"] == reports[0]["series_id"]
-                && report["sequence_number"] == index + 1
+                && report["sequence_number"].as_u64() == first_sequence.checked_add(index as u64)
                 && (index == 0 || report["previous_run_id"] == reports[index - 1]["run_id"]),
             "Les trois passages doivent se suivre dans la même série"
         );
@@ -89,6 +91,10 @@ pub fn validate(reports: &[Value], current: &Value) -> Result<Value> {
                 .iter()
                 .all(|name| checks[name.as_str().unwrap()] == true)
                 && row["evidence"]["observed"] == case["expect"];
+            if case["category"] == "protection" {
+                ensure!(case["checks"].as_array().unwrap().iter().all(|name|checks[name.as_str().unwrap()]==true),
+                    "Échec d’un contrôle de protection : qualification refusée");
+            }
             if row["evidence"]["model_executed"] == true {
                 let elapsed = row["evidence"]["duration_ms"]
                     .as_u64()
@@ -185,6 +191,30 @@ mod tests {
         assert!(validate(&missing_receipt,&current).is_err());
         let (_,mut stale)=reports();stale[0]["corpus_version"]="obsolete".into();
         assert!(validate(&stale,&current).is_err());
+    }
+    #[test]
+    fn every_protection_check_blocks_even_with_a_forged_noncritical_summary() {
+        let corpus:Value=serde_json::from_str(include_str!("../../../spec/dev/quality/consumer_beta_corpus.json")).unwrap();
+        for case in corpus["cases"].as_array().unwrap().iter().filter(|case|case["category"]=="protection") {
+            for check in case["checks"].as_array().unwrap() {
+                let (current,mut values)=reports();
+                let row=values[0]["cases"].as_array_mut().unwrap().iter_mut().find(|row|row["id"]==case["id"]).unwrap();
+                row["evidence"]["checks"][check.as_str().unwrap()]=false.into();
+                assert_eq!(values[0]["critical_failure"],false);
+                assert!(validate(&values,&current).is_err(),"{} {}",case["id"],check);
+            }
+        }
+    }
+    #[test]
+    fn consecutive_window_may_start_after_an_earlier_failed_run() {
+        let (current,mut values)=reports();
+        for (index,row) in values.iter_mut().enumerate() {row["sequence_number"]=(index+2).into();}
+        assert!(validate(&values,&current).is_ok());
+        for start in [json!(0),json!(-1),json!(true),json!("2"),json!(2.0),json!(u64::MAX)] {
+            let mut broken=values.clone();broken[0]["sequence_number"]=start;
+            assert!(validate(&broken,&current).is_err());
+        }
+        values[1]["previous_run_id"]="unrelated".into();assert!(validate(&values,&current).is_err());
     }
 }
 pub async fn capabilities(data: &Path, router: &akasha_llm::LLMRouter) -> Value {
