@@ -1,4 +1,4 @@
-name: Windows consumer beta candidate
+name: Windows beta source tree diagnostic
 on:
   workflow_dispatch:
 permissions:
@@ -6,7 +6,46 @@ permissions:
 env:
   CARGO_INCREMENTAL: '0'
 jobs:
+  provenance:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ec0e47ba536e62edf469fb6e9475b242b9ceadc9
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/akasha-ui/package-lock.json
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/cache/restore@v4
+        with:
+          key: akasha-consumer-deps-v1-windows-2022-false-05e1ccf3b42827ea6e9ac4426565e69903c9ea442eda8b64786b544f72f72bee-Windows_NT-x64-6cc906dc-bf13f223
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            apps/akasha-ui/src-tauri/target
+      - name: Check clean starting tree
+        run: git status --porcelain=v1 --untracked-files=all
+      - name: Build desktop and retain exact source changes
+        working-directory: apps/akasha-ui
+        shell: pwsh
+        env:
+          VITE_AKASHA_DAEMON_PORT: '3877'
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run tauri build -- --no-bundle --config src-tauri/tauri.consumer.conf.json
+          $buildExit=$LASTEXITCODE
+          git status --porcelain=v1 --untracked-files=all
+          git diff --stat
+          git diff -- src-tauri
+          exit $buildExit
   candidate:
+    if: false
     runs-on: windows-2022
     timeout-minutes: 120
     strategy:
