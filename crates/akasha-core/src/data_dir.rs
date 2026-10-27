@@ -40,7 +40,10 @@ pub fn resolve_bootstrap_data_dir(
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+            // Optional legacy settings must not prevent doctor/recovery from
+            // opening the existing default profile. Explicit overrides and
+            // readable redirect values still receive strict path validation.
+            Err(error) => tracing::warn!(file=name,%error,"Ignoring unreadable optional bootstrap environment file"),
         }
     }
     match legacy {
@@ -77,6 +80,21 @@ mod tests {
     #[test]fn restored_selection_is_resolved_before_environment_and_does_not_import_old_credentials(){
         let directory=tempfile::tempdir().unwrap();let root=directory.path().join("original");std::fs::create_dir(&root).unwrap();let target=directory.path().join(format!("akasha-restored-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&target).unwrap();std::fs::write(target.join("akasha.db"),b"schema verified by daemon").unwrap();std::fs::write(root.join("consumer_active_profile.json"),serde_json::to_vec(&serde_json::json!({"schema_version":1,"path":target})).unwrap()).unwrap();std::fs::write(root.join("connectors.env"),"OPENAI_API_KEY=PRIVATE_OLD_KEY\nAKASHA_PORT=4001\n").unwrap();
         assert_eq!(resolve_active_profile(&root).unwrap(),std::fs::canonicalize(&target).unwrap());let removed=restored_environment_keys(&root,&root,&["TAVILY_API_KEY".into(),"PATH".into()]);assert!(removed.contains("OPENAI_API_KEY"));assert!(removed.contains("TAVILY_API_KEY"));assert!(!removed.contains("AKASHA_PORT"));assert!(!removed.contains("PATH"));assert!(!target.join("connectors.env").exists());
+    }
+    #[test]
+    fn unreadable_optional_settings_do_not_block_default_profile_or_other_redirects() {
+        let home=tempfile::tempdir().unwrap();let root=home.path().join("akasha");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("connectors.env"),[0xff,0xfe,0x41,0]).unwrap();
+        assert_eq!(resolve_bootstrap_data_dir(None,Some(home.path())).unwrap(),root);
+        let custom=home.path().join("custom");
+        std::fs::write(root.join("akasha.env"),format!("AKASHA_DATA_DIR={}\n",custom.display())).unwrap();
+        assert_eq!(resolve_bootstrap_data_dir(None,Some(home.path())).unwrap(),custom);
+        std::fs::remove_file(root.join("connectors.env")).unwrap();
+        std::fs::create_dir(root.join("connectors.env")).unwrap();
+        assert_eq!(resolve_bootstrap_data_dir(None,Some(home.path())).unwrap(),custom);
+        std::fs::write(root.join("akasha.env"),"AKASHA_DATA_DIR=relative-is-still-invalid\n").unwrap();
+        assert!(resolve_bootstrap_data_dir(None,Some(home.path())).is_err());
     }
     #[test]
     fn default_and_tilde_use_the_same_home_from_any_launcher() {
