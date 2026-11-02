@@ -121,6 +121,9 @@ class Fixture(BaseHTTPRequestHandler):
                 response = "Le service a refusé l'inscription. Aucun compte n'a été créé."
             elif not state["verified"]:
                 response = "TOOL: run_command " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
+            elif not state["repeat_requested"]:
+                state["repeat_requested"] = True
+                response = "TOOL: run_command " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
             else:
                 response = "Le compte FixtureAgent a été créé et vérifié."
             self.send({"model": "account-fixture", "response": response, "message": {"role": "assistant", "content": response}, "done": True, "prompt_eval_count": len(text) // 3, "eval_count": 60})
@@ -140,7 +143,7 @@ print(json.dumps({"verified":True,"id":me["id"],"name":me["name"],"service_origi
 '''
 
 
-def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False):
+def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False, browser_only: bool = False):
     read_only = read_only or withdraw_only
     evidence.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="web-account-", dir=evidence)).resolve()
@@ -154,7 +157,7 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                      "token": "fixture-token-must-never-leave-worker", "origin": origin,
                      "client": client, "cancel": cancel, "reject": reject, "refuse": refuse, "read_only": read_only, "real_model": model,
                      "native_chat": native_chat, "steer_stop": steer_stop, "model_started": threading.Event(), "release_model": threading.Event()}
-    service.state.update(prepare_only=prepare_only, prepared=False)
+    service.state.update(prepare_only=prepare_only, prepared=False, repeat_requested=False)
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
     write_router(profile, model or "account-fixture", origin, "cuda")
@@ -170,6 +173,10 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
               "command_timeout_secs": 20, "default_profile": "fixture",
               "tool_profiles": {"fixture": ["web_fetch", "run_command", "read_file"]}}
     (profile / "tools_policy.yaml").write_text(json.dumps(policy), encoding="utf-8")
+    if browser_only:
+        policy.update(browser_enabled=True, allowed_commands=[])
+        policy["tool_profiles"]["fixture"].append("browser")
+        (profile / "tools_policy.yaml").write_text(json.dumps(policy), encoding="utf-8")
     port = choose_port()
     base = f"http://127.0.0.1:{port}"
     env = {k: v for k, v in clean_env().items() if not k.startswith("AKASHA_")}
@@ -234,7 +241,9 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
             (profile / "report.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
             assert not children.get("children"), result
             assert not service.state["token_exposed_to_model"], result
-            if read_only:
+            if browser_only:
+                assert task["status"] == "failed" and service.state["creates"] == 0 and not tools and not service.state["request_bytes"], result
+            elif read_only:
                 assert answered and task["status"] == "completed" and service.state["creates"] == 0, result
                 assert "conditions" in task["outcome"]["response"].lower(), result
                 assert len(service.state["request_bytes"]) == 3 and "web_fetch" in tools, result
@@ -247,6 +256,7 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                 assert task["status"] == "failed" and service.state["creates"] == 0, result
             else:
                 assert task["status"] == "completed" and service.state["creates"] == 1 and service.state["verified"] >= 1, result
+                assert model or service.state["repeat_requested"], result
                 assert service.state["duplicate_attempts"] == 0, result
                 assert "web_fetch" in tools and "run_command" in tools and "web_search" not in tools and "web_crawl" not in tools, result
             assert service.state["selector_calls"] == 0, result
@@ -275,5 +285,6 @@ if __name__ == "__main__":
     parser.add_argument("--steer-stop", action="store_true", help="Cancel through the steering queue during the first model call")
     parser.add_argument("--prepare-only", action="store_true", help="A successful preparation and false claim must fail without an account receipt")
     parser.add_argument("--withdraw-only", action="store_true", help="Withdraw registration without asking for a summary")
+    parser.add_argument("--browser-only", action="store_true", help="Refuse an unsupported verification transport before any remote mutation")
     args = parser.parse_args()
-    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only)
+    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only, args.browser_only)
