@@ -350,6 +350,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test --locked -p akasha-vault --lib protected_archive
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            cargo test --locked -p akasha-daemon --no-default-features --features akasha-store/memory-sqlcipher --lib profile_backup::tests::memory_protection_uses_sqlcipher_capability
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test --locked -p akasha-daemon --no-default-features --features consumer-beta --lib privacy::
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test --locked -p akasha-daemon --no-default-features --features consumer-beta --lib profile_backup::

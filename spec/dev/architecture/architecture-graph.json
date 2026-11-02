@@ -1,8 +1,8 @@
 {
   "meta": {
     "product": "Akasha",
-    "version": "0.13.0-beta.2",
-    "description": "Akasha: existing agent runtime and isolated Windows consumer beta, with sourced documents and local OCR, confirmed reminders, recurring watches, scoped remote consent, SQLCipher memory and encrypted profile backups. Expert beta preserves account API workers and receipt-verified single-task operations.",
+    "version": "0.13.0-beta.3",
+    "description": "Akasha: existing agent runtime and isolated Windows consumer beta, with sourced documents and local OCR, confirmed reminders, recurring watches, scoped remote consent, SQLCipher memory and encrypted profile backups. Expert beta preserves account API workers and receipt-verified single-task operations. SQLCipher availability is shared by Expert and consumer memory protection.",
     "defaultPort": 3876,
     "dataDir": "~/akasha (or AKASHA_DATA_DIR)",
     "sources": [

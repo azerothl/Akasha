@@ -3,6 +3,8 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub const SQLCIPHER_COMPILED: bool = cfg!(feature = "memory-sqlcipher");
+
 #[derive(Serialize, Deserialize)]
 struct Metadata {
     version: u32,
@@ -35,7 +37,7 @@ pub fn status(path: &Path) -> serde_json::Value {
     } else {
         "not_initialized"
     };
-    serde_json::json!({"state":state,"sqlcipher_compiled":cfg!(feature="memory-sqlcipher"),"encrypted_at_rest":state=="encrypted","scope":"long_term_memory_only"})
+    serde_json::json!({"state":state,"sqlcipher_compiled":SQLCIPHER_COMPILED,"encrypted_at_rest":state=="encrypted","scope":"long_term_memory_only"})
 }
 
 pub fn open_connection<P: AsRef<Path>>(path: P) -> anyhow::Result<Connection> {

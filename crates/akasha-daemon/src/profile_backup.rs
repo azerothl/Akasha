@@ -433,7 +433,7 @@ pub fn route(
             r#"{"error":"explicit_confirmation_required"}"#,
         ));
     }
-    if path == "/api/memory/protection" && !cfg!(feature = "consumer-beta") {
+    if path == "/api/memory/protection" && !akasha_store::memory_protection::SQLCIPHER_COMPILED {
         return Some(json_response(
             "501 Not Implemented",
             r#"{"error":"SQLCipher absent de ce binaire"}"#,
@@ -542,6 +542,47 @@ pub fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn memory_protection_uses_sqlcipher_capability() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("akasha.db");
+        let memory = directory.path().join("memory.db");
+        let legacy = rusqlite::Connection::open(&memory).unwrap();
+        legacy.execute_batch("CREATE TABLE legacy(id TEXT PRIMARY KEY, content TEXT); INSERT INTO legacy VALUES('stable-id','synthetic memory');").unwrap();
+        drop(legacy);
+        let response = route(
+            "POST", "/api/memory/protection",
+            Some(br#"{"passphrase":"synthetic test recovery phrase","confirmed":true}"#),
+            directory.path(), &store,
+        ).unwrap();
+        if !akasha_store::memory_protection::SQLCIPHER_COMPILED {
+            assert!(response.contains("501 Not Implemented"));
+            assert!(!store.exists());
+            return;
+        }
+        assert!(response.contains("200 OK"), "{response}");
+        let body: serde_json::Value = serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let id = Uuid::parse_str(body["task_id"].as_str().unwrap()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let task = TaskStore::open(&store).unwrap().get(id).unwrap().unwrap();
+            if task.status == TaskStatus::Completed { break; }
+            assert_ne!(task.status, TaskStatus::Failed);
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(akasha_store::memory_protection::status(&memory)["state"], "encrypted");
+        assert_ne!(&std::fs::read(&memory).unwrap()[..16], b"SQLite format 3\0");
+        let connection = akasha_store::memory_protection::open_connection(&memory).unwrap();
+        assert_eq!(connection.query_row("SELECT content FROM legacy WHERE id='stable-id'", [], |row| row.get::<_, String>(0)).unwrap(), "synthetic memory");
+        drop(connection);
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("memory.db.protection.json")).unwrap()
+        ).unwrap();
+        akasha_vault::device_secret_delete(metadata["key_id"].as_str().unwrap()).unwrap();
+    }
     #[test]
     fn settings_backup_keeps_routes_but_excludes_provider_credentials() {
         assert_eq!(public_endpoint("https://api.openai.com/v1?key=secret").as_deref(),Some("https://api.openai.com/v1"));
