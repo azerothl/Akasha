@@ -39,17 +39,21 @@ pub(crate) fn matches(message: &str) -> bool {
     {
         return false;
     }
+    // A negated operation with qualifiers is still not a positive request to
+    // create an account. Keep independent positive clauses, e.g. create once
+    // followed by "don't register duplicates".
+    let positive=regex::Regex::new(r"\b(?:don't|do not|never|ne|n')\b[^;.!?\n]*").expect("negated clause").replace_all(&text," ");
     let account = [
         "compte", "account", "inscri", "sign up", "signup", "register",
     ]
     .iter()
-    .any(|word| text.contains(word));
+    .any(|word| positive.contains(word));
     let action = [
         "cree", "creer", "create", "inscri", "register", "sign up", "signup", "continue",
         "reprend", "connect",
     ]
     .iter()
-    .any(|word| text.contains(word));
+    .any(|word| positive.contains(word));
     account && action
 }
 
@@ -233,6 +237,7 @@ mod tests {
             "Crée un compte sur le site web https://example.org",
             "Register an agent account at https://example.org/accounts",
             "Crée un compte sur https://example.org et résume les conditions",
+            "Crée un compte sur https://example.org, ne crée pas de doublon",
         ] { assert!(matches(message), "{message}"); }
     }
 
@@ -243,6 +248,8 @@ mod tests {
             "Don't register an account at https://example.org; just summarize the requirements",
             "Please don't register an account at https://example.org; just summarize the requirements",
             "Ne crée pas de compte sur https://example.org : résume les conditions",
+            "Don't register a duplicate account at https://example.org",
+            "Ne crée pas de compte en double sur https://example.org",
             "Lis https://example.org/create-account?register=true",
             "Audit de l'inscription sur https://example.org",
             "Crée un compte puis délègue les tests à des sous-agents sur https://example.org",
