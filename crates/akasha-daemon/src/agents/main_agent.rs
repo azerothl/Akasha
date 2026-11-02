@@ -615,6 +615,8 @@ User message:\n{}",
         let has_source_workflow=document_request.is_some()||organization_request.is_some();
         let web_account_operation = studio_disk_root.is_none() && studio_forced_spawn.is_none()
             && crate::web_account_task::matches(&original_user_message_owned);
+        let single_tool_operation = studio_disk_root.is_none() && studio_forced_spawn.is_none()
+            && crate::direct_tool_task::named_tool(&original_user_message_owned).is_some();
         tokio::spawn(async move {
             let store_path = store_path_buf.as_path();
             let message = message_owned.as_str();
@@ -659,13 +661,13 @@ User message:\n{}",
                     timed_out: false,
                     elapsed_ms: 0,
                 }
-            } else if forward_to_orchestrator && !has_source_workflow && web_account_operation {
+            } else if forward_to_orchestrator && !has_source_workflow && (web_account_operation || single_tool_operation) {
                 SelectorRunResult {
                     decision: Some(SelectorDecision {
                         answer_mode: SelectorAnswerMode::Direct,
                         task_type: Some("conversation".into()),
                         target_agent: None,
-                        reason: Some("single_web_account_operation".into()),
+                        reason: Some(if web_account_operation {"single_web_account_operation"}else{"explicit_single_tool_operation"}.into()),
                     }),
                     enabled: false,
                     timed_out: false,

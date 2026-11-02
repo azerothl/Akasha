@@ -5,12 +5,19 @@ use std::path::Path;
 use uuid::Uuid;
 
 pub fn user_text(message: &str) -> &str {
-    if message.starts_with("[Guardrail:") {
-        if let Some((_, actual)) = message.split_once("]\n\n") {
-            return actual.trim_start();
-        }
+    let mut actual=message;
+    for _ in 0..8 {
+        let next=if actual.starts_with("[Guardrail:") {
+            actual.split_once("]\n\n").map(|(_,body)|body)
+        } else if actual.starts_with("[Composer mode: ") {
+            actual.split_once("]\n").and_then(|(header,body)| {
+                let length=header.rsplit_once("; prompt_bytes: ")?.1.parse::<usize>().ok()?;
+                body.get(length..)?.strip_prefix("\n\n")
+            })
+        } else {None};
+        match next {Some(next)=>actual=next.trim_start(),None=>break}
     }
-    message
+    actual
 }
 
 fn installed_version(message: &str) -> Option<Value> {

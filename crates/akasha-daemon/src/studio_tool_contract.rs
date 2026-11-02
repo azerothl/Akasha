@@ -445,6 +445,28 @@ pub(crate) fn decode(text: &str) -> Result<Decoded, String> {
         {
             vec![envelope.arguments.to_string()]
         }
+        "schedule_task" => {
+            if envelope.arguments.get("argv").is_some() { legacy_web_arguments(&envelope.arguments)? } else {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct ScheduleArgs { rrule: String, prompt: String, title: Option<String> }
+                let input: ScheduleArgs=serde_json::from_value(envelope.arguments.clone()).map_err(|error|format!("invalid schedule_task arguments: {error}"))?;
+                if input.rrule.trim().is_empty() || input.prompt.trim().is_empty() {return Err("schedule_task requires rrule and prompt".into());}
+                let mut args=vec![input.rrule,input.prompt];
+                if let Some(title)=input.title {args.extend(["--title".into(),title]);}
+                args
+            }
+        }
+        "cancel_scheduled_task" => {
+            if envelope.arguments.get("argv").is_some() { legacy_web_arguments(&envelope.arguments)? } else {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct CancelArgs { schedule_id: String }
+                let input: CancelArgs=serde_json::from_value(envelope.arguments.clone()).map_err(|error|format!("invalid cancel_scheduled_task arguments: {error}"))?;
+                Uuid::parse_str(&input.schedule_id).map_err(|_|"cancel_scheduled_task requires a UUID")?;
+                vec![input.schedule_id]
+            }
+        }
         "web_search" => {
             if envelope.arguments.get("argv").is_some() {
                 legacy_web_arguments(&envelope.arguments)?
@@ -614,6 +636,8 @@ pub(crate) fn supports_typed(tool: &str) -> bool {
 }
 
 pub(crate) fn argument_schema(tool: &str) -> Value {
+    if tool == "schedule_task" {return json!({"type":"object","additionalProperties":false,"required":["rrule","prompt"],"properties":{"rrule":{"type":"string","minLength":1},"prompt":{"type":"string","minLength":1,"description":"Exact message to execute later; preserve its complete literal text."},"title":{"type":"string"}}});}
+    if tool == "cancel_scheduled_task" {return json!({"type":"object","additionalProperties":false,"required":["schedule_id"],"properties":{"schedule_id":{"type":"string","format":"uuid"}}});}
     if tool == "web_search" {
         return json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1},"max_results":{"type":"integer","minimum":1,"maximum":20}}});
     }
@@ -1502,6 +1526,13 @@ mod literal_schema_tests {
 
 #[cfg(test)]
 mod edit_content_contract_tests {
+    #[test]
+    fn schedule_contract_preserves_literal_prompt_and_separate_title() {
+        let prompt="N'appelle aucun outil. Réponds exactement SCHEDULE_OK, puis conserve --title dans ce texte.";
+        let decoded=super::decode(&serde_json::json!({"schema_version":1,"tool":"schedule_task","arguments":{"rrule":"FREQ=HOURLY","prompt":prompt,"title":"Titre été"}}).to_string()).unwrap();
+        assert_eq!(decoded.argv,vec!["FREQ=HOURLY",prompt,"--title","Titre été"]);
+        assert!(super::decode(&serde_json::json!({"schema_version":1,"tool":"cancel_scheduled_task","arguments":{"schedule_id":"invalid"}}).to_string()).is_err());
+    }
     #[test]
     fn patch_and_line_edits_do_not_advertise_whole_file_content() {
         let patch=super::argument_schema("apply_patch");

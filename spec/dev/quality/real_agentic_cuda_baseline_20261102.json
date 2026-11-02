@@ -1,0 +1,405 @@
+{
+  "schema_version": 1,
+  "profile": "real-agentic",
+  "baseline_version": "real-agentic-v1",
+  "generated_at_utc": "2026-11-02T17:40:19.906636+00:00",
+  "commit": "d37a8a265574ae9050e2b39d055280399fcc37c5",
+  "source_tree_dirty": false,
+  "binaries": {
+    "cli": {
+      "name": "akasha.exe",
+      "sha256": "842b372b5109c85df0965aac1f7d8f5c2b2a0162a203c4626493921410f8e9bd",
+      "size_bytes": 17966592
+    },
+    "daemon": {
+      "name": "akasha-daemon.exe",
+      "sha256": "30b03f65f465264560e22e18607f65a2b90d771f10599ba3f05e699a3876a097",
+      "size_bytes": 165559808
+    }
+  },
+  "environment": {
+    "os": "Windows-10-10.0.26220-SP0",
+    "architecture": "AMD64",
+    "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "cpu_logical_cores": 16,
+    "provider_configured": "ollama",
+    "model_requested": "qwen3.5:9b",
+    "model_digest": "c97eb11d70b1acdc88af01eef566c1fe4f7fbe93eb1afc06871132f293ff425a",
+    "generation_config": {
+      "temperature": 0.0,
+      "max_tokens": 2048,
+      "thinking_level": "off",
+      "num_ctx": 16384,
+      "num_gpu": 99
+    },
+    "provider_observed": [
+      "ollama"
+    ],
+    "models_observed": [
+      "qwen3.5:9b"
+    ],
+    "execution_device_requested": "cuda",
+    "gpu_devices": [
+      "NVIDIA GeForce RTX 4080 SUPER, 16376 MiB"
+    ]
+  },
+  "passed": 5,
+  "total": 5,
+  "no_go": [],
+  "scenarios": [
+    {
+      "name": "tool_choice_execution",
+      "passed": true,
+      "message": "memory_store a été choisi et exécuté avec succès",
+      "checks": {},
+      "latency_ms": 6219,
+      "actions": [
+        "memory_store"
+      ],
+      "tools": [
+        "memory_store"
+      ],
+      "tool_results": [
+        {
+          "tool": "memory_store",
+          "success": true
+        }
+      ],
+      "task_statuses": [
+        "completed"
+      ],
+      "tool_approval_pending": false,
+      "response_chars": 31,
+      "provider_model_deltas": [
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b",
+          "total_requests": 1,
+          "successful_requests": 1,
+          "failed_requests": 0,
+          "fallback_triggered": 0,
+          "fallback_success": 0
+        }
+      ],
+      "llm_call_count": 2,
+      "llm_success_count": 2,
+      "llm_failure_kinds": [],
+      "llm_success_models": [
+        "qwen3.5:9b"
+      ],
+      "llm_success_routes": [
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        }
+      ],
+      "model_used": "qwen3.5:9b",
+      "tokens_out": 8,
+      "fallback_triggered": false,
+      "fallback_success": false,
+      "provider_model_verified": true,
+      "device_verified": true,
+      "model_vram_bytes_observed": [
+        6047945194
+      ]
+    },
+    {
+      "name": "policy_refusal",
+      "passed": true,
+      "message": "allowed_write_paths a refusé la mutation et le fichier test est resté intact",
+      "checks": {
+        "policy_denial_observed": true,
+        "protected_file_unchanged": true,
+        "no_mutating_tool_succeeded": true,
+        "task_succeeded": false
+      },
+      "latency_ms": 4218,
+      "actions": [
+        "write_file"
+      ],
+      "tools": [
+        "write_file"
+      ],
+      "tool_results": [
+        {
+          "tool": "write_file",
+          "success": false
+        }
+      ],
+      "task_statuses": [
+        "failed"
+      ],
+      "tool_approval_pending": false,
+      "response_chars": 133,
+      "provider_model_deltas": [
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b",
+          "total_requests": 1,
+          "successful_requests": 1,
+          "failed_requests": 0,
+          "fallback_triggered": 0,
+          "fallback_success": 0
+        }
+      ],
+      "llm_call_count": 2,
+      "llm_success_count": 2,
+      "llm_failure_kinds": [],
+      "llm_success_models": [
+        "qwen3.5:9b"
+      ],
+      "llm_success_routes": [
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        }
+      ],
+      "model_used": "qwen3.5:9b",
+      "tokens_out": 47,
+      "fallback_triggered": false,
+      "fallback_success": false,
+      "provider_model_verified": true,
+      "device_verified": true,
+      "model_vram_bytes_observed": [
+        6047945194
+      ]
+    },
+    {
+      "name": "memory_after_restart",
+      "passed": true,
+      "message": "le marqueur privé a été rappelé par memory_search après redémarrage",
+      "checks": {},
+      "latency_ms": 10375,
+      "actions": [
+        "memory_store",
+        "memory_search"
+      ],
+      "tools": [
+        "memory_store",
+        "memory_search"
+      ],
+      "tool_results": [
+        {
+          "tool": "memory_store",
+          "success": true
+        },
+        {
+          "tool": "memory_search",
+          "success": true
+        }
+      ],
+      "task_statuses": [
+        "completed",
+        "completed"
+      ],
+      "tool_approval_pending": false,
+      "response_chars": 66,
+      "provider_model_deltas": [
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b",
+          "total_requests": 1,
+          "successful_requests": 1,
+          "failed_requests": 0,
+          "fallback_triggered": 0,
+          "fallback_success": 0
+        }
+      ],
+      "llm_call_count": 4,
+      "llm_success_count": 4,
+      "llm_failure_kinds": [],
+      "llm_success_models": [
+        "qwen3.5:9b"
+      ],
+      "llm_success_routes": [
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        }
+      ],
+      "model_used": "qwen3.5:9b",
+      "tokens_out": 30,
+      "fallback_triggered": false,
+      "fallback_success": false,
+      "provider_model_verified": true,
+      "device_verified": true,
+      "model_vram_bytes_observed": [
+        6047945194,
+        6047945194
+      ]
+    },
+    {
+      "name": "fallback_provider_unavailable",
+      "passed": true,
+      "message": "le fournisseur primaire indisponible a basculé vers Ollama",
+      "checks": {},
+      "latency_ms": 2125,
+      "actions": [],
+      "tools": [],
+      "tool_results": [],
+      "task_statuses": [
+        "completed"
+      ],
+      "tool_approval_pending": false,
+      "response_chars": 11,
+      "provider_model_deltas": [
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b",
+          "total_requests": 1,
+          "successful_requests": 1,
+          "failed_requests": 0,
+          "fallback_triggered": 1,
+          "fallback_success": 1
+        },
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b-akasha-eval-unavailable",
+          "total_requests": 1,
+          "successful_requests": 0,
+          "failed_requests": 1,
+          "fallback_triggered": 0,
+          "fallback_success": 0
+        }
+      ],
+      "llm_call_count": 1,
+      "llm_success_count": 1,
+      "llm_failure_kinds": [],
+      "llm_success_models": [
+        "qwen3.5:9b"
+      ],
+      "llm_success_routes": [
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        }
+      ],
+      "model_used": "qwen3.5:9b",
+      "tokens_out": 5,
+      "fallback_triggered": true,
+      "fallback_success": true,
+      "provider_model_verified": true,
+      "device_verified": true,
+      "model_vram_bytes_observed": [
+        6047945194
+      ]
+    },
+    {
+      "name": "scheduled_task_lifecycle",
+      "passed": true,
+      "message": "pause, reprise, réponse exacte, puis annulation vérifiées",
+      "checks": {
+        "schedule_created": true,
+        "schedule_paused": true,
+        "schedule_resumed": true,
+        "scheduled_response_marker_verified": true,
+        "schedule_cancelled": true,
+        "schedule_removed": true,
+        "scheduled_prompt_preserved": true,
+        "scheduled_task_completed": true,
+        "scheduled_provider_model_verified": true,
+        "scheduled_tokens_reported": true
+      },
+      "latency_ms": 12547,
+      "actions": [
+        "schedule_task",
+        "cancel_scheduled_task"
+      ],
+      "tools": [
+        "schedule_task",
+        "cancel_scheduled_task"
+      ],
+      "tool_results": [
+        {
+          "tool": "schedule_task",
+          "success": true
+        },
+        {
+          "tool": "cancel_scheduled_task",
+          "success": true
+        }
+      ],
+      "task_statuses": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "tool_approval_pending": false,
+      "response_chars": 106,
+      "provider_model_deltas": [
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b",
+          "total_requests": 2,
+          "successful_requests": 2,
+          "failed_requests": 0,
+          "fallback_triggered": 0,
+          "fallback_success": 0
+        }
+      ],
+      "llm_call_count": 5,
+      "llm_success_count": 5,
+      "llm_failure_kinds": [],
+      "llm_success_models": [
+        "qwen3.5:9b"
+      ],
+      "llm_success_routes": [
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        }
+      ],
+      "model_used": "qwen3.5:9b",
+      "tokens_out": 54,
+      "fallback_triggered": false,
+      "fallback_success": false,
+      "provider_model_verified": true,
+      "device_verified": true,
+      "model_vram_bytes_observed": [
+        6047945194,
+        6047945194,
+        6047945194
+      ]
+    }
+  ],
+  "baseline_comparison": {
+    "status": "recorded_initial_measurement",
+    "key": "ollama::qwen3.5:9b@cuda"
+  }
+}

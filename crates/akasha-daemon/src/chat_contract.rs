@@ -230,13 +230,18 @@ pub(crate) fn literal_write_error(request: &str, tool: &str, args: &[String]) ->
 }
 
 pub(crate) fn requires_source_fetch(request: &str) -> bool {
-    regex::Regex::new(r"(?i)(?:ouvre|ouvrir|open|fetch|consulte|consulter)\s+(?:(?:la|sa|cette|the|its)\s+)?(?:source|page)|web_fetch").unwrap().is_match(request)
+    regex::Regex::new(r"(?i)(?:ouvre|ouvrir|open|fetch|consulte|consulter)\s+(?:(?:la|sa|cette|the|its)\s+)?(?:source|page)|web_fetch").unwrap().is_match(&instruction_text(request))
+}
+
+pub(crate) fn instruction_text(request: &str) -> String {
+    regex::Regex::new(r#"`[^`]*`|"(?:\\.|[^"\\])*""#)
+        .expect("literal arguments").replace_all(crate::consumer_workflow::user_text(request), " ").into_owned()
 }
 
 pub(crate) fn requires_post_write_read(request: &str) -> bool {
     regex::Regex::new(r"(?i)(?:puis|ensuite|then)\s+(?:relis|relire|lis|read|re-read)\b")
         .unwrap()
-        .is_match(request)
+        .is_match(&instruction_text(request))
 }
 
 /// Updated only from successful executor receipts, never from model claims.

@@ -21,6 +21,35 @@ const MAX_CATCHUP: usize = 10;
 /// Pending item: (run_id, task_id, message, session_id) — sent to orchestrator then run marked Running.
 type PendingRun = (Uuid, Uuid, String, String);
 
+pub(crate) fn tool_arguments(args: &[String]) -> (String,String,String) {
+    let cron=args.first().map(|arg|arg.trim().to_owned()).unwrap_or_default();
+    let mut title="Agent scheduled task".to_owned();
+    let mut prompt=Vec::new();
+    let mut index=1;
+    while index<args.len() {
+        if args[index]=="--title" {
+            if let Some(value)=args.get(index+1) {title=value.clone();index+=2;continue;}
+        }
+        prompt.push(args[index].as_str());index+=1;
+    }
+    (cron,prompt.join(" ").trim().to_owned(),title)
+}
+
+pub(crate) fn execution_context(schedule: &Schedule) -> (String, String) {
+    let mut message=if schedule.name.trim().is_empty() {"Exécution planifiée.".to_owned()}else{schedule.name.clone()};
+    let mut session_id=format!("schedule:{}",schedule.id);
+    if let Some(context)=schedule.channel_context.as_deref().map(str::trim).filter(|s|!s.is_empty()) {
+        match serde_json::from_str::<serde_json::Value>(context) {
+            Ok(value)=>{
+                if let Some(text)=value.as_str().or_else(||value.get("message").and_then(|v|v.as_str())).map(str::trim).filter(|s|!s.is_empty()) {message=text.to_owned();}
+                if let Some(session)=value.get("session_id").and_then(|v|v.as_str()).map(str::trim).filter(|s|!s.is_empty()) {session_id=session.to_owned();}
+            }
+            Err(_)=>message=context.to_owned(),
+        }
+    }
+    (message,session_id)
+}
+
 /// Run the scheduler loop: every TICK_INTERVAL_SECS, evaluate enabled schedules,
 /// create task_runs with dedup_key, create tasks and push to orchestrator.
 /// Stores are opened per tick and never held across await so the future stays Send.
@@ -115,46 +144,7 @@ async fn tick(
                 let run_id = Uuid::new_v4();
                 // Resolve the final message/session_id first so both `initial_message` (stored
                 // on the Task) and the orchestrator payload use the same human-readable string.
-                let mut message = if schedule.name.trim().is_empty() {
-                    "Exécution planifiée.".to_string()
-                } else {
-                    schedule.name.clone()
-                };
-                let mut session_id = format!("schedule:{}", schedule.id);
-                if let Some(ctx) = schedule.channel_context.as_deref() {
-                    match serde_json::from_str::<serde_json::Value>(ctx) {
-                        Ok(v) => {
-                            // If the JSON value is itself a plain string, use it directly.
-                            if let Some(s) = v.as_str() {
-                                let s = s.trim();
-                                if !s.is_empty() {
-                                    message = s.to_string();
-                                }
-                            } else {
-                                // JSON object: prefer explicit `message` field.
-                                if let Some(m) = v.get("message").and_then(|s| s.as_str()) {
-                                    let m = m.trim();
-                                    if !m.is_empty() {
-                                        message = m.to_string();
-                                    }
-                                }
-                                if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
-                                    let sid = sid.trim();
-                                    if !sid.is_empty() {
-                                        session_id = sid.to_string();
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Not JSON: use the raw channel_context as the message.
-                            let ctx = ctx.trim();
-                            if !ctx.is_empty() {
-                                message = ctx.to_string();
-                            }
-                        }
-                    }
-                }
+                let (message, session_id) = execution_context(&schedule);
                 let initial_message = Some(message.clone()).filter(|s| !s.is_empty());
                 let task = Task {
                     id: task_id,
@@ -517,6 +507,18 @@ fn due_slots_interval(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manual_and_automatic_runs_resolve_the_same_message_and_session() {
+        let now=chrono::Utc::now();let id=uuid::Uuid::new_v4();
+        let mut schedule=akasha_store::Schedule{id,name:"Default task".into(),description:String::new(),enabled:true,timezone:"UTC".into(),rrule:"FREQ=HOURLY".into(),interval_seconds:None,start_at:now,end_at:None,channel_context:None,created_at:now,updated_at:now};
+        assert_eq!(super::execution_context(&schedule),("Default task".into(),format!("schedule:{id}")));
+        schedule.channel_context=Some(r#"{"message":"Reply SCHEDULE_OK","session_id":"original-session","created_by_task_id":"metadata-only"}"#.into());
+        assert_eq!(super::execution_context(&schedule),("Reply SCHEDULE_OK".into(),"original-session".into()));
+        schedule.channel_context=Some("Legacy plain prompt".into());
+        assert_eq!(super::execution_context(&schedule).0,"Legacy plain prompt");
+        schedule.channel_context=Some(r#""Legacy JSON string""#.into());
+        assert_eq!(super::execution_context(&schedule).0,"Legacy JSON string");
+    }
     use super::*;
     #[cfg(not(feature="consumer-beta"))]
     #[tokio::test]

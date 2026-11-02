@@ -645,6 +645,8 @@ pub(crate) async fn run_message_via_llm(
     // breaks fast-lane matching or memory profile selection.
     let structured = interpret_message(clean_message);
     let web_account_task = !code_studio_disk_task && crate::web_account_task::matches(clean_message);
+    let direct_tool = if code_studio_disk_task || web_account_task {None}else{crate::direct_tool_task::named_tool(clean_message)};
+    let durable_tool_task = web_account_task || direct_tool.is_some();
     let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
     // Slim prompt for embedded + small Ollama (also for subagents — full RULE dumps cause rule-echo).
     let embedded_compact = embedded_primary_route && !code_studio_disk_task;
@@ -819,6 +821,8 @@ pub(crate) async fn run_message_via_llm(
         String::new()
     } else if web_account_task && tools_executor_snapshot.is_some() {
         crate::web_account_task::tools(&tools_executor_snapshot.as_ref().unwrap().policy)
+    } else if let (Some(name),Some(executor))=(direct_tool,tools_executor_snapshot.as_ref()) {
+        crate::direct_tool_task::tools(&executor.policy,name)
     } else if embedded_compact && tools_executor_snapshot.is_some() {
         let allowed_tools = tools_executor_snapshot
             .as_ref()
@@ -1083,6 +1087,8 @@ pub(crate) async fn run_message_via_llm(
         );
     } else if web_account_task {
         system_prompt.push_str(crate::web_account_task::CONTEXT);
+    } else if direct_tool.is_some() {
+        system_prompt.push_str(crate::direct_tool_task::CONTEXT);
     } else if code_studio_disk_task {
         system_prompt.push_str(CODE_STUDIO_APP_CONTEXT);
     } else if !code_studio_disk_task && embedded_compact {
@@ -1175,7 +1181,7 @@ pub(crate) async fn run_message_via_llm(
     if code_studio_disk_task && !studio_initial_kanban_planning {
         system_prompt.push_str("\n[Studio execution protocol — file contents are structured data]\nFollow the provider native function transport when available (studio_call or the provider adapter). For text fallback, use one TOOL_JSON: object per line with schema_version:1, tool and arguments. File mutations must target the exact requested workspace:/ path and contain only the requested content. Read an existing file successfully before editing it. Include expected_version from that read when available; if omitted, the runtime binds the mutation to this task's latest successful read and still rejects stale edits. For a new file, pass expected_version: missing. Never put call syntax inside file content. Square-bracket/function notation is valid only when the provider adapter explicitly requires its native format; it is not a legacy TOOL format. Do not add a summary to a legacy write_file body: it would become file contents. Wait for the execution result before summarizing in a separate assistant turn. Retain the original user request until ALL requested operations and checks are done. Project templates and maintenance examples never authorize additional files outside the user's explicit task scope.\n");
     }
-    let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
+    let mut system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
     } else {
         Some(system_prompt.trim_end().to_string())
@@ -1909,6 +1915,9 @@ pub(crate) async fn run_message_via_llm(
             && crate::studio_file_effects::has_request(clean_message);
         let mut chat_mutation_succeeded = false;
         let mut web_account_action_succeeded = false;
+        let mut direct_tool_succeeded = false;
+        let mut scheduled_literal_rejections = 0u32;
+        let mut direct_catalogue_expanded=false;
         let mut web_account_action_required = web_account_task;
         let mut web_account_scope=crate::web_account_task::verification_scope(clean_message);
         let mut chat_effect_repairs = 0u32;
@@ -2013,7 +2022,7 @@ pub(crate) async fn run_message_via_llm(
                 let steering_items = sq.drain_steering(task_id).await;
                 for item in steering_items {
                     if web_account_task {crate::web_account_task::apply_user_instruction(&mut web_account_scope,&mut web_account_action_required,&mut web_account_action_succeeded,&item.text);}
-                    if web_account_task && crate::web_account_task::stop_reply(&item.text) {
+                    if durable_tool_task && crate::web_account_task::stop_reply(&item.text) {
                         match TaskStore::open(&store_path).and_then(|s|s.transition_if(task_id,
                             &[TaskStatus::Running,TaskStatus::WaitingUserInput],TaskStatus::Cancelled)) {
                             Ok(_) => {run_outcome.termination=TerminationReason::Cancelled;reply_text="Tâche annulée à votre demande.".into();}
@@ -2030,7 +2039,7 @@ pub(crate) async fn run_message_via_llm(
                         st.append(&session_id, "user", steer_text.clone()).await;
                     }
                     user_message = format!("{user_message}\n\n{steer_text}");
-                    if web_account_task {
+                    if durable_tool_task {
                         current_prompt.push_str(&format!("\n\n{steer_text}"));
                     }
                     let _ = store.insert_event(
@@ -2054,6 +2063,16 @@ pub(crate) async fn run_message_via_llm(
                         .with_correlation(task_id),
                     );
                 }
+            }
+            // Later trusted guidance can change the operation. Lift the initial
+            // restriction and expose the ordinary permitted catalogue once.
+            let direct_tool=direct_tool.filter(|_|scope_unchanged);
+            if durable_tool_task && !web_account_task && !scope_unchanged && !direct_catalogue_expanded {
+                if let Some(registry)=tools_executor.as_ref() {
+                    let executor=registry.read().await;
+                    system_prompt.get_or_insert_with(String::new).push_str(&crate::direct_tool_task::expanded_tools(&executor.policy,&assigned_agent));
+                }
+                direct_catalogue_expanded=true;
             }
             // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
             if let Some(ref store) = task_usage_store {
@@ -2218,13 +2237,15 @@ pub(crate) async fn run_message_via_llm(
                     }
                     (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else if let Some(repair)=compiler_repair.as_ref() {repair.definition(names)}else if let Some(target)=build_missing_target.as_ref() {crate::studio_tool_contract::missing_entrypoint_definition(names,target)}else if let Some((ticket,command))=foundation_boundary {crate::studio_vite_scaffold::foundation_definition(names,ticket,command,foundation_ready)}else{crate::studio_tool_contract::native_definition(names)}])
                 })
-            }else if !code_studio_disk_task && !is_small_talk_fast_lane && !web_account_task {
+            }else if !code_studio_disk_task && !is_small_talk_fast_lane && !web_account_task && (!durable_tool_task || scope_unchanged) {
                 tools_executor_snapshot.as_ref()
                     .and_then(|executor| crate::chat_contract::native_tools(&executor.policy, &assigned_agent))
                     .and_then(|mut tools| {
+                        if let Some(name)=direct_tool { tools.retain(|tool|tool["function"]["name"]==name || tool["function"]["name"]=="ask_user"); }
                         (!tools.is_empty()).then_some(tools)
                     })
             }else{None};
+            let native_tools=native_tools.or_else(||direct_tool.and_then(|name|tools_executor_snapshot.as_ref().and_then(|executor|crate::direct_tool_task::native_tools(&executor.policy,&assigned_agent,name))));
             let mut turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             // Workflow tools use the text protocol. Include their effective
             // announced names for ordinary turns, without widening literal-only turns.
@@ -2240,12 +2261,12 @@ pub(crate) async fn run_message_via_llm(
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
                     && native_tools.as_ref().is_some_and(|tools|tools[0].pointer("/function/parameters/properties/tool/enum").and_then(|v|v.as_array()).is_some_and(|names|names.iter().any(|name|matches!(name.as_str(),Some("write_file"|"write_code"|"edit_file"|"search_replace"|"apply_patch"))))),
                 conversation: if code_studio_disk_task { Some(conversation.clone()) }
-                    else if web_account_task { Some(auxiliary_context.iter().chain(conversation.iter()).cloned().collect()) }
+                    else if durable_tool_task { Some(auxiliary_context.iter().chain(conversation.iter()).cloned().collect()) }
                     else if auxiliary_context.is_empty() { None } else { Some(auxiliary_context.clone()) },
                 prompt: if code_studio_disk_task {
                     format!("{}{}", resume_overlay, current_prompt)
                 } else {
-                    format!("{}{}{}\n[Tool transport] Prefer the advertised native functions. Text fallback is one TOOL: line per call, or TOOL_JSON: followed by a complete object with schema_version:1, tool and arguments. Never put proposed calls in code fences or invent tool_use JSON wrappers. A call is complete only after the runtime returns its result.\n", resume_overlay, current_prompt, tool_instruction)
+                    format!("{}{}{}\n[Tool transport] Prefer the advertised native functions. Text fallback is one TOOL: line per call, or TOOL_JSON: followed by a complete object with schema_version:1, tool and arguments. Never put proposed calls in code fences or invent tool_use JSON wrappers. A call is complete only after the runtime returns its result.\n", resume_overlay, current_prompt, if direct_catalogue_expanded {""}else{tool_instruction.as_str()})
                 },
                 max_tokens: Some(goal_tracker.as_ref().map(|goal|completion_max_tokens.min(goal.goal.max_tokens.saturating_sub(goal.state.tokens_used) as u32)).unwrap_or(completion_max_tokens)),
                 temperature: Some(completion_temperature),
@@ -2517,6 +2538,7 @@ pub(crate) async fn run_message_via_llm(
                                 "round": round + 1,
                                 "success": true,
                                 "model_used": resp.model_used,
+                                "provider_used": resp.provider_used,
                                 "latency_ms": resp
                                     .total_duration_ns
                                     .map(|ns| ns / 1_000_000)
@@ -2584,7 +2606,7 @@ pub(crate) async fn run_message_via_llm(
                         } else {
                             local_protocol_error && protocol_retry_count < 3
                         };
-                        if code_studio_disk_task && retry_allowed {
+                        if (code_studio_disk_task || durable_tool_task) && retry_allowed {
                             let failure_kind = if provider_parse_error { "provider_json_parse" } else { "native_tool_protocol" };
                             let retry_detail = if provider_parse_error {
                                 "Le fournisseur a rejeté le JSON d'appel d'outil avant son exécution."
@@ -2603,8 +2625,9 @@ pub(crate) async fn run_message_via_llm(
                                 goal.state.tokens_used=goal.state.tokens_used.saturating_add(completion_max_tokens as u64);
                                 if let Err(error)=goal.save(&store_path,task_id,"active","Malformed tool transport rejected; bounded corrective retry") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
                             }
-                            current_prompt.push_str(&format!("\n[Current advertised functions] {}. Choose only from these names.\n",turn_tool_names.as_deref().unwrap_or(&[]).join(", ")));
-                            current_prompt.push_str(&format!("\n[Transport rejection — no tool call from this response was executed] {retry_detail} Regenerate one complete operation using an advertised function and its literal keyword arguments. Do not mix formats or use legacy TOOL lines. Keep the arguments small and valid JSON. Re-read current ticket and file state before making any assumptions about earlier operations. Continue the requested implementation only after the repaired call succeeds.\n"));
+                            let repair_names=turn_tool_names.as_ref().map(|names|names.join(", ")).or_else(||direct_tool.map(str::to_owned)).unwrap_or_else(||"the functions in the original permitted catalogue".into());
+                            current_prompt.push_str(&format!("\n[Current advertised functions] {repair_names}. Choose only from these names.\n"));
+                            current_prompt.push_str(&if code_studio_disk_task {format!("\n[Transport rejection — no tool call from this response was executed] {retry_detail} Regenerate one complete operation using an advertised function and its literal keyword arguments. Do not mix formats or use legacy TOOL lines. Keep the arguments small and valid JSON. Re-read current ticket and file state before making any assumptions about earlier operations. Continue the requested implementation only after the repaired call succeeds.\n")}else{format!("\n[Transport rejection — no operation ran this round] {retry_detail} Regenerate one complete call to the requested tool using its advertised schema and the ORIGINAL exact arguments. Preserve completed receipts; never replay a successful operation. A proposed call is not an execution.\n")});
                             continue 'tool_rounds;
                         }
                         run_outcome.termination = if error_text.to_ascii_lowercase().contains("timeout") {TerminationReason::Timeout}else{TerminationReason::ProviderError};
@@ -2689,7 +2712,9 @@ pub(crate) async fn run_message_via_llm(
 
             let requested_tool_example = !code_studio_disk_task && crate::chat_contract::requested_tool_example(clean_message, &response);
             let mut parsed_tool_calls = tools_executor_snapshot.as_ref().filter(|_| !requested_tool_example).and_then(|_| {
-                let calls = if code_studio_disk_task {super::studio_conversation::parse_calls_for_turn(&response,turn_tool_names.as_deref())} else {parse_tool_calls(&response)};
+                let calls = if code_studio_disk_task {super::studio_conversation::parse_calls_for_turn(&response,turn_tool_names.as_deref())}
+                    else if let Some(name)=direct_tool {super::studio_conversation::parse_calls_for_turn(&response,Some(&[name.to_owned(),"ask_user".into()]))}
+                    else {parse_tool_calls(&response)};
                 if calls.is_empty() {
                     None
                 } else {
@@ -3123,7 +3148,7 @@ pub(crate) async fn run_message_via_llm(
                             tool_results.push("[User reply applied] This stale proposed operation did not run. Choose new arguments from the user's latest reply before executing another operation.".into());
                             continue;
                         }
-                        if web_account_task {
+                        if durable_tool_task {
                             if let Some(queue)=steering_queue.as_ref() {if queue.has_pending_steering(task_id).await {
                                 tool_results.push("[User guidance pending] This proposed operation did not run. Apply the queued user instruction before choosing another operation.".into());
                                 continue;
@@ -3198,6 +3223,11 @@ pub(crate) async fn run_message_via_llm(
                             run_outcome.termination=TerminationReason::ToolError;
                             reply_text="L’utilisateur a limité la tâche à une consultation ; aucune opération susceptible de modifier le compte n’a été exécutée.".into();
                             break 'tool_rounds;
+                        }
+                        if let Some(error)=(scope_unchanged && direct_tool==Some("schedule_task")).then(||crate::direct_tool_task::schedule_literal_error(clean_message,&actual_tool,tool_args)).flatten() {
+                            scheduled_literal_rejections += 1;run_outcome.failed_tool_calls += 1;
+                            if scheduled_literal_rejections>=3 {run_outcome.termination=TerminationReason::ToolError;reply_text=error;break 'tool_rounds;}
+                            tool_results.push(error);continue;
                         }
                         if !code_studio_disk_task {
                             if let Some(error) = crate::chat_contract::literal_write_error(clean_message, effective_role_tool, tool_args) {
@@ -3835,7 +3865,7 @@ pub(crate) async fn run_message_via_llm(
                         let approved_delivery_envelope=delivery_approval_identity.as_ref().map(|identity| {
                             vec![serde_json::json!({"schema_version":1,"operation_id":typed_call.as_ref().map(|call|call.envelope.operation_id).unwrap_or_else(Uuid::new_v4),"tool":actual_tool,"arguments":serde_json::from_str::<serde_json::Value>(&tool_args.join(" ")).unwrap_or_default(),"approval_identity":identity}).to_string()]
                         });
-                        if web_account_task {
+                        if durable_tool_task {
                             if let Some(queue)=steering_queue.as_ref() {if queue.has_pending_steering(task_id).await {
                                 tool_results.push("[User guidance pending] This operation did not run; apply the queued correction or cancellation first.".into());
                                 continue;
@@ -3914,11 +3944,12 @@ pub(crate) async fn run_message_via_llm(
                                             .await
                                             {
                                                 Ok(Ok(reply)) => {
+                                                    if durable_tool_task {scope_unchanged=false;}
                                                     // Every account reply may change the destination,
                                                     // credentials or permission of later proposed calls.
                                                     if web_account_task {account_reply_changed_batch=true;}
                                                     if web_account_task {crate::web_account_task::apply_user_instruction(&mut web_account_scope,&mut web_account_action_required,&mut web_account_action_succeeded,&reply);}
-                                                    if web_account_task && crate::web_account_task::stop_reply(&reply) {
+                                                    if durable_tool_task && crate::web_account_task::stop_reply(&reply) {
                                                         match TaskStore::open(&store_path).and_then(|s| s.transition_if(task_id,
                                                             &[TaskStatus::Running, TaskStatus::WaitingUserInput], TaskStatus::Cancelled)) {
                                                             Ok(_) => { run_outcome.termination = TerminationReason::Cancelled; reply_text = "Tâche annulée à votre demande.".into(); }
@@ -4370,6 +4401,7 @@ pub(crate) async fn run_message_via_llm(
                         previous_batch_call_succeeded = success;
                         if success {
                             run_outcome.successful_tool_calls += 1;
+                            if direct_tool == Some(actual_tool.as_str()) { direct_tool_succeeded = true; }
                             if actual_tool == "web_search" { chat_search_succeeded = true; }
                             if web_account_task && crate::web_account_task::reported_readback(&web_account_scope,effective_role_tool,&res) {
                                 web_account_action_succeeded = true;
@@ -4616,13 +4648,13 @@ pub(crate) async fn run_message_via_llm(
                 }
                 let execution_response=runtime_commands_added.then(||super::studio_conversation::scheduled_execution_response(&calls)).flatten();
                 let results_blob = tool_results.join("\n");
-                if code_studio_disk_task || web_account_task {
+                if code_studio_disk_task || durable_tool_task {
                     let per_call:Vec<String>=tool_result_starts.iter().enumerate().map(|(index,start)| {
                         let end=tool_result_starts.get(index+1).copied().unwrap_or(tool_results.len());
                         let recorded=tool_results[*start..end].join("\n");
                         if recorded.is_empty(){"No execution result recorded; do not assume success.".into()}else{recorded}
                     }).collect();
-                    if web_account_task {
+                    if durable_tool_task {
                         // Persist session/steering instructions, not the repeated
                         // catalogue and transport suffix added to delivered_prompt.
                         super::studio_conversation::append_account_turn(&mut conversation,&current_prompt,&response,&results_blob,&per_call,round);
@@ -4738,7 +4770,7 @@ pub(crate) async fn run_message_via_llm(
                     .count();
                 // Only successful read-only source data can be summarized. Human answers,
                 // repository rules, failures and mutation/unknown receipts stay exact.
-                let results_blob = if !code_studio_disk_task && !web_account_task && !calls.is_empty()
+                let results_blob = if !code_studio_disk_task && !durable_tool_task && !calls.is_empty()
                     && run_outcome.failed_tool_calls == failed_calls_before_round
                     && calls.iter().all(|(name, args)| matches!(name.as_str(), "read_file" | "read_code" | "web_fetch" | "web_search" | "search_files" | "grep_content")
                         && !args.iter().any(|arg| ["agents.md", "skill.md", "code_studio_plan.md", "design.md"].iter().any(|rule| arg.to_ascii_lowercase().contains(rule))))
@@ -4747,7 +4779,7 @@ pub(crate) async fn run_message_via_llm(
                     "Read-only source results are supplied separately as auxiliary context. Use their facts; reread exact file ranges before editing.".to_owned()
                 } else { results_blob };
                 // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
-                current_prompt = if code_studio_disk_task || web_account_task {
+                current_prompt = if code_studio_disk_task || durable_tool_task {
                     String::new()
                 } else if round_had_ask_user {
                     format!(
@@ -5167,6 +5199,16 @@ pub(crate) async fn run_message_via_llm(
                 }
                 run_outcome.termination = TerminationReason::VerificationFailed;
                 reply_text = "La vérification explicitement demandée n’a pas été effectuée après deux tentatives de correction. Les résultats déjà obtenus sont conservés dans la tâche.".into();
+                break 'tool_rounds;
+            }
+            if direct_tool.is_some() && !direct_tool_succeeded {
+                if chat_effect_repairs < 1 && run_outcome.failed_tool_calls == 0 {
+                    chat_effect_repairs += 1;
+                    current_prompt = format!("{delivered_prompt}\n[Requested operation has not executed] Call {} with the user's requested arguments using the advertised contract. A final claim cannot replace its receipt. If unavailable, explain the precise blocker. Do not call other tools.\n",direct_tool.unwrap());
+                    continue;
+                }
+                run_outcome.termination = TerminationReason::ToolError;
+                reply_text = format!("L’opération demandée n’a pas réussi.\n{}",last_tool_results_blob.as_deref().unwrap_or("Aucun reçu d’exécution de l’outil demandé.").chars().take(1800).collect::<String>());
                 break 'tool_rounds;
             }
             if web_account_task && web_account_action_required && !web_account_action_succeeded {

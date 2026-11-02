@@ -21,6 +21,82 @@
     "A primary-provider failure without a recorded successful fallback",
     "A scheduled task that cannot be paused, resumed, completed, and cancelled"
   ],
-  "measured_baselines": {},
+  "measured_baselines": {
+    "ollama::qwen3.5:9b@cuda": {
+      "model": "qwen3.5:9b",
+      "provider": "ollama",
+      "device": "cuda",
+      "source_commit": "d37a8a265574ae9050e2b39d055280399fcc37c5",
+      "model_digest": "c97eb11d70b1acdc88af01eef566c1fe4f7fbe93eb1afc06871132f293ff425a",
+      "measured_at_utc": "2026-11-02T17:40:19.906636+00:00",
+      "hardware": {
+        "os": "Windows-10-10.0.26220-SP0",
+        "architecture": "AMD64",
+        "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+        "cpu_logical_cores": 16,
+        "gpu_devices": [
+          "NVIDIA GeForce RTX 4080 SUPER, 16376 MiB"
+        ]
+      },
+      "scenarios": {
+        "tool_choice_execution": {
+          "passed": true,
+          "latency_ms": 6219
+        },
+        "policy_refusal": {
+          "passed": true,
+          "latency_ms": 4218
+        },
+        "memory_after_restart": {
+          "passed": true,
+          "latency_ms": 10375
+        },
+        "fallback_provider_unavailable": {
+          "passed": true,
+          "latency_ms": 2125
+        },
+        "scheduled_task_lifecycle": {
+          "passed": true,
+          "latency_ms": 12547
+        }
+      }
+    },
+    "ollama::qwen3.5:9b@cpu": {
+      "model": "qwen3.5:9b",
+      "provider": "ollama",
+      "device": "cpu",
+      "source_commit": "9ed8e5b50a1ac82cd161c8e2a4034010274bad98",
+      "model_digest": "c97eb11d70b1acdc88af01eef566c1fe4f7fbe93eb1afc06871132f293ff425a",
+      "measured_at_utc": "2026-11-02T18:27:29.069762+00:00",
+      "hardware": {
+        "os": "Windows-10-10.0.26220-SP0",
+        "architecture": "AMD64",
+        "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+        "cpu_logical_cores": 16
+      },
+      "scenarios": {
+        "tool_choice_execution": {
+          "passed": true,
+          "latency_ms": 28688
+        },
+        "policy_refusal": {
+          "passed": true,
+          "latency_ms": 28531
+        },
+        "memory_after_restart": {
+          "passed": true,
+          "latency_ms": 45079
+        },
+        "fallback_provider_unavailable": {
+          "passed": true,
+          "latency_ms": 6188
+        },
+        "scheduled_task_lifecycle": {
+          "passed": true,
+          "latency_ms": 75313
+        }
+      }
+    }
+  },
   "interpretation": "This file defines acceptance thresholds and stores per-model measured baselines. A baseline is added only after a clean committed revision passes all scenarios. Later runs must match the same hardware and pass each scenario without exceeding the absolute limit or 2x the measured latency plus 5 seconds. A passing mock-ci run never substitutes for this profile."
 }
