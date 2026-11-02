@@ -2574,7 +2574,7 @@ pub(crate) async fn run_message_via_llm(
                         } else {
                             local_protocol_error && protocol_retry_count < 3
                         };
-                        if code_studio_disk_task && retry_allowed {
+                        if (code_studio_disk_task || durable_tool_task) && retry_allowed {
                             let failure_kind = if provider_parse_error { "provider_json_parse" } else { "native_tool_protocol" };
                             let retry_detail = if provider_parse_error {
                                 "Le fournisseur a rejeté le JSON d'appel d'outil avant son exécution."
@@ -2593,8 +2593,9 @@ pub(crate) async fn run_message_via_llm(
                                 goal.state.tokens_used=goal.state.tokens_used.saturating_add(completion_max_tokens as u64);
                                 if let Err(error)=goal.save(&store_path,task_id,"active","Malformed tool transport rejected; bounded corrective retry") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
                             }
-                            current_prompt.push_str(&format!("\n[Current advertised functions] {}. Choose only from these names.\n",turn_tool_names.as_deref().unwrap_or(&[]).join(", ")));
-                            current_prompt.push_str(&format!("\n[Transport rejection — no tool call from this response was executed] {retry_detail} Regenerate one complete operation using an advertised function and its literal keyword arguments. Do not mix formats or use legacy TOOL lines. Keep the arguments small and valid JSON. Re-read current ticket and file state before making any assumptions about earlier operations. Continue the requested implementation only after the repaired call succeeds.\n"));
+                            let repair_names=turn_tool_names.as_ref().map(|names|names.join(", ")).or_else(||direct_tool.map(str::to_owned)).unwrap_or_else(||"the functions in the original permitted catalogue".into());
+                            current_prompt.push_str(&format!("\n[Current advertised functions] {repair_names}. Choose only from these names.\n"));
+                            current_prompt.push_str(&if code_studio_disk_task {format!("\n[Transport rejection — no tool call from this response was executed] {retry_detail} Regenerate one complete operation using an advertised function and its literal keyword arguments. Do not mix formats or use legacy TOOL lines. Keep the arguments small and valid JSON. Re-read current ticket and file state before making any assumptions about earlier operations. Continue the requested implementation only after the repaired call succeeds.\n")}else{format!("\n[Transport rejection — no operation ran this round] {retry_detail} Regenerate one complete call to the requested tool using its advertised schema and the ORIGINAL exact arguments. Preserve completed receipts; never replay a successful operation. A proposed call is not an execution.\n")});
                             continue 'tool_rounds;
                         }
                         run_outcome.termination = if error_text.to_ascii_lowercase().contains("timeout") {TerminationReason::Timeout}else{TerminationReason::ProviderError};

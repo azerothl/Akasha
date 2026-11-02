@@ -1013,7 +1013,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     resumed_list = http_json(base, "GET", "/api/schedules").get("schedules", [])
                     resumed = any(item.get("id") == schedule_id and item.get("enabled") is True for item in resumed_list)
                     schedule_checks["schedule_resumed"] = resumed
-                    persisted_schedule=next((item for item in resumed_list if item.get("id")==schedule_id),{})
+                    persisted_schedule=http_json(base,"GET",f"/api/schedules/{schedule_id}")
                     saved_context=persisted_schedule.get("channel_context") or ""
                     try:
                         decoded=json.loads(saved_context)
