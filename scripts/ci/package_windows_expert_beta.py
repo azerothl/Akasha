@@ -30,6 +30,8 @@ def package(daemon, ui, clients, runtime, embeddings, output, cuda):
     (output / 'scripts').mkdir()
     for name in ['install.ps1', 'setup.ps1', 'update.ps1']:
         shutil.copy2(ROOT / 'scripts' / name, output / 'scripts' / name)
+    (output / 'scripts/expert-beta-launch.ps1').write_text(
+        (ROOT / 'scripts/expert-beta-launch.ps1').read_text(encoding='utf-8-sig'), encoding='utf-8-sig')
     shutil.copy2(ROOT / 'LICENSE', output / 'LICENSE')
     if cuda:
         root = Path(os.environ['CUDA_PATH'])
@@ -39,7 +41,7 @@ def package(daemon, ui, clients, runtime, embeddings, output, cuda):
                 raise ValueError('Missing CUDA runtime: ' + pattern)
             for source in matches:
                 shutil.copy2(source, output / source.name)
-    (output / 'START-AKASHA.cmd').write_text('@echo off\r\ncd /d "%~dp0"\r\nstart "" "%~dp0akasha-ui.exe"\r\n', encoding='ascii')
+    (output / 'START-AKASHA.cmd').write_text('@echo off\r\ncd /d "%~dp0"\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\expert-beta-launch.ps1" %*\r\nif errorlevel 1 pause\r\n', encoding='ascii')
     (output / 'README-BETA.txt').write_text(
         'Akasha ' + build['version'] + ' — édition Expert Windows\n'
         'Fermez Akasha avant de remplacer ses exécutables. Extrayez ce paquet dans un dossier de binaires, '
