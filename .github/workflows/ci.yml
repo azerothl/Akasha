@@ -186,10 +186,12 @@ jobs:
         run: chmod +x target/debug/akasha-daemon
       - uses: actions/setup-node@v4
         with:
-          node-version: "lts/*"
+          # Match the Windows candidate toolchain instead of following new LTS majors.
+          node-version: "22"
           cache: npm
           cache-dependency-path: apps/akasha-ui/package-lock.json
       - name: Install UI deps and Playwright browser
+        timeout-minutes: 10
         working-directory: apps/akasha-ui
         run: |
           npm ci
