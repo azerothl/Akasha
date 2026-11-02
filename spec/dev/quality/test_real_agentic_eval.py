@@ -15,6 +15,22 @@ SPEC.loader.exec_module(eval_runner)
 
 
 class RealAgenticEvalTests(unittest.TestCase):
+    def test_memory_precondition_rejects_incomplete_or_locked_builds(self):
+        for state, compiled in [("not_initialized", False), ("locked", True), ("migration_required", True), ("encrypted", False)]:
+            with self.subTest(state=state, compiled=compiled), self.assertRaisesRegex(RuntimeError, "memory prerequisite unavailable"):
+                eval_runner.require_memory_ready({"memory": {"state": state, "sqlcipher_compiled": compiled}})
+        eval_runner.require_memory_ready({"memory": {"state": "encrypted", "sqlcipher_compiled": True}})
+
+    def test_binary_fingerprint_tracks_actual_bytes_without_an_absolute_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary=Path(temporary)/"daemon.exe"
+            binary.write_bytes(b"candidate one")
+            first=eval_runner.binary_fingerprint(binary)
+            binary.write_bytes(b"candidate two")
+            self.assertNotEqual(first["sha256"],eval_runner.binary_fingerprint(binary)["sha256"])
+            self.assertEqual(first["name"],"daemon.exe")
+            self.assertNotIn(temporary,str(first))
+
     def test_isolated_daemon_keeps_loader_dlls_but_no_profile_or_credentials(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);source=root/"candidate";isolated=root/"isolated"

@@ -70,6 +70,22 @@ def copy_daemon_with_runtime(source: Path, destination: Path) -> Path:
     return destination
 
 
+def require_memory_ready(privacy: dict[str, Any]) -> None:
+    """Reject an incomplete test build before attributing errors to a model."""
+    memory = privacy.get("memory") or {}
+    if memory.get("state") != "encrypted" or memory.get("sqlcipher_compiled") is not True:
+        raise RuntimeError(
+            "memory prerequisite unavailable: a daemon with embeddings and SQLCipher, "
+            f"its offline embedding model and an unlocked memory are required (state={memory.get('state', 'missing')})"
+        )
+
+
+def binary_fingerprint(path: Path) -> dict[str, Any]:
+    with path.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    return {"name": path.name, "sha256": digest, "size_bytes": path.stat().st_size}
+
+
 def choose_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -762,6 +778,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             capabilities = http_json(base, "GET", "/api/capabilities")
             if not isinstance(capabilities.get("schema_version"), int):
                 raise RuntimeError("daemon capabilities endpoint returned an invalid schema")
+            require_memory_ready(http_json(base, "GET", "/api/privacy"))
 
             # The model must choose and execute a memory tool call; its private marker
             # is used again after a real daemon restart and never written to the report.
@@ -1066,6 +1083,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
             "commit": commit,
             "source_tree_dirty": dirty,
+            "binaries": {"cli": binary_fingerprint(args.cli), "daemon": binary_fingerprint(args.daemon)},
             "environment": {
                 "os": platform.platform(),
                 "architecture": platform.machine(),
