@@ -1,6 +1,11 @@
 name: Windows Expert beta candidate
 on:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Clean main revision or release tag to compile'
+        required: true
+        default: main
 permissions:
   contents: read
 env:
@@ -15,6 +20,8 @@ jobs:
         cuda: [false, true]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
@@ -68,7 +75,7 @@ jobs:
       - name: Verify Expert launcher safety
         run: python -m unittest discover -s scripts/ci/tests -p test_expert_beta_launch.py -v
       - name: Build Expert CLI and TUI
-        run: cargo build --locked --release -p akasha-cli -p akasha-tui --features akasha-store/memory-sqlcipher
+        run: cargo build --locked --release -p akasha-cli -p akasha-tui
       - name: Compile CPU candidate
         if: '!matrix.cuda'
         run: cargo build --locked --release -p akasha-daemon --no-default-features --features embedded,embedded-llama-cpp,embeddings-tract,akasha-store/memory-sqlcipher
