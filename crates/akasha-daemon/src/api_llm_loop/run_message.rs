@@ -4346,7 +4346,7 @@ pub(crate) async fn run_message_via_llm(
                             run_outcome.successful_tool_calls += 1;
                             if direct_tool == Some(actual_tool.as_str()) { direct_tool_succeeded = true; }
                             if actual_tool == "web_search" { chat_search_succeeded = true; }
-                            if actual_tool == "run_command" || (actual_tool == "browser" && tool_args.first().is_some_and(|arg| arg == "click")) {
+                            if web_account_task && crate::web_account_task::reported_readback(clean_message,&actual_tool,&res) {
                                 web_account_action_succeeded = true;
                             }
                             if actual_tool == "web_fetch" { chat_source_fetched = true; }
@@ -5154,7 +5154,7 @@ pub(crate) async fn run_message_via_llm(
             if web_account_task && web_account_action_required && !web_account_action_succeeded {
                 if chat_effect_repairs < 1 && run_outcome.failed_tool_calls == 0 {
                     chat_effect_repairs += 1;
-                    current_prompt = format!("{delivered_prompt}\n[Account operation was not executed]\nNo account action has succeeded. You run inside Akasha with the actual tools advertised above; do not invent an inability to access the host. Read the supplied URL with web_fetch if not already read, then use the documented API through run_command or the permitted interactive browser. Keep credentials private in a single worker process. Do not repeat completed reads or ask already answered questions. If a tool reports a denial, report that exact failure.\n");
+                    current_prompt = format!("{delivered_prompt}\n[Account operation was not executed]\nNo verified account receipt is available. Preparatory commands and browser clicks do not prove registration. Retain an already created account: never register it again. Obtain the documented authenticated read-back and report its actual HTTP status, the original mutation status, service_origin, id and verified:true as one JSON object from the worker. You run inside Akasha with the actual tools advertised above; do not invent an inability to access the host. Read the supplied URL with web_fetch if not already read, then use the documented API through run_command or the permitted interactive browser. Keep credentials private in a single worker process. Do not repeat completed reads or ask already answered questions. If a tool reports a denial, report that exact failure.\n");
                     continue;
                 }
                 run_outcome.termination = TerminationReason::VerificationFailed;
