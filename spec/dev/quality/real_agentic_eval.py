@@ -86,6 +86,13 @@ def binary_fingerprint(path: Path) -> dict[str, Any]:
     return {"name": path.name, "sha256": digest, "size_bytes": path.stat().st_size}
 
 
+def copy_embedding_runtime(binary: Path, data_dir: Path) -> None:
+    source=binary.resolve().parent / "embedding_model"
+    if not (source / "embedding-lock.json").is_file():
+        raise RuntimeError("offline embedding runtime missing beside the daemon")
+    shutil.copytree(source, data_dir / "embedding_model")
+
+
 def choose_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -351,6 +358,9 @@ def llm_call_diagnostics(
         if (entry.get("payload") or {}).get("success") is True
         and isinstance((entry.get("payload") or {}).get("model_used"), str)
     ]
+    success_routes = [{"model": (entry.get("payload") or {}).get("model_used"),
+                       "provider": (entry.get("payload") or {}).get("provider_used")}
+                      for entry in finished if (entry.get("payload") or {}).get("success") is True]
     failure_kinds = [
         classify_llm_failure((entry.get("payload") or {}).get("error"))
         for entry in finished
@@ -396,6 +406,7 @@ def llm_call_diagnostics(
     return {
         "call_count": max(len(started), len(finished)),
         "success_models": success_models,
+        "success_routes": success_routes,
         "failure_kinds": failure_kinds,
         "unfinished_count": unmatched_count,
     }
@@ -419,6 +430,7 @@ def provider_model_evidence(
     task_model: Any,
     successful_call_models: list[str],
     provider_metrics: list[dict[str, Any]],
+    successful_call_routes: list[dict[str, Any]] | None = None,
 ) -> tuple[bool, str | None]:
     normalize = lambda value: re.sub(r"[^a-z0-9]", "", str(value).lower())
     expected = normalize(expected_model)
@@ -439,6 +451,10 @@ def provider_model_evidence(
         and expected
         and expected in normalize(item.get("model", ""))
         for item in provider_metrics
+    )
+    provider_observed = provider_observed or any(
+        route.get("provider") == "ollama" and expected and expected == normalize(route.get("model"))
+        for route in successful_call_routes or []
     )
     return bool(model_match), "ollama" if model_match and provider_observed else None
 
@@ -525,6 +541,7 @@ def submit_message(
         model_used,
         llm_diagnostics["success_models"],
         providers,
+        llm_diagnostics["success_routes"],
     )
     device_match, vram_bytes = model_device_match(ollama_url, expected_model, device)
     return {
@@ -766,9 +783,11 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                 "AKASHA_PORT": str(port),
                 "AKASHA_LLM_TIMEOUT_SECS": str(args.timeout_secs),
                 "AKASHA_LLM_FIRST_CHUNK_SECS": str(args.timeout_secs),
+                "AKASHA_EMBEDDINGS_OFFLINE": "1",
             }
         )
         run_checked([str(args.cli), "init", "--defaults"], env)
+        copy_embedding_runtime(args.daemon, data_dir)
         write_router(data_dir, model, args.ollama_url, args.device)
         write_eval_tools_policy(data_dir, root, allowed_tools=["memory_search", "memory_store"])
         daemon = Daemon(args.daemon, env, root / "daemon.log", base)

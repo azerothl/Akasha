@@ -645,6 +645,8 @@ pub(crate) async fn run_message_via_llm(
     // breaks fast-lane matching or memory profile selection.
     let structured = interpret_message(clean_message);
     let web_account_task = !code_studio_disk_task && crate::web_account_task::matches(clean_message);
+    let direct_tool = if code_studio_disk_task {None}else{crate::direct_tool_task::named_tool(clean_message)};
+    let durable_tool_task = web_account_task || direct_tool.is_some();
     let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
     // Slim prompt for embedded + small Ollama (also for subagents — full RULE dumps cause rule-echo).
     let embedded_compact = embedded_primary_route && !code_studio_disk_task;
@@ -819,6 +821,8 @@ pub(crate) async fn run_message_via_llm(
         String::new()
     } else if web_account_task && tools_executor_snapshot.is_some() {
         crate::web_account_task::tools(&tools_executor_snapshot.as_ref().unwrap().policy)
+    } else if let (Some(name),Some(executor))=(direct_tool,tools_executor_snapshot.as_ref()) {
+        crate::direct_tool_task::tools(&executor.policy,name)
     } else if embedded_compact && tools_executor_snapshot.is_some() {
         let allowed_tools = tools_executor_snapshot
             .as_ref()
@@ -1083,6 +1087,8 @@ pub(crate) async fn run_message_via_llm(
         );
     } else if web_account_task {
         system_prompt.push_str(crate::web_account_task::CONTEXT);
+    } else if direct_tool.is_some() {
+        system_prompt.push_str(crate::direct_tool_task::CONTEXT);
     } else if code_studio_disk_task {
         system_prompt.push_str(CODE_STUDIO_APP_CONTEXT);
     } else if !code_studio_disk_task && embedded_compact {
@@ -1909,6 +1915,7 @@ pub(crate) async fn run_message_via_llm(
             && crate::studio_file_effects::has_request(clean_message);
         let mut chat_mutation_succeeded = false;
         let mut web_account_action_succeeded = false;
+        let mut direct_tool_succeeded = false;
         let mut chat_effect_repairs = 0u32;
         let mut chat_completion_repairs = 0u32;
         let mut chat_readback = crate::chat_contract::PostMutationRead::new(tool_disk_workspace_root.clone());
@@ -2009,7 +2016,7 @@ pub(crate) async fn run_message_via_llm(
                         st.append(&session_id, "user", steer_text.clone()).await;
                     }
                     user_message = format!("{user_message}\n\n{steer_text}");
-                    if web_account_task {
+                    if durable_tool_task {
                         current_prompt.push_str(&format!("\n\n{steer_text}"));
                     }
                     let _ = store.insert_event(
@@ -2202,6 +2209,7 @@ pub(crate) async fn run_message_via_llm(
                     .and_then(|executor| crate::chat_contract::native_tools(&executor.policy, &assigned_agent))
                     .and_then(|mut tools| {
                         if web_account_task { crate::web_account_task::retain_native_tools(&mut tools); }
+                        if let Some(name)=direct_tool { tools.retain(|tool|tool["function"]["name"]==name || tool["function"]["name"]=="ask_user"); }
                         (!tools.is_empty()).then_some(tools)
                     })
             }else{None};
@@ -2220,7 +2228,7 @@ pub(crate) async fn run_message_via_llm(
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
                     && native_tools.as_ref().is_some_and(|tools|tools[0].pointer("/function/parameters/properties/tool/enum").and_then(|v|v.as_array()).is_some_and(|names|names.iter().any(|name|matches!(name.as_str(),Some("write_file"|"write_code"|"edit_file"|"search_replace"|"apply_patch"))))),
                 conversation: if code_studio_disk_task { Some(conversation.clone()) }
-                    else if web_account_task { Some(auxiliary_context.iter().chain(conversation.iter()).cloned().collect()) }
+                    else if durable_tool_task { Some(auxiliary_context.iter().chain(conversation.iter()).cloned().collect()) }
                     else if auxiliary_context.is_empty() { None } else { Some(auxiliary_context.clone()) },
                 prompt: if code_studio_disk_task {
                     format!("{}{}", resume_overlay, current_prompt)
@@ -2497,6 +2505,7 @@ pub(crate) async fn run_message_via_llm(
                                 "round": round + 1,
                                 "success": true,
                                 "model_used": resp.model_used,
+                                "provider_used": resp.provider_used,
                                 "latency_ms": resp
                                     .total_duration_ns
                                     .map(|ns| ns / 1_000_000)
@@ -2669,7 +2678,9 @@ pub(crate) async fn run_message_via_llm(
 
             let requested_tool_example = !code_studio_disk_task && crate::chat_contract::requested_tool_example(clean_message, &response);
             let mut parsed_tool_calls = tools_executor_snapshot.as_ref().filter(|_| !requested_tool_example).and_then(|_| {
-                let calls = if code_studio_disk_task {super::studio_conversation::parse_calls_for_turn(&response,turn_tool_names.as_deref())} else {parse_tool_calls(&response)};
+                let calls = if code_studio_disk_task {super::studio_conversation::parse_calls_for_turn(&response,turn_tool_names.as_deref())}
+                    else if let Some(name)=direct_tool {super::studio_conversation::parse_calls_for_turn(&response,Some(&[name.to_owned(),"ask_user".into()]))}
+                    else {parse_tool_calls(&response)};
                 if calls.is_empty() {
                     None
                 } else {
@@ -3858,7 +3869,7 @@ pub(crate) async fn run_message_via_llm(
                                             .await
                                             {
                                                 Ok(Ok(reply)) => {
-                                                    if web_account_task && crate::web_account_task::stop_reply(&reply) {
+                                                    if durable_tool_task && crate::web_account_task::stop_reply(&reply) {
                                                         match TaskStore::open(&store_path).and_then(|s| s.transition_if(task_id,
                                                             &[TaskStatus::Running, TaskStatus::WaitingUserInput], TaskStatus::Cancelled)) {
                                                             Ok(_) => { run_outcome.termination = TerminationReason::Cancelled; reply_text = "Tâche annulée à votre demande.".into(); }
@@ -4310,6 +4321,7 @@ pub(crate) async fn run_message_via_llm(
                         previous_batch_call_succeeded = success;
                         if success {
                             run_outcome.successful_tool_calls += 1;
+                            if direct_tool == Some(actual_tool.as_str()) { direct_tool_succeeded = true; }
                             if actual_tool == "web_search" { chat_search_succeeded = true; }
                             if actual_tool == "run_command" || (actual_tool == "browser" && tool_args.first().is_some_and(|arg| arg == "click")) {
                                 web_account_action_succeeded = true;
@@ -4556,13 +4568,13 @@ pub(crate) async fn run_message_via_llm(
                 }
                 let execution_response=runtime_commands_added.then(||super::studio_conversation::scheduled_execution_response(&calls)).flatten();
                 let results_blob = tool_results.join("\n");
-                if code_studio_disk_task || web_account_task {
+                if code_studio_disk_task || durable_tool_task {
                     let per_call:Vec<String>=tool_result_starts.iter().enumerate().map(|(index,start)| {
                         let end=tool_result_starts.get(index+1).copied().unwrap_or(tool_results.len());
                         let recorded=tool_results[*start..end].join("\n");
                         if recorded.is_empty(){"No execution result recorded; do not assume success.".into()}else{recorded}
                     }).collect();
-                    if web_account_task {
+                    if durable_tool_task {
                         // Persist session/steering instructions, not the repeated
                         // catalogue and transport suffix added to delivered_prompt.
                         super::studio_conversation::append_account_turn(&mut conversation,&current_prompt,&response,&results_blob,&per_call,round);
@@ -4678,7 +4690,7 @@ pub(crate) async fn run_message_via_llm(
                     .count();
                 // Only successful read-only source data can be summarized. Human answers,
                 // repository rules, failures and mutation/unknown receipts stay exact.
-                let results_blob = if !code_studio_disk_task && !web_account_task && !calls.is_empty()
+                let results_blob = if !code_studio_disk_task && !durable_tool_task && !calls.is_empty()
                     && run_outcome.failed_tool_calls == failed_calls_before_round
                     && calls.iter().all(|(name, args)| matches!(name.as_str(), "read_file" | "read_code" | "web_fetch" | "web_search" | "search_files" | "grep_content")
                         && !args.iter().any(|arg| ["agents.md", "skill.md", "code_studio_plan.md", "design.md"].iter().any(|rule| arg.to_ascii_lowercase().contains(rule))))
@@ -4687,7 +4699,7 @@ pub(crate) async fn run_message_via_llm(
                     "Read-only source results are supplied separately as auxiliary context. Use their facts; reread exact file ranges before editing.".to_owned()
                 } else { results_blob };
                 // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
-                current_prompt = if code_studio_disk_task || web_account_task {
+                current_prompt = if code_studio_disk_task || durable_tool_task {
                     String::new()
                 } else if round_had_ask_user {
                     format!(
@@ -5104,6 +5116,16 @@ pub(crate) async fn run_message_via_llm(
                 }
                 run_outcome.termination = TerminationReason::VerificationFailed;
                 reply_text = "La vérification explicitement demandée n’a pas été effectuée après deux tentatives de correction. Les résultats déjà obtenus sont conservés dans la tâche.".into();
+                break 'tool_rounds;
+            }
+            if direct_tool.is_some() && !direct_tool_succeeded {
+                if chat_effect_repairs < 1 && run_outcome.failed_tool_calls == 0 {
+                    chat_effect_repairs += 1;
+                    current_prompt = format!("[Requested operation has not executed] Call {} with the user's requested arguments using the advertised contract. A final claim cannot replace its receipt. If unavailable, explain the precise blocker. Do not call other tools.\n",direct_tool.unwrap());
+                    continue;
+                }
+                run_outcome.termination = TerminationReason::ToolError;
+                reply_text = format!("L’opération demandée n’a pas réussi.\n{}",last_tool_results_blob.as_deref().unwrap_or("Aucun reçu d’exécution de l’outil demandé.").chars().take(1800).collect::<String>());
                 break 'tool_rounds;
             }
             if web_account_task && !web_account_action_succeeded {

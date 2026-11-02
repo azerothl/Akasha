@@ -15,6 +15,26 @@ SPEC.loader.exec_module(eval_runner)
 
 
 class RealAgenticEvalTests(unittest.TestCase):
+    def test_per_call_provider_receipt_survives_a_router_metrics_reset(self):
+        self.assertEqual(eval_runner.provider_model_evidence("test:1b","test:1b",["test:1b"],[],[{"model":"test:1b","provider":"ollama"}]),(True,"ollama"))
+        self.assertEqual(eval_runner.provider_model_evidence("test:1b","test:1b",["test:1b"],[],[{"model":"test:1b","provider":"remote"}]),(True,None))
+        self.assertEqual(eval_runner.provider_model_evidence("test:1b","test:1b",["test:1b"],[],[{"model":"other:1b","provider":"ollama"}]),(True,None))
+
+    def test_embedding_precondition_copies_only_model_assets_to_the_test_profile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);package=root/"package";data=root/"data"
+            package.mkdir();data.mkdir()
+            binary=package/"daemon.exe";binary.write_bytes(b"binary")
+            with self.assertRaisesRegex(RuntimeError,"offline embedding runtime missing"):
+                eval_runner.copy_embedding_runtime(binary,data)
+            model=package/"embedding_model";model.mkdir()
+            (model/"embedding-lock.json").write_text("{}")
+            (model/"model.onnx").write_bytes(b"model")
+            (package/"akasha.env").write_text("PRIVATE_TEST_VALUE=excluded")
+            eval_runner.copy_embedding_runtime(binary,data)
+            self.assertEqual({p.name for p in data.iterdir()},{"embedding_model"})
+            self.assertEqual((data/"embedding_model/model.onnx").read_bytes(),b"model")
+
     def test_router_pins_context_and_thinking_on_every_measured_route(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
