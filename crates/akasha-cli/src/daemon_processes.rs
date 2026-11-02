@@ -157,7 +157,7 @@ pub fn inventory() -> anyhow::Result<Vec<Instance>> {
     let uid=String::from_utf8_lossy(&identity.stdout).trim().parse::<u32>()
         .ok().filter(|_|identity.status.success()).ok_or_else(||anyhow::anyhow!("Impossible de déterminer l'utilisateur courant"))?;
     let output = Command::new("ps")
-        .args(if cfg!(target_os="macos") {vec!["-U".to_owned(),uid.to_string(),"-x".to_owned(),"-o".to_owned(),"pid=,ppid=,lstart=,rss=,comm=".to_owned()]} else {vec!["-u".to_owned(),uid.to_string(),"-o".to_owned(),"pid=,ppid=,lstart=,rss=,comm=".to_owned()]})
+        .args(if cfg!(target_os="macos") {vec!["-U".to_owned(),uid.to_string(),"-x".to_owned(),"-o".to_owned(),"pid=,ppid=,lstart=,rss=,stat=,comm=".to_owned()]} else {vec!["-u".to_owned(),uid.to_string(),"-o".to_owned(),"pid=,ppid=,lstart=,rss=,stat=,comm=".to_owned()]})
         .env("LC_ALL", "C")
         .output()?;
     if !output.status.success() {
@@ -173,13 +173,13 @@ fn parse_unix(text: &str) -> Vec<Instance> {
     let mut rows = Vec::new();
     for line in text.lines() {
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() < 9 {
+        if fields.len() < 10 || fields[8].starts_with('Z') {
             continue;
         }
         let (Ok(pid), Ok(parent)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>()) else {
             continue;
         };
-        let command = fields[8..].join(" ");
+        let command = fields[9..].join(" ");
         let Some(mut kind) = role(&command) else {
             continue;
         };
@@ -576,8 +576,14 @@ mod tests {
         assert!(parse_windows("not JSON").is_err());
     }
     #[test]
+    fn unix_inventory_excludes_unreaped_daemons() {
+        let rows = parse_unix("123 1 Sat Oct 24 12:00:00 2026 0 Z /usr/bin/akasha-daemon\n124 1 Sat Oct 24 12:00:00 2026 20 S /usr/bin/akasha-daemon\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 124);
+    }
+    #[test]
     fn unix_listing_uses_exact_executable_names() {
-        let rows=parse_unix("123 1 Sat Oct 24 12:00:00 2026 1024 /usr/bin/akasha-daemon\n124 1 Sat Oct 24 12:00:00 2026 20 /usr/bin/not-akasha-daemon\n");
+        let rows=parse_unix("123 1 Sat Oct 24 12:00:00 2026 1024 S /usr/bin/akasha-daemon\n124 1 Sat Oct 24 12:00:00 2026 20 S /usr/bin/not-akasha-daemon\n");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pid, 123);
         assert_eq!(rows[0].memory_bytes, 1048576);
