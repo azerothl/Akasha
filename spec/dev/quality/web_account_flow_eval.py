@@ -104,7 +104,12 @@ class Fixture(BaseHTTPRequestHandler):
                 response = '{"answer_mode":"delegate","task_type":"orchestrator"}'
             elif state["refuse"]:
                 response = "Je ne peux pas utiliser d'outils ni accéder à votre ordinateur."
-            elif state["read_only"] and "just summarize the requirements" in text:
+            elif state["prepare_only"] and not state["prepared"]:
+                state["prepared"] = True
+                response = "TOOL: run_command " + sys.executable + " -c print(42)"
+            elif state["prepare_only"]:
+                response = "Le compte a été créé et vérifié."
+            elif state["read_only"] and ("just summarize the requirements" in text or "Don't register" in text):
                 response = "Voici les conditions requises. Aucun compte n'a été créé."
             elif state["read_only"]:
                 response = "TOOL: web_fetch " + state["origin"] + "/agents.html" if not state["reads"] else 'TOOL: ask_user\n{"question":"Continuer cette inscription fictive ?"}'
@@ -127,15 +132,16 @@ CLIENT = '''import json, sys, urllib.request
 base=sys.argv[1]
 body=json.dumps({"name":"FixtureAgent","password":"SyntheticOnly-2026"}).encode()
 r=urllib.request.Request(base+"/api/v2/accounts",data=body,headers={"Content-Type":"application/json"},method="POST")
-with urllib.request.urlopen(r) as response: account=json.load(response)
+with urllib.request.urlopen(r) as response: account=json.load(response); mutation_status=response.status
 r=urllib.request.Request(base+"/api/v2/me",headers={"Authorization":"Bearer "+account["apiToken"]})
-with urllib.request.urlopen(r) as response: me=json.load(response)
+with urllib.request.urlopen(r) as response: me=json.load(response); readback_status=response.status
 assert me["name"]=="FixtureAgent"
-print(json.dumps({"verified":True,"id":me["id"],"name":me["name"]}))
+print(json.dumps({"verified":True,"id":me["id"],"name":me["name"],"service_origin":base,"mutation_status":mutation_status,"readback_status":readback_status}))
 '''
 
 
-def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False):
+def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False):
+    read_only = read_only or withdraw_only
     evidence.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="web-account-", dir=evidence)).resolve()
     test_daemon = copy_daemon_with_runtime(daemon, profile / daemon.name)
@@ -148,6 +154,7 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                      "token": "fixture-token-must-never-leave-worker", "origin": origin,
                      "client": client, "cancel": cancel, "reject": reject, "refuse": refuse, "read_only": read_only, "real_model": model,
                      "native_chat": native_chat, "steer_stop": steer_stop, "model_started": threading.Event(), "release_model": threading.Event()}
+    service.state.update(prepare_only=prepare_only, prepared=False)
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
     write_router(profile, model or "account-fixture", origin, "cuda")
@@ -202,7 +209,8 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                     questions = [e["payload"] for e in events if e["event_type"] == "task_waiting_user_input"]
                     if questions:
                         q = questions[-1]
-                        http_json(base, "POST", f"/api/tasks/{task_id}/human-reply", {"request_id": q["request_id"], "response": "Don't register; just summarize the requirements" if read_only else "stop"})
+                        reply = "Don't register" if withdraw_only else "Don't register; just summarize the requirements" if read_only else "stop"
+                        http_json(base, "POST", f"/api/tasks/{task_id}/human-reply", {"request_id": q["request_id"], "response": reply})
                         answered = True
                 if task["status"] in {"completed", "failed", "cancelled", "interrupted"}:
                     if (cancel or steer_stop) and not (task.get("outcome") or {}).get("response"):
@@ -235,7 +243,7 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                 assert task["outcome"]["result"] == "cancelled", result
                 assert "annul" in task["outcome"]["response"].lower(), result
                 assert len(service.state["request_bytes"]) == 1, result
-            elif reject or refuse:
+            elif reject or refuse or prepare_only:
                 assert task["status"] == "failed" and service.state["creates"] == 0, result
             else:
                 assert task["status"] == "completed" and service.state["creates"] == 1 and service.state["verified"] >= 1, result
@@ -265,5 +273,7 @@ if __name__ == "__main__":
     parser.add_argument("--read-only", action="store_true", help="Human withdraws registration and asks for a summary only")
     parser.add_argument("--native-chat", action="store_true", help="Native-chat model retains the complete text tool catalogue")
     parser.add_argument("--steer-stop", action="store_true", help="Cancel through the steering queue during the first model call")
+    parser.add_argument("--prepare-only", action="store_true", help="A successful preparation and false claim must fail without an account receipt")
+    parser.add_argument("--withdraw-only", action="store_true", help="Withdraw registration without asking for a summary")
     args = parser.parse_args()
-    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop)
+    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only)
