@@ -4563,7 +4563,9 @@ pub(crate) async fn run_message_via_llm(
                         if recorded.is_empty(){"No execution result recorded; do not assume success.".into()}else{recorded}
                     }).collect();
                     if web_account_task {
-                        super::studio_conversation::append_account_turn(&mut conversation,&delivered_prompt,&response,&results_blob,&per_call,round);
+                        // Persist session/steering instructions, not the repeated
+                        // catalogue and transport suffix added to delivered_prompt.
+                        super::studio_conversation::append_account_turn(&mut conversation,&current_prompt,&response,&results_blob,&per_call,round);
                     } else {
                         if !delivered_prompt.trim().is_empty() {conversation.push(if !conversation.is_empty() && (delivered_prompt.trim_start().starts_with("[Active goal") || delivered_prompt.trim_start().starts_with("[Repair the FIRST") || delivered_prompt.trim_start().starts_with("[STUDIO_READ_ONLY_STREAK]")) {akasha_llm::ConversationMessage::runtime_control(delivered_prompt.clone())} else {akasha_llm::ConversationMessage::user(delivered_prompt.clone())});}
                         conversation.extend(super::studio_conversation::tool_turn_with_results(execution_response.as_deref().unwrap_or(&response), &results_blob, &per_call, round, if scope_unchanged && goal_tracker.is_none() {&task_scope}else{""}));

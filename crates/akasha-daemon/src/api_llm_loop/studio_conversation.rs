@@ -6,10 +6,10 @@ pub(super) fn initial_user_context<'a>(history: &'a [ConversationMessage], fallb
         .map(|message|message.content.as_str()).unwrap_or(fallback)
 }
 
-pub(super) fn append_account_turn(history: &mut Vec<ConversationMessage>, delivered_prompt: &str, response: &str, results: &str, per_call: &[String], round: u32) {
+pub(super) fn append_account_turn(history: &mut Vec<ConversationMessage>, context_prompt: &str, response: &str, results: &str, per_call: &[String], round: u32) {
     // Preserve the full initial session context and each later steering/repair
     // instruction exactly as delivered, alongside the completed tool receipts.
-    if !delivered_prompt.trim().is_empty() { history.push(ConversationMessage::user(delivered_prompt.to_owned())); }
+    if !context_prompt.trim().is_empty() { history.push(ConversationMessage::user(context_prompt.to_owned())); }
     history.extend(tool_turn_with_results(response, results, per_call, round, ""));
 }
 
