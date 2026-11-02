@@ -40,23 +40,37 @@ pub(crate) fn matches(message: &str) -> bool {
     {
         return false;
     }
-    // A negated operation with qualifiers is still not a positive request to
-    // create an account. Keep independent positive clauses, e.g. create once
-    // followed by "don't register duplicates".
+    if regex::Regex::new(r"(?i)^\s*(?:read|lis|lire|résume|summarize|summarise|describe|debug|help)\b").expect("informational request").is_match(message) {return false;}
+    account_intent(message).is_some()
+}
+
+enum AccountIntent { Create { additional: bool }, Resume }
+
+fn account_intent(message: &str) -> Option<AccountIntent> {
+    let raw=message.to_lowercase().replace('’',"'");
+    let unquoted=regex::Regex::new(r#"`[^`]*`|"(?:\\.|[^"\\])*""#).expect("argument data").replace_all(&raw," ");
+    let text=regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("URL data").replace_all(&unquoted,|capture:&regex::Captures| {let value=&capture[0];let trimmed=value.trim_end_matches(['.',',',';',':','!',')',']','}']);format!(" {}",&value[trimmed.len()..])});
+    if regex::Regex::new(r"\b(?:later|tomorrow|demain)\b|plus tard|pas maintenant|not now").expect("deferred operation").is_match(&text) {return None;}
     let positive=regex::Regex::new(r"\b(?:don't|do not|never|ne|n')\b[^,;.!?\n]*").expect("negated clause").replace_all(&text," ");
-    let account = [
-        "compte", "account", "inscri", "sign up", "signup", "register",
-    ]
-    .iter()
-    .any(|word| positive.contains(word))
-        || text.contains("account") && regex::Regex::new(r"\bcreate\s+one\b").expect("account reference").is_match(&positive);
-    let action = [
-        "cree", "creer", "create", "inscri", "register", "sign up", "signup", "continue",
-        "reprend", "connect",
-    ]
-    .iter()
-    .any(|word| positive.contains(word));
-    account && action
+    let prefix=r"(?:^|[,;\n]|\b(?:then|puis|ensuite|et|and))\s*(?:(?:please|stp|oui|yes|ok|merci de|s'il te pla[iî]t)\s+)?(?:(?:(?:can|could|would)\s+you|(?:peux|pourrais|pouvez|pourriez)[ -](?:tu|vous))\s+(?:please\s+)?(?:me\s+)?)?";
+    let creation=r"(?:cr[eé]e(?:r|z)?|create)(?:-moi|-toi)?\s+(?:(?:also|aussi)\s+)?(?:(?:un|une|le|mon|ton|votre|an?|the|one)\s+)?(?:(?:nouveau|autre|new|another|second|additional|read-only|agent)\s+){0,2}(?:compte|accounts?)\b";
+    let registration=r"(?:register\s+(?:(?:an?|the)\s+)?(?:(?:another|second|new|agent)\s+){0,2}(?:account|agent|user|me)\b|register\s+(?:at|on)\b|(?:sign(?:\s+me)?[ -]+up|signup)\s+(?:at|on|for)\b|inscri(?:s|vez|re)-(?:moi|toi)\b|inscri(?:s|vez|re)\s+(?:(?:un|le|mon)\s+)?compte\b)";
+    let resume=r"(?:(?:continu(?:e|er|ez)|reprends?|reprendre|reprenez)\s+(?:(?:l'|la\s+|the\s+|mon\s+|cette\s+))?(?:inscri(?:ption|tion)|registration|signup|account creation|cr[eé]ation\s+(?:du\s+)?compte)\b|resume\s+(?:the\s+)?(?:registration|signup|account creation)\b)";
+    let purpose=r"^\s*(?:use|utilise|utiliser)\b[^;.!?\n]*?\b(?:to|pour)\s+(?:te\s+)?";
+    let direct=regex::Regex::new(&format!(r"(?:{prefix}|{purpose})(?:{creation}|{registration})")).expect("explicit registration action");
+    if let Some(action)=direct.find(&positive) {
+        let additional=regex::Regex::new(r"\b(?:(?:another|second|additional|nouveau|autre)\s+(?:agent\s+)?|(?:also|aussi)\s+(?:(?:un|an?)\s+)?)(?:account|compte)\b").expect("new account operation").is_match(action.as_str());
+        return Some(AccountIntent::Create{additional});
+    }
+    if regex::Regex::new(r"\baccount\b").unwrap().is_match(&text) && regex::Regex::new(&format!(r"{prefix}create\s+one(?:\s+(?:at|on|now)\b|\s*$)")).unwrap().is_match(&positive) {return Some(AccountIntent::Create{additional:false});}
+    regex::Regex::new(&format!(r"(?:{prefix}|{purpose}){resume}")).expect("explicit registration continuation").is_match(&positive).then_some(AccountIntent::Resume)
+}
+
+pub(crate) fn apply_followup(scope: &mut String, required: &mut bool, verified: &mut bool, correction: &str) {
+    let new_destination=update_destination(scope,correction);
+    let additional=matches!(account_intent(correction),Some(AccountIntent::Create{additional:true})) && !read_only_scope(correction);
+    if new_destination || additional {*verified=false;}
+    *required=authorization_after(*required,scope,correction);
 }
 
 pub(crate) const CONTEXT: &str = "[Akasha — account operation at a supplied URL]\n\
@@ -114,9 +128,14 @@ pub(crate) fn verification_available(policy: &akasha_tools::ToolsPolicy) -> bool
 }
 
 fn positive_targets(text: &str) -> Vec<url::Url> {
-    let pattern=regex::Regex::new(r#"(?i)\b(?:register|create|cr[eé]e(?:r|z)?|inscri(?:s|re|vez|vons|t))\b[^\n;,.!?]*?\b(?:at|on|sur)\s+(?:(?:le|the)\s+)?(?:(?:site(?:\s+web)?|website)\s+)?(https?://[^\s<>"`]+)"#).expect("registration target");
+    let pattern=regex::Regex::new(r#"(?i)\b(?:register|create|cr[eé]e(?:r|z)?|inscri(?:s|re|vez|vons|t)|continu(?:e|er|ez)|reprends?|reprendre|reprenez|resume)\b[^\n;,.!?]*?\b(?:at|on|sur)\s+(?:(?:le|the)\s+)?(?:(?:site(?:\s+web)?|website)\s+)?(https?://[^\s<>"`]+)"#).expect("registration target");
     let negated=regex::Regex::new(r"(?i)(?:don't|do not|never|ne(?:\s+(?:vous|te)|\s+t')?|n')\s*$").expect("negated target");
-    pattern.captures_iter(text).filter(|capture|!negated.is_match(&text[..capture.get(0).unwrap().start()])).filter_map(|capture|request_urls(&capture[1]).into_iter().next()).collect()
+    let quoted=regex::Regex::new(r#"`[^`]*`|"(?:\\.|[^"\\])*""#).expect("quoted data").find_iter(text).map(|item|item.range()).collect::<Vec<_>>();
+    let reference=regex::Regex::new(r"(?i)\b(?:docs|documentation|skill|référence|reference)\b").expect("reference source");
+    pattern.captures_iter(text).filter(|capture| {
+        let start=capture.get(0).unwrap().start();
+        !quoted.iter().any(|range|range.contains(&start)) && !negated.is_match(&text[..start]) && !reference.is_match(&text[start..capture.get(1).unwrap().start()])
+    }).filter_map(|capture|request_urls(&capture[1]).into_iter().next()).collect()
 }
 
 pub(crate) fn verification_scope(message: &str) -> String {
@@ -196,7 +215,7 @@ fn read_only_scope_at(reply: &str, scope: Option<&str>) -> bool {
     if registration_withdrawn_at(&text,scope) {return true;}
     let text=regex::Regex::new(r#"`[^`]*`|"[^"]*""#).expect("quoted data").replace_all(&text," ");
     // A summary followed by registration retains the requested mutation.
-    if regex::Regex::new(r"\b(?:create|register|sign[ -]?up|cree|creer|creez|inscris|inscrire|inscrivez|inscris-moi|continu\w*|reprend\w*|resume\s+(?:registration|signup))\b").expect("retained registration").is_match(&text) {return false;}
+    if account_intent(reply).is_some() {return false;}
     matches!(text.trim(),"read-only"|"read only"|"lecture seule") || ["just summarize", "only summarize", "just summarise", "only summarise", "switch to read-only", "passe en lecture seule", "resume seulement", "resume uniquement", "juste resumer", "contente-toi de resumer", "resume les conditions", "resume les exigences"].iter().any(|phrase|text.contains(phrase))
 }
 
@@ -228,6 +247,24 @@ pub(crate) fn read_only_tool(name: &str, args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn informational_login_and_deferred_requests_do_not_authorize_registration() {
+        for request in ["Résume les conditions d'inscription sur https://example.org", "Read signup docs on https://example.org", "Continue account login on https://example.org", "Connect to my account at https://example.org", "Continue registration later at https://example.org", "Debug the account login at https://example.org"] {assert!(!matches(request),"{request}");}
+        let request="Continue registration on https://service.example using the skill https://docs.example/skill";
+        assert!(matches(request));assert_eq!(verification_scope(request),"https://service.example/");
+    }
+
+    #[test]
+    fn a_followup_can_authorize_another_account_at_the_same_service() {
+        let mut scope="https://example.org/".to_owned();let mut required=true;let mut verified=true;
+        apply_followup(&mut scope,&mut required,&mut verified,"Create another account named Beta at https://example.org");
+        assert!(required);assert!(!verified);assert_eq!(scope,"https://example.org/");
+        verified=true;
+        apply_followup(&mut scope,&mut required,&mut verified,"Continue registration at https://example.org");
+        assert!(verified);
+        apply_followup(&mut scope,&mut required,&mut verified,"Don't register another account at https://example.org");
+        assert!(verified);
+    }
     #[test]
     fn a_read_only_correction_withdraws_the_original_account_operation() {
         for reply in ["Don't register; just summarize the requirements", "Ne crée pas de compte : résume les conditions", "Passe en lecture seule", "Don't register", "Please do not register", "Ne crée pas de compte", "Merci de ne pas créer de compte"] {assert!(read_only_scope(reply));}
