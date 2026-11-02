@@ -244,7 +244,7 @@ class RealAgenticEvalTests(unittest.TestCase):
         prompt = eval_runner.schedule_task_prompt("eval-title")
         self.assertIn("Call the schedule_task tool now", prompt)
         self.assertIn("FREQ=HOURLY", prompt)
-        self.assertIn("Reply SCHEDULE_OK", prompt)
+        self.assertIn(eval_runner.SCHEDULE_PROMPT, prompt)
         self.assertIn("eval-title", prompt)
         self.assertIn("Do not claim that it was created", prompt)
 

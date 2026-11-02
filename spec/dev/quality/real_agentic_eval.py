@@ -33,6 +33,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[3]
 BASELINE_PATH = ROOT / "spec" / "dev" / "quality" / "evals_agentic_real_baseline.json"
 MAX_OUTPUT_TOKENS = 2048
+SCHEDULE_PROMPT = "Réponds exactement SCHEDULE_OK, sans ponctuation ni commentaire. N'appelle aucun outil."
 ROUTES = (
     "conversation",
     "code_generation",
@@ -610,7 +611,7 @@ def memory_store_prompt(token: str) -> str:
 def schedule_task_prompt(title: str) -> str:
     return (
         "Call the schedule_task tool now, exactly once. Use FREQ=HOURLY as the "
-        "first argument, `Reply SCHEDULE_OK` as the scheduled prompt, and "
+        f"first argument, `{SCHEDULE_PROMPT}` as the exact scheduled prompt, and "
         f"`{title}` as the title. Do not claim that it was created until the "
         "tool has returned successfully, and do not call any other tool."
     )
@@ -1012,6 +1013,14 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     resumed_list = http_json(base, "GET", "/api/schedules").get("schedules", [])
                     resumed = any(item.get("id") == schedule_id and item.get("enabled") is True for item in resumed_list)
                     schedule_checks["schedule_resumed"] = resumed
+                    persisted_schedule=next((item for item in resumed_list if item.get("id")==schedule_id),{})
+                    saved_context=persisted_schedule.get("channel_context") or ""
+                    try:
+                        decoded=json.loads(saved_context)
+                        saved_prompt=decoded.get("message") if isinstance(decoded,dict) else decoded
+                    except (ValueError,TypeError):
+                        saved_prompt=saved_context
+                    schedule_checks["scheduled_prompt_preserved"] = saved_prompt == SCHEDULE_PROMPT
                     run_before = metric_snapshot(base)
                     run_started = time.monotonic()
                     run_now = http_json(base, "POST", f"/api/schedules/{schedule_id}/run_now", {})
@@ -1086,7 +1095,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     removed = not any(item.get("id") == schedule_id for item in remaining)
                     schedule_checks["schedule_cancelled"] = cancelled
                     schedule_checks["schedule_removed"] = removed
-                    schedule_ok = paused and resumed and finished and cancelled and removed and created.get("model_match") and created.get("provider_used") == "ollama" and cancel.get("model_match") and cancel.get("provider_used") == "ollama"
+                    schedule_ok = paused and resumed and finished and cancelled and removed and schedule_checks["scheduled_prompt_preserved"] and created.get("model_match") and created.get("provider_used") == "ollama" and cancel.get("model_match") and cancel.get("provider_used") == "ollama"
                     summary = "pause, reprise, réponse exacte, puis annulation vérifiées" if schedule_ok else "un état du cycle planifié n'a pas satisfait son contrôle"
                 else:
                     schedule_ok = False
