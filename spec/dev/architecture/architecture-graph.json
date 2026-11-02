@@ -1,8 +1,8 @@
 {
   "meta": {
     "product": "Akasha",
-    "version": "0.13.0-beta.1",
-    "description": "Akasha: existing agent runtime and isolated Windows consumer beta, with sourced documents and local OCR, confirmed reminders, recurring watches, scoped remote consent, SQLCipher memory and encrypted profile backups.",
+    "version": "0.13.0-beta.2",
+    "description": "Akasha: existing agent runtime and isolated Windows consumer beta, with sourced documents and local OCR, confirmed reminders, recurring watches, scoped remote consent, SQLCipher memory and encrypted profile backups. Expert beta preserves account API workers and receipt-verified single-task operations.",
     "defaultPort": 3876,
     "dataDir": "~/akasha (or AKASHA_DATA_DIR)",
     "sources": [
@@ -505,6 +505,37 @@
         "POST /api/router/qualify",
         "GET /api/capabilities"
       ]
+    },
+    {
+      "id": "account-operation",
+      "label": "Verified account operation",
+      "layer": "runtime",
+      "crate": "crates/akasha-daemon",
+      "description": "Single account request in the existing conversation worker; scoped tools, authenticated read-back receipts, user corrections and cancellation; no replay after verification.",
+      "apis": [
+        "POST /api/message",
+        "GET /api/tasks/:id"
+      ]
+    },
+    {
+      "id": "explicit-operation",
+      "label": "Explicit primitive operation",
+      "layer": "runtime",
+      "crate": "crates/akasha-daemon",
+      "description": "Qualified primitive tool requests stay in the existing worker. Literal arguments remain data and multiple operations retain the full tool route.",
+      "apis": [
+        "POST /api/message"
+      ]
+    },
+    {
+      "id": "local-processes",
+      "label": "Local daemon inventory",
+      "layer": "clients",
+      "crate": "crates/akasha-cli",
+      "description": "User-scoped daemon inventory and identity-checked termination; excludes zombies and protects host details against foreign web origins.",
+      "apis": [
+        "GET /api/status"
+      ]
     }
   ],
   "edges": [
@@ -957,6 +988,48 @@
       "from": "consumer-documents",
       "to": "task-store",
       "label": "same task lifecycle"
+    },
+    {
+      "id": "beta2-75",
+      "from": "conversation",
+      "to": "account-operation",
+      "label": "account intent"
+    },
+    {
+      "id": "beta2-76",
+      "from": "account-operation",
+      "to": "tools",
+      "label": "permitted synchronous worker"
+    },
+    {
+      "id": "beta2-77",
+      "from": "account-operation",
+      "to": "vault",
+      "label": "private credentials"
+    },
+    {
+      "id": "beta2-78",
+      "from": "conversation",
+      "to": "explicit-operation",
+      "label": "qualified primitive"
+    },
+    {
+      "id": "beta2-79",
+      "from": "explicit-operation",
+      "to": "tools",
+      "label": "executor receipts"
+    },
+    {
+      "id": "beta2-80",
+      "from": "ui-cli",
+      "to": "local-processes",
+      "label": "status / daemon list / kill"
+    },
+    {
+      "id": "beta2-81",
+      "from": "local-processes",
+      "to": "http-api",
+      "label": "status"
     }
   ],
   "flows": [
@@ -1294,6 +1367,24 @@
         "sqlite",
         "profile-backup",
         "consumer-ui"
+      ]
+    },
+    {
+      "id": "flow-verified-account",
+      "name": "Create and verify a service account",
+      "description": "Discover the supplied service contract, create and read back inside one private worker, retain the receipt and apply user corrections without duplicate registration.",
+      "steps": [
+        "ui-tauri",
+        "http-api",
+        "main-agent",
+        "conversation",
+        "account-operation",
+        "tools-policy",
+        "tools",
+        "vault",
+        "account-operation",
+        "task-store",
+        "ui-tauri"
       ]
     }
   ]

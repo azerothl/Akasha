@@ -1,0 +1,114 @@
+name: Windows Expert beta candidate
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: '0'
+jobs:
+  candidate:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda: [false, true]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/akasha-ui/package-lock.json
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Select matching Clang library and headers
+        shell: pwsh
+        run: ./scripts/ci/prepare-llvm-windows.ps1
+      - name: Locate NVIDIA native cache
+        if: matrix.cuda
+        id: native_cache
+        shell: pwsh
+        run: '"directory=$(Join-Path $env:LOCALAPPDATA llcb)" >> $env:GITHUB_OUTPUT'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: akasha-consumer-deps-v1
+          shared-key: windows-2022-${{ matrix.cuda }}-${{ hashFiles('vendor/**', 'scripts/build-windows-daemon-cuda.ps1', 'scripts/ci/prepare-llvm-windows.ps1', '.github/workflows/consumer-beta-candidate.yml') }}
+          env-vars: CARGO CC CFLAGS CXX CMAKE RUST CUDA LIBCLANG CLANG BINDGEN LLAMA NVCC ESAXX
+          workspaces: |
+            . -> target
+            apps/akasha-ui/src-tauri -> target
+          cache-directories: ${{ steps.native_cache.outputs.directory }}
+          cache-on-failure: true
+          cache-bin: false
+          cache-workspace-crates: false
+      - name: Prepare SQLCipher and pinned OCR
+        shell: pwsh
+        run: |
+          ./scripts/ci/prepare-sqlcipher-windows.ps1
+          python scripts/prepare-ocr-runtime.py --output "$env:RUNNER_TEMP/ocr-runtime"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/ci/prepare_consumer_embeddings.py --output "$env:RUNNER_TEMP/embedding-model"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "AKASHA_OCR_LOCK_SHA256=$((Get-FileHash "$env:RUNNER_TEMP/ocr-runtime/runtime-lock.json" -Algorithm SHA256).Hash.ToLower())" >> $env:GITHUB_ENV
+      - name: CUDA toolkit
+        if: matrix.cuda
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.9.1'
+      - name: Verify clean source provenance before compilation
+        shell: pwsh
+        run: |
+          $sourceStatus = git status --porcelain
+          if ($LASTEXITCODE) { throw 'Unable to inspect source provenance' }
+          if ($sourceStatus) { $sourceStatus; throw 'Candidate compilation requires a clean checkout' }
+      - name: Build Expert CLI and TUI
+        run: cargo build --locked --release -p akasha-cli -p akasha-tui --features akasha-store/memory-sqlcipher
+      - name: Compile CPU candidate
+        if: '!matrix.cuda'
+        run: cargo build --locked --release -p akasha-daemon --no-default-features --features embedded,embedded-llama-cpp,embeddings-tract,akasha-store/memory-sqlcipher
+      - name: Compile NVIDIA candidate
+        if: matrix.cuda
+        run: ./scripts/build-windows-daemon-cuda.ps1 -Features 'embedded,embedded-llama-cpp,embedded-llama-cpp-cuda,embeddings-tract,akasha-store/memory-sqlcipher'
+      - name: Compile Expert desktop
+        working-directory: apps/akasha-ui
+        env:
+          VITE_AKASHA_DAEMON_PORT: '3876'
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run tauri build -- --no-bundle
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Assemble verified Expert portable package
+        shell: pwsh
+        run: |
+          $daemon='target/release/akasha-daemon.exe'
+          if ('${{ matrix.cuda }}' -eq 'true') { $daemon='target/x86_64-pc-windows-msvc/release/akasha-daemon.exe'; $variant='nvidia' } else { $variant='cpu' }
+          $arguments=@('scripts/ci/package_windows_expert_beta.py','--daemon',$daemon,'--ui','apps/akasha-ui/src-tauri/target/release/akasha-ui.exe','--clients','target/release','--runtime',"$env:RUNNER_TEMP/ocr-runtime",'--output',"candidate-$variant",'--embeddings',"$env:RUNNER_TEMP/embedding-model")
+          if ($variant -eq 'nvidia') { $arguments+='--cuda' }
+          python @arguments
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: akasha-expert-beta-candidate-cuda-${{ matrix.cuda }}
+          path: candidate-*/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain compiler inputs for packaging diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: expert-beta-build-inputs-cuda-${{ matrix.cuda }}
+          path: |
+            target/release/akasha-daemon.exe
+            target/x86_64-pc-windows-msvc/release/akasha-daemon.exe
+            apps/akasha-ui/src-tauri/target/release/akasha-ui.exe
+            ${{ runner.temp }}/ocr-runtime/
+            ${{ runner.temp }}/embedding-model/
+          if-no-files-found: warn
+          retention-days: 7
+      # This workflow only creates candidates. It never tags, publishes or emails.
+      # Hosted Windows runners do not prove real NVIDIA inference or second-account restore.
