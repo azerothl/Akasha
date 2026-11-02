@@ -25,6 +25,8 @@ def package(daemon, ui, clients, runtime, embeddings, output, cuda):
     for source, name in [(runtime, 'ocr-runtime'), (embeddings, 'embedding_model'),
                          (ROOT / 'spec', 'spec'), (ROOT / 'docs', 'docs')]:
         shutil.copytree(source, output / name)
+    shutil.copytree(ROOT / 'scripts' / 'playwright-runner', output / 'playwright-runner',
+                    ignore=shutil.ignore_patterns('node_modules', '__pycache__', '*.pyc'))
     (output / 'scripts').mkdir()
     for name in ['install.ps1', 'setup.ps1', 'update.ps1']:
         shutil.copy2(ROOT / 'scripts' / name, output / 'scripts' / name)
