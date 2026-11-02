@@ -41,7 +41,7 @@ def package(daemon, ui, clients, runtime, embeddings, output, cuda):
                 raise ValueError('Missing CUDA runtime: ' + pattern)
             for source in matches:
                 shutil.copy2(source, output / source.name)
-    (output / 'START-AKASHA.cmd').write_text('@echo off\r\ncd /d "%~dp0"\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\expert-beta-launch.ps1" %*\r\nif errorlevel 1 pause\r\n', encoding='ascii')
+    (output / 'START-AKASHA.cmd').write_text('@echo off\r\ncd /d "%~dp0"\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\expert-beta-launch.ps1" %*\r\nif errorlevel 1 pause\r\n', encoding='ascii', newline='')
     (output / 'README-BETA.txt').write_text(
         'Akasha ' + build['version'] + ' — édition Expert Windows\n'
         'Fermez Akasha avant de remplacer ses exécutables. Extrayez ce paquet dans un dossier de binaires, '
