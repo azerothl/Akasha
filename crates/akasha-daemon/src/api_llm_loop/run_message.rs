@@ -1916,6 +1916,7 @@ pub(crate) async fn run_message_via_llm(
         let mut chat_mutation_succeeded = false;
         let mut web_account_action_succeeded = false;
         let mut direct_tool_succeeded = false;
+        let mut scheduled_literal_rejections = 0u32;
         let mut web_account_action_required = web_account_task && !crate::web_account_task::read_only_scope(clean_message);
         let mut chat_effect_repairs = 0u32;
         let mut chat_completion_repairs = 0u32;
@@ -2215,7 +2216,7 @@ pub(crate) async fn run_message_via_llm(
                         (!tools.is_empty()).then_some(tools)
                     })
             }else{None};
-            let native_tools=native_tools.or_else(||direct_tool.and_then(|name|tools_executor_snapshot.as_ref().and_then(|executor|crate::direct_tool_task::native_tools(&executor.policy,&assigned_agent,name))));
+            let native_tools=native_tools.or_else(||direct_tool.and_then(|name|tools_executor_snapshot.as_ref().and_then(|executor|crate::direct_tool_task::native_tools(&executor.policy,&assigned_agent,name,clean_message))));
             let mut turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             // Workflow tools use the text protocol. Include their effective
             // announced names for ordinary turns, without widening literal-only turns.
@@ -3169,6 +3170,11 @@ pub(crate) async fn run_message_via_llm(
                         let effective_role_tool = if actual_tool.is_empty() {
                             if tool_args.is_empty() { "read_skill" } else { "run_command" }
                         } else { actual_tool.as_str() };
+                        if let Some(error)=crate::direct_tool_task::schedule_literal_error(clean_message,&actual_tool,tool_args) {
+                            scheduled_literal_rejections += 1;run_outcome.failed_tool_calls += 1;
+                            if scheduled_literal_rejections>=3 {run_outcome.termination=TerminationReason::ToolError;reply_text=error;break 'tool_rounds;}
+                            tool_results.push(error);continue;
+                        }
                         if !code_studio_disk_task {
                             if let Some(error) = crate::chat_contract::literal_write_error(clean_message, effective_role_tool, tool_args) {
                                 run_outcome.failed_tool_calls += 1;

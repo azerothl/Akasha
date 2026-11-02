@@ -1021,6 +1021,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     except (ValueError,TypeError):
                         saved_prompt=saved_context
                     schedule_checks["scheduled_prompt_preserved"] = saved_prompt == SCHEDULE_PROMPT
+                    schedule_checks["scheduled_rule_preserved"] = persisted_schedule.get("rrule") == "FREQ=HOURLY"
+                    schedule_checks["scheduled_title_preserved"] = persisted_schedule.get("name") == title
                     run_before = metric_snapshot(base)
                     run_started = time.monotonic()
                     run_now = http_json(base, "POST", f"/api/schedules/{schedule_id}/run_now", {})
@@ -1095,7 +1097,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     removed = not any(item.get("id") == schedule_id for item in remaining)
                     schedule_checks["schedule_cancelled"] = cancelled
                     schedule_checks["schedule_removed"] = removed
-                    schedule_ok = paused and resumed and finished and cancelled and removed and schedule_checks["scheduled_prompt_preserved"] and created.get("model_match") and created.get("provider_used") == "ollama" and cancel.get("model_match") and cancel.get("provider_used") == "ollama"
+                    schedule_ok = paused and resumed and finished and cancelled and removed and schedule_checks["scheduled_prompt_preserved"] and schedule_checks["scheduled_rule_preserved"] and schedule_checks["scheduled_title_preserved"] and created.get("model_match") and created.get("provider_used") == "ollama" and cancel.get("model_match") and cancel.get("provider_used") == "ollama"
                     summary = "pause, reprise, réponse exacte, puis annulation vérifiées" if schedule_ok else "un état du cycle planifié n'a pas satisfait son contrôle"
                 else:
                     schedule_ok = False
