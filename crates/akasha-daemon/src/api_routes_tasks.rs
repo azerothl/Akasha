@@ -1634,18 +1634,12 @@ pub(crate) async fn schedule_run_now(
             .to_string(),
         );
     }
-    let msg = s
-        .channel_context
-        .as_deref()
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .unwrap_or(s.name.as_str());
-    let session_id = format!("schedule:{}", schedule_id);
+    let (msg, session_id) = crate::scheduler::execution_context(&s);
     let correlation = Uuid::new_v4();
     match main_agent
         .handle_message(
             store_path,
-            msg,
+            &msg,
             None,
             correlation,
             true,

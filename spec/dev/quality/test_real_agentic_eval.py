@@ -19,6 +19,7 @@ class RealAgenticEvalTests(unittest.TestCase):
         self.assertEqual(eval_runner.provider_model_evidence("test:1b","test:1b",["test:1b"],[],[{"model":"test:1b","provider":"ollama"}]),(True,"ollama"))
         self.assertEqual(eval_runner.provider_model_evidence("test:1b","test:1b",["test:1b"],[],[{"model":"test:1b","provider":"remote"}]),(True,None))
         self.assertEqual(eval_runner.provider_model_evidence("test:1b","test:1b",["test:1b"],[],[{"model":"other:1b","provider":"ollama"}]),(True,None))
+        self.assertEqual(eval_runner.provider_model_evidence("test:1b","test:1b-other-quant",["test:1b-other-quant"],[],[{"model":"test:1b-other-quant","provider":"ollama"}]),(False,None))
 
     def test_embedding_precondition_copies_only_model_assets_to_the_test_profile(self):
         with tempfile.TemporaryDirectory() as temporary:

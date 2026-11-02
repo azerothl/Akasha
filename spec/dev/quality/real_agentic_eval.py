@@ -9,6 +9,7 @@ It never connects to the user's normal Akasha data directory.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import datetime as dt
 import hashlib
 import json
@@ -435,22 +436,22 @@ def provider_model_evidence(
 ) -> tuple[bool, str | None]:
     normalize = lambda value: re.sub(r"[^a-z0-9]", "", str(value).lower())
     expected = normalize(expected_model)
-    event_match = any(expected and expected in normalize(model) for model in successful_call_models)
+    event_match = any(expected and expected == normalize(model) for model in successful_call_models)
     successful_metric_match = any(
         item.get("provider") == "ollama"
         and item.get("successful_requests", 0) > 0
         and expected
-        and expected in normalize(item.get("model", ""))
+        and expected == normalize(item.get("model", ""))
         for item in provider_metrics
     )
     model_match = event_match or (
-        successful_metric_match and expected and expected in normalize(task_model)
+        successful_metric_match and expected and expected == normalize(task_model)
     )
     provider_observed = any(
         item.get("provider") == "ollama"
         and item.get("total_requests", 0) > 0
         and expected
-        and expected in normalize(item.get("model", ""))
+        and expected == normalize(item.get("model", ""))
         for item in provider_metrics
     )
     provider_observed = provider_observed or any(
@@ -652,6 +653,7 @@ def scenario_result(
         "llm_success_count": sum(len(call.get("llm_success_models", [])) for call in calls),
         "llm_failure_kinds": [kind for call in calls for kind in call.get("llm_failure_kinds", [])],
         "llm_success_models": list(dict.fromkeys(model for call in calls for model in call.get("llm_success_models", []))),
+        "llm_success_routes": [route for call in calls for route in call.get("llm_success_routes",[])],
         "model_used": next((call["model_used"] for call in reversed(calls) if call["model_used"]), None),
         "tokens_out": sum(int(call["tokens_out"] or 0) for call in calls),
         "fallback_triggered": any(call["fallback_triggered"] for call in calls),
@@ -908,7 +910,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             try:
                 memory_read = submit_message(
                     base,
-                    f"Utilise memory_search pour rechercher ce marqueur exact : {token}. Indique s'il a été retrouvé.",
+                    f"Utilise memory_search pour rechercher ce marqueur exact : {token}. S'il est retrouvé, réponds uniquement avec ce marqueur exact, sans phrase supplémentaire.",
                     "ask",
                     True,
                     args.timeout_secs,
@@ -926,7 +928,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     scenario_result(
                         "memory_after_restart",
                         [memory_write, memory_read] if "memory_write" in locals() else [memory_read],
-                        memory_read["status"] in TASK_SUCCEEDED and persisted and memory_read["model_match"] and memory_read["provider_used"] == "ollama",
+                        memory_read["status"] in TASK_SUCCEEDED and persisted and normalized_marker_response(memory_read["_response"]) == token.casefold() and memory_read["model_match"] and memory_read["provider_used"] == "ollama",
                         "le marqueur privé a été rappelé par memory_search après redémarrage" if persisted else "le marqueur n'a pas été prouvé dans le résultat memory_search après redémarrage",
                     )
                 )
@@ -1097,7 +1099,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             if getattr(args,"evidence_dir",None):
                 args.evidence_dir.mkdir(parents=True,exist_ok=True)
                 shutil.copy2(root/"daemon.log",args.evidence_dir/"daemon.log")
-                with sqlite3.connect(data_dir/"akasha.db") as source, sqlite3.connect(args.evidence_dir/"synthetic-tasks.db") as destination:
+                with closing(sqlite3.connect(data_dir/"akasha.db")) as source, closing(sqlite3.connect(args.evidence_dir/"synthetic-tasks.db")) as destination:
                     source.backup(destination)
 
         # Never serialize raw assistant replies or tool previews; the report records only

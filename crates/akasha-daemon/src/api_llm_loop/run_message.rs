@@ -645,7 +645,7 @@ pub(crate) async fn run_message_via_llm(
     // breaks fast-lane matching or memory profile selection.
     let structured = interpret_message(clean_message);
     let web_account_task = !code_studio_disk_task && crate::web_account_task::matches(clean_message);
-    let direct_tool = if code_studio_disk_task {None}else{crate::direct_tool_task::named_tool(clean_message)};
+    let direct_tool = if code_studio_disk_task || web_account_task {None}else{crate::direct_tool_task::named_tool(clean_message)};
     let durable_tool_task = web_account_task || direct_tool.is_some();
     let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
     // Slim prompt for embedded + small Ollama (also for subagents — full RULE dumps cause rule-echo).
@@ -5121,7 +5121,7 @@ pub(crate) async fn run_message_via_llm(
             if direct_tool.is_some() && !direct_tool_succeeded {
                 if chat_effect_repairs < 1 && run_outcome.failed_tool_calls == 0 {
                     chat_effect_repairs += 1;
-                    current_prompt = format!("[Requested operation has not executed] Call {} with the user's requested arguments using the advertised contract. A final claim cannot replace its receipt. If unavailable, explain the precise blocker. Do not call other tools.\n",direct_tool.unwrap());
+                    current_prompt = format!("{delivered_prompt}\n[Requested operation has not executed] Call {} with the user's requested arguments using the advertised contract. A final claim cannot replace its receipt. If unavailable, explain the precise blocker. Do not call other tools.\n",direct_tool.unwrap());
                     continue;
                 }
                 run_outcome.termination = TerminationReason::ToolError;

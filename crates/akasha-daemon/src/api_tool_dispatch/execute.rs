@@ -106,6 +106,10 @@ async fn resolve_workspace_write_target(
     Ok(canonical_target)
 }
 
+fn parse_schedule_id(value: &str) -> Option<Uuid> {
+    Uuid::parse_str(value.trim().strip_prefix("schedule_id=").unwrap_or(value.trim()).trim().trim_matches(['\'', '"'])).ok()
+}
+
 pub(crate) async fn execute_tool_call_impl(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
     tool_name: &str,
@@ -1600,7 +1604,7 @@ pub(crate) async fn execute_tool_call_impl(
         "cancel_scheduled_task" => {
             let id = args
                 .get(0)
-                .and_then(|s| Uuid::parse_str(s).ok());
+                .and_then(|s| parse_schedule_id(s));
             match (store_path, id) {
                 (Some(path), Some(schedule_id)) => match ScheduleStore::open(path) {
                     Ok(store) => match store.get_schedule(schedule_id) {
@@ -4056,6 +4060,12 @@ pub(crate) async fn execute_tool_call_impl(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scheduled_cancellation_accepts_positional_or_named_uuid_only() {
+        let id=uuid::Uuid::new_v4();
+        for value in [id.to_string(),format!("schedule_id={id}"),format!("schedule_id=\"{id}\"")] {assert_eq!(super::parse_schedule_id(&value),Some(id));}
+        for value in ["schedule_id=invalid","other=00000000-0000-0000-0000-000000000000", ""] {assert_eq!(super::parse_schedule_id(value),None);}
+    }
     use super::execute_tool_call_impl;
     use crate::api::new_task_workspace_store;
     use akasha_tools::{ToolExecutor, ToolsPolicy};
