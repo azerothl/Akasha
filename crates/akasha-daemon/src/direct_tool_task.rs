@@ -19,6 +19,10 @@ pub(crate) fn tools(policy: &akasha_tools::ToolsPolicy, name: &str) -> String {
     format!("\n[Tools for the explicit operation]\nUse TOOL: <name> <arguments> or the advertised native function, then wait for the actual result.\n{descriptions}\n")
 }
 
+pub(crate) fn native_tools(policy: &akasha_tools::ToolsPolicy, role: &str, name: &str) -> Option<Vec<serde_json::Value>> {
+    (matches!(name,"schedule_task"|"cancel_scheduled_task") && policy.can_use_tool(name) && crate::studio_role_policy::allows_tool(role,name)).then(||vec![serde_json::json!({"type":"function","function":{"name":name,"description":"Execute the explicitly requested scheduled operation, preserving its literal arguments, and wait for its receipt.","parameters":crate::studio_tool_contract::argument_schema(name)}})])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

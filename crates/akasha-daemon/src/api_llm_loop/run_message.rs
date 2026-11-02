@@ -2213,6 +2213,7 @@ pub(crate) async fn run_message_via_llm(
                         (!tools.is_empty()).then_some(tools)
                     })
             }else{None};
+            let native_tools=native_tools.or_else(||direct_tool.and_then(|name|tools_executor_snapshot.as_ref().and_then(|executor|crate::direct_tool_task::native_tools(&executor.policy,&assigned_agent,name))));
             let mut turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             // Workflow tools use the text protocol. Include their effective
             // announced names for ordinary turns, without widening literal-only turns.
