@@ -2262,7 +2262,7 @@ pub(crate) async fn run_message_via_llm(
                 prompt: if code_studio_disk_task {
                     format!("{}{}", resume_overlay, current_prompt)
                 } else {
-                    format!("{}{}{}\n[Tool transport] Prefer the advertised native functions. Text fallback is one TOOL: line per call, or TOOL_JSON: followed by a complete object with schema_version:1, tool and arguments. Never put proposed calls in code fences or invent tool_use JSON wrappers. A call is complete only after the runtime returns its result.\n", resume_overlay, current_prompt, tool_instruction)
+                    format!("{}{}{}\n[Tool transport] Prefer the advertised native functions. Text fallback is one TOOL: line per call, or TOOL_JSON: followed by a complete object with schema_version:1, tool and arguments. Never put proposed calls in code fences or invent tool_use JSON wrappers. A call is complete only after the runtime returns its result.\n", resume_overlay, current_prompt, if direct_catalogue_expanded {""}else{tool_instruction.as_str()})
                 },
                 max_tokens: Some(goal_tracker.as_ref().map(|goal|completion_max_tokens.min(goal.goal.max_tokens.saturating_sub(goal.state.tokens_used) as u32)).unwrap_or(completion_max_tokens)),
                 temperature: Some(completion_temperature),
