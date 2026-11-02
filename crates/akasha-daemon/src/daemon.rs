@@ -791,7 +791,7 @@ impl Daemon {
             let today_session = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
             short_term.load_day_from_disk(&today_session).await;
             let memory_db_path = data_dir.join("memory.db");
-            let embedding_cache = if cfg!(feature="consumer-beta") {std::env::current_exe().ok().and_then(|path|path.parent().map(|parent|parent.join("embedding_model"))).filter(|path|path.join("embedding-lock.json").is_file()).unwrap_or_else(||data_dir.join("embedding_model"))}else{data_dir.join("embedding_model")};
+            let embedding_cache = std::env::current_exe().ok().and_then(|path|path.parent().map(|parent|parent.join("embedding_model"))).filter(|path|path.join("embedding-lock.json").is_file()).unwrap_or_else(||data_dir.join("embedding_model"));
             let long_term_client = start_memory_actor(&memory_db_path, &embedding_cache)
                 .ok()
                 .map(|(client, _handle)| {
