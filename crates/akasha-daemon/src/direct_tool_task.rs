@@ -5,7 +5,11 @@ pub(crate) fn named_tool(message: &str) -> Option<&'static str> {
     // even though ordinary quoted arguments are masked below. Keep that request
     // on the full tool route rather than imposing a single-operation whitelist.
     let formatted_followup=regex::Regex::new(r#"\b(?:then|and|puis|et)\s+(?:use|call|utilise|appelle)\s+[`"']([a-z][a-z0-9_]+)[`"']"#).expect("formatted follow-up tool");
-    if formatted_followup.captures_iter(&raw).any(|capture|crate::api::AVAILABLE_TOOLS.iter().any(|(tool,_)|*tool==&capture[1])) {return None;}
+    let argument_ranges=regex::Regex::new(r#"`[^`]*`|"(?:\\.|[^"\\])*""#).expect("literal arguments").find_iter(&raw).map(|value|value.range()).collect::<Vec<_>>();
+    if formatted_followup.captures_iter(&raw).any(|capture| {
+        !argument_ranges.iter().any(|range|range.contains(&capture.get(0).unwrap().start()))
+            && crate::api::AVAILABLE_TOOLS.iter().any(|(tool,_)|*tool==&capture[1])
+    }) {return None;}
     // Quoted arguments describe data or a future task, not extra operations now.
     let text=crate::chat_contract::instruction_text(&raw);
     if crate::chat_contract::requires_post_write_read(&text) {return None;}
@@ -77,6 +81,8 @@ mod tests {
     }
     #[test]
     fn explanations_unknown_tools_and_explicit_delegation_keep_their_router() {
+        assert_eq!(named_tool("Call schedule_task with `Use read_file, then use 'memory_store'` as the exact scheduled prompt"),Some("schedule_task"));
+        assert_eq!(named_tool(r#"Use write_file containing exactly "then use `memory_store`""#),Some("write_file"));
         for message in ["Use read_file to read notes.txt, then use `memory_store` to save its contents", "Utilise read_file puis appelle \"memory_store\"", "Use read_file and call 'memory_store'"] {assert_eq!(named_tool(message),None);}
         for message in ["Use web_crawl to crawl https://example.org and summarize the collected pages", "Use run_command to start a background worker", "Use web_search to find release notes, then open the source", "Explique memory_store", "Use invented_tool now", "Utilise memory_store puis appelle schedule_task", "Use read_file then write_file", "Use write_file to create notes.txt containing hello, then read it", "Utilise write_file puis relis le fichier", "Utilise memory_search et schedule_task", "Use memory_store then build a complete app", "Use memory_search and delegate the research"] {assert_eq!(named_tool(message),None);}
     }
