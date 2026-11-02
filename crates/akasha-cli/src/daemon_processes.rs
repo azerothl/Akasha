@@ -12,10 +12,11 @@ pub struct Instance {
     pub started: String,
     pub memory_bytes: u64,
     pub ports: Vec<u16>,
+    pub ports_known: bool,
 }
 impl Instance {
     fn json(&self) -> Value {
-        json!({"pid":self.pid,"parent_pid":self.parent,"kind":self.kind,"executable":self.executable,"started_at":self.started,"memory_bytes":self.memory_bytes,"listening_ports":self.ports})
+        json!({"pid":self.pid,"parent_pid":self.parent,"kind":self.kind,"executable":self.executable,"started_at":self.started,"memory_bytes":self.memory_bytes,"listening_ports":self.ports,"listening_ports_complete":self.ports_known})
     }
 }
 fn basename(path: &str) -> &str {
@@ -53,6 +54,12 @@ fn retain_instances(mut rows: Vec<Instance>) -> Vec<Instance> {
 
 #[cfg(windows)]
 fn powershell(script: &str, args: &[String]) -> anyhow::Result<std::process::Output> {
+    powershell_bounded(script,args,Duration::from_secs(15))
+}
+
+#[cfg(windows)]
+fn powershell_bounded(script: &str, args: &[String], timeout: Duration) -> anyhow::Result<std::process::Output> {
+    use std::io::Read;
     use std::os::windows::process::CommandExt;
     let mut command = Command::new("powershell.exe");
     command.creation_flags(0x08000000);
@@ -74,18 +81,22 @@ fn powershell(script: &str, args: &[String]) -> anyhow::Result<std::process::Out
         .spawn()
         .context("Impossible d'interroger les processus Windows")?;
     let started = std::time::Instant::now();
+    let mut stdout=child.stdout.take().context("Missing PowerShell stdout")?;
+    let mut stderr=child.stderr.take().context("Missing PowerShell stderr")?;
+    let output_reader=std::thread::spawn(move||{let mut bytes=Vec::new();stdout.read_to_end(&mut bytes).map(|_|bytes)});
+    let error_reader=std::thread::spawn(move||{let mut bytes=Vec::new();stderr.read_to_end(&mut bytes).map(|_|bytes)});
     loop {
         if child.try_wait()?.is_some() {
             break;
         }
-        if started.elapsed() > Duration::from_secs(15) {
+        if started.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("La gestion des processus Windows a dépassé quinze secondes ; vérifiez les processus avant de réessayer");
+            bail!("La requête de processus Windows a dépassé {} secondes",timeout.as_secs());
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    let output = child.wait_with_output()?;
+    let output = std::process::Output {status:child.wait()?,stdout:output_reader.join().map_err(|_|anyhow::anyhow!("PowerShell stdout reader failed"))??,stderr:error_reader.join().map_err(|_|anyhow::anyhow!("PowerShell stderr reader failed"))??};
     if !output.status.success() {
         bail!(
             "Gestion des processus : {}",
@@ -97,7 +108,7 @@ fn powershell(script: &str, args: &[String]) -> anyhow::Result<std::process::Out
 
 #[cfg(windows)]
 pub fn inventory() -> anyhow::Result<Vec<Instance>> {
-    let script = r#"$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ports=@{}; Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $key=[string]$_.OwningProcess; $ports[$key]=@($ports[$key])+[int]$_.LocalPort }; $items=@(Get-CimInstance Win32_Process -Filter "Name='akasha-daemon.exe' OR Name='akasha.exe'" | ForEach-Object { [pscustomobject]@{ pid=[int]$_.ProcessId; parent=[int]$_.ParentProcessId; name=$_.Name; executable=$_.ExecutablePath; supervisor=($_.CommandLine -match '^(?:"[^"]+"|\S+)\s+start(?:\s|$)'); started=$(try{(Get-Process -Id $_.ProcessId -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')}catch{''}); memory=[long]$_.WorkingSetSize; ports=@($ports[[string]$_.ProcessId] | Where-Object { $_ -ne $null } | Sort-Object -Unique) } }); ConvertTo-Json -InputObject $items -Depth 4 -Compress"#;
+    let script = r#"$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $items=@(Get-CimInstance Win32_Process -Filter "Name='akasha-daemon.exe' OR Name='akasha.exe'" | ForEach-Object { [pscustomobject]@{ pid=[int]$_.ProcessId; parent=[int]$_.ParentProcessId; name=$_.Name; executable=$_.ExecutablePath; supervisor=($_.CommandLine -match '^(?:"[^"]+"|\S+)\s+start(?:\s|$)'); started=$(try{(Get-Process -Id $_.ProcessId -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')}catch{''}); memory=[long]$_.WorkingSetSize } }); ConvertTo-Json -InputObject $items -Depth 4 -Compress"#;
     let output = powershell(script, &[])?;
     parse_windows(&String::from_utf8_lossy(&output.stdout))
 }
@@ -124,6 +135,7 @@ fn parse_windows(text: &str) -> anyhow::Result<Vec<Instance>> {
             parent: row["parent"].as_u64().unwrap_or(0) as u32,
             kind,
             executable: row["executable"].as_str().unwrap_or_default().into(),
+            ports_known: row["ports"].is_array(),
             started: row["started"].as_str().unwrap_or_default().into(),
             memory_bytes: row["memory"].as_u64().unwrap_or(0),
             ports: row["ports"]
@@ -139,8 +151,13 @@ fn parse_windows(text: &str) -> anyhow::Result<Vec<Instance>> {
 
 #[cfg(not(windows))]
 pub fn inventory() -> anyhow::Result<Vec<Instance>> {
+    // Only the caller's effective user is within the termination scope. Other
+    // users' /proc identities may be unreadable and must not block our stops.
+    let identity=Command::new("id").arg("-u").output()?;
+    let uid=String::from_utf8_lossy(&identity.stdout).trim().parse::<u32>()
+        .ok().filter(|_|identity.status.success()).ok_or_else(||anyhow::anyhow!("Impossible de déterminer l'utilisateur courant"))?;
     let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,lstart=,rss=,comm="])
+        .args(["-u", &uid.to_string(), "-o", "pid=,ppid=,lstart=,rss=,comm="])
         .env("LC_ALL", "C")
         .output()?;
     if !output.status.success() {
@@ -176,6 +193,8 @@ fn parse_unix(text: &str) -> Vec<Instance> {
         {
             kind = "supervisor";
         }
+        #[cfg(target_os = "macos")]
+        if kind=="launcher" && Command::new("ps").args(["-ww","-p",&pid.to_string(),"-o","command="]).output().ok().filter(|out|out.status.success()).is_some_and(|out|supervisor_command_line(&command,String::from_utf8_lossy(&out.stdout).trim())) {kind="supervisor";}
         #[cfg(target_os = "linux")]
         let executable = std::fs::read_link(format!("/proc/{pid}/exe"))
             .map(|path| path.to_string_lossy().into_owned())
@@ -190,6 +209,7 @@ fn parse_unix(text: &str) -> Vec<Instance> {
             started: fields[2..7].join(" "),
             memory_bytes: fields[7].parse::<u64>().unwrap_or(0).saturating_mul(1024),
             ports: Vec::new(),
+            ports_known: false,
         });
     }
     retain_instances(rows)
@@ -246,6 +266,24 @@ fn same_instance(expected: &Instance, actual: &Instance) -> bool {
         && expected.started == actual.started
         && expected.executable == actual.executable
 }
+
+#[cfg(any(target_os="macos",test))]
+fn supervisor_command_line(executable: &str, command: &str) -> bool {
+    command.match_indices(char::is_whitespace).any(|(index,_)| {
+        let candidate=command[..index].trim_matches('"');
+        let identity=if executable.contains('/') {candidate==executable || candidate==basename(executable)} else {basename(candidate)==executable};
+        identity && command[index..].split_whitespace().next()==Some("start")
+    })
+}
+
+#[cfg(any(windows,test))]
+fn apply_ports(rows: &mut [Instance], ports: &Value) {
+    let Some(ports)=ports.as_array() else{return;};
+    for row in rows {
+        row.ports=ports.iter().filter(|port|port["pid"].as_u64()==Some(row.pid as u64)).filter_map(|port|port["port"].as_u64().and_then(|n|u16::try_from(n).ok())).collect();
+        row.ports.sort_unstable();row.ports.dedup();row.ports_known=true;
+    }
+}
 fn terminate(expected: &Instance) -> anyhow::Result<()> {
     let current = inventory()?;
     let Some(actual) = current.iter().find(|row| row.pid == expected.pid) else {
@@ -269,7 +307,7 @@ fn terminate(expected: &Instance) -> anyhow::Result<()> {
     #[cfg(not(windows))]
     {
         let status = Command::new("kill")
-            .args(["-KILL", "--", &expected.pid.to_string()])
+            .args(["-s", "KILL", &expected.pid.to_string()])
             .status()?;
         if !status.success() {
             bail!("Échec de l'arrêt du PID {}", expected.pid);
@@ -311,7 +349,15 @@ pub fn stop_all() -> anyhow::Result<()> {
     Ok(())
 }
 pub fn list(json_output: bool) -> anyhow::Result<()> {
-    let rows = inventory()?;
+    #[allow(unused_mut)]
+    let mut rows = inventory()?;
+    #[cfg(windows)]
+    if !rows.is_empty() {
+        let script=r#"$ErrorActionPreference='Stop';$items=@(Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object { [pscustomobject]@{pid=[int]$_.OwningProcess;port=[int]$_.LocalPort} });ConvertTo-Json -InputObject $items -Compress"#;
+        if let Ok(output)=powershell_bounded(script,&[],Duration::from_secs(3)) {
+            if let Ok(ports)=serde_json::from_slice::<Value>(&output.stdout) {apply_ports(&mut rows,&ports);}
+        }
+    }
     if json_output {
         println!(
             "{}",
@@ -330,11 +376,11 @@ pub fn list(json_output: bool) -> anyhow::Result<()> {
                 row.parent,
                 row.kind,
                 row.memory_bytes / (1024 * 1024),
-                row.ports
+                if !row.ports_known {"indisponible".into()} else {row.ports
                     .iter()
                     .map(u16::to_string)
                     .collect::<Vec<_>>()
-                    .join(","),
+                    .join(",")},
                 row.executable
             );
         }
@@ -415,6 +461,21 @@ pub fn status(port: Option<u16>, json_output: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn macos_supervisors_are_recognized_without_a_live_child() {
+        for command in ["/Applications/Akasha Test/akasha start","\"/Applications/Akasha Test/akasha\" start --foreground","akasha start"] {assert!(supervisor_command_line("/Applications/Akasha Test/akasha",command));}
+        for command in ["/usr/local/bin/akasha start","\"/Applications/Akasha Test/akasha\" start --foreground"] {assert!(supervisor_command_line("akasha",command));}
+        for command in ["akasha status","akasha-start start","other-akasha start"] {assert!(!supervisor_command_line("/Applications/Akasha Test/akasha",command));}
+    }
+    #[test]
+    fn unavailable_port_metadata_never_invalidates_a_process_identity() {
+        let mut rows=vec![instance(100,10,"daemon")];let before=rows[0].clone();
+        apply_ports(&mut rows,&serde_json::Value::Null);
+        assert!(!rows[0].ports_known);assert!(same_instance(&before,&rows[0]));
+        apply_ports(&mut rows,&serde_json::json!([{"pid":100,"port":3876},{"pid":999,"port":99}]));
+        assert!(rows[0].ports_known);assert_eq!(rows[0].ports,vec![3876]);assert!(same_instance(&before,&rows[0]));
+        assert!(kill_plan(&rows,100).is_ok());
+    }
     fn instance(pid: u32, parent: u32, kind: &'static str) -> Instance {
         Instance {
             pid,
@@ -429,6 +490,7 @@ mod tests {
             started: "2026-10-24T12:00:00.0000000Z".into(),
             memory_bytes: 0,
             ports: vec![],
+            ports_known: false,
         }
     }
     #[test]

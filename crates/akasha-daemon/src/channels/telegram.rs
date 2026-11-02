@@ -23,6 +23,30 @@ fn reconcile_hitl_reply(pending: &mut HashMap<i64, TelegramWait>, chat: i64, sen
     }
 }
 
+fn host_command_allowed(command: &str, user_id: i64, approved: bool) -> bool {
+    !matches!(command,"/status"|"/budget"|"/memory"|"/tasks") || user_id!=0 && approved
+}
+
+fn status_summary(status: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"status":status["status"],"version":status["version"],"healthy":status["healthy"],"degraded":status["degraded"]})
+}
+
+#[cfg(test)]
+mod status_access_tests {
+    #[test]
+    fn status_is_approved_and_never_forwards_host_identity() {
+        for command in ["/status","/budget","/memory","/tasks"] {
+            assert!(!super::host_command_allowed(command,42,false));
+            assert!(!super::host_command_allowed(command,0,true));
+            assert!(super::host_command_allowed(command,42,true));
+        }
+        assert!(super::host_command_allowed("/start",42,false));
+        let summary=super::status_summary(&serde_json::json!({"status":"ok","version":"test","pid":43210,"data_dir":"C:/private-user/akasha","degraded_reason":"private path"}));
+        assert_eq!(summary["status"],"ok");
+        assert!(summary.get("pid").is_none() && summary.get("data_dir").is_none() && summary.get("degraded_reason").is_none());
+    }
+}
+
 #[cfg(test)]
 mod hitl_reply_tests {
     use super::*;
@@ -315,6 +339,10 @@ pub async fn run_telegram_bot(
             let command = command_raw.split('@').next().unwrap_or(command_raw);
             let rest = rest.trim();
             let access = crate::channel_access::load(data_dir.as_path());
+            if !host_command_allowed(command,from_user_id,crate::channel_access::is_approved_user(&access,from_user_id)) {
+                let _=send_telegram(&client,&send_message_url,chat_id,"Access pending approval. Send /start and ask an admin to approve it.").await;
+                continue;
+            }
 
             let payload: String = if command == "/akasha" {
                 rest.to_string()
@@ -356,7 +384,7 @@ pub async fn run_telegram_bot(
             } else if command == "/status" {
                 let url = format!("{}/api/status", daemon_base_url);
                 match client.get(&url).send().await {
-                    Ok(resp) => resp.text().await.unwrap_or_else(|_| "status unavailable".to_string()),
+                    Ok(resp) => resp.json::<serde_json::Value>().await.map(|value|status_summary(&value).to_string()).unwrap_or_else(|_| "status unavailable".to_string()),
                     Err(_) => "status unavailable".to_string(),
                 }
             } else if command == "/budget" {

@@ -46,6 +46,10 @@ impl HealthState {
 pub type HealthStatus = Arc<RwLock<HealthState>>;
 
 static RUNTIME_HEALTH: std::sync::OnceLock<HealthStatus> = std::sync::OnceLock::new();
+pub(crate) fn status_origin_allowed(origin: Option<&str>) -> bool {
+    let Some(origin)=origin else{return true;};
+    url::Url::parse(origin).ok().is_some_and(|url|matches!(url.scheme(),"http"|"https"|"tauri") && url.username().is_empty() && url.password().is_none() && matches!(url.host_str(),Some("localhost"|"127.0.0.1"|"::1"|"[::1]"|"tauri.localhost")))
+}
 pub(crate) fn register_runtime(health: HealthStatus) { let _ = RUNTIME_HEALTH.set(health); }
 pub(crate) async fn runtime_status(data_dir: &std::path::Path) -> serde_json::Value {
     let state = match RUNTIME_HEALTH.get() { Some(health) => Some(health.read().await.clone()), None => None };
@@ -62,6 +66,12 @@ pub(crate) async fn runtime_status(data_dir: &std::path::Path) -> serde_json::Va
 
 #[cfg(test)]
 mod runtime_tests {
+    #[test]
+    fn status_details_reject_untrusted_browser_origins() {
+        assert!(super::status_origin_allowed(None));
+        for origin in ["http://localhost:4173","http://127.0.0.1:3876","http://[::1]:4173","tauri://localhost","http://tauri.localhost"] {assert!(super::status_origin_allowed(Some(origin)));}
+        for origin in ["https://evil.example","https://localhost.evil.example","http://evil@localhost","null", "file:///"] {assert!(!super::status_origin_allowed(Some(origin)));}
+    }
     #[tokio::test]
     async fn status_identifies_the_process_without_changing_legacy_status_field() {
         let value=super::runtime_status(std::path::Path::new("data-dir")).await;
