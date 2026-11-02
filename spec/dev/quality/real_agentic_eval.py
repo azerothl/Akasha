@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -1037,6 +1038,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     run_model_match, run_provider = provider_model_evidence(model,run_model,run_llm_diagnostics["success_models"],run_providers,run_llm_diagnostics["success_routes"])
                     schedule_device_match, schedule_vram_bytes = model_device_match(args.ollama_url, model, args.device)
                     schedule_run = {
+                        "status": run_task.get("status"),
                         "latency_ms": round((time.monotonic() - run_started) * 1000),
                         "tools": [],
                         "provider_model_deltas": run_providers,
@@ -1059,6 +1061,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     schedule_run["response_chars"] = len(run_text.strip())
                     schedule_run["response_exact_match"] = normalized_marker_response(run_text) == "schedule_ok"
                     schedule_checks["scheduled_response_marker_verified"] = schedule_run["response_exact_match"]
+                    schedule_checks["scheduled_task_completed"] = run_task.get("status") in TASK_SUCCEEDED
+                    schedule_checks["scheduled_provider_model_verified"] = bool(schedule_run["model_match"] and schedule_run["provider_used"] == "ollama")
+                    schedule_checks["scheduled_tokens_reported"] = int(run_task.get("last_turn_tokens_out") or 0) > 0
                     finished = run_task.get("status") in TASK_SUCCEEDED and int(run_task.get("last_turn_tokens_out") or 0) > 0 and schedule_run["response_exact_match"] and schedule_run["model_match"]
                     cancel = submit_message(
                         base,
@@ -1089,6 +1094,11 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                 scenarios.append(scenario_result("scheduled_task_lifecycle", schedule_calls, False, str(error), schedule_checks))
         finally:
             daemon.stop()
+            if getattr(args,"evidence_dir",None):
+                args.evidence_dir.mkdir(parents=True,exist_ok=True)
+                shutil.copy2(root/"daemon.log",args.evidence_dir/"daemon.log")
+                with sqlite3.connect(data_dir/"akasha.db") as source, sqlite3.connect(args.evidence_dir/"synthetic-tasks.db") as destination:
+                    source.backup(destination)
 
         # Never serialize raw assistant replies or tool previews; the report records only
         # action names, counts, hashes, routes and measured durations.
@@ -1159,6 +1169,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--daemon", type=Path, default=default_target / f"akasha-daemon{suffix}")
     parser.add_argument("--timeout-secs", type=int, default=360)
     parser.add_argument("--output", type=Path, help="Write report JSON here; stdout is used by default")
+    parser.add_argument("--evidence-dir", type=Path, help="Optional local-only daemon log and synthetic task receipts; never included in the minimized JSON report")
     parser.add_argument("--record-baseline", action="store_true", help="Record a new measured model baseline only when all scenarios pass")
     return parser.parse_args()
 
