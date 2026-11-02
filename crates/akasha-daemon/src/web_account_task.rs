@@ -101,6 +101,16 @@ pub(crate) fn stop_reply(reply: &str) -> bool {
     )
 }
 
+pub(crate) fn read_only_scope(reply: &str) -> bool {
+    let text=reply.to_lowercase().replace(['é','è','ê'],"e").replace('’',"'");
+    matches!(text.trim(),"read-only"|"read only"|"lecture seule") || ["just summarize", "only summarize", "just summarise", "only summarise", "read-only task", "read-only mode", "switch to read-only", "passe en lecture seule", "resume seulement", "resume uniquement", "juste resumer", "contente-toi de resumer", "resume les conditions", "resume les exigences"].iter().any(|phrase|text.contains(phrase))
+}
+
+pub(crate) fn read_only_tool(name: &str, args: &[String]) -> bool {
+    matches!(name,"web_fetch"|"read_file"|"list_skills"|"read_skill"|"ask_user")
+        || name=="browser" && args.first().is_some_and(|action|matches!(action.as_str(),"navigate"|"snapshot"))
+}
+
 pub(crate) fn retain_native_tools(tools: &mut Vec<serde_json::Value>) {
     tools.retain(|tool| matches!(tool.pointer("/function/name").and_then(|v|v.as_str()),
         Some("web_fetch" | "browser" | "run_command" | "read_file" | "write_file" | "list_skills" | "read_skill" | "install_skill" | "ask_user")));
@@ -109,6 +119,15 @@ pub(crate) fn retain_native_tools(tools: &mut Vec<serde_json::Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_read_only_correction_withdraws_the_original_account_operation() {
+        for reply in ["Don't register; just summarize the requirements", "Ne crée pas de compte : résume les conditions", "Passe en lecture seule"] {assert!(read_only_scope(reply));}
+        for reply in ["Utilise le nom Alpha", "Oui, continue l'inscription", "Create a read-only account at https://example.org", "Avant de créer le compte, montre les conditions puis inscris-moi"] {assert!(!read_only_scope(reply));}
+        assert!(read_only_tool("web_fetch",&[]));
+        assert!(read_only_tool("browser",&["snapshot".into()]));
+        assert!(!read_only_tool("browser",&["click".into(),"submit".into()]));
+        assert!(!read_only_tool("run_command",&["curl.exe".into()]));
+    }
 
     #[test]
     fn reported_registration_and_resume_requests_are_single_tasks() {
