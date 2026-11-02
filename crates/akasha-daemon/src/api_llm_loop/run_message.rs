@@ -1909,7 +1909,7 @@ pub(crate) async fn run_message_via_llm(
             && crate::studio_file_effects::has_request(clean_message);
         let mut chat_mutation_succeeded = false;
         let mut web_account_action_succeeded = false;
-        let mut web_account_action_required = web_account_task && !crate::web_account_task::read_only_scope(clean_message);
+        let mut web_account_action_required = web_account_task;
         let mut chat_effect_repairs = 0u32;
         let mut chat_completion_repairs = 0u32;
         let mut chat_readback = crate::chat_contract::PostMutationRead::new(tool_disk_workspace_root.clone());
@@ -2001,6 +2001,14 @@ pub(crate) async fn run_message_via_llm(
             if let Some(ref sq) = steering_queue {
                 let steering_items = sq.drain_steering(task_id).await;
                 for item in steering_items {
+                    if web_account_task && crate::web_account_task::stop_reply(&item.text) {
+                        match TaskStore::open(&store_path).and_then(|s|s.transition_if(task_id,
+                            &[TaskStatus::Running,TaskStatus::WaitingUserInput],TaskStatus::Cancelled)) {
+                            Ok(_) => {run_outcome.termination=TerminationReason::Cancelled;reply_text="Tâche annulée à votre demande.".into();}
+                            Err(error) => {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Impossible d’enregistrer l’annulation : {error}");}
+                        }
+                        break 'tool_rounds;
+                    }
                     explicit_file_goals.clear();scope_unchanged=false;
                     let steer_text = format!(
                         "[Steering — instruction utilisateur à appliquer maintenant]\n{}",
@@ -2199,11 +2207,10 @@ pub(crate) async fn run_message_via_llm(
                     }
                     (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else if let Some(repair)=compiler_repair.as_ref() {repair.definition(names)}else if let Some(target)=build_missing_target.as_ref() {crate::studio_tool_contract::missing_entrypoint_definition(names,target)}else if let Some((ticket,command))=foundation_boundary {crate::studio_vite_scaffold::foundation_definition(names,ticket,command,foundation_ready)}else{crate::studio_tool_contract::native_definition(names)}])
                 })
-            }else if !code_studio_disk_task && !is_small_talk_fast_lane {
+            }else if !code_studio_disk_task && !is_small_talk_fast_lane && !web_account_task {
                 tools_executor_snapshot.as_ref()
                     .and_then(|executor| crate::chat_contract::native_tools(&executor.policy, &assigned_agent))
                     .and_then(|mut tools| {
-                        if web_account_task { crate::web_account_task::retain_native_tools(&mut tools); }
                         (!tools.is_empty()).then_some(tools)
                     })
             }else{None};

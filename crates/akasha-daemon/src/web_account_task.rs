@@ -37,6 +37,9 @@ pub(crate) fn matches(message: &str) -> bool {
     {
         return false;
     }
+    if regex::Regex::new(r"^(?:don't|do not|ne)\s+(?:create|register|sign up|cree|creer)|^ne\s+cree\b.*\bpas\b|^n'inscri.*\bpas\b").expect("withdrawn account request").is_match(text.trim()) {
+        return false;
+    }
     let account = [
         "compte", "account", "inscri", "sign up", "signup", "register",
     ]
@@ -103,17 +106,15 @@ pub(crate) fn stop_reply(reply: &str) -> bool {
 
 pub(crate) fn read_only_scope(reply: &str) -> bool {
     let text=reply.to_lowercase().replace(['é','è','ê'],"e").replace('’',"'");
-    matches!(text.trim(),"read-only"|"read only"|"lecture seule") || ["just summarize", "only summarize", "just summarise", "only summarise", "read-only task", "read-only mode", "switch to read-only", "passe en lecture seule", "resume seulement", "resume uniquement", "juste resumer", "contente-toi de resumer", "resume les conditions", "resume les exigences"].iter().any(|phrase|text.contains(phrase))
+    let text=text.trim();
+    let directives=["just summarize", "only summarize", "just summarise", "only summarise", "switch to read-only", "passe en lecture seule", "resume seulement", "resume uniquement", "juste resumer", "contente-toi de resumer", "resume les conditions", "resume les exigences"];
+    matches!(text,"read-only"|"read only"|"lecture seule") || directives.iter().any(|phrase|text.starts_with(phrase))
+        || ["don't register", "do not register", "ne cree pas", "n'inscris pas"].iter().any(|phrase|text.starts_with(phrase)) && directives.iter().any(|phrase|text.contains(phrase))
 }
 
 pub(crate) fn read_only_tool(name: &str, args: &[String]) -> bool {
     matches!(name,"web_fetch"|"read_file"|"list_skills"|"read_skill"|"ask_user")
         || name=="browser" && args.first().is_some_and(|action|matches!(action.as_str(),"navigate"|"snapshot"))
-}
-
-pub(crate) fn retain_native_tools(tools: &mut Vec<serde_json::Value>) {
-    tools.retain(|tool| matches!(tool.pointer("/function/name").and_then(|v|v.as_str()),
-        Some("web_fetch" | "browser" | "run_command" | "read_file" | "write_file" | "list_skills" | "read_skill" | "install_skill" | "ask_user")));
 }
 
 #[cfg(test)]
@@ -122,7 +123,7 @@ mod tests {
     #[test]
     fn a_read_only_correction_withdraws_the_original_account_operation() {
         for reply in ["Don't register; just summarize the requirements", "Ne crée pas de compte : résume les conditions", "Passe en lecture seule"] {assert!(read_only_scope(reply));}
-        for reply in ["Utilise le nom Alpha", "Oui, continue l'inscription", "Create a read-only account at https://example.org", "Avant de créer le compte, montre les conditions puis inscris-moi"] {assert!(!read_only_scope(reply));}
+        for reply in ["Utilise le nom Alpha", "Oui, continue l'inscription", "Create a read-only account at https://example.org", "Avant de créer le compte, montre les conditions puis inscris-moi", "Crée le compte et résume les conditions", "Create an account and just summarize the terms afterwards"] {assert!(!read_only_scope(reply));}
         assert!(read_only_tool("web_fetch",&[]));
         assert!(read_only_tool("browser",&["snapshot".into()]));
         assert!(!read_only_tool("browser",&["click".into(),"submit".into()]));
@@ -137,6 +138,7 @@ mod tests {
             "Crée un compte agent sur https://example.org puis vérifie son existence.",
             "Crée un compte sur le site web https://example.org",
             "Register an agent account at https://example.org/accounts",
+            "Crée un compte sur https://example.org et résume les conditions",
         ] { assert!(matches(message), "{message}"); }
     }
 
@@ -144,6 +146,8 @@ mod tests {
     fn urls_do_not_turn_questions_or_projects_into_registrations() {
         for message in [
             "Explique comment créer un compte sur https://example.org",
+            "Don't register an account at https://example.org; just summarize the requirements",
+            "Ne crée pas de compte sur https://example.org : résume les conditions",
             "Lis https://example.org/create-account?register=true",
             "Audit de l'inscription sur https://example.org",
             "Crée un compte puis délègue les tests à des sous-agents sur https://example.org",
@@ -170,10 +174,6 @@ mod tests {
         assert!(!prompt.contains("web_search"));
         assert!(!prompt.contains("web_crawl"));
         assert!(CONTEXT.len() + tools(&akasha_tools::ToolsPolicy::default()).len() < 10000);
-        let mut native=vec![serde_json::json!({"function":{"name":"web_search"}}), serde_json::json!({"function":{"name":"web_fetch"}})];
-        retain_native_tools(&mut native);
-        assert_eq!(native.len(),1);
-        assert_eq!(native[0]["function"]["name"],"web_fetch");
     }
 
     #[test]
