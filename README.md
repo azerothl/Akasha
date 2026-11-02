@@ -98,6 +98,20 @@ cargo build
 
 **Arrêter** : `akasha stop`
 
+**État et instances locales** :
+
+```powershell
+akasha status                    # état du daemon configuré, sans le démarrer
+akasha info                      # alias de status
+akasha status --port 4000 --json  # autre port ; sortie exploitable par script
+akasha daemon list               # PID, parent, superviseur, mémoire, exécutable
+akasha daemon list --json        # inventaire local (même si l'API est bloquée)
+akasha daemon kill 12345         # arrêt forcé d'une instance précise
+```
+
+`status` utilise le port explicite, puis `AKASHA_PORT` dans le shell ou `akasha.env`, puis 3876. Il renvoie un code de sortie non nul si le daemon est inaccessible. Les versions récentes du daemon exposent aussi leur PID, version, durée de fonctionnement, dossier de données et état dégradé dans `GET /api/status` ; les anciennes versions peuvent seulement répondre `status: ok`.
+
+`daemon list` interroge les processus locaux ; sous Windows, il indique aussi les ports d'écoute accessibles. `daemon kill` vérifie le PID, le chemin et l'identité de l'instance avant l'arrêt. Lorsqu'un superviseur Akasha est associé, il est arrêté avant son daemon pour éviter une relance automatique. Un PID étranger ou une identité inaccessible est refusé. L'arrêt est forcé et peut interrompre le travail en cours. `akasha stop` conserve son comportement global (toutes les instances Akasha locales), mais utilise désormais cette vérification plutôt qu'une terminaison par nom d'image ou recherche de texte.
 Le dossier persistant est `%USERPROFILE%\akasha` sous Windows, ou `~/akasha` sous Linux/macOS. `AKASHA_DATA_DIR`, lorsqu'il est défini **dans l'environnement avant le lancement**, permet de choisir un autre dossier absolu ; `~/...` et `~\...` sont développés vers le dossier utilisateur. Les chemins relatifs et les valeurs vides sont refusés. Le CLI transmet le même chemin absolu au superviseur, au daemon et aux modèles embarqués ; Pour compatibilit�, une ancienne ligne `AKASHA_DATA_DIR` du profil par d�faut est lue une seule fois au d�marrage et normalis�e ; les fichiers du dossier final ne peuvent pas d�clencher une nouvelle redirection. `GET /api/config` expose le dossier réellement utilisé dans `data_dir`.
 
 Une ancienne version pouvait transmettre littéralement `AKASHA_DATA_DIR=~\akasha` depuis `akasha.env` et créer un dossier `~\akasha` sous le répertoire de lancement. Si l'historique semble vide après une mise à jour, vérifier d'abord le dossier utilisé : ne pas supprimer ni fusionner automatiquement les bases existantes. Relancer avec le bon chemin absolu permet de réutiliser leurs données.

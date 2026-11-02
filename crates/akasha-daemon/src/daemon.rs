@@ -215,6 +215,7 @@ impl Daemon {
 
     /// Run the daemon (blocks until shutdown)
     pub async fn run(&self) -> anyhow::Result<RunOutcome> {
+        crate::health::register_runtime(self.health.clone());
         log_upgrade_heritage_reminder(&self.data_dir);
         if cfg!(feature="consumer-beta") {
             crate::consumer_profile::ensure_vault_scope(&self.data_dir)?;
