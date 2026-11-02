@@ -2,7 +2,7 @@
 pub(crate) fn named_tool(message: &str) -> Option<&'static str> {
     let raw=crate::consumer_workflow::user_text(message).trim().to_lowercase();
     // Quoted arguments describe data or a future task, not extra operations now.
-    let text=regex::Regex::new(r#"`[^`]*`|"(?:\\.|[^"\\])*""#).expect("literal arguments").replace_all(&raw," ").into_owned();
+    let text=crate::chat_contract::instruction_text(&raw);
     if crate::chat_contract::requires_post_write_read(&text) {return None;}
     if ["delegate", "délègue", "delegue", "sous-agent", "subagent", "then call", "puis appelle", "puis utilise", "then build", "puis construis"].iter().any(|word|text.contains(word)) {return None;}
     let cue=regex::Regex::new(r"^(?:use(?: only)?|call(?: the)?|utilise(?: uniquement)?|appelle|exécute)(?: l'outil)?\s+([a-z][a-z0-9_]+)\b").expect("explicit tool cue");
@@ -54,6 +54,14 @@ pub(crate) fn native_tools(policy: &akasha_tools::ToolsPolicy, role: &str, name:
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quoted_content_does_not_require_an_unrequested_read() {
+        for request in [r#"Use write_file to create notes.txt containing exactly "then read""#, "Use write_file with `puis relis` as its content"] {
+            assert_eq!(named_tool(request), Some("write_file"));
+            assert!(!crate::chat_contract::requires_post_write_read(request));
+        }
+        assert!(crate::chat_contract::requires_post_write_read(r#"Use write_file containing "then read", then read the file"#));
+    }
     #[test]
     fn explicit_tool_requests_do_not_need_a_project_planner() {
         for (message,tool) in [("Use web_fetch to open the source https://example.org","web_fetch"),("Use only memory_store to save a message and image, process or pdf. Do not call write_file or any other tool.","memory_store"),("Call the schedule_task tool now, exactly once, with `use write_file then read it` as the scheduled prompt.","schedule_task"),("Utilise memory_search pour retrouver mon rendez-vous.","memory_search"),("Utilise cancel_scheduled_task pour annuler cette tâche.","cancel_scheduled_task")] {assert_eq!(named_tool(message),Some(tool));}
