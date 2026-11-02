@@ -1,0 +1,388 @@
+{
+  "schema_version": 1,
+  "profile": "real-agentic",
+  "baseline_version": "real-agentic-v1",
+  "generated_at_utc": "2026-11-02T18:27:29.069762+00:00",
+  "commit": "9ed8e5b50a1ac82cd161c8e2a4034010274bad98",
+  "source_tree_dirty": false,
+  "binaries": {
+    "cli": {
+      "name": "akasha.exe",
+      "sha256": "d6d1ba83efbecbd72c114e97034ef5b6c0b465bc48470dd23797adde7429358e",
+      "size_bytes": 17492480
+    },
+    "daemon": {
+      "name": "akasha-daemon.exe",
+      "sha256": "206f06723484c60f9c40f83351f2caf4208805e91cb40d3dad21b68116d0316d",
+      "size_bytes": 165553152
+    }
+  },
+  "environment": {
+    "os": "Windows-10-10.0.26220-SP0",
+    "architecture": "AMD64",
+    "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "cpu_logical_cores": 16,
+    "provider_configured": "ollama",
+    "model_requested": "qwen3.5:9b",
+    "model_digest": "c97eb11d70b1acdc88af01eef566c1fe4f7fbe93eb1afc06871132f293ff425a",
+    "generation_config": {
+      "temperature": 0.0,
+      "max_tokens": 2048,
+      "thinking_level": "off",
+      "num_ctx": 16384,
+      "num_gpu": 0
+    },
+    "provider_observed": [
+      "ollama"
+    ],
+    "models_observed": [
+      "qwen3.5:9b"
+    ],
+    "execution_device_requested": "cpu",
+    "gpu_devices": [
+      "NVIDIA GeForce RTX 4080 SUPER, 16376 MiB"
+    ]
+  },
+  "passed": 5,
+  "total": 5,
+  "no_go": [],
+  "scenarios": [
+    {
+      "name": "tool_choice_execution",
+      "passed": true,
+      "message": "memory_store a été choisi et exécuté avec succès",
+      "checks": {},
+      "latency_ms": 28688,
+      "actions": [
+        "memory_store"
+      ],
+      "tools": [
+        "memory_store"
+      ],
+      "tool_results": [
+        {
+          "tool": "memory_store",
+          "success": true
+        }
+      ],
+      "task_statuses": [
+        "completed"
+      ],
+      "tool_approval_pending": false,
+      "response_chars": 148,
+      "provider_model_deltas": [],
+      "llm_call_count": 1,
+      "llm_success_count": 1,
+      "llm_failure_kinds": [],
+      "llm_success_models": [
+        "qwen3.5:9b"
+      ],
+      "llm_success_routes": [
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        }
+      ],
+      "model_used": "qwen3.5:9b",
+      "tokens_out": 50,
+      "fallback_triggered": false,
+      "fallback_success": false,
+      "provider_model_verified": true,
+      "device_verified": true,
+      "model_vram_bytes_observed": [
+        0
+      ]
+    },
+    {
+      "name": "policy_refusal",
+      "passed": true,
+      "message": "allowed_write_paths a refusé la mutation et le fichier test est resté intact",
+      "checks": {
+        "policy_denial_observed": true,
+        "protected_file_unchanged": true,
+        "no_mutating_tool_succeeded": true,
+        "task_succeeded": false
+      },
+      "latency_ms": 28531,
+      "actions": [
+        "write_file"
+      ],
+      "tools": [
+        "write_file"
+      ],
+      "tool_results": [
+        {
+          "tool": "write_file",
+          "success": false
+        }
+      ],
+      "task_statuses": [
+        "failed"
+      ],
+      "tool_approval_pending": false,
+      "response_chars": 133,
+      "provider_model_deltas": [
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b",
+          "total_requests": 1,
+          "successful_requests": 1,
+          "failed_requests": 0,
+          "fallback_triggered": 0,
+          "fallback_success": 0
+        }
+      ],
+      "llm_call_count": 2,
+      "llm_success_count": 2,
+      "llm_failure_kinds": [],
+      "llm_success_models": [
+        "qwen3.5:9b"
+      ],
+      "llm_success_routes": [
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        }
+      ],
+      "model_used": "qwen3.5:9b",
+      "tokens_out": 52,
+      "fallback_triggered": false,
+      "fallback_success": false,
+      "provider_model_verified": true,
+      "device_verified": true,
+      "model_vram_bytes_observed": [
+        0
+      ]
+    },
+    {
+      "name": "memory_after_restart",
+      "passed": true,
+      "message": "le marqueur privé a été rappelé par memory_search après redémarrage",
+      "checks": {},
+      "latency_ms": 45079,
+      "actions": [
+        "memory_store",
+        "memory_search"
+      ],
+      "tools": [
+        "memory_store",
+        "memory_search"
+      ],
+      "tool_results": [
+        {
+          "tool": "memory_store",
+          "success": true
+        },
+        {
+          "tool": "memory_search",
+          "success": true
+        }
+      ],
+      "task_statuses": [
+        "completed",
+        "completed"
+      ],
+      "tool_approval_pending": false,
+      "response_chars": 183,
+      "provider_model_deltas": [],
+      "llm_call_count": 3,
+      "llm_success_count": 3,
+      "llm_failure_kinds": [],
+      "llm_success_models": [
+        "qwen3.5:9b"
+      ],
+      "llm_success_routes": [
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        }
+      ],
+      "model_used": "qwen3.5:9b",
+      "tokens_out": 72,
+      "fallback_triggered": false,
+      "fallback_success": false,
+      "provider_model_verified": true,
+      "device_verified": true,
+      "model_vram_bytes_observed": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "fallback_provider_unavailable",
+      "passed": true,
+      "message": "le fournisseur primaire indisponible a basculé vers Ollama",
+      "checks": {},
+      "latency_ms": 6188,
+      "actions": [],
+      "tools": [],
+      "tool_results": [],
+      "task_statuses": [
+        "completed"
+      ],
+      "tool_approval_pending": false,
+      "response_chars": 11,
+      "provider_model_deltas": [
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b-akasha-eval-unavailable",
+          "total_requests": 1,
+          "successful_requests": 0,
+          "failed_requests": 1,
+          "fallback_triggered": 0,
+          "fallback_success": 0
+        },
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b",
+          "total_requests": 1,
+          "successful_requests": 1,
+          "failed_requests": 0,
+          "fallback_triggered": 1,
+          "fallback_success": 1
+        }
+      ],
+      "llm_call_count": 1,
+      "llm_success_count": 1,
+      "llm_failure_kinds": [],
+      "llm_success_models": [
+        "qwen3.5:9b"
+      ],
+      "llm_success_routes": [
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        }
+      ],
+      "model_used": "qwen3.5:9b",
+      "tokens_out": 5,
+      "fallback_triggered": true,
+      "fallback_success": true,
+      "provider_model_verified": true,
+      "device_verified": true,
+      "model_vram_bytes_observed": [
+        0
+      ]
+    },
+    {
+      "name": "scheduled_task_lifecycle",
+      "passed": true,
+      "message": "pause, reprise, réponse exacte, puis annulation vérifiées",
+      "checks": {
+        "schedule_created": true,
+        "schedule_paused": true,
+        "schedule_resumed": true,
+        "scheduled_response_marker_verified": true,
+        "schedule_cancelled": true,
+        "schedule_removed": true,
+        "scheduled_prompt_preserved": true,
+        "scheduled_rule_preserved": true,
+        "scheduled_title_preserved": true,
+        "scheduled_task_completed": true,
+        "scheduled_provider_model_verified": true,
+        "scheduled_tokens_reported": true
+      },
+      "latency_ms": 75313,
+      "actions": [
+        "schedule_task",
+        "cancel_scheduled_task"
+      ],
+      "tools": [
+        "schedule_task",
+        "cancel_scheduled_task"
+      ],
+      "tool_results": [
+        {
+          "tool": "schedule_task",
+          "success": true
+        },
+        {
+          "tool": "cancel_scheduled_task",
+          "success": true
+        }
+      ],
+      "task_statuses": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "tool_approval_pending": false,
+      "response_chars": 106,
+      "provider_model_deltas": [
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b",
+          "total_requests": 2,
+          "successful_requests": 2,
+          "failed_requests": 0,
+          "fallback_triggered": 0,
+          "fallback_success": 0
+        },
+        {
+          "provider": "ollama",
+          "model": "qwen3.5:9b",
+          "total_requests": 2,
+          "successful_requests": 2,
+          "failed_requests": 0,
+          "fallback_triggered": 0,
+          "fallback_success": 0
+        }
+      ],
+      "llm_call_count": 5,
+      "llm_success_count": 5,
+      "llm_failure_kinds": [],
+      "llm_success_models": [
+        "qwen3.5:9b"
+      ],
+      "llm_success_routes": [
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        },
+        {
+          "model": "qwen3.5:9b",
+          "provider": "ollama"
+        }
+      ],
+      "model_used": "qwen3.5:9b",
+      "tokens_out": 48,
+      "fallback_triggered": false,
+      "fallback_success": false,
+      "provider_model_verified": true,
+      "device_verified": true,
+      "model_vram_bytes_observed": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "baseline_comparison": {
+    "status": "recorded_initial_measurement",
+    "key": "ollama::qwen3.5:9b@cpu"
+  }
+}
