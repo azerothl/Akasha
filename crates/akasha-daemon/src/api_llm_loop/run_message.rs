@@ -2009,7 +2009,7 @@ pub(crate) async fn run_message_via_llm(
             if let Some(ref sq) = steering_queue {
                 let steering_items = sq.drain_steering(task_id).await;
                 for item in steering_items {
-                    if web_account_task && crate::web_account_task::stop_reply(&item.text) {
+                    if durable_tool_task && crate::web_account_task::stop_reply(&item.text) {
                         match TaskStore::open(&store_path).and_then(|s|s.transition_if(task_id,
                             &[TaskStatus::Running,TaskStatus::WaitingUserInput],TaskStatus::Cancelled)) {
                             Ok(_) => {run_outcome.termination=TerminationReason::Cancelled;reply_text="Tâche annulée à votre demande.".into();}
@@ -3177,7 +3177,7 @@ pub(crate) async fn run_message_via_llm(
                         let effective_role_tool = if actual_tool.is_empty() {
                             if tool_args.is_empty() { "read_skill" } else { "run_command" }
                         } else { actual_tool.as_str() };
-                        if let Some(error)=crate::direct_tool_task::schedule_literal_error(clean_message,&actual_tool,tool_args) {
+                        if let Some(error)=(scope_unchanged && direct_tool==Some("schedule_task")).then(||crate::direct_tool_task::schedule_literal_error(clean_message,&actual_tool,tool_args)).flatten() {
                             scheduled_literal_rejections += 1;run_outcome.failed_tool_calls += 1;
                             if scheduled_literal_rejections>=3 {run_outcome.termination=TerminationReason::ToolError;reply_text=error;break 'tool_rounds;}
                             tool_results.push(error);continue;
@@ -3891,6 +3891,7 @@ pub(crate) async fn run_message_via_llm(
                                             .await
                                             {
                                                 Ok(Ok(reply)) => {
+                                                    if durable_tool_task {scope_unchanged=false;}
                                                     if web_account_task && crate::web_account_task::read_only_scope(&reply) { web_account_action_required = false; }
                                                     if durable_tool_task && crate::web_account_task::stop_reply(&reply) {
                                                         match TaskStore::open(&store_path).and_then(|s| s.transition_if(task_id,

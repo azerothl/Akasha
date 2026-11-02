@@ -22,6 +22,7 @@ pub(crate) fn tools(policy: &akasha_tools::ToolsPolicy, name: &str) -> String {
 }
 
 pub(crate) fn literal_schedule_prompt(message: &str) -> Option<&str> {
+    let message=crate::consumer_workflow::user_text(message);
     for pattern in [r"(?is)`([^`]+)`\s+as\s+(?:the\s+)?(?:exact\s+)?scheduled prompt",r"(?is)(?:message|prompt)\s+exact\s*[:=]?\s*`([^`]+)`"] {
         if let Some(capture)=regex::Regex::new(pattern).expect("literal schedule prompt").captures(message) {return capture.get(1).map(|value|value.as_str());}
     }
@@ -31,7 +32,7 @@ pub(crate) fn literal_schedule_prompt(message: &str) -> Option<&str> {
 pub(crate) fn schedule_literal_error(message: &str, tool: &str, args: &[String]) -> Option<String> {
     if tool!="schedule_task" {return None;}
     let expected=literal_schedule_prompt(message)?;
-    (args.get(1).map(String::as_str)!=Some(expected)).then(||format!("[schedule_task] No schedule was created. Preserve the complete exact requested prompt: {}",serde_json::json!(expected)))
+    (crate::scheduler::tool_arguments(args).1!=expected).then(||format!("[schedule_task] No schedule was created. Preserve the complete exact requested prompt: {}",serde_json::json!(expected)))
 }
 
 pub(crate) fn native_tools(policy: &akasha_tools::ToolsPolicy, role: &str, name: &str) -> Option<Vec<serde_json::Value>> {
@@ -66,5 +67,15 @@ mod tests {
         assert_eq!(literal_schedule_prompt(request),Some("Réponds OK. N'appelle aucun outil."));
         assert!(schedule_literal_error(request,"schedule_task",&["FREQ=HOURLY".into(),"Réponds OK.".into()]).is_some());
         assert!(schedule_literal_error(request,"schedule_task",&["FREQ=HOURLY".into(),"Réponds OK. N'appelle aucun outil.".into()]).is_none());
+        assert!(schedule_literal_error(request,"schedule_task",&["FREQ=HOURLY".into(),"Réponds".into(),"OK.".into(),"--title".into(),"Test".into(),"N'appelle".into(),"aucun".into(),"outil.".into()]).is_none());
+    }
+    #[test]
+    fn composer_rules_are_separate_from_the_actual_operation() {
+        let prompt="Private rules\n\nUse write_file for a different example é.";
+        for mode in ["ask","architect","code","custom"] {
+            let request=format!("[Guardrail: runtime]\n\n[Composer mode: {mode}; prompt_bytes: {}]\n{prompt}\n\nUse memory_store to save a message",prompt.len());
+            assert_eq!(named_tool(&request),Some("memory_store"));
+        }
+        assert_eq!(named_tool("[Composer mode: ask; prompt_bytes: 1]\né\n\nUse memory_store"),None);
     }
 }

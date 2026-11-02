@@ -21,6 +21,20 @@ const MAX_CATCHUP: usize = 10;
 /// Pending item: (run_id, task_id, message, session_id) — sent to orchestrator then run marked Running.
 type PendingRun = (Uuid, Uuid, String, String);
 
+pub(crate) fn tool_arguments(args: &[String]) -> (String,String,String) {
+    let cron=args.first().map(|arg|arg.trim().to_owned()).unwrap_or_default();
+    let mut title="Agent scheduled task".to_owned();
+    let mut prompt=Vec::new();
+    let mut index=1;
+    while index<args.len() {
+        if args[index]=="--title" {
+            if let Some(value)=args.get(index+1) {title=value.clone();index+=2;continue;}
+        }
+        prompt.push(args[index].as_str());index+=1;
+    }
+    (cron,prompt.join(" ").trim().to_owned(),title)
+}
+
 pub(crate) fn execution_context(schedule: &Schedule) -> (String, String) {
     let mut message=if schedule.name.trim().is_empty() {"Exécution planifiée.".to_owned()}else{schedule.name.clone()};
     let mut session_id=format!("schedule:{}",schedule.id);

@@ -1493,22 +1493,7 @@ pub(crate) async fn execute_tool_call_impl(
             }
         }
         "schedule_task" => {
-            let cron = args.get(0).map(String::as_str).unwrap_or("").trim().to_string();
-            let mut title = "Agent scheduled task".to_string();
-            let mut prompt_parts: Vec<&str> = Vec::new();
-            let mut i = 1;
-            while i < args.len() {
-                if args[i] == "--title" {
-                    if let Some(value) = args.get(i + 1) {
-                        title = value.clone();
-                        i += 2;
-                        continue;
-                    }
-                }
-                prompt_parts.push(args[i].as_str());
-                i += 1;
-            }
-            let prompt = prompt_parts.join(" ");
+            let (cron,prompt,title)=crate::scheduler::tool_arguments(args);
             let prompt = prompt.trim();
             if cron.is_empty() || prompt.is_empty() {
                 return (
