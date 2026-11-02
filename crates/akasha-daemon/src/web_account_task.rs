@@ -19,6 +19,7 @@ pub(crate) fn matches(message: &str) -> bool {
         .replace('’', "'");
     if [
         "explique",
+        "explain",
         "comment ",
         "how ",
         "audit",
@@ -113,13 +114,18 @@ pub(crate) fn verification_available(policy: &akasha_tools::ToolsPolicy) -> bool
 }
 
 fn positive_targets(text: &str) -> Vec<url::Url> {
-    let pattern=regex::Regex::new(r#"(?i)\b(?:register|create|cr[eé]e(?:r|z)?|inscri\w*)\b[^\n;]*?\b(?:at|on|sur)\s+(https?://[^\s<>"`]+)"#).expect("registration target");
+    let pattern=regex::Regex::new(r#"(?i)\b(?:register|create|cr[eé]e(?:r|z)?|inscri(?:s|re|vez|vons|t))\b[^\n;,.!?]*?\b(?:at|on|sur)\s+(?:(?:le|the)\s+)?(?:(?:site(?:\s+web)?|website)\s+)?(https?://[^\s<>"`]+)"#).expect("registration target");
     let negated=regex::Regex::new(r"(?i)(?:don't|do not|never|ne(?:\s+(?:vous|te)|\s+t')?|n')\s*$").expect("negated target");
     pattern.captures_iter(text).filter(|capture|!negated.is_match(&text[..capture.get(0).unwrap().start()])).filter_map(|capture|request_urls(&capture[1]).into_iter().next()).collect()
 }
 
 pub(crate) fn verification_scope(message: &str) -> String {
-    positive_targets(crate::consumer_workflow::user_text(message)).last().map(|url|url.as_str().to_owned()).unwrap_or_else(||message.to_owned())
+    let message=crate::consumer_workflow::user_text(message);
+    let positive=positive_targets(message);
+    let candidates=if positive.is_empty() {request_urls(message)}else{positive};
+    let Some(first)=candidates.first() else{return String::new();};
+    if candidates.iter().any(|url|url.origin()!=first.origin()) {return String::new();}
+    first.as_str().to_owned()
 }
 
 pub(crate) fn update_destination(scope: &mut String, correction: &str) -> bool {
@@ -288,6 +294,9 @@ mod tests {
         assert!(authorization_after(true,&scope,"Don't register at https://old.example"));
         assert!(!authorization_after(true,&scope,"Don't register at https://new.example"));
         assert_eq!(verification_scope(correction),"https://new.example/");
+        assert_eq!(verification_scope("Crée un compte sur https://new.example; lis la documentation d'inscription sur https://docs.example"),"https://new.example/");
+        assert_eq!(verification_scope("Utilise https://docs.example/skill pour créer un compte sur le site web https://new.example"),"https://new.example/");
+        assert_eq!(verification_scope("Crée un compte nommé Alpha. Documentation sur https://docs.example et site https://new.example"),"");
         assert!(reported_readback(&scope,"run_command",receipt));
     }
 
@@ -311,6 +320,7 @@ mod tests {
     fn urls_do_not_turn_questions_or_projects_into_registrations() {
         for message in [
             "Explique comment créer un compte sur https://example.org",
+            "I don't have an account, explain the signup at https://example.org",
             "Don't register an account at https://example.org; just summarize the requirements",
             "Please don't register an account at https://example.org; just summarize the requirements",
             "Ne crée pas de compte sur https://example.org : résume les conditions",

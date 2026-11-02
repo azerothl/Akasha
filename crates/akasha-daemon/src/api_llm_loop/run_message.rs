@@ -1961,6 +1961,11 @@ pub(crate) async fn run_message_via_llm(
                 .or_else(||(checkpoint.round>=max_tool_rounds).then(||serde_json::json!({"tool_round_limit":true,"max_tool_rounds":max_tool_rounds})))
         });
         'tool_rounds: loop {
+            if web_account_task && web_account_scope.is_empty() {
+                run_outcome.termination=TerminationReason::ContextUnavailable;
+                reply_text="La destination du compte est ambiguë parmi les liens fournis. Précisez le site d’inscription ; aucune inscription n’a été lancée.".into();
+                break 'tool_rounds;
+            }
             if web_account_task && web_account_action_required && !web_account_action_succeeded && !tools_executor_snapshot.as_ref().is_some_and(|executor|crate::web_account_task::verification_available(&executor.policy)) {
                 run_outcome.termination=TerminationReason::ToolError;
                 reply_text="Inscription non démarrée : aucun outil autorisé ne permet la création par API et sa relecture authentifiée. Le navigateur de ce parcours est limité à la consultation ; aucun formulaire n’a été soumis.".into();
