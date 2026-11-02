@@ -60,7 +60,8 @@ jobs:
   rust-tests:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    # Its daemon artifact runs in ui-e2e: both jobs need the same glibc ABI.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Start measurement
@@ -84,7 +85,7 @@ jobs:
         id: cache
         uses: ./.github/actions/cargo-cache
         with:
-          variant: ci-ubuntu-debug-default
+          variant: ci-ubuntu-24.04-debug-default
       - name: Cargo test (workspace or affected packages)
         env:
           FULL: ${{ needs.changes.outputs.full }}
@@ -172,7 +173,7 @@ jobs:
         if: needs.rust-tests.result == 'skipped'
         uses: ./.github/actions/cargo-cache
         with:
-          variant: ci-ubuntu-debug-default
+          variant: ci-ubuntu-24.04-debug-default
       - name: Reuse daemon built by Rust checks
         if: needs.rust-tests.result == 'success'
         uses: actions/download-artifact@v4
@@ -184,6 +185,10 @@ jobs:
         run: cargo build --locked -p akasha-daemon
       - name: Restore executable permission after artifact download
         run: chmod +x target/debug/akasha-daemon
+      - name: Verify daemon loader dependencies before installing the UI browser
+        run: |
+          ldd target/debug/akasha-daemon | tee daemon-loader.log
+          ! grep -q 'not found' daemon-loader.log
       - uses: actions/setup-node@v4
         with:
           # Match the Windows candidate toolchain instead of following new LTS majors.
