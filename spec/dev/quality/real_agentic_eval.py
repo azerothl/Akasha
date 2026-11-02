@@ -565,6 +565,7 @@ def submit_message(
         "llm_call_count": llm_diagnostics["call_count"],
         "llm_unfinished_call_count": llm_diagnostics["unfinished_count"],
         "llm_success_models": llm_diagnostics["success_models"],
+        "llm_success_routes": llm_diagnostics["success_routes"],
         "llm_failure_kinds": llm_diagnostics["failure_kinds"],
         "tools": tools,
         "tool_events": [
@@ -696,6 +697,7 @@ def compare_or_record_baseline(
             "provider": "ollama",
             "device": device,
             "source_commit": report["commit"],
+            "model_digest": report["environment"].get("model_digest"),
             "measured_at_utc": report["generated_at_utc"],
             "hardware": hardware_fingerprint(report["environment"], device),
             "scenarios": {
@@ -711,6 +713,10 @@ def compare_or_record_baseline(
     if not isinstance(recorded, dict):
         report["baseline_comparison"] = {"status": "missing", "key": key}
         report["no_go"].append("measured_baseline_missing")
+        return
+    if recorded.get("model_digest") != report["environment"].get("model_digest"):
+        report["baseline_comparison"] = {"status": "model_digest_mismatch", "key": key}
+        report["no_go"].append("measured_baseline_model_changed")
         return
     expected_hardware = recorded.get("hardware")
     actual_hardware = hardware_fingerprint(report["environment"], device)
@@ -766,6 +772,10 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     model = args.model.strip()
     if not model:
         raise RuntimeError("--model must be a non-empty explicit model identifier")
+    tags=http_json(args.ollama_url,"GET","/api/tags").get("models",[])
+    model_digest=next((item.get("digest") for item in tags if item.get("name")==model or item.get("model")==model),None)
+    if not isinstance(model_digest,str) or not re.fullmatch(r"[a-fA-F0-9]{64}",model_digest):
+        raise RuntimeError("installed model digest could not be verified")
 
     with tempfile.TemporaryDirectory(prefix="akasha-agentic-eval-") as temp:
         root = Path(temp)
@@ -1024,6 +1034,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     run_text = next((item.get("message", "") for item in reversed(run_progress) if isinstance(item, dict) and item.get("message")), "")
                     run_text = re.sub(r"<think>.*?</think>", "", run_text, flags=re.DOTALL).strip()
                     run_llm_diagnostics = llm_call_diagnostics(run_event_data.get("events", []), run_task, run_text)
+                    run_model_match, run_provider = provider_model_evidence(model,run_model,run_llm_diagnostics["success_models"],run_providers,run_llm_diagnostics["success_routes"])
                     schedule_device_match, schedule_vram_bytes = model_device_match(args.ollama_url, model, args.device)
                     schedule_run = {
                         "latency_ms": round((time.monotonic() - run_started) * 1000),
@@ -1031,13 +1042,14 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                         "provider_model_deltas": run_providers,
                         "model_used": run_model,
                         "model_match": run_model_match,
-                        "provider_used": "ollama" if run_model_match else None,
+                        "provider_used": run_provider,
                         "device_match": schedule_device_match,
                         "model_vram_bytes": schedule_vram_bytes,
                         "tokens_out": run_task.get("last_turn_tokens_out", 0),
                         "llm_call_count": run_llm_diagnostics["call_count"],
                         "llm_unfinished_call_count": run_llm_diagnostics["unfinished_count"],
                         "llm_success_models": run_llm_diagnostics["success_models"],
+                        "llm_success_routes": run_llm_diagnostics["success_routes"],
                         "llm_failure_kinds": run_llm_diagnostics["failure_kinds"],
                         "fallback_triggered": False,
                         "fallback_success": False,
@@ -1111,6 +1123,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                 "cpu_logical_cores": os.cpu_count(),
                 "provider_configured": "ollama",
                 "model_requested": model,
+                "model_digest": model_digest,
                 "generation_config": {
                     "temperature": 0.0,
                     "max_tokens": MAX_OUTPUT_TOKENS,
