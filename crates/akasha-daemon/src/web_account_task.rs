@@ -86,7 +86,7 @@ pub(crate) fn tools(policy: &akasha_tools::ToolsPolicy) -> String {
         ("web_fetch", "web_fetch <url> — read an allowed URL and its response status/body"),
         ("browser", "browser navigate <url> | snapshot — read an interactive account contract; mutations require a verifiable API worker"),
         ("run_command", "run_command [VAULT:<key>=<ENV_VAR>] <program> <arguments...> — execute an allowed program on the host; on Windows use powershell.exe -NoProfile -Command <script>"),
-        ("run_terminal", "run_terminal [VAULT:<key>=<ENV_VAR>] <program> <arguments...> — execute an allowed program on the host; on Windows use powershell.exe -NoProfile -Command <script>"),
+        ("run_terminal", "run_terminal <program> <arguments...> — execute an allowed program on the host; vault environment injection requires run_command; on Windows use powershell.exe -NoProfile -Command <script>"),
         ("read_file", "read_file <path> — read an allowed file"),
         ("write_file", "write_file <path> then content on following lines — save an allowed non-secret file"),
         ("list_skills", "list_skills — list installed skills"),
@@ -125,6 +125,10 @@ pub(crate) fn stop_reply(reply: &str) -> bool {
 
 pub(crate) fn verification_available(policy: &akasha_tools::ToolsPolicy) -> bool {
     (policy.can_use_tool("run_command") || policy.can_use_tool("run_terminal")) && !policy.allowed_commands.is_empty()
+}
+
+pub(crate) fn supported_tool(name: &str) -> bool {
+    matches!(name,"web_fetch"|"browser"|"run_command"|"run_terminal"|"read_file"|"write_file"|"list_skills"|"read_skill"|"install_skill"|"ask_user")
 }
 
 fn positive_targets(text: &str) -> Vec<url::Url> {
@@ -398,6 +402,10 @@ mod tests {
         policy.tool_profiles.insert("read-only".into(), vec!["run_terminal".into()]);
         policy.allowed_commands = vec!["powershell.exe".into()];
         assert!(verification_available(&policy));
+        assert!(supported_tool("run_terminal"));
+        assert!(!supported_tool("run_command_background"));
+        assert!(!supported_tool("terminal_session"));
+        assert!(!supported_tool("run_in_container"));
         let prompt = tools(&policy);
         assert!(prompt.contains("run_terminal "));
         assert!(!prompt.contains("run_command "));
