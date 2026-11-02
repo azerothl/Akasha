@@ -34,6 +34,10 @@ pub async fn handle_deep_research_routes(
                 r#"{"error":"missing_body"}"#,
             ));
         };
+        let consents=match v.get("remote_consents").cloned().map(serde_json::from_value::<Vec<crate::privacy::Consent>>).transpose() {
+            Ok(consents)=>consents.unwrap_or_default(),
+            Err(_)=>return Some(json_response("400 Bad Request",r#"{"error":"invalid_remote_consents"}"#)),
+        };
         let req: StartResearchRequest = match serde_json::from_value(v) {
             Ok(r) => r,
             Err(_) => {
@@ -56,7 +60,9 @@ pub async fn handle_deep_research_routes(
             max_time_secs: req.max_time_secs.clamp(60, 3600),
             ..Default::default()
         };
-        let run_id = spawn_research_run(ctx.clone(), topic.to_string(), config);
+        let run_id = match engine::spawn_authorized_research_run(ctx.clone(),topic.to_string(),config,&consents) {
+            Ok(id)=>id,Err(error)=>return Some(json_response("400 Bad Request",&serde_json::json!({"error":error}).to_string())),
+        };
         return Some(json_response(
             "200 OK",
             &serde_json::json!({ "run_id": run_id }).to_string(),

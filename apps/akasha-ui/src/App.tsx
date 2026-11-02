@@ -18,6 +18,14 @@ import { useI18n } from "./useI18n";
 
 import { AppNavigation } from "./components/AppNavigation";
 import { FreeModelsPanel } from "./components/FreeModelsPanel";
+import "./components/consumerFlows.css";
+import {MemoryEntryActions} from "./components/MemoryEntryActions";
+import {ConsumerOrganizationPanel} from "./components/ConsumerOrganizationPanel";
+import {ConsumerWatchPanel} from "./components/ConsumerWatchPanel";
+import {ConsumerHome} from "./components/ConsumerHome";
+import {ConsumerBackupPanel} from "./components/ConsumerBackupPanel";
+import {useConsumerProfile} from "./components/useConsumerProfile";
+import { RemoteConsentPicker, type RemoteConsent } from "./components/RemotePrivacy";
 import { PermissionsBell } from "./components/PermissionsBell";
 import { SteeringQueueBell } from "./components/SteeringQueueBell";
 import { OnboardingWizard, readSetupWizardPending } from "./components/OnboardingWizard";
@@ -79,6 +87,7 @@ import { loadRecoveryDraft, useChatDraftRecovery } from "./hooks/useChatDraftRec
 const RelationGraph = deferPanel(() => import("relation-graph/react"));
 const GeoMapView = deferPanel(() => import("./GeoMapView").then(m => ({ default: m.GeoMapView })));
 const SystemHealthPanel = deferPanel(() => import("./SystemHealthPanel").then(m => ({ default: m.SystemHealthPanel })));
+import type { UserRagDocument } from "./components/UserRagPanel";
 const UserRagPanel = deferPanel(() => import("./components/UserRagPanel").then(m => ({ default: m.UserRagPanel })));
 const PluginCatalogPanel = deferPanel(() => import("./components/PluginCatalogPanel").then(m => ({ default: m.PluginCatalogPanel })));
 const ModulesPanel = deferPanel(() => import("./components/ModulesPanel").then(m => ({ default: m.ModulesPanel })));
@@ -98,7 +107,7 @@ const ThemeEditorPanel = deferPanel(() => import("./components/ThemeEditorPanel"
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
-const DAEMON_PORT = 3876;
+import {DAEMON_PORT} from "./daemonPort";
 const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
@@ -1460,6 +1469,7 @@ function App() {
     return "comfortable";
   });
   const [chatAgentMode, setChatAgentMode] = useState(() => localStorage.getItem(CHAT_AGENT_MODE_KEY) !== "0");
+  const [remoteConsents, setRemoteConsents] = useState<RemoteConsent[]>([]);
   const [composerMode, setComposerMode] = useState<ComposerMode>(loadComposerModeInitial);
   const [chatWebSearch, setChatWebSearch] = useState(() => localStorage.getItem(CHAT_WEB_SEARCH_KEY) === "1");
   const [chatIncognito, setChatIncognito] = useState(() => localStorage.getItem(CHAT_INCOGNITO_KEY) === "1");
@@ -1481,6 +1491,8 @@ function App() {
   >([]);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [uiMode, setUiMode] = useState<UiMode>(loadSavedUiMode);
+  const [consumerBuild,setConsumerBuild]=useState(false);
+  const [consumerHome,setConsumerHome]=useState(true);
   const [showOnboarding, setShowOnboarding] = useState(() => readSetupWizardPending());
   const eventLabel = useCallback(
     (typ: string) => {
@@ -1838,6 +1850,8 @@ function App() {
     });
   }, []);
 
+  useConsumerProfile(fetchSystemEndpoint, !!health?.ok);
+  useEffect(()=>{if(!health?.ok)return;let disposed=false;void fetchSystemEndpoint("/api/privacy").then(result=>{if(!disposed&&result.ok)setConsumerBuild(JSON.parse(result.text).consumer_beta_build===true);}).catch(()=>{});return()=>{disposed=true;};},[health?.ok,fetchSystemEndpoint]);
   const cookbookRecipeHandlers = useMemo<CookbookRecipeHandlers>(
     () => ({
       onTryInChat: tryCookbookRecipeInChat,
@@ -2159,6 +2173,7 @@ function App() {
   const [wakeupFormMinutes, setWakeupFormMinutes] = useState("60");
   const [wakeupFormMessage, setWakeupFormMessage] = useState("");
   const [wakeupSaving, setWakeupSaving] = useState(false);
+  const [wakeupError, setWakeupError] = useState("");
   const calendarEventLabel = (ev: { label?: string; task_id?: string; type?: string }) => {
     if (ev.label && ev.label.trim()) return ev.label;
     if (ev.type === "external") return ev.label?.trim() || (locale === "en" ? "External event" : "Événement externe");
@@ -2454,7 +2469,7 @@ function App() {
   const [handoffModels, setHandoffModels] = useState<Array<{ provider: string; model: string }>>([]);
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [handoffStatus, setHandoffStatus] = useState<string | null>(null);
-  const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string; index_status?: string; indexed_at?: string | null; index_error?: string | null }>>([]);
+  const [userRagDocuments, setUserRagDocuments] = useState<UserRagDocument[]>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
   const [dataSourcesSubTab, setDataSourcesSubTab] = useState<"rag" | "project_graph">("rag");
@@ -4149,14 +4164,14 @@ function App() {
 
   const fetchWakeups = useCallback(async () => {
     try {
-      const res = await fetch(e2eDaemonHttpUrl("/api/wakeups"));
+      const res = await fetchSystemEndpoint("/api/wakeups");
       if (!res.ok) throw new Error(String(res.status));
-      const data = (await res.json()) as { wakeups?: WakeupRow[] };
+      const data = JSON.parse(res.text) as { wakeups?: WakeupRow[] };
       setWakeups(data.wakeups ?? []);
     } catch {
       setWakeups([]);
     }
-  }, []);
+  }, [fetchSystemEndpoint]);
 
   const fetchCalendarGridEvents = useCallback(async () => {
     const d = calendarGridDate;
@@ -4987,11 +5002,12 @@ function App() {
     setUserRagLoading(true);
     setUserRagError(null);
     try {
-      const data = await invoke<{ documents?: Array<{ id?: string; name?: string; mime_type?: string; added_at?: string }> }>(
+      const data = await invoke<{ documents?: Array<Partial<UserRagDocument>> }>(
         "get_user_rag_documents",
         { port: DAEMON_PORT }
       );
       const docs = (data?.documents ?? []).map((d) => ({
+        ...d,
         id: d.id ?? "",
         name: d.name ?? "",
         mime_type: d.mime_type ?? "",
@@ -5921,6 +5937,8 @@ function App() {
     const attachmentsPayload = attachments.length > 0
       ? attachments.map((a) => ({ type: a.typ, name: a.name, content_base64: a.content_base64, mime_type: a.mime_type }))
       : undefined;
+    const taskConsents = remoteConsents;
+    setRemoteConsents([]);
     setAttachments([]);
     setLoading(true);
     try {
@@ -5938,6 +5956,8 @@ function App() {
         queued?: boolean;
       }>("send_message_ack", {
         message: messageToSend,
+        displayMessage: userMessage,
+        remoteConsents: taskConsents,
         sessionId: sessionId,
         attachments: attachmentsPayload,
         newSession: useNewSession ? true : undefined,
@@ -6225,7 +6245,7 @@ function App() {
                     {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
                   </span>
                 </Tooltip>
-                {tab !== "tasks" && (
+                {tab !== "tasks" && !(tab==="chat"&&isSimpleMode&&consumerBuild&&consumerHome) && (
                   <Tooltip content={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}>
                     <button
                       type="button"
@@ -6244,6 +6264,7 @@ function App() {
         {/* Onboarding: first steps modal (dismissible, "Ne plus afficher" stored in localStorage) */}
         {showOnboarding && (
           <OnboardingWizard
+            fetchEndpoint={fetchSystemEndpoint}
             locale={locale}
             daemonOk={!!health?.ok}
             onComplete={() => setShowOnboarding(false)}
@@ -6550,7 +6571,9 @@ function App() {
             </div>
           </div>
         )}
-        {tab === "chat" && (
+        {tab==="chat"&&isSimpleMode&&consumerBuild&&!consumerHome?<button type="button" className="btn-secondary" onClick={()=>setConsumerHome(true)}>Revenir à mes usages</button>:null}
+        {tab==="chat"&&isSimpleMode&&consumerBuild&&consumerHome?<ConsumerHome fetchEndpoint={fetchSystemEndpoint} daemonPort={DAEMON_PORT} locale={locale} onChat={()=>setConsumerHome(false)} onMemory={()=>setTab("memory")} t={t} readFileAsBase64={readFileAsBase64}/>:null}
+        {tab === "chat" && !(isSimpleMode&&consumerBuild&&consumerHome) && (
           <section
             id="panel-chat"
             role="tabpanel"
@@ -7275,6 +7298,7 @@ function App() {
               disabled={loading}
             />
             </div>
+            <RemoteConsentPicker fetchEndpoint={fetchSystemEndpoint} value={remoteConsents} onChange={setRemoteConsents} disabled={loading} locale={locale} />
             <div className="input-area">
               <input
                 ref={fileInputRef}
@@ -7415,6 +7439,7 @@ function App() {
 
         {(tab === "notes" || visitedTabs.has("notes")) && (
           <section id="panel-notes" role="tabpanel" aria-labelledby="tab-notes" className="panel notes-panel-wrap" hidden={tab !== "notes"}>
+            <ConsumerOrganizationPanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
             <NotesPanel t={t} locale={locale} daemonPort={DAEMON_PORT} onDiscussNote={discussNote} />
           </section>
         )}
@@ -7433,6 +7458,7 @@ function App() {
             className="panel scheduled-panel"
           >
             <h2 className="panel-title">{t("tabs.scheduled")}</h2>
+            <ConsumerWatchPanel fetchEndpoint={fetchSystemEndpoint} />
             <p className="panel-description">{t("scheduled.description")}</p>
             <div className="scheduled-scroll" role="region" aria-label={t("tabs.scheduled")}>
             {scheduleReports.length === 0 ? (
@@ -8628,22 +8654,22 @@ function App() {
                     void (async () => {
                       const minutes = parseInt(wakeupFormMinutes, 10);
                       if (!sessionId || !wakeupFormMessage.trim() || !Number.isFinite(minutes) || minutes <= 0) return;
+                      const fire_at = new Date(Date.now() + minutes * 60_000).toISOString();
+                      if (!window.confirm(`${locale === "en" ? "Create this reminder" : "Créer ce rappel"} : ${new Date(fire_at).toLocaleString(locale)}\n${wakeupFormMessage.trim()} ?`)) return;
+                      setWakeupError("");
                       setWakeupSaving(true);
                       try {
-                        const fire_at = new Date(Date.now() + minutes * 60_000).toISOString();
-                        const res = await fetch(e2eDaemonHttpUrl("/api/wakeups"), {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
+                        const res = await requestSystemEndpoint("POST", "/api/wakeups", JSON.stringify({
                             session_id: sessionId,
                             message: wakeupFormMessage.trim(),
                             fire_at,
-                          }),
-                        });
-                        if (res.ok) {
-                          setWakeupFormMessage("");
-                          await fetchWakeups();
-                        }
+                            confirmed: true,
+                          }));
+                        if (!res.ok) throw new Error(res.text || `HTTP ${res.status}`);
+                        setWakeupFormMessage("");
+                        await fetchWakeups();
+                      } catch (error) {
+                        setWakeupError(String(error));
                       } finally {
                         setWakeupSaving(false);
                       }
@@ -8675,6 +8701,7 @@ function App() {
                     {wakeupSaving ? "…" : "Programmer"}
                   </button>
                 </form>
+                {wakeupError && <p role="alert">{wakeupError}</p>}
                 {!sessionId && (
                   <p className="muted">Ouvrez ou démarrez une session de chat pour créer un rappel.</p>
                 )}
@@ -8696,10 +8723,11 @@ function App() {
                             onClick={() => {
                               void (async () => {
                                 try {
-                                  await fetch(e2eDaemonHttpUrl(`/api/wakeups/${encodeURIComponent(w.id)}`), { method: "DELETE" });
+                                  const res=await requestSystemEndpoint("DELETE",`/api/wakeups/${encodeURIComponent(w.id)}`);
+                                  if(!res.ok)throw new Error(res.text || `HTTP ${res.status}`);
                                   await fetchWakeups();
-                                } catch {
-                                  /* ignore */
+                                } catch (error) {
+                                  setWakeupError(String(error));
                                 }
                               })();
                             }}
@@ -9292,23 +9320,7 @@ function App() {
                                 )}
                               </div>
                               {e.id != null && (
-                                <button
-                                  type="button"
-                                  className="memory-long-term-delete"
-                                  onClick={async (ev) => {
-                                    ev.stopPropagation();
-                                    try {
-                                      await invoke("delete_memory_long_term", { id: e.id, port: DAEMON_PORT });
-                                      fetchMemory();
-                                    } catch (err) {
-                                      setMemoryError(String(err));
-                                    }
-                                  }}
-                                  aria-label="Supprimer cette entrée"
-                                  title="Supprimer de la mémoire long terme"
-                                >
-                                  Supprimer
-                                </button>
+                                <MemoryEntryActions id={e.id} content={e.content} fetchEndpoint={fetchSystemEndpoint} onChanged={() => void fetchMemory()} />
                               )}
                             </li>
                           ))}
@@ -11009,6 +11021,8 @@ function App() {
                 </div>
                 <div className="settings-data-scroll">
                   {dataSourcesSubTab === "rag" && (
+                    <>
+                    <ConsumerBackupPanel fetchEndpoint={fetchSystemEndpoint} daemonPort={DAEMON_PORT} />
                     <UserRagPanel
                       t={t}
                       locale={locale}
@@ -11021,6 +11035,7 @@ function App() {
                       fetchEndpoint={fetchSystemEndpoint}
                       readFileAsBase64={readFileAsBase64}
                     />
+                    </>
                   )}
                   {dataSourcesSubTab === "project_graph" && (
                     <>
@@ -11204,7 +11219,7 @@ function App() {
           </div>
         </div>
 
-        {rightSidebarOpen && (
+        {rightSidebarOpen && !(tab==="chat"&&isSimpleMode&&consumerBuild&&consumerHome) && (
           <aside className="sidebar-right" aria-label={tab === "chat" ? t("sidebar.threads_panel") : t("sidebar.tasks_panel")}>
             <div className="sidebar-right-header">
               <h3 className="sidebar-right-title">{tab === "chat" ? t("chat.threads_title") : t("tabs.tasks")}</h3>

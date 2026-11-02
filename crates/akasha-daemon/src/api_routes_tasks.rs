@@ -1233,8 +1233,24 @@ pub(crate) async fn get_task_status(
                     if e.task_id.is_none() {
                         e.task_id = Some(c.id.to_string());
                     }
-                    progress_list.push(e);
+                    // Keep the parent's response last: chat consumes the final
+                    // entry, while task details still retain child progress.
+                    let at = progress_list.len().saturating_sub(1);
+                    progress_list.insert(at, e);
                 }
+            }
+        }
+    }
+    // Terminal response and task status are persisted atomically. The event bus
+    // may still be draining earlier streamed text when polling first sees the
+    // terminal status; that text must not replace the final answer or error.
+    if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Interrupted) {
+        if let Some(outcome) = store.get_outcome(id).ok().flatten() {
+            let response = outcome["response"].as_str().or_else(|| {
+                if task.status != TaskStatus::Completed { outcome["reason"].as_str() } else { None }
+            });
+            if let Some(response) = response.filter(|text| !text.trim().is_empty()) {
+                progress_list.push(ProgressEntry { progress_pct:100, message:response.to_string(), task_id:Some(id.to_string()) });
             }
         }
     }
@@ -1959,7 +1975,10 @@ if method == "POST" && path == "/api/message" {
         .as_ref()
         .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
         .unwrap_or_default();
-    let display_request = message.clone();
+    let display_request = body_json.as_ref()
+        .and_then(|v| v.get("display_message").and_then(|v| v.as_str()))
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&message).to_string();
     // Parse attachments: images -> data URLs for vision; documents -> append extracted text to message.
     let image_data_urls: Option<Vec<String>> = {
         let arr = body_json
@@ -2073,9 +2092,21 @@ if method == "POST" && path == "/api/message" {
         let body = serde_json::json!({ "error": "prompt_injection_rejected", "detail": e.to_string() });
         return Some(json_response("400 Bad Request", &body.to_string()));
     }
-    // Onboarding: if user profile has no how_to_call, try to extract from message and save
+    let incognito = body_json
+        .as_ref()
+        .map(|v| {
+            v.get("incognito")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false)
+                || v.get("no_memory")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    // The consumer wizard never asks for a name. Its first ordinary question
+    // must not be interpreted as one, nor may private messages save a profile.
     let mut message = message;
-    {
+    if !cfg!(feature = "consumer-beta") && !incognito {
         let mut user_profile = UserProfile::load(data_dir);
         if !user_profile.has_how_to_call() && !message.trim().is_empty() {
             let extracted = extract_how_to_call_from_message(message.trim());
@@ -2117,17 +2148,6 @@ if method == "POST" && path == "/api/message" {
             }
         })
         .unwrap_or(TaskPriority::UserNormal);
-    let incognito = body_json
-        .as_ref()
-        .map(|v| {
-            v.get("incognito")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false)
-                || v.get("no_memory")
-                    .and_then(|x| x.as_bool())
-                    .unwrap_or(false)
-        })
-        .unwrap_or(false);
     let studio_code_mode = body_json
         .as_ref()
         .and_then(|v| v.get("studio_code_mode").and_then(|x| x.as_str()))
@@ -2439,7 +2459,7 @@ if method == "POST" && path == "/api/message" {
     } else if let Some(ref mode) = composer_mode {
         match mode.as_str() {
             "architect" | "code" => Some(mode.clone()),
-            "ask" => None,
+            "ask" => Some("ask".to_string()),
             other if crate::api::agent_role_system_prompt(other).is_some() => Some(other.to_string()),
             _ => None,
         }
@@ -2797,11 +2817,31 @@ if method == "POST" && path == "/api/message" {
         priority,
         incognito,
     );
+    if let Some(ids)=body_json.as_ref().and_then(|body|body.get("document_ids")) {
+        match crate::document_conversation::prepare(data_dir,ids,&display_request) {
+            Ok(request)=>{envelope.document_request=Some(request);envelope.incognito=true;},
+            Err(error)=>return Some(json_response("409 Conflict",&serde_json::json!({"error":error.to_string()}).to_string())),
+        }
+    }
+    if let Some(note)=body_json.as_ref().and_then(|body|body.get("organization_note")) {
+        if envelope.document_request.is_some(){return Some(json_response("400 Bad Request",r#"{"error":"Choisissez un seul parcours par demande"}"#));}
+        match crate::consumer_organization::prepare(data_dir,note) {
+            Ok(request)=>{envelope.organization_request=Some(request);envelope.incognito=true;},
+            Err(error)=>return Some(json_response("400 Bad Request",&serde_json::json!({"error":error.to_string()}).to_string())),
+        }
+    }
     envelope.display_request = Some(display_request);
     envelope.studio_execution = studio_execution;
+    if let Some(consents) = body_json.as_ref().and_then(|body|body.get("remote_consents")) {
+        match serde_json::from_value::<Vec<crate::privacy::Consent>>(consents.clone()) {
+            Ok(consents) => envelope.remote_consents = consents,
+            Err(_) => return Some(json_response("400 Bad Request",r#"{"error":"invalid_remote_consents"}"#)),
+        }
+    }
     envelope.studio_disk_root = studio_disk_root.clone();
     envelope.studio_forced_agent = studio_forced_agent;
     envelope.studio_evolution_branch = studio_evolution_branch;
+    if envelope.document_request.is_some() || envelope.organization_request.is_some() {envelope.studio_forced_agent=Some("ask".into());}
     match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
         Ok(task_id) => {
             if let (Some(root), Some(ticket_id)) = (studio_disk_root.as_ref(), studio_ticket_id.as_ref()) {

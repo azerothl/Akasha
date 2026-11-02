@@ -11,7 +11,7 @@ const DEFAULT_SEARXNG_URL: &str = "https://searx.be";
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 const USER_AGENT: &str = "Mozilla/5.0 (compatible; Akasha/1.0; +https://github.com/akasha)";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct WebSearchHit {
     pub title: String,
     pub url: String,
@@ -114,6 +114,25 @@ fn build_provider_chain(policy: &ToolsPolicy) -> Vec<ProviderId> {
     chain
 }
 
+fn provider_endpoint(provider:ProviderId,policy:&ToolsPolicy)->String {
+    match provider {
+            ProviderId::Searxng => searxng_base_url(policy),
+            ProviderId::Brave => "https://api.search.brave.com".into(),
+            ProviderId::DuckDuckGo => "https://html.duckduckgo.com".into(),
+            ProviderId::Tavily => "https://api.tavily.com".into(),
+            ProviderId::Serper => "https://google.serper.dev".into(),
+            ProviderId::GooglePse => "https://www.googleapis.com".into(),
+        }
+}
+
+/// Only recipients in the configured search chain; never include API secrets.
+pub fn privacy_search_services(policy:&ToolsPolicy)->Vec<serde_json::Value> {
+    build_provider_chain(policy).into_iter().map(|provider| {
+        let endpoint=provider_endpoint(provider,policy);
+        serde_json::json!({"name":provider.as_str(),"endpoint":akasha_core::privacy::endpoint_identity(&endpoint),"recipient":format!("search:{}:{}",provider.as_str(),akasha_core::privacy::endpoint_identity(&endpoint)),"local":akasha_core::privacy::loopback_url(&endpoint),"data_classes":["web_query"]})
+    }).collect()
+}
+
 fn parse_provider_name(name: &str) -> Option<ProviderId> {
     match name.to_lowercase().as_str() {
         "brave" => Some(ProviderId::Brave),
@@ -182,6 +201,7 @@ fn searxng_base_url(policy: &ToolsPolicy) -> String {
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .user_agent(USER_AGENT)
         .build()
@@ -205,17 +225,22 @@ pub fn format_hits(hits: &[WebSearchHit]) -> String {
 }
 
 /// Search with provider fallback chain. Returns (formatted lines, tool result, provider used).
-pub async fn web_search_routed(
+pub async fn web_search_routed(query:&str,max_results:u32,policy:&ToolsPolicy)->anyhow::Result<(String,ToolResult,Option<String>)>{
+    let(hits,result,provider)=web_search_hits(query,max_results,policy).await?;
+    Ok((format_hits(&hits),result,provider))
+}
+
+pub async fn web_search_hits(
     query: &str,
     max_results: u32,
     policy: &ToolsPolicy,
-) -> anyhow::Result<(String, ToolResult, Option<String>)> {
+) -> anyhow::Result<(Vec<WebSearchHit>, ToolResult, Option<String>)> {
     let count = max_results.clamp(1, 10);
     let chain = build_provider_chain(policy);
 
     if chain.is_empty() {
         return Ok((
-            String::new(),
+            Vec::new(),
             ToolResult {
                 tool: "web_search".to_string(),
                 success: false,
@@ -228,28 +253,36 @@ pub async fn web_search_routed(
 
     let mut attempts: Vec<String> = Vec::new();
     for provider in chain {
+        let endpoint = provider_endpoint(provider,policy);
+        if !akasha_core::privacy::loopback_url(&endpoint) {
+            let recipient=format!("search:{}:{}",provider.as_str(),akasha_core::privacy::endpoint_identity(&endpoint));
+            if let Err(error)=akasha_core::privacy::check(&recipient,&["web_query"]) {
+                attempts.push(error);continue;
+            }
+        }
         match search_with_provider(provider, query, count, policy).await {
             Ok(hits) if !hits.is_empty() => {
+                let total=hits.len();
                 let name = provider.as_str().to_string();
-                let text = format_hits(&hits);
                 return Ok((
-                    text,
+                    hits,
                     ToolResult {
                         tool: "web_search".to_string(),
                         success: true,
-                        summary: format!("{} result(s) via {}", hits.len(), name),
+                        summary: format!("{} result(s) via {}", total, name),
                         detail: Some(format!("query: {}\nprovider: {}", query, name)),
                     },
                     Some(name),
                 ));
             }
             Ok(_) => attempts.push(format!("{}:empty", provider.as_str())),
-            Err(e) => attempts.push(format!("{}:{}", provider.as_str(), e)),
+            // Transport errors may contain an URL with a provider API key.
+            Err(_) => attempts.push(format!("{}:request_failed", provider.as_str())),
         }
     }
 
     Ok((
-        String::new(),
+        Vec::new(),
         ToolResult {
             tool: "web_search".to_string(),
             success: false,

@@ -24,6 +24,7 @@ embedded-download = ["embedded", "akasha-embedded-llm/download"]
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 serde_yaml = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 tokio = { version = "1", features = ["time", "sync", "rt", "macros"] }
@@ -34,3 +35,6 @@ chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 akasha-core = { path = "../akasha-core" }
 akasha-embedded-llm = { path = "../akasha-embedded-llm", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

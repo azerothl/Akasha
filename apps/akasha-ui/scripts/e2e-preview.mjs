@@ -36,6 +36,11 @@ function mimeFor(file) {
 }
 
 function proxyToDaemon(req, res) {
+  if (process.env.AKASHA_E2E_DAEMON_DISABLED === "1") {
+    res.writeHead(503, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Daemon proxy disabled for isolated IPC fixtures");
+    return;
+  }
   const u = new URL(req.url ?? "/", `http://${HOST}`);
   const daemonPath = (u.pathname.replace(/^\/__e2e_daemon/, "") || "/") + u.search;
   const headers = { ...req.headers };

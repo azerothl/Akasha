@@ -27,6 +27,7 @@ fn permission_queue_decision_body(body: Option<&[u8]>) -> (Option<String>, Optio
 }
 
 pub struct RouteCtx<'a> {
+    pub llm_router: &'a akasha_llm::LLMRouter,
     pub data_dir: &'a Path,
     /// Full request path including query string (used by queue filters).
     pub path: &'a str,
@@ -43,6 +44,7 @@ pub async fn try_handle(
     let data_dir = ctx.data_dir;
     let path = ctx.path;
     let human_input_store = ctx.human_input_store;
+    if let Some(response) = crate::privacy::routes(method,path_only,body,data_dir,ctx.llm_router) {return Some(response);}
 if method == "GET" && path_only == "/api/permissions/mode" {
     let state = load_permission_mode(data_dir);
     return Some(json_response(
@@ -341,6 +343,7 @@ mod tests {
         use super::*;
         use crate::api::{new_human_input_store, PendingHumanInput};
         let dir=tempfile::tempdir().unwrap();
+        let router=akasha_llm::LLMRouter::new(akasha_llm::RoutingConfig::default_config());
         let task=Uuid::new_v4();
         for id in ["historical","current"] {
             let item=serde_json::from_value(serde_json::json!({"id":id,"task_id":task,"tool":"write_file","scope":"same","action":"write","description":"test","rationale":"test","urgency":"normal","status":"pending","created_at":"2026-10-18T00:00:00Z","updated_at":"2026-10-18T00:00:00Z"})).unwrap();
@@ -351,14 +354,14 @@ mod tests {
         waits.write().await.insert(task,PendingHumanInput {request_id:Some("current".into()),question:"approve".into(),context:String::new(),choices:None,response_tx:tx});
         for action in ["approve","deny"] {
             let path=format!("/api/permissions/queue/historical/{action}");
-            let ctx=RouteCtx {data_dir:dir.path(),path:&path,human_input_store:Some(&waits)};
+            let ctx=RouteCtx {llm_router:&router,data_dir:dir.path(),path:&path,human_input_store:Some(&waits)};
             let response=try_handle("POST",&path,None,&ctx).await.unwrap();
             assert!(response.contains("409 Conflict"));
             assert!(waits.read().await.contains_key(&task));
             assert!(matches!(rx.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
         }
         let path="/api/permissions/queue/current/approve";
-        let ctx=RouteCtx {data_dir:dir.path(),path,human_input_store:Some(&waits)};
+        let ctx=RouteCtx {llm_router:&router,data_dir:dir.path(),path,human_input_store:Some(&waits)};
         assert!(try_handle("POST",path,None,&ctx).await.unwrap().contains("200 OK"));
         assert_eq!(rx.await.unwrap(),"Approuver");
         assert!(!waits.read().await.contains_key(&task));

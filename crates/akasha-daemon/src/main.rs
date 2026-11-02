@@ -8,6 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Exit code when restart is requested via POST /api/restart. Supervisor treats non-zero as "respawn".
 const RESTART_EXIT_CODE: i32 = 85;
+const BUILD_METADATA:&str=concat!("AKASHA_CONSUMER_INFO_V1:",env!("AKASHA_CONSUMER_BUILD_INFO"),":END_AKASHA_CONSUMER_INFO_V1");
 
 /// Keep the non-blocking log worker alive for the process lifetime.
 static LOG_WORKER_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
@@ -60,18 +61,30 @@ fn init_tracing(data_dir: &Path) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let data_dir = std::env::var("AKASHA_DATA_DIR").unwrap_or_else(|_| {
-        dirs::home_dir()
-            .map(|p| p.join("akasha").display().to_string())
-            .unwrap_or_else(|| ".akasha".into())
-    });
-    let data_path = std::path::PathBuf::from(&data_dir);
-    std::fs::create_dir_all(&data_path).ok();
+    if std::env::args().nth(1).as_deref()==Some("--consumer-build-info") {
+        let metadata=std::hint::black_box(BUILD_METADATA);
+        println!("{}",metadata.strip_prefix("AKASHA_CONSUMER_INFO_V1:").and_then(|value|value.strip_suffix(":END_AKASHA_CONSUMER_INFO_V1")).expect("build metadata"));
+        return Ok(());
+    }
+    if let Some(code) = akasha_daemon::document_worker::entry() { std::process::exit(code); }
+    let previous=akasha_core::data_dir::resolve_bootstrap_data_dir(std::env::var_os("AKASHA_DATA_DIR").as_deref(),dirs::home_dir().as_deref())?;
+    let bootstrap_path=if cfg!(feature="consumer-beta"){std::env::var_os("AKASHA_PROFILE_BOOTSTRAP_DIR").map(std::path::PathBuf::from).unwrap_or_else(||previous.clone())}else{previous.clone()};
+    let data_path=akasha_daemon::consumer_profile::resolve(&bootstrap_path)?;
+    if data_path!=bootstrap_path {for key in akasha_core::data_dir::restored_environment_keys(&bootstrap_path,&previous,&std::env::vars().map(|(key,_)|key).collect::<Vec<_>>()){std::env::remove_var(key);}}
+    if data_path==bootstrap_path {
+    for (key, value) in akasha_core::data_dir::legacy_bootstrap_environment(std::env::var_os("AKASHA_DATA_DIR").as_deref(), dirs::home_dir().as_deref())? {
+        if std::env::var_os(&key).is_none() { std::env::set_var(key, value); }
+    }
+    }
+    std::fs::create_dir_all(&data_path)?;
+    // Embedded model paths and every subsystem must see exactly the same absolute root.
+    std::env::set_var("AKASHA_DATA_DIR", &data_path);
     init_tracing(&data_path)?;
     // `AKASHA_DATA_DIR` in env files is ignored — data_path was resolved above (see ENV_FILE_SKIP_KEYS).
     akasha_core::apply_data_dir_env_files(&data_path);
 
     info!("Akasha daemon starting");
+    info!(data_dir = %data_path.display(), "Using persistent Akasha data directory");
 
     let spec_dir = akasha_core::resolve_spec_dir(data_path.as_path());
 

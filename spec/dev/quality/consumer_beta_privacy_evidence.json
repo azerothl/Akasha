@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "kind": "unit_and_controlled_ui_validation",
+  "source_revision": "312a87c1e995bb09d23523b99f4aa475c44cc5e8",
+  "platform": "Windows x86_64",
+  "rust": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "node": "v22.20.0",
+  "records": [
+    {
+      "label": "SQLCipher store",
+      "log_sha256": "d6436cce9cbf51de53d201c4b08977b2badc624c61e808756e32b1e1fb02eafd",
+      "summaries": [
+        "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s"
+      ],
+      "test_binaries": [
+        {
+          "file": "akasha_store-80c71cedad714ec3.exe",
+          "sha256": "9e23d2b4115eaf2c415cecb0015e717ed024e2a740e28e3146087cf1793df10d"
+        }
+      ]
+    },
+    {
+      "label": "Consumer daemon",
+      "log_sha256": "86424eabd5d0492f3eb5f5ae528439602ff7f9eb5f051495946f7aab14fee2b5",
+      "summaries": [
+        "test result: ok. 725 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 11.72s"
+      ],
+      "test_binaries": [
+        {
+          "file": "akasha_daemon-1e95eabb47ed7618.exe",
+          "sha256": "1a041ca19285aae16b81bf33b4e4020081c8274d26f765ed75bd7bb714309111"
+        }
+      ]
+    },
+    {
+      "label": "Developer daemon",
+      "log_sha256": "f57d67f52012c341ab37c460581216d2bae9d9693a3699e595244c4ddf6fd2c3",
+      "summaries": [
+        "test result: ok. 725 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 11.04s"
+      ],
+      "test_binaries": [
+        {
+          "file": "akasha_daemon-351a3d828931e1a4.exe",
+          "sha256": "1f91407a6a89aa08749bb64906682e4319a669166d8b096e581eaaa84748950e"
+        }
+      ]
+    },
+    {
+      "label": "Core/LLM/web tools",
+      "log_sha256": "59f2eeb16d33fbbfa78836046ba4cd8725c5948e334cf44b02c5d15062ab169b",
+      "summaries": [
+        "test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.39s",
+        "test result: ok. 125 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.38s",
+        "test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "test_binaries": [
+        {
+          "file": "akasha_core-c20565ebdd4e7a8c.exe",
+          "sha256": "e67893ca76ff2aee2a43657035d56b137501043cdc45a96d1ae4365bd43e331c"
+        },
+        {
+          "file": "akasha_llm-117009d3498245c6.exe",
+          "sha256": "8e4313f945fc0a819947f1c15972da2d15511b52f2a5938a524db2adb5869c9f"
+        },
+        {
+          "file": "akasha_tools-640b1f5fa5e4affb.exe",
+          "sha256": "75d1e9cea747b5157dafb048f6412a6c2975335575f1a95eacca78aeb2015e20"
+        }
+      ]
+    },
+    {
+      "label": "Archive crypto",
+      "log_sha256": "fdcd1fe7bd9efa3d34cd5ab332190d29adfd70b7639821b7e6adab9365d4979d",
+      "summaries": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 4.71s"
+      ],
+      "test_binaries": [
+        {
+          "file": "akasha_vault-9c8d2aa388bc31a3.exe",
+          "sha256": "fa1fdc7f43bedebd4ec259adc486ec2d75bc9deaddf6e3876ea0fb44f281fe29"
+        }
+      ]
+    },
+    {
+      "label": "UI unit",
+      "log_sha256": "8b387dbe6840f28d75e29354adaa2ff2cf1f7907839c87d15a02274dd74231e2",
+      "summaries": [
+        "Tests  74 passed (74)"
+      ],
+      "test_binaries": []
+    },
+    {
+      "label": "Chromium privacy UI",
+      "log_sha256": "bb2dd773b5d365128ecc76167b7ed0b5f710652a4435d961d5e7cfda6aab13b4",
+      "summaries": [
+        "2 passed (3.2s)"
+      ],
+      "test_binaries": []
+    },
+    {
+      "label": "UI build",
+      "log_sha256": "c230927f796841d940ff36251eff14e9cf471cb3a8a9089ec5306dc1359884dc",
+      "summaries": [
+        "✓ built in 3.92s"
+      ],
+      "test_binaries": []
+    }
+  ],
+  "limits": [
+    "Not the 50-scenario consumer acceptance run",
+    "No model recommendation",
+    "Not an installer or second Windows account test",
+    "No human pilot"
+  ]
+}

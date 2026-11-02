@@ -2,7 +2,13 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Assistant personnel **sécurisé**, **local-first**, conçu comme une infrastructure agentique autonome 24/7. Orchestration d’agents spécialisés, multi-canaux (texte, Slack, Discord, Telegram), protection des secrets (vault), routeur LLM avec fallback.
+Akasha vous aide à **comprendre vos documents**, **préparer des actions à partir de vos notes** et **suivre les sujets qui vous intéressent**. Chaque réponse documentaire renvoie aux passages du fichier original ; les actions et dates sont vérifiées avant enregistrement.
+
+La **préversion Windows 0.13.0-beta.1 pour particuliers** propose deux paquets CPU et NVIDIA : [premier lancement, démonstration et limites](spec/consumer-beta-windows.md). Modèles locaux par défaut, mémoire long terme et sauvegardes chiffrées. Conversations, notes et documents importés restent hors du chiffrement applicatif pendant la bêta.
+
+**Candidat technique : le pilote avec données personnelles n’est pas encore ouvert.** La diffusion attend les qualifications Windows sans GPU, NVIDIA, du paquet et de la restauration sur un autre compte. [Preuves et contrôles restants](spec/dev/quality/CONSUMER_BETA_DELIVERY.md).
+
+L’édition de développement conserve orchestration d’agents spécialisés, multi-canaux, coffre et routeur LLM. Les instructions de compilation et de configuration suivent ci-dessous.
 
 **Vision et principes** : [spec/00_vision.md](spec/00_vision.md)
 
@@ -106,6 +112,9 @@ akasha daemon kill 12345         # arrêt forcé d'une instance précise
 `status` utilise le port explicite, puis `AKASHA_PORT` dans le shell ou `akasha.env`, puis 3876. Il renvoie un code de sortie non nul si le daemon est inaccessible. Les versions récentes du daemon exposent aussi leur PID, version, durée de fonctionnement, dossier de données et état dégradé dans `GET /api/status` ; les anciennes versions peuvent seulement répondre `status: ok`.
 
 `daemon list` interroge les processus locaux ; sous Windows, il indique aussi les ports d'écoute accessibles. `daemon kill` vérifie le PID, le chemin et l'identité de l'instance avant l'arrêt. Lorsqu'un superviseur Akasha est associé, il est arrêté avant son daemon pour éviter une relance automatique. Un PID étranger ou une identité inaccessible est refusé. L'arrêt est forcé et peut interrompre le travail en cours. `akasha stop` conserve son comportement global (toutes les instances Akasha locales), mais utilise désormais cette vérification plutôt qu'une terminaison par nom d'image ou recherche de texte.
+Le dossier persistant est `%USERPROFILE%\akasha` sous Windows, ou `~/akasha` sous Linux/macOS. `AKASHA_DATA_DIR`, lorsqu'il est défini **dans l'environnement avant le lancement**, permet de choisir un autre dossier absolu ; `~/...` et `~\...` sont développés vers le dossier utilisateur. Les chemins relatifs et les valeurs vides sont refusés. Le CLI transmet le même chemin absolu au superviseur, au daemon et aux modèles embarqués ; Pour compatibilit�, une ancienne ligne `AKASHA_DATA_DIR` du profil par d�faut est lue une seule fois au d�marrage et normalis�e ; les fichiers du dossier final ne peuvent pas d�clencher une nouvelle redirection. `GET /api/config` expose le dossier réellement utilisé dans `data_dir`.
+
+Une ancienne version pouvait transmettre littéralement `AKASHA_DATA_DIR=~\akasha` depuis `akasha.env` et créer un dossier `~\akasha` sous le répertoire de lancement. Si l'historique semble vide après une mise à jour, vérifier d'abord le dossier utilisé : ne pas supprimer ni fusionner automatiquement les bases existantes. Relancer avec le bon chemin absolu permet de réutiliser leurs données.
 
 **Toujours actif (one-command)** : `akasha up` démarre le daemon si nécessaire puis vérifie l’état via `/api/status`.
 

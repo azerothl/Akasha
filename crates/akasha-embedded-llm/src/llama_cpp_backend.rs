@@ -86,7 +86,26 @@ pub fn complete_with_metrics(
     max_tokens: Option<usize>,
     temperature: Option<f64>,
 ) -> Result<crate::EmbeddedCompletion> {
-    with_lock(|| run_generation(gguf_path, prompt, max_tokens, temperature, |_| {}))
+    complete_with_reasoning(gguf_path, prompt, max_tokens, temperature, true)
+}
+
+pub fn complete_with_reasoning(
+    gguf_path: &Path,
+    prompt: &str,
+    max_tokens: Option<usize>,
+    temperature: Option<f64>,
+    thinking_enabled: bool,
+) -> Result<crate::EmbeddedCompletion> {
+    with_lock(|| {
+        run_generation(
+            gguf_path,
+            prompt,
+            max_tokens,
+            temperature,
+            thinking_enabled,
+            |_| {},
+        )
+    })
 }
 
 pub fn complete_stream<F>(
@@ -112,7 +131,80 @@ pub fn complete_stream_with_metrics<F>(
 where
     F: FnMut(&str),
 {
-    with_lock(|| run_generation(gguf_path, prompt, max_tokens, temperature, on_chunk))
+    complete_stream_with_reasoning(gguf_path, prompt, max_tokens, temperature, true, on_chunk)
+}
+
+pub fn complete_stream_with_reasoning<F>(
+    gguf_path: &Path,
+    prompt: &str,
+    max_tokens: Option<usize>,
+    temperature: Option<f64>,
+    thinking_enabled: bool,
+    on_chunk: F,
+) -> Result<crate::EmbeddedCompletion>
+where
+    F: FnMut(&str),
+{
+    with_lock(|| {
+        run_generation(
+            gguf_path,
+            prompt,
+            max_tokens,
+            temperature,
+            thinking_enabled,
+            on_chunk,
+        )
+    })
+}
+
+/// Qwen's official non-thinking generation prefix; never edit source messages.
+/// https://huggingface.co/Qwen/Qwen3.5-0.8B/blob/main/chat_template.jinja
+fn reasoning_prefix(
+    mut formatted: String,
+    architecture: &str,
+    thinking_enabled: bool,
+) -> Result<String> {
+    if thinking_enabled || !architecture.starts_with("qwen3") {
+        return Ok(formatted);
+    }
+    const ASSISTANT: &str = "<|im_start|>assistant\n";
+    let offset = formatted.rfind(ASSISTANT).ok_or_else(|| {
+        EmbeddedLlmError::Inference("Qwen generation template is unsupported".into())
+    })? + ASSISTANT.len();
+    let suffix = formatted[offset..].trim();
+    if !suffix.is_empty() && suffix != "<think>" && suffix != "<think>\n\n</think>" {
+        return Err(EmbeddedLlmError::Inference(
+            "Qwen generation prefix is unsupported".into(),
+        ));
+    }
+    formatted.truncate(offset);
+    formatted.push_str("<think>\n\n</think>\n\n");
+    Ok(formatted)
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::*;
+    #[test]
+    fn explicit_off_preserves_messages_and_closes_only_the_generation_prefix() {
+        let content="<|im_start|>user\nSource littérale <think>conservée</think>\n<|im_end|>\n<|im_start|>assistant\n";
+        let disabled = reasoning_prefix(content.into(), "qwen35", false).unwrap();
+        assert!(disabled.starts_with(content));
+        assert!(disabled.ends_with("<think>\n\n</think>\n\n"));
+        assert_eq!(
+            reasoning_prefix(content.into(), "qwen35", true).unwrap(),
+            content
+        );
+        assert_eq!(
+            reasoning_prefix(content.into(), "llama", false).unwrap(),
+            content
+        );
+        assert_eq!(
+            reasoning_prefix(format!("{content}<think>\n"), "qwen3", false).unwrap(),
+            disabled
+        );
+        assert!(reasoning_prefix("unknown template".into(), "qwen35", false).is_err());
+    }
 }
 
 fn with_lock<R, F: FnOnce() -> Result<R>>(f: F) -> Result<R> {
@@ -177,6 +269,7 @@ fn run_generation<F>(
     prompt: &str,
     max_tokens: Option<usize>,
     temperature: Option<f64>,
+    thinking_enabled: bool,
     mut on_piece: F,
 ) -> Result<crate::EmbeddedCompletion>
 where
@@ -222,6 +315,11 @@ where
             Ok(formatted) => (formatted, AddBos::Never),
             Err(_) => (prompt.to_string(), AddBos::Always),
         };
+    let architecture = pipeline
+        .model
+        .meta_val_str("general.architecture", 256)
+        .unwrap_or_default();
+    let effective_prompt = reasoning_prefix(effective_prompt, &architecture, thinking_enabled)?;
     let mut prompt_tokens = pipeline
         .model
         .str_to_token(&effective_prompt, add_bos)

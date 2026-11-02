@@ -31,6 +31,9 @@ async fn discovered_allocation_and_chunked_sources_work_in_both_transports() {
                         Err(error) => panic!("{error}"),
                     };
                     socket
+                        .set_nonblocking(false)
+                        .unwrap();
+                    socket
                         .set_read_timeout(Some(Duration::from_secs(3)))
                         .unwrap();
                     let mut bytes = Vec::new();

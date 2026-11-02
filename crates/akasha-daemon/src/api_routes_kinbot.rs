@@ -29,6 +29,9 @@ pub async fn try_handle(
     body: Option<&[u8]>,
     ctx: &KinbotRouteCtx<'_>,
 ) -> Option<String> {
+    if let Some(response) = crate::document_api::route(method,path,body,ctx).await {return Some(response);}
+    if let Some(response)=crate::consumer_organization::route(method,path,body,ctx.data_dir,ctx.store_path) {return Some(response);}
+    if let Some(response)=crate::consumer_watch::route(method,path,body,ctx.data_dir,ctx.store_path) {return Some(response);}
     // User RAG retrieve (knowledge base test search)
     if method == "GET" && path.starts_with("/api/user-rag/retrieve") {
         let q = query_str
@@ -43,12 +46,14 @@ pub async fn try_handle(
             return Some(json_response("400 Bad Request", r#"{"error":"q_required"}"#));
         }
         let store = ctx.user_rag_store.lock().await;
-        match store.retrieve_hybrid(&q, None, top_k) {
-            Ok(chunks) => {
+        match store.retrieve_passages(&q, None, top_k) {
+            Ok(passages) => {
+                let chunks: Vec<_> = passages.iter().map(|passage|passage.content.clone()).collect();
                 let body = serde_json::json!({
                     "query": q,
                     "top_k": top_k,
                     "chunks": chunks,
+                    "passages": passages,
                     "count": chunks.len(),
                 });
                 return Some(json_response("200 OK", &body.to_string()));
@@ -94,6 +99,7 @@ pub async fn try_handle(
     }
     if method == "POST" && path == "/api/wakeups" {
         let j = parse_json(body)?;
+        if cfg!(feature="consumer-beta") && j.get("confirmed").and_then(|value|value.as_bool())!=Some(true) {return Some(json_response("400 Bad Request",r#"{"error":"Confirmez le rappel avant son enregistrement"}"#));}
         let session_id = j.get("session_id")?.as_str()?.to_string();
         let message = j.get("message")?.as_str()?.to_string();
         let fire_at = j

@@ -45,6 +45,8 @@ docker/
 
 # Local toolchain caches
 .tools/
+# Jimver/cuda-toolkit downloads its vendor installer here before compilation.
+/cuda_download/
 
 # Local voice toolchain (not part of the daemon build)
 akasha-models/.venv-voice/

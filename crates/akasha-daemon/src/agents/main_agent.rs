@@ -127,6 +127,7 @@ fn strip_thinking_tokens(text: &str) -> &str {
 /// These correspond to the non-None branches of `agent_role_system_prompt` (api.rs).
 /// "conversation" is intentionally absent — it is the default fallback.
 const SPECIALIST_AGENTS: &[&str] = &[
+    "ask",
     "search",
     "code",
     "creative",
@@ -480,7 +481,7 @@ User message:\n{}",
         studio_evolution_branch: Option<String>,
         incognito: bool,
     ) -> anyhow::Result<Uuid> {
-        self.handle_message_with_execution(store_path, message, display_request, _correlation_id, forward_to_orchestrator, session_id, image_data_urls, priority, studio_disk_root, studio_forced_agent, studio_evolution_branch, incognito, None).await
+        self.handle_message_with_execution(store_path, message, display_request, _correlation_id, forward_to_orchestrator, session_id, image_data_urls, priority, studio_disk_root, studio_forced_agent, studio_evolution_branch, incognito, None, vec![], None, None).await
     }
 
     pub(crate) fn validate_studio_execution(&self, body: &serde_json::Value) -> Result<Option<crate::studio_execution::Execution>, String> {
@@ -502,17 +503,24 @@ User message:\n{}",
         studio_evolution_branch: Option<String>,
         incognito: bool,
         studio_execution: Option<crate::studio_execution::Execution>,
+        remote_consents: Vec<crate::privacy::Consent>,
+        document_request: Option<crate::document_conversation::DocumentRequest>,
+        organization_request: Option<crate::consumer_organization::Request>,
     ) -> anyhow::Result<Uuid> {
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
+        if !remote_consents.is_empty() {
+            crate::privacy::grant(store_path.parent().ok_or_else(||anyhow::anyhow!("data directory unavailable"))?, &format!("task:{task_id}"), &remote_consents, 2)?;
+        }
 
         let initial_message = initial_task_message(message, display_request);
 
         // Determine a preliminary assigned_agent (without LLM) so the task can be persisted
         // immediately, satisfying the "ack < 500ms" guarantee and ensuring the task_id is in
         // the DB before any events that carry it as a correlation ID.
+        let routing_message = display_request.unwrap_or(message);
         let execution_mode = if forward_to_orchestrator {
-            Some(classify_execution_mode(message))
+            Some(classify_execution_mode(routing_message))
         } else {
             None
         };
@@ -551,6 +559,8 @@ User message:\n{}",
                 studio_project_id,
             };
             store.insert(&task)?;
+            if let Some(request)=&organization_request {store.insert_event(task_id,"organization_request",Some(&serde_json::to_value(request)?),&Utc::now().to_rfc3339())?;}
+            if let Some(request)=&document_request {store.insert_event(task_id,"document_request",Some(&serde_json::to_value(request)?),&Utc::now().to_rfc3339())?;}
             if let Some(options) = &studio_execution {
                 crate::studio_execution::persist(store_path,task_id,options).map_err(anyhow::Error::msg)?;
                 store.insert_event(task_id, "studio_execution", Some(&serde_json::to_value(options)?), &Utc::now().to_rfc3339())?;
@@ -570,7 +580,7 @@ User message:\n{}",
         let mut message_for_llm = message.to_string();
         // Keep the unmodified user message for routing decisions (recall detection, selector).
         // The studio prefix is only for the LLM prompt — routing logic should see the original intent.
-        let original_user_message = message.to_string();
+        let original_user_message = routing_message.to_string();
         if let Some(ref b) = studio_evolution_branch {
             message_for_llm = format!(
                 "[Studio: apply changes on git branch `{b}`]\n\n{}",
@@ -602,6 +612,7 @@ User message:\n{}",
         let incognito_flag = incognito;
         let store_path_buf = store_path.to_path_buf();
         let preliminary_agent_str = preliminary_agent.to_string();
+        let has_source_workflow=document_request.is_some()||organization_request.is_some();
         tokio::spawn(async move {
             let store_path = store_path_buf.as_path();
             let message = message_owned.as_str();
@@ -612,7 +623,9 @@ User message:\n{}",
             // Run the LLM selector after the task is safely persisted.
             // Use the original (unprefixed) message so studio prefixes don't break recall detection.
             let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(original_message);
-            let selector_result = if let Some(agent) = studio_forced_spawn
+            let selector_result = if !has_source_workflow&&crate::consumer_workflow::runtime_version_request(original_message) {
+                SelectorRunResult{decision:Some(SelectorDecision{answer_mode:SelectorAnswerMode::Direct,task_type:Some("conversation".into()),target_agent:Some("ask".into()),reason:Some("runtime_metadata".into())}),enabled:false,timed_out:false,elapsed_ms:0}
+            } else if let Some(agent) = studio_forced_spawn
                 .as_ref()
                 .filter(|a| is_specialist_agent(a.as_str()))
                 .cloned()
@@ -636,7 +649,7 @@ User message:\n{}",
                 SelectorRunResult {
                     decision: Some(SelectorDecision {
                         answer_mode: SelectorAnswerMode::Direct,
-                        task_type: Some("code_generation".to_string()),
+                        task_type: Some(if agent == "ask" { "conversation" } else { "code_generation" }.to_string()),
                         target_agent: Some(agent),
                         reason: Some("studio_assigned_agent".to_string()),
                     }),
@@ -646,7 +659,7 @@ User message:\n{}",
                 }
             } else if forward_to_orchestrator && !skip_selector_for_recall {
                 emit_timeline_for_task(&agent_clone.bus, Some(store_path), task_id, "selector_start", None);
-                agent_clone.system_selector_decision(message).await
+                akasha_core::privacy::scoped(crate::privacy::task_scope(store_path,task_id), agent_clone.system_selector_decision(original_message)).await
             } else {
                 SelectorRunResult {
                     decision: None,
@@ -835,6 +848,9 @@ User message:\n{}",
     fn resume_task_admitted(&self,store_path:&Path,task_id:Uuid)->anyhow::Result<()> {
         let store = TaskStore::open(store_path)?;
         let task = store.get(task_id)?.ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        if task.assigned_agent == "document_import" {
+            anyhow::bail!("document_reindex_required: cet import doit être relancé depuis Documents avec Réindexer ; une reprise de conversation ne peut pas lire le document");
+        }
         let studio=store.lineage_root_studio_project_id(task_id)?.is_some();
         let resumable = matches!(
             task.status,
@@ -915,6 +931,18 @@ mod tests {
         is_external_info_request, normalize_task_type, parse_selector_decision,
         strip_thinking_tokens, SelectorAnswerMode,
     };
+
+    #[tokio::test]
+    async fn interrupted_document_import_cannot_enter_the_conversation_queue() {
+        let dir=tempfile::tempdir().unwrap();let db=dir.path().join("tasks.db");let id=uuid::Uuid::new_v4();let now=chrono::Utc::now();
+        let store=akasha_store::TaskStore::open(&db).unwrap();
+        store.insert(&akasha_store::Task{id,parent_task_id:None,status:akasha_store::TaskStatus::Interrupted,assigned_agent:"document_import".into(),created_at:now,updated_at:now,initial_message:Some("Lecture documentaire locale".into()),studio_project_id:None}).unwrap();
+        let (bus,_)=crate::agents::new_event_bus();let (tx,mut rx)=tokio::sync::mpsc::channel(1);
+        let agent=super::MainAgent::new(bus,super::OrchestratorSender::new(tx.clone(),tx.clone()),std::sync::Arc::new(akasha_llm::LLMRouter::new(serde_json::from_str("{}").unwrap())),crate::studio::new_studio_disk_root_registry()).with_direct_conversation_tx(tx);
+        assert!(agent.resume_task(&db,id).unwrap_err().to_string().starts_with("document_reindex_required"));
+        assert_eq!(store.get(id).unwrap().unwrap().status,akasha_store::TaskStatus::Interrupted);
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn initial_task_message_preserves_raw_request_before_truncation() {

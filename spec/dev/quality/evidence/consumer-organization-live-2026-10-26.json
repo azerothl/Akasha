@@ -1,0 +1,535 @@
+{
+  "binary_sha256": "4679a8dc3ff1af9ba7ed063af3b22d7263eb861953ebf2c2ec304259227a09a9",
+  "mode": "live",
+  "model": "qwen3.5:9b",
+  "cases": [
+    {
+      "id": "preview_without_effects",
+      "passed": true,
+      "task": {
+        "assigned_agent": "ask",
+        "cost_usd": 0.0,
+        "created_at": "2026-10-26T19:03:33.219784200+00:00",
+        "last_turn_cost_usd": 0.0,
+        "last_turn_latency_ms": 0,
+        "last_turn_model_used": null,
+        "last_turn_tokens_in": 0,
+        "last_turn_tokens_out": 0,
+        "outcome": {
+          "acceptance_verified": true,
+          "actions_created": 0,
+          "preview": {
+            "created_at": "2026-10-26T19:03:34.329001100Z",
+            "id": "2ce15282-efbc-4f0f-85e3-4df56090755a",
+            "note_id": "3224adeb-d172-4c94-95eb-5f40794bd1b7",
+            "proposals": [
+              {
+                "explanation": "L'heure de paiement reste à confirmer.",
+                "id": "00e3f17a-2212-4179-bcff-566ecbfdd5ff",
+                "needs_date_confirmation": true,
+                "suggested_date": "lundi",
+                "title": "Payer la facture synthétique"
+              }
+            ],
+            "source_sha256": "14c90db8286836fb539a788e97124caf441f4d95dd441df8e41002430f96f3b2",
+            "task_id": "e94bfe44-b514-4a6e-97b2-9324a7c4b794"
+          },
+          "raw_model_response": "{\"actions\":[{\"title\":\"Payer la facture synthétique\",\"date_hint\":\"lundi\",\"explanation\":\"L'heure de paiement reste à confirmer.\"}]}",
+          "reminders_created": 0,
+          "response": "1 proposition(s) à vérifier. Aucun rappel ni action n’a été enregistré. Confirmez les titres et dates avant la création.",
+          "status": "completed"
+        },
+        "progress": [
+          {
+            "message": "Terminé.",
+            "progress_pct": 100,
+            "task_id": "e94bfe44-b514-4a6e-97b2-9324a7c4b794"
+          },
+          {
+            "message": "1 proposition(s) à vérifier. Aucun rappel ni action n’a été enregistré. Confirmez les titres et dates avant la création.",
+            "progress_pct": 100,
+            "task_id": "e94bfe44-b514-4a6e-97b2-9324a7c4b794"
+          }
+        ],
+        "status": "completed",
+        "suggested_actions": [
+          {
+            "id": "refresh_files",
+            "kind": "ui",
+            "label": "Rafraîchir la liste des fichiers",
+            "ui_action": "refresh_files"
+          },
+          {
+            "id": "open_editor",
+            "kind": "ui",
+            "label": "Onglet Éditeur",
+            "ui_action": "open_editor"
+          },
+          {
+            "id": "open_preview",
+            "kind": "ui",
+            "label": "Ouvrir l’aperçu",
+            "ui_action": "open_preview"
+          },
+          {
+            "id": "open_design",
+            "kind": "ui",
+            "label": "Voir DESIGN.md",
+            "ui_action": "open_design"
+          }
+        ],
+        "task_id": "e94bfe44-b514-4a6e-97b2-9324a7c4b794",
+        "todos": [],
+        "tokens_used": 0,
+        "updated_at": "2026-10-26T19:03:34.380006400+00:00"
+      },
+      "actions": {
+        "actions": []
+      },
+      "wakeups": {
+        "wakeups": []
+      },
+      "children": {
+        "children": [],
+        "parent_task_id": "e94bfe44-b514-4a6e-97b2-9324a7c4b794"
+      }
+    },
+    {
+      "id": "ambiguous_date_and_missing_confirmation_rejected",
+      "passed": true,
+      "ambiguous": {
+        "error": "Cette heure est ambiguë ou inexistante lors du changement d’heure. Choisissez une autre heure avant de confirmer."
+      },
+      "missing_confirmation": {
+        "error": "Confirmez explicitement la création des actions et rappels"
+      }
+    },
+    {
+      "id": "confirmation_persists_once",
+      "passed": true,
+      "first": {
+        "outcome": {
+          "acceptance_verified": true,
+          "actions": [
+            {
+              "completed": false,
+              "created_at": "2026-10-26T19:03:34.745113300+00:00",
+              "id": "00e3f17a-2212-4179-bcff-566ecbfdd5ff",
+              "note_id": "3224adeb-d172-4c94-95eb-5f40794bd1b7",
+              "preview_id": "2ce15282-efbc-4f0f-85e3-4df56090755a",
+              "remind_at": "2026-10-26T20:03:00+00:00",
+              "reminder_id": "3e4f4b62-a08b-48e0-9bd9-570ff1c2136f",
+              "reminder_status": "pending",
+              "timezone": "UTC",
+              "title": "Payer la facture synthétique"
+            }
+          ],
+          "preview_task_id": "e94bfe44-b514-4a6e-97b2-9324a7c4b794",
+          "response": "Actions et rappels confirmés enregistrés.",
+          "status": "completed"
+        },
+        "status": "completed",
+        "task_id": "911054f1-8fae-412e-8f2b-b84724df27bd"
+      },
+      "repeat": {
+        "outcome": {
+          "acceptance_verified": true,
+          "actions": [
+            {
+              "completed": false,
+              "created_at": "2026-10-26T19:03:34.745113300+00:00",
+              "id": "00e3f17a-2212-4179-bcff-566ecbfdd5ff",
+              "note_id": "3224adeb-d172-4c94-95eb-5f40794bd1b7",
+              "preview_id": "2ce15282-efbc-4f0f-85e3-4df56090755a",
+              "remind_at": "2026-10-26T20:03:00+00:00",
+              "reminder_id": "3e4f4b62-a08b-48e0-9bd9-570ff1c2136f",
+              "reminder_status": "pending",
+              "timezone": "UTC",
+              "title": "Payer la facture synthétique"
+            }
+          ],
+          "preview_task_id": "e94bfe44-b514-4a6e-97b2-9324a7c4b794",
+          "response": "Actions et rappels confirmés enregistrés.",
+          "status": "completed"
+        },
+        "status": "completed",
+        "task_id": "053085c2-2bdb-42c4-85d4-9c36daccbead"
+      },
+      "actions": {
+        "actions": [
+          {
+            "completed": false,
+            "created_at": "2026-10-26T19:03:34.745113300+00:00",
+            "id": "00e3f17a-2212-4179-bcff-566ecbfdd5ff",
+            "note_id": "3224adeb-d172-4c94-95eb-5f40794bd1b7",
+            "preview_id": "2ce15282-efbc-4f0f-85e3-4df56090755a",
+            "remind_at": "2026-10-26T20:03:00+00:00",
+            "reminder_id": "3e4f4b62-a08b-48e0-9bd9-570ff1c2136f",
+            "reminder_status": "pending",
+            "timezone": "UTC",
+            "title": "Payer la facture synthétique"
+          }
+        ]
+      }
+    },
+    {
+      "id": "backup_encrypted_and_no_password_in_task",
+      "passed": true,
+      "task": {
+        "assigned_agent": "profile_maintenance",
+        "cost_usd": 0.0,
+        "created_at": "2026-10-26T19:03:34.843944100+00:00",
+        "last_turn_cost_usd": 0.0,
+        "last_turn_latency_ms": 0,
+        "last_turn_model_used": null,
+        "last_turn_tokens_in": 0,
+        "last_turn_tokens_out": 0,
+        "outcome": {
+          "acceptance_verified": false,
+          "backup_path": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-organization-audit-5enfoti0\\profile\\backups\\92a74509-284e-4268-b080-95e195a0050b.akbk",
+          "memory": {
+            "encrypted_at_rest": true,
+            "scope": "long_term_memory_only",
+            "sqlcipher_compiled": true,
+            "state": "encrypted"
+          },
+          "response": "Sauvegarde chiffrée créée et vérifiée.",
+          "result": "succeeded",
+          "schema_version": 1,
+          "status": "completed"
+        },
+        "progress": [
+          {
+            "message": "Préparation des données à sauvegarder",
+            "progress_pct": 5,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          },
+          {
+            "message": "Copie cohérente des données du profil",
+            "progress_pct": 10,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          },
+          {
+            "message": "Copie cohérente des données du profil",
+            "progress_pct": 17,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          },
+          {
+            "message": "Copie cohérente des données du profil",
+            "progress_pct": 25,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          },
+          {
+            "message": "Copie cohérente des données du profil",
+            "progress_pct": 33,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          },
+          {
+            "message": "Copie cohérente des données du profil",
+            "progress_pct": 41,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          },
+          {
+            "message": "Copie cohérente des données du profil",
+            "progress_pct": 49,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          },
+          {
+            "message": "Copie cohérente des données du profil",
+            "progress_pct": 57,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          },
+          {
+            "message": "Chiffrement de la sauvegarde",
+            "progress_pct": 70,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          },
+          {
+            "message": "Vérification de la sauvegarde chiffrée",
+            "progress_pct": 85,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          },
+          {
+            "message": "Sauvegarde chiffrée créée et vérifiée.",
+            "progress_pct": 100,
+            "task_id": "92a74509-284e-4268-b080-95e195a0050b"
+          }
+        ],
+        "status": "completed",
+        "suggested_actions": [
+          {
+            "id": "refresh_files",
+            "kind": "ui",
+            "label": "Rafraîchir la liste des fichiers",
+            "ui_action": "refresh_files"
+          },
+          {
+            "id": "open_editor",
+            "kind": "ui",
+            "label": "Onglet Éditeur",
+            "ui_action": "open_editor"
+          },
+          {
+            "id": "open_preview",
+            "kind": "ui",
+            "label": "Ouvrir l’aperçu",
+            "ui_action": "open_preview"
+          },
+          {
+            "id": "open_design",
+            "kind": "ui",
+            "label": "Voir DESIGN.md",
+            "ui_action": "open_design"
+          }
+        ],
+        "task_id": "92a74509-284e-4268-b080-95e195a0050b",
+        "todos": [],
+        "tokens_used": 0,
+        "updated_at": "2026-10-26T19:03:37.778664300+00:00"
+      },
+      "archive_sha256": "8fed4707eebbf8564d3ddcc68d899e1d33f8dfa89bae73edd53d45078ea239ac"
+    },
+    {
+      "id": "wrong_password",
+      "passed": true,
+      "task": {
+        "assigned_agent": "profile_maintenance",
+        "cost_usd": 0.0,
+        "created_at": "2026-10-26T19:03:37.964154900+00:00",
+        "failure_detail": "Vérification de la sauvegarde avant restauration",
+        "last_turn_cost_usd": 0.0,
+        "last_turn_latency_ms": 0,
+        "last_turn_model_used": null,
+        "last_turn_tokens_in": 0,
+        "last_turn_tokens_out": 0,
+        "outcome": {
+          "acceptance_verified": false,
+          "reason": "backup_authentication_failed: phrase incorrecte ou archive altérée",
+          "response": "L’opération n’a pas abouti : backup_authentication_failed: phrase incorrecte ou archive altérée",
+          "result": "failed",
+          "schema_version": 1,
+          "status": "failed"
+        },
+        "progress": [
+          {
+            "message": "Vérification de la sauvegarde avant restauration",
+            "progress_pct": 5,
+            "task_id": "78d81101-0fcf-477f-895b-64a8b91a584e"
+          },
+          {
+            "message": "L’opération n’a pas abouti : backup_authentication_failed: phrase incorrecte ou archive altérée",
+            "progress_pct": 100,
+            "task_id": "78d81101-0fcf-477f-895b-64a8b91a584e"
+          }
+        ],
+        "status": "failed",
+        "suggested_actions": [
+          {
+            "id": "analyze_failure",
+            "kind": "message",
+            "label": "Demander une analyse de l’échec",
+            "message": "La dernière tâche a échoué ou été annulée.\nContexte:\nVérification de la sauvegarde avant restauration\n\nPropose un plan de correction ciblé sans répéter l’implémentation. Si la cause est un contexte trop volumineux, identifie les résumés ou historiques redondants à compacter tout en conservant la demande, les règles et les résultats récents nécessaires."
+          }
+        ],
+        "task_id": "78d81101-0fcf-477f-895b-64a8b91a584e",
+        "todos": [],
+        "tokens_used": 0,
+        "updated_at": "2026-10-26T19:03:39.344813300+00:00"
+      }
+    },
+    {
+      "id": "tampered_archive",
+      "passed": true,
+      "task": {
+        "assigned_agent": "profile_maintenance",
+        "cost_usd": 0.0,
+        "created_at": "2026-10-26T19:03:39.512715500+00:00",
+        "failure_detail": "Vérification de la sauvegarde avant restauration",
+        "last_turn_cost_usd": 0.0,
+        "last_turn_latency_ms": 0,
+        "last_turn_model_used": null,
+        "last_turn_tokens_in": 0,
+        "last_turn_tokens_out": 0,
+        "outcome": {
+          "acceptance_verified": false,
+          "reason": "backup_authentication_failed: phrase incorrecte ou archive altérée",
+          "response": "L’opération n’a pas abouti : backup_authentication_failed: phrase incorrecte ou archive altérée",
+          "result": "failed",
+          "schema_version": 1,
+          "status": "failed"
+        },
+        "progress": [
+          {
+            "message": "Vérification de la sauvegarde avant restauration",
+            "progress_pct": 5,
+            "task_id": "b5a29ca6-51d0-42c9-840d-2013eae07ff3"
+          },
+          {
+            "message": "L’opération n’a pas abouti : backup_authentication_failed: phrase incorrecte ou archive altérée",
+            "progress_pct": 100,
+            "task_id": "b5a29ca6-51d0-42c9-840d-2013eae07ff3"
+          }
+        ],
+        "status": "failed",
+        "suggested_actions": [
+          {
+            "id": "analyze_failure",
+            "kind": "message",
+            "label": "Demander une analyse de l’échec",
+            "message": "La dernière tâche a échoué ou été annulée.\nContexte:\nVérification de la sauvegarde avant restauration\n\nPropose un plan de correction ciblé sans répéter l’implémentation. Si la cause est un contexte trop volumineux, identifie les résumés ou historiques redondants à compacter tout en conservant la demande, les règles et les résultats récents nécessaires."
+          }
+        ],
+        "task_id": "b5a29ca6-51d0-42c9-840d-2013eae07ff3",
+        "todos": [],
+        "tokens_used": 0,
+        "updated_at": "2026-10-26T19:03:40.918865400+00:00"
+      }
+    },
+    {
+      "id": "restore_isolated",
+      "passed": true,
+      "task": {
+        "assigned_agent": "profile_maintenance",
+        "cost_usd": 0.0,
+        "created_at": "2026-10-26T19:03:41.081008400+00:00",
+        "last_turn_cost_usd": 0.0,
+        "last_turn_latency_ms": 0,
+        "last_turn_model_used": null,
+        "last_turn_tokens_in": 0,
+        "last_turn_tokens_out": 0,
+        "outcome": {
+          "acceptance_verified": false,
+          "active_profile_unchanged": true,
+          "response": "Le profil a été restauré dans un dossier séparé. Reconnectez vos services et réactivez les rappels souhaités.",
+          "restored_profile": "C:\\Users\\azero\\AppData\\Local\\Temp\\akasha-organization-audit-5enfoti0\\akasha-restored-7248982e-0872-408c-b7c6-db05d0ee08b9",
+          "result": "succeeded",
+          "schema_version": 1,
+          "status": "completed"
+        },
+        "progress": [
+          {
+            "message": "Vérification de la sauvegarde avant restauration",
+            "progress_pct": 5,
+            "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9"
+          },
+          {
+            "message": "Restauration dans un profil séparé",
+            "progress_pct": 10,
+            "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9"
+          },
+          {
+            "message": "Restauration dans un profil séparé",
+            "progress_pct": 19,
+            "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9"
+          },
+          {
+            "message": "Restauration dans un profil séparé",
+            "progress_pct": 28,
+            "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9"
+          },
+          {
+            "message": "Restauration dans un profil séparé",
+            "progress_pct": 37,
+            "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9"
+          },
+          {
+            "message": "Restauration dans un profil séparé",
+            "progress_pct": 47,
+            "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9"
+          },
+          {
+            "message": "Restauration dans un profil séparé",
+            "progress_pct": 56,
+            "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9"
+          },
+          {
+            "message": "Restauration dans un profil séparé",
+            "progress_pct": 65,
+            "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9"
+          },
+          {
+            "message": "Profil restauré et contrôlé ; le profil actif reste en place",
+            "progress_pct": 95,
+            "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9"
+          },
+          {
+            "message": "Le profil a été restauré dans un dossier séparé. Reconnectez vos services et réactivez les rappels souhaités.",
+            "progress_pct": 100,
+            "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9"
+          }
+        ],
+        "status": "completed",
+        "suggested_actions": [
+          {
+            "id": "refresh_files",
+            "kind": "ui",
+            "label": "Rafraîchir la liste des fichiers",
+            "ui_action": "refresh_files"
+          },
+          {
+            "id": "open_editor",
+            "kind": "ui",
+            "label": "Onglet Éditeur",
+            "ui_action": "open_editor"
+          },
+          {
+            "id": "open_preview",
+            "kind": "ui",
+            "label": "Ouvrir l’aperçu",
+            "ui_action": "open_preview"
+          },
+          {
+            "id": "open_design",
+            "kind": "ui",
+            "label": "Voir DESIGN.md",
+            "ui_action": "open_design"
+          }
+        ],
+        "task_id": "7248982e-0872-408c-b7c6-db05d0ee08b9",
+        "todos": [],
+        "tokens_used": 0,
+        "updated_at": "2026-10-26T19:03:42.689369+00:00"
+      }
+    },
+    {
+      "id": "activation_waits_for_restart",
+      "passed": true,
+      "receipt": {
+        "active_profile_unchanged_until_restart": true,
+        "response": "Le profil restauré est prêt. Redémarrez Akasha pour l’utiliser. Les services distants restent à reconnecter et les récurrences à réactiver.",
+        "restart_required": true
+      }
+    },
+    {
+      "id": "restart_uses_restored_profile_without_replaying_reminders",
+      "passed": true,
+      "actions": {
+        "actions": [
+          {
+            "completed": false,
+            "created_at": "2026-10-26T19:03:34.745113300+00:00",
+            "id": "00e3f17a-2212-4179-bcff-566ecbfdd5ff",
+            "note_id": "3224adeb-d172-4c94-95eb-5f40794bd1b7",
+            "preview_id": "2ce15282-efbc-4f0f-85e3-4df56090755a",
+            "remind_at": "2026-10-26T20:03:00+00:00",
+            "reminder_id": "3e4f4b62-a08b-48e0-9bd9-570ff1c2136f",
+            "reminder_status": "disabled_restored",
+            "timezone": "UTC",
+            "title": "Payer la facture synthétique"
+          }
+        ]
+      },
+      "notes": {
+        "notes": [
+          {
+            "created_at": "2026-10-26T19:03:33.185631700+00:00",
+            "id": "3224adeb-d172-4c94-95eb-5f40794bd1b7",
+            "title": "Note synthétique",
+            "updated_at": "2026-10-26T19:03:33.185631700+00:00"
+          }
+        ]
+      }
+    }
+  ],
+  "passed": true
+}

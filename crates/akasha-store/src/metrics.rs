@@ -40,7 +40,7 @@ pub struct MetricsStore {
 
 impl MetricsStore {
     pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = crate::memory_protection::open_connection(path)?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS llm_metrics_events (

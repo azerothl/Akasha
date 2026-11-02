@@ -142,6 +142,24 @@ impl EmbeddedLlm {
         max_tokens: Option<usize>,
         temperature: Option<f64>,
     ) -> Result<EmbeddedCompletion> {
+        self.complete_for_router_model_with_reasoning(
+            router_model,
+            prompt,
+            max_tokens,
+            temperature,
+            true,
+        )
+    }
+
+    /// Preserve the caller's explicit reasoning choice in the native template.
+    pub fn complete_for_router_model_with_reasoning(
+        &self,
+        router_model: Option<&str>,
+        prompt: &str,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+        thinking_enabled: bool,
+    ) -> Result<EmbeddedCompletion> {
         let started = std::time::Instant::now();
         let _guard = acquire_inference_lock()?;
         #[cfg(not(feature = "llama-cpp"))]
@@ -152,11 +170,12 @@ impl EmbeddedLlm {
                 .and_then(|m| config::resolve_gguf_path_for_router_model(m))
                 .or_else(config::resolve_gguf_path);
             if let Some(path) = path {
-                return llama_cpp_backend::complete_with_metrics(
+                return llama_cpp_backend::complete_with_reasoning(
                     &path,
                     prompt,
                     max_tokens,
                     temperature,
+                    thinking_enabled,
                 );
             }
         }
@@ -199,6 +218,28 @@ impl EmbeddedLlm {
     where
         F: FnMut(&str),
     {
+        self.complete_stream_with_reasoning(
+            router_model,
+            prompt,
+            max_tokens,
+            temperature,
+            true,
+            on_chunk,
+        )
+    }
+
+    pub fn complete_stream_with_reasoning<F>(
+        &self,
+        router_model: Option<&str>,
+        prompt: &str,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+        thinking_enabled: bool,
+        on_chunk: F,
+    ) -> Result<EmbeddedCompletion>
+    where
+        F: FnMut(&str),
+    {
         let started = std::time::Instant::now();
         let _guard = acquire_inference_lock()?;
         #[cfg(not(feature = "llama-cpp"))]
@@ -209,11 +250,12 @@ impl EmbeddedLlm {
                 .and_then(|m| config::resolve_gguf_path_for_router_model(m))
                 .or_else(config::resolve_gguf_path);
             if let Some(path) = path {
-                return llama_cpp_backend::complete_stream_with_metrics(
+                return llama_cpp_backend::complete_stream_with_reasoning(
                     &path,
                     prompt,
                     max_tokens,
                     temperature,
+                    thinking_enabled,
                     on_chunk,
                 );
             }

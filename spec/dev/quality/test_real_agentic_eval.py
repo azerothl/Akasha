@@ -15,6 +15,21 @@ SPEC.loader.exec_module(eval_runner)
 
 
 class RealAgenticEvalTests(unittest.TestCase):
+    def test_isolated_daemon_keeps_loader_dlls_but_no_profile_or_credentials(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);source=root/"candidate";isolated=root/"isolated"
+            source.mkdir();isolated.mkdir()
+            (source/"akasha-daemon.exe").write_bytes(b"synthetic executable")
+            (source/"cublas64_12.dll").write_bytes(b"synthetic CUDA dependency")
+            (source/"cudart64_12.DLL").write_bytes(b"synthetic mixed-case dependency")
+            (source/"akasha.env").write_text("SYNTHETIC_SECRET=not-copied",encoding="utf-8")
+            (source/"profile").mkdir();(source/"profile/memory.db").write_bytes(b"private data")
+            result=eval_runner.copy_daemon_with_runtime(source/"akasha-daemon.exe",isolated/"akasha-daemon.exe")
+            self.assertEqual(result,isolated/"akasha-daemon.exe")
+            self.assertEqual({p.name for p in isolated.iterdir()},{"akasha-daemon.exe","cublas64_12.dll","cudart64_12.DLL"})
+            for name in ["akasha-daemon.exe","cublas64_12.dll","cudart64_12.DLL"]:
+                self.assertEqual((isolated/name).read_bytes(),(source/name).read_bytes())
+
     def test_llm_failure_diagnostics_are_categorical(self):
         self.assertEqual(
             eval_runner.classify_llm_failure("Provider rejected malformed tool-call JSON before execution"),

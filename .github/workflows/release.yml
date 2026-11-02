@@ -9,6 +9,9 @@ on:
   push:
     tags:
       - 'v*'
+      # Windows consumer betas use their isolated candidate packages and are
+      # published explicitly as prereleases, without the stable update feed.
+      - '!v*-beta.*'
   workflow_dispatch:
     inputs:
       version:

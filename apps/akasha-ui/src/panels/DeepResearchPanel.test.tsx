@@ -15,9 +15,32 @@ beforeEach(() => {
 });
 
 describe("DeepResearchPanel", () => {
+  it("authorizes a discovered source in the same research scope without restarting", async () => {
+    const scope="task:00000000-0000-4000-8000-000000000001";
+    const started: unknown[]=[];const permissions: unknown[]=[];
+    const fetchEndpoint=vi.fn(async(path:string,init?:RequestInit)=>{
+      const body=JSON.parse(String(init?.body??"{}"));
+      if(path==="/api/privacy")return {ok:true,status:200,text:JSON.stringify({services:[],search_services:[],grants:[],memory:{state:"encrypted",encrypted_at_rest:true}})};
+      if(path==="/api/permissions/remote"){permissions.push(body);return {ok:true,status:200,text:'{"ok":true}'};}
+      if(path==="/api/research/deep/start"){
+        if(!body.topic)return {ok:false,status:400,text:'{"error":"missing_topic"}'};
+        started.push(body);return {ok:true,status:200,text:'{"run_id":"same-research"}'};
+      }
+      return {ok:true,status:200,text:JSON.stringify({id:"same-research",topic:"Sujet synthétique",phase:"reading",round:1,max_rounds:4,branches:[],evolving_report:"",search_degraded:false,pending_permission:{scope,recipient:"web:https://source.example",data_classes:["web_url"]}})};
+    });
+    render(<I18nProvider><NotificationProvider><DeepResearchPanel fetchEndpoint={fetchEndpoint} locale="fr"/></NotificationProvider></I18nProvider>);
+    fireEvent.change(screen.getByRole("textbox"),{target:{value:"Sujet synthétique"}});
+    const start=screen.getByRole("button",{name:"Lancer la recherche"});
+    await waitFor(()=>expect((start as HTMLButtonElement).disabled).toBe(false));fireEvent.click(start);
+    fireEvent.click(await screen.findByRole("button",{name:"Autoriser cette source pour cette recherche"}));
+    await waitFor(()=>expect(permissions).toEqual([{confirmed:true,scope,consents:[{recipient:"web:https://source.example",data_classes:["web_url"]}]}]));
+    expect(started).toHaveLength(1);
+    expect(screen.getByRole("button",{name:"Annuler"})).toBeDefined();
+  });
   it("shows the unconsulted-citation diagnostic and blocks report export", async () => {
     const diagnostic = "research_report_unconsulted_citations: https://example.invalid/not-consulted";
     const fetchEndpoint = vi.fn(async (path: string, init?: RequestInit) => {
+      if (path === "/api/privacy") return {ok:true,status:200,text:JSON.stringify({services:[],search_services:[],grants:[],memory:{state:"encrypted",encrypted_at_rest:true}})};
       if (path === "/api/research/deep/start" && init?.method === "POST") {
         const request = JSON.parse(String(init.body ?? "{}")) as { topic?: string };
         if (!request.topic?.trim()) {
@@ -74,5 +97,24 @@ describe("DeepResearchPanel", () => {
     expect(screen.queryByRole("toolbar")).toBeNull();
     expect(screen.queryByLabelText("Rapport de recherche")).toBeNull();
     expect(openSpy).not.toHaveBeenCalled();
+  });
+  it("sends research consent before starting and clears it after a failed start", async () => {
+    const recipient={name:"Service synthétique",endpoint:"https://example.invalid",recipient:"model:test",local:false,data_classes:["message"]};
+    const sent:unknown[]=[];
+    const fetchEndpoint=vi.fn(async(path:string,init?:RequestInit)=>{
+      if(path==="/api/privacy")return {ok:true,status:200,text:JSON.stringify({services:[recipient],search_services:[],grants:[],memory:{state:"encrypted",encrypted_at_rest:true}})};
+      const body=JSON.parse(String(init?.body??"{}"));
+      if(body.topic){sent.push(body.remote_consents);return {ok:false,status:500,text:"failure"};}
+      return {ok:false,status:400,text:'{"error":"missing_topic"}'};
+    });
+    render(<I18nProvider><NotificationProvider><DeepResearchPanel fetchEndpoint={fetchEndpoint} locale="fr"/></NotificationProvider></I18nProvider>);
+    fireEvent.click(screen.getByText("Modèles locaux · services distants bloqués"));
+    const choice=await screen.findByRole("checkbox");fireEvent.click(choice);
+    fireEvent.change(screen.getByRole("textbox"),{target:{value:"Sujet fictif"}});
+    const start=screen.getByRole("button",{name:"Lancer la recherche"});
+    await waitFor(()=>expect((start as HTMLButtonElement).disabled).toBe(false));fireEvent.click(start);
+    await waitFor(()=>expect(sent).toEqual([[{recipient:"model:test",data_classes:["message"]}]]));
+    await waitFor(()=>expect((choice as HTMLInputElement).checked).toBe(false));
+    fireEvent.click(start);await waitFor(()=>expect(sent[1]).toEqual([]));
   });
 });

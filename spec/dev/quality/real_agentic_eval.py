@@ -56,6 +56,20 @@ MUTATING_TOOLS = {
 }
 
 
+def copy_daemon_with_runtime(source: Path, destination: Path) -> Path:
+    """Keep a portable Windows daemon executable with its adjacent loader DLLs.
+
+    The profile stays independently isolated; no data, credentials or settings
+    are copied from the candidate directory.
+    """
+    source = source.resolve(strict=True)
+    shutil.copy2(source, destination)
+    for component in source.parent.iterdir():
+        if component.is_file() and component.suffix.lower() == ".dll":
+            shutil.copy2(component, destination.parent / component.name)
+    return destination
+
+
 def choose_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))

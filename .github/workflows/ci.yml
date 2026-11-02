@@ -199,6 +199,9 @@ jobs:
       - name: Playwright E2E
         working-directory: apps/akasha-ui
         run: npm run test:e2e
+      - name: Consumer privacy and three workflows
+        working-directory: apps/akasha-ui
+        run: npx playwright test --config playwright.privacy.config.ts
 
   evals-mock-ci:
     runs-on: ubuntu-latest
@@ -234,6 +237,10 @@ jobs:
 
       - name: Test isolated real-agentic eval harness
         run: python3 spec/dev/quality/test_real_agentic_eval.py
+      - name: Validate consumer acceptance corpus and evidence gate
+        run: |
+          python3 spec/dev/quality/consumer_beta_eval.py --validate-corpus
+          python3 -m unittest discover -s spec/dev/quality -p 'test_consumer*py' -v
   release-artifact-first-boot-linux:
     if: github.event_name == 'workflow_dispatch' && inputs.run_release_smoke
     runs-on: ubuntu-latest
@@ -290,15 +297,76 @@ jobs:
       - name: Validate Windows PowerShell updater and component publication
         run: python -m unittest discover -s scripts/ci/tests -p test_package_updates.py -v
 
+  consumer-beta-protection-windows:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ./.github/actions/cargo-cache
+        with:
+          variant: consumer-beta-sqlcipher-windows
+      - name: Prepare pinned Perl for vendored OpenSSL
+        shell: pwsh
+        run: ./scripts/ci/prepare-sqlcipher-windows.ps1
+      - name: Test SQLCipher and portable backup protection
+        run: |
+          cargo test --locked -p akasha-store --features memory-sqlcipher --lib
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked -p akasha-vault --lib protected_archive
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked -p akasha-daemon --no-default-features --features consumer-beta --lib privacy::
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked -p akasha-daemon --no-default-features --features consumer-beta --lib profile_backup::
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked -p akasha-daemon --no-default-features --features consumer-beta --lib consumer_watch::
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked -p akasha-daemon --no-default-features --features consumer-beta --lib scheduler::
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build pinned PDFium and Tesseract runtime
+        shell: pwsh
+        run: |
+          python scripts/prepare-ocr-runtime.py --output "$env:RUNNER_TEMP/ocr-runtime"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $lock = (Get-FileHash "$env:RUNNER_TEMP/ocr-runtime/runtime-lock.json" -Algorithm SHA256).Hash.ToLower()
+          "AKASHA_OCR_LOCK_SHA256=$lock" >> $env:GITHUB_ENV
+      - name: Exercise native parsing and document tasks
+        shell: pwsh
+        run: |
+          python -m pip install Pillow==11.3.0 reportlab==4.4.4
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --locked -p akasha-daemon --no-default-features --features consumer-beta
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python spec/dev/quality/consumer_beta_run.py --binary target/debug/akasha-daemon.exe --runtime "$env:RUNNER_TEMP/ocr-runtime" --output "$env:RUNNER_TEMP/consumer-50"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path apps/akasha-ui/src-tauri/Cargo.toml --lib desktop_transport_tests
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path apps/akasha-ui/src-tauri/Cargo.toml --lib backup_export_tests
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: consumer-document-receipts-windows
+          path: |
+            ${{ runner.temp }}/consumer-50/
+            ${{ runner.temp }}/ocr-runtime/runtime-lock.json
+
   # Preserve the existing required "test" check, including docs-only changes.
   test:
     if: always()
-    needs: [changes, rust-tests, ui-e2e, windows-updater]
+    needs: [changes, rust-tests, ui-e2e, windows-updater, consumer-beta-protection-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Check all required outcomes
         env:
           PLAN_RESULT: ${{ needs.changes.result }}
+          PROTECTION_RESULT: ${{ needs.consumer-beta-protection-windows.result }}
           RUST_RESULT: ${{ needs.rust-tests.result }}
           UI_RESULT: ${{ needs.ui-e2e.result }}
           UPDATE_RESULT: ${{ needs.windows-updater.result }}
@@ -307,5 +375,6 @@ jobs:
         run: |
           [[ "$PLAN_RESULT" == success ]]
           [[ "$UPDATE_RESULT" == success ]]
+          if [[ "$RUST_REQUIRED" == true ]]; then [[ "$PROTECTION_RESULT" == success ]]; else [[ "$PROTECTION_RESULT" == skipped ]]; fi
           if [[ "$RUST_REQUIRED" == true ]]; then [[ "$RUST_RESULT" == success ]]; else [[ "$RUST_RESULT" == skipped ]]; fi
           if [[ "$UI_REQUIRED" == true ]]; then [[ "$UI_RESULT" == success ]]; else [[ "$UI_RESULT" == skipped ]]; fi

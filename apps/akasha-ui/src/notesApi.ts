@@ -12,7 +12,7 @@ export type NoteDocument = NoteMeta & {
   content: string;
 };
 
-const DEFAULT_PORT = 3876;
+import { DAEMON_PORT as DEFAULT_PORT } from "./daemonPort";
 
 function daemonBase(port?: number) {
   if (E2E_WEB) return "/__e2e_daemon";
@@ -30,7 +30,7 @@ async function fetchJson<T>(path: string, init?: RequestInit, port?: number): Pr
 
 export async function listNotes(port?: number): Promise<NoteMeta[]> {
   try {
-    const json = await invoke<{ notes?: NoteMeta[] }>("get_notes", { port: port ?? null });
+    const json = await invoke<{ notes?: NoteMeta[] }>("get_notes", { port: port ?? DEFAULT_PORT });
     return json.notes ?? [];
   } catch {
     const json = await fetchJson<{ notes?: NoteMeta[] }>("/api/notes", undefined, port);
@@ -40,7 +40,7 @@ export async function listNotes(port?: number): Promise<NoteMeta[]> {
 
 export async function getNote(id: string, port?: number): Promise<NoteDocument> {
   try {
-    return await invoke<NoteDocument>("get_note", { id, port: port ?? null });
+    return await invoke<NoteDocument>("get_note", { id, port: port ?? DEFAULT_PORT });
   } catch {
     return fetchJson<NoteDocument>(`/api/notes/${encodeURIComponent(id)}`, undefined, port);
   }
@@ -48,7 +48,7 @@ export async function getNote(id: string, port?: number): Promise<NoteDocument> 
 
 export async function createNote(title: string, content = "", port?: number): Promise<NoteDocument> {
   try {
-    return await invoke<NoteDocument>("create_note", { title, content, port: port ?? null });
+    return await invoke<NoteDocument>("create_note", { title, content, port: port ?? DEFAULT_PORT });
   } catch {
     return fetchJson<NoteDocument>(
       "/api/notes",
@@ -72,7 +72,7 @@ export async function updateNote(
       id,
       title: patch.title ?? null,
       content: patch.content ?? null,
-      port: port ?? null,
+      port: port ?? DEFAULT_PORT,
     });
   } catch {
     return fetchJson<NoteDocument>(
@@ -89,7 +89,7 @@ export async function updateNote(
 
 export async function deleteNoteApi(id: string, port?: number): Promise<void> {
   try {
-    await invoke("delete_note", { id, port: port ?? null });
+    await invoke("delete_note", { id, port: port ?? DEFAULT_PORT });
   } catch {
     await fetchJson(`/api/notes/${encodeURIComponent(id)}`, { method: "DELETE" }, port);
   }
@@ -109,7 +109,7 @@ export async function uploadNoteAsset(
       filename,
       content_base64,
       mime_type,
-      port: port ?? null,
+      port: port ?? DEFAULT_PORT,
     });
     return json;
   } catch {

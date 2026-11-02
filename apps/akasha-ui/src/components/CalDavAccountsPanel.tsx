@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { InfoTip } from "./Tooltip";
+import { DAEMON_PORT } from "../daemonPort";
 
 type CalAccount = {
   id: string;
@@ -329,7 +330,7 @@ export function CalDavAccountsPanel({ locale, fetchEndpoint }: Props) {
     }
   };
 
-  const redirectUri = oauthConfig?.redirect_uri ?? "http://127.0.0.1:3876/api/calendar/oauth/callback";
+  const redirectUri = oauthConfig?.redirect_uri ?? `http://127.0.0.1:${DAEMON_PORT}/api/calendar/oauth/callback`;
 
   const oauthSetupSteps = useMemo(() => {
     if (selectedProviderId === "google_calendar") {

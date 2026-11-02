@@ -113,7 +113,7 @@ async fn run_fact_extract(
         if is_poison_fact(&format!("{} {} {}", s, p, o)) {
             continue;
         }
-        let _ = facts.insert_fact(&s, &p, &o, Some(entry_uuid));
+        let _ = facts.insert_if_current(&s, &p, &o, entry_uuid, &job.content);
     }
     Ok(())
 }

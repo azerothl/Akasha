@@ -30,10 +30,12 @@ pub async fn try_handle(
 ) -> Option<String> {
     let path = full_path(path_only, query_str);
     let data_dir = ctx.data_dir;
+    if let Some(response)=crate::consumer_qualification::route(method,path_only,body,data_dir,ctx.llm_router).await{return Some(response);}
     let store_path = ctx.store_path;
     let llm_router = ctx.llm_router;
     let ollama_base_url = ctx.ollama_base_url;
     let task_usage_store = ctx.task_usage_store;
+    if let Some(response)=crate::model_qualification::route(method,path_only,body,data_dir,store_path,llm_router){return Some(response);}
 if method == "GET" && path == "/api/router/free-models" {
     return Some(json_response("200 OK", &llm_router.free_models_status().to_string()));
 }
@@ -318,6 +320,7 @@ if method == "GET" && path == "/api/router/embedded-status" {
             "embedded_available": false,
             "embedded_loaded": false,
             "compiled_backends": [],
+            "consumer":crate::consumer_qualification::capabilities(data_dir,llm_router).await,
             "hint": "Recompile daemon with feature embedded"
         })
         .to_string();
@@ -329,8 +332,9 @@ if method == "GET" && path == "/api/router/embedded-status" {
 if method == "GET" && path_only == "/api/capabilities" {
     #[cfg(feature = "embedded")]
     {
-        let body = llm_router.embedded_capabilities().to_string();
-        return Some(json_response("200 OK", &body));
+        let mut body = llm_router.embedded_capabilities();
+        body["consumer"]=crate::consumer_qualification::capabilities(data_dir,llm_router).await;
+        return Some(json_response("200 OK", &body.to_string()));
     }
     #[cfg(not(feature = "embedded"))]
     {
@@ -354,6 +358,7 @@ if method == "GET" && path_only == "/api/capabilities" {
                 "evidence_only": "Bench evidence only",
                 "groundwork_only": "Docs / watch only"
             },
+            "consumer":crate::consumer_qualification::capabilities(data_dir,llm_router).await,
             "hint": "Recompile daemon with feature embedded"
         })
         .to_string();
@@ -729,7 +734,7 @@ if method == "GET" && path == "/api/router/models" {
 // GET /api/router/ollama/models — list models from configured Ollama (kept for backward compat)
 if method == "GET" && path == "/api/router/ollama/models" {
     let base_url = ollama_base_url
-        .map(String::from)
+        .filter(|url|!url.trim().is_empty()).map(String::from)
         .or_else(|| llm_router.ollama_base_url());
     let base_url = match base_url {
         Some(u) => u.trim_end_matches('/').to_string(),
@@ -737,6 +742,7 @@ if method == "GET" && path == "/api/router/ollama/models" {
             return Some(json_response("404 Not Found", r#"{"error":"ollama_not_configured"}"#));
         }
     };
+    if cfg!(feature="consumer-beta") && !akasha_core::privacy::loopback_url(&base_url){return Some(json_response("403 Forbidden",r#"{"error":"La détection automatique est limitée à Ollama local"}"#));}
     let url = format!("{}/api/tags", base_url);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -758,7 +764,13 @@ if method == "GET" && path == "/api/router/ollama/models" {
                             .collect()
                     })
                     .unwrap_or_default();
-                let body = serde_json::json!({ "base_url": base_url, "models": models });
+                let local_models:Vec<String>=json["models"].as_array().into_iter().flatten().filter(|item| {
+                    akasha_core::privacy::loopback_url(&base_url)
+                    && item["remote_host"].as_str().is_none_or(str::is_empty)
+                    && item["remote_model"].as_str().is_none_or(str::is_empty)
+                    && !item["name"].as_str().unwrap_or("").contains(":cloud")
+                }).filter_map(|item|item["name"].as_str().map(str::to_string)).collect();
+                let body = serde_json::json!({ "base_url": base_url, "models": models, "local_models":local_models });
                 return Some(json_response("200 OK", &body.to_string()));
             }
         }
@@ -773,7 +785,7 @@ if method == "GET" && path == "/api/router/ollama/models" {
 // GET /api/router/ollama/show?model=xxx — Ollama model details (context length, num_ctx)
 if method == "GET" && path.starts_with("/api/router/ollama/show") {
     let base_url = ollama_base_url
-        .map(String::from)
+        .filter(|url|!url.trim().is_empty()).map(String::from)
         .or_else(|| llm_router.ollama_base_url());
     let base_url = match base_url {
         Some(u) => u.trim_end_matches('/').to_string(),

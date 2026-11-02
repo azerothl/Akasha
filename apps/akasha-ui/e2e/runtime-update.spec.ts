@@ -10,6 +10,7 @@ async function setup(page: Page, initialState = "ready") {
       __runtimeUpdateFixture: fixture,
       __TAURI_INTERNALS__: {
         invoke: async (command: string, args?: { confirmed?: boolean }) => {
+          if (command === "get_daemon_launch_config") return { port: 3876 };
           if (command === "get_app_version") return "1.0.0";
           if (command === "get_update_status") return {
             remote_version: "1.0.0", runtime_update: {

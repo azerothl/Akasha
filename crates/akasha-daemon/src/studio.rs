@@ -41,7 +41,7 @@ pub fn resolve_studio_project_dir(data_dir: &Path, project_id: &str) -> Result<P
 /// If the full path exists, canonicalize it (resolves symlinks).  For paths
 /// that do not yet exist (e.g. create/write targets), canonicalize the nearest
 /// existing ancestor and append the remaining suffix lexically.
-fn canonicalize_path_for_studio_check(path: &Path) -> Option<PathBuf> {
+pub(crate) fn canonicalize_path_for_studio_check(path: &Path) -> Option<PathBuf> {
     if let Ok(canonical) = std::fs::canonicalize(path) {
         return Some(canonical);
     }

@@ -232,7 +232,7 @@ pub(crate) fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> 
 pub(crate) fn tool_supports_multiline_body(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "apply_patch" | "edit_file" | "write_file" | "ask_user" | "search_replace" | "notes_write"
+        "apply_patch" | "edit_file" | "write_file" | "write_code" | "ask_user" | "search_replace" | "notes_write"
     )
 }
 
@@ -794,8 +794,10 @@ pub(crate) fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
     let mut calls = Vec::new();
     let mut legacy = String::new();
     let mut in_reasoning = false;
+    let mut in_fence = false;
     for line in response.lines() {
-        if !in_reasoning && line.trim_start().starts_with("TOOL_JSON:") {
+        if line.trim_start().starts_with("```") { in_fence = !in_fence; }
+        if !in_reasoning && !in_fence && line.trim_start().starts_with("TOOL_JSON:") {
             calls.extend(parse_legacy_tool_calls(&legacy));
             legacy.clear();
             calls.extend(parse_tool_calls_strict(line));
@@ -826,6 +828,27 @@ fn parse_legacy_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
 #[cfg(test)]
 mod native_envelope_tests {
     use super::parse_tool_calls;
+
+    #[test]
+    fn inline_file_bodies_keep_spaces_quotes_and_unicode() {
+        for tool in ["write_file", "write_code"] {
+            let calls = parse_tool_calls(&format!("TOOL: {tool} C:/audit/answer.txt Bonjour  été 🙂"));
+            let (path, content) = crate::api::parse_write_file_request(&calls[0].1).unwrap();
+            assert_eq!(path, "C:/audit/answer.txt");
+            assert_eq!(content, "Bonjour  été 🙂");
+            let calls = parse_tool_calls(&format!("TOOL: {tool} \"C:/audit with spaces/a.json\" {{\"x\": \"été 🙂\"}}\nsecond line"));
+            let (path, content) = crate::api::parse_write_file_request(&calls[0].1).unwrap();
+            assert_eq!(path, "C:/audit with spaces/a.json");
+            assert_eq!(content, "{\"x\": \"été 🙂\"}\nsecond line");
+        }
+    }
+
+    #[test]
+    fn documented_tool_examples_are_data_and_do_not_execute() {
+        assert!(parse_tool_calls("Voici un exemple, à titre de documentation :\n```text\nTOOL: run_command echo example\n```\n").is_empty());
+        assert!(parse_tool_calls("```json\nTOOL_JSON: {\"schema_version\":1,\"tool\":\"read_file\",\"arguments\":{\"path\":\"example.txt\"}}\n```").is_empty());
+        assert_eq!(parse_tool_calls("```text\nTOOL: read_file EXAMPLE.md\n```\nTOOL: read_file ACTUAL.md"), [("read_file".into(), vec!["ACTUAL.md".into()])]);
+    }
 
     #[test]
     fn native_arguments_are_not_legacy_tool_or_reasoning_markup() {
@@ -867,8 +890,11 @@ pub(crate) fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String
     let mut out = Vec::new();
     let lines: Vec<&str> = response.lines().collect();
     let mut i = 0;
+    let mut in_fence = false;
     while i < lines.len() {
         let line = lines[i].trim();
+        if line.starts_with("```") { in_fence = !in_fence; i += 1; continue; }
+        if in_fence { i += 1; continue; }
         if let Some(json) = line.strip_prefix("TOOL_JSON:") {
             out.push(("studio_call".into(), vec![json.trim().into()]));
             i += 1;
@@ -906,6 +932,22 @@ pub(crate) fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String
                     continue;
                 }
                 let mut args = fixed_args.to_vec();
+                if matches!(tool_name_lc.as_str(), "write_file" | "write_code") && !args.is_empty() {
+                    // Keep an inline body as ONE literal argument. Separate
+                    // words otherwise look like a header plus a new body line.
+                    let header = rest[name.len()..].trim_start();
+                    let path_end = if header.starts_with('"') {
+                        let mut escaped = false;
+                        header.char_indices().skip(1).find_map(|(index, ch)| {
+                            if escaped { escaped = false; None }
+                            else if ch == '\\' { escaped = true; None }
+                            else if ch == '"' { Some(index + 1) } else { None }
+                        }).unwrap_or(header.len())
+                    } else { header.find(char::is_whitespace).unwrap_or(header.len()) };
+                    let inline = header[path_end..].trim_start();
+                    args.truncate(1);
+                    if !inline.is_empty() { args.push(inline.to_string()); }
+                }
                 // Only certain tools support a multi-line body argument.
                 let supports_body = tool_supports_multiline_body(&tool_name_lc);
 

@@ -264,7 +264,9 @@ impl FallbackEngine {
                         return Ok(out);
                     }
                     Err(e) => {
-                        if i > 0 {
+                        if matches!(e,crate::provider::ProviderError::ConsentRequired(_)) {
+                            // Authorization is user state, not provider health.
+                        } else if i > 0 {
                             metrics.record_failure_with_fallback(
                                 entry.provider.as_str(),
                                 &entry.model,

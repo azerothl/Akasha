@@ -1,0 +1,6 @@
+{
+  "productName":"Akasha Beta",
+  "identifier":"app.akasha.consumerbeta",
+  "app":{"windows":[{"title":"Akasha · bêta particuliers","width":1200,"height":850,"minWidth":800,"minHeight":600}],"security":{"csp":{"img-src":"'self' asset: http://asset.localhost blob: data:","frame-src":"'none'"}}},
+  "bundle":{"active":false,"category":"Productivity","shortDescription":"Documents personnels, notes en actions et veille locale"}
+}

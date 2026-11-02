@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { PermissionsQueuePanel, type PermissionQueueItem } from "../PermissionsQueuePanel";
+import { RemotePermissions } from "./RemotePrivacy";
 import { MonoIcon } from "./MonoIcon";
 
 type Props = {
@@ -65,6 +66,7 @@ export function PermissionsBell({ fetchEndpoint, locale, onOpenChange }: Props) 
               ×
             </button>
           </div>
+          <RemotePermissions fetchEndpoint={fetchEndpoint} locale={locale} />
           <PermissionsQueuePanel fetchEndpoint={fetchEndpoint} locale={locale} />
         </div>
       ) : null}

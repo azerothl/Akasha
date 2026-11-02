@@ -101,9 +101,17 @@ class PackageUpdateTests(unittest.TestCase):
                 destination.write_bytes(payload)
             (install / "akasha-daemon.exe").write_bytes(b"old daemon")
             updates.marker(install, "windows-x86_64-cuda", "1.0.0")
+            # Reproduce hosted Windows TEMP paths such as RUNNER~1. Preserve
+            # the directory identity even when .NET expands its 8.3 spelling.
+            import ctypes
+            buffer = ctypes.create_unicode_buffer(32768)
+            short_path = ctypes.windll.kernel32.GetShortPathNameW
+            short_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+            short_path.restype = ctypes.c_uint32
+            fixture = buffer.value if short_path(str(directory), buffer, len(buffer)) else str(directory)
             result = subprocess.run([
                 "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                str(ROOT / "scripts/ci/test_update.ps1"), "-Fixture", str(directory),
+                str(ROOT / "scripts/ci/test_update.ps1"), "-Fixture", fixture,
             ], capture_output=True, text=True, timeout=120)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("Windows updater regression checks passed", result.stdout)

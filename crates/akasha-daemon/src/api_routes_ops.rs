@@ -853,16 +853,20 @@ pub async fn try_handle(
                 ));
             }
         };
+        if let Err(error)=crate::document_api::claim_batch(body_json.as_ref().expect("upload object")) {return Some(json_response("400 Bad Request",&serde_json::json!({"error":error.to_string()}).to_string()));}
         let store = user_rag_store.lock().await;
         match store.add_document(&content_base64, &name, &mime_type) {
             Ok(id) => {
                 let data_dir = store_path.parent().unwrap_or(store_path).to_path_buf();
-                crate::api_routes_kinbot::spawn_user_rag_index(data_dir, id.clone());
-                let body = serde_json::json!({ "id": id, "name": name, "message": "Document ajouté.", "index_status": "pending" });
+                let runtime_available=crate::document_worker::runtime_dir().is_ok_and(|path|path.join("runtime-lock.json").is_file());
+                let task=if cfg!(feature="consumer-beta")||runtime_available||crate::document_worker::plain_text_name(&name) {
+                    match crate::document_import::start(data_dir,store_path.into(),user_rag_store.clone(),id.clone()) {Ok(id)=>Some(id),Err(error)=>{let _=store.set_index_status(&id,"failed",None,Some(&error.to_string()));None}}
+                }else{crate::api_routes_kinbot::spawn_user_rag_index(data_dir,id.clone());None};
+                let body = serde_json::json!({ "id": id, "task_id":task, "name": name, "message": "Document ajouté. Lecture en cours.", "index_status": "pending" });
                 return Some(json_response("200 OK", &body.to_string()));
             }
             Err(e) => {
-                let body = serde_json::json!({ "error": "add_failed", "detail": e.to_string() });
+                let body = serde_json::json!({ "error": e.to_string(), "code": "add_failed" });
                 return Some(json_response(
                     "500 Internal Server Error",
                     &body.to_string(),

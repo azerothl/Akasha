@@ -217,6 +217,15 @@ impl Daemon {
     pub async fn run(&self) -> anyhow::Result<RunOutcome> {
         crate::health::register_runtime(self.health.clone());
         log_upgrade_heritage_reminder(&self.data_dir);
+        if cfg!(feature="consumer-beta") {
+            crate::consumer_profile::ensure_vault_scope(&self.data_dir)?;
+            std::env::set_var("AKASHA_BIND","127.0.0.1");
+            std::env::set_var("AKASHA_EMBEDDINGS_OFFLINE","1");
+            let memory=self.data_dir.join("memory.db");
+            if !memory.exists() && !memory.with_extension("db.protection.json").exists() {
+                if let Err(error)=akasha_store::memory_protection::open_connection(&memory) {warn!(%error,"Memory locked: Windows protection unavailable");}
+            }
+        }
         // Load specs at startup
         match load_specs(&self.spec_dir) {
             Ok(specs) => {
@@ -253,7 +262,7 @@ impl Daemon {
             .unwrap_or(DEFAULT_PORT);
         let mut channel_config = crate::channels::ChannelConfig::default();
         channel_config.port = port;
-        if std::env::var("AKASHA_SLACK_ENABLED").as_deref() == Ok("1") {
+        if !cfg!(feature="consumer-beta") && std::env::var("AKASHA_SLACK_ENABLED").as_deref() == Ok("1") {
             if let Ok(v) = &vault {
                 if let Ok(secret) = v.get("slack_signing_secret") {
                     channel_config.slack_signing_secret = Some(secret);
@@ -261,7 +270,7 @@ impl Daemon {
                 }
             }
         }
-        if std::env::var("AKASHA_TEAMS_ENABLED").as_deref() == Ok("1") {
+        if !cfg!(feature="consumer-beta") && std::env::var("AKASHA_TEAMS_ENABLED").as_deref() == Ok("1") {
             if let Ok(v) = &vault {
                 if let (Ok(app_id), Ok(app_password)) = (v.get("teams_app_id"), v.get("teams_app_password")) {
                     channel_config.teams_app_id = Some(app_id);
@@ -347,8 +356,8 @@ impl Daemon {
             .providers
             .get("ollama")
             .and_then(|c| c.base_url.clone())
-            .or_else(|| std::env::var("OLLAMA_HOST").ok());
-        let ollama_url = if ollama_url.is_none() {
+            .or_else(|| if cfg!(feature="consumer-beta") {None} else {std::env::var("OLLAMA_HOST").ok()});
+        let ollama_url = if cfg!(feature="consumer-beta") {Some(ollama_url.unwrap_or_else(||"http://127.0.0.1:11434".into()))} else if ollama_url.is_none() {
             info!("Aucune URL Ollama configurée, lancement de la découverte (local puis réseau)…");
             let discovered = akasha_llm::discover_all().await;
             if let Some(ref u) = discovered.first() {
@@ -572,7 +581,7 @@ impl Daemon {
         } else {
             vec![]
         };
-        let cluster_enabled = std::env::var("AKASHA_CLUSTER_ENABLED").as_deref() == Ok("1");
+        let cluster_enabled = !cfg!(feature="consumer-beta") && std::env::var("AKASHA_CLUSTER_ENABLED").as_deref() == Ok("1");
         if !cluster_enabled {
             if let Ok(log) = ImmutableLog::open(&log_path) {
                 if log.verify().unwrap_or(false) {
@@ -645,10 +654,10 @@ impl Daemon {
             };
             let bind_host = std::env::var("AKASHA_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
             info!(port = port, bind = %bind_host, "Daemon listening for health checks and API");
-            crate::companion_discovery::spawn_companion_lan_discovery(
+            if !cfg!(feature="consumer-beta") {crate::companion_discovery::spawn_companion_lan_discovery(
                 port,
                 env!("CARGO_PKG_VERSION").to_string(),
-            );
+            );}
 
             // Phase A: Tools policy (agent machine tools)
             let data_dir = db_path.parent().unwrap_or_else(|| db_path.as_path());
@@ -782,7 +791,7 @@ impl Daemon {
             let today_session = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
             short_term.load_day_from_disk(&today_session).await;
             let memory_db_path = data_dir.join("memory.db");
-            let embedding_cache = data_dir.join("embedding_model");
+            let embedding_cache = if cfg!(feature="consumer-beta") {std::env::current_exe().ok().and_then(|path|path.parent().map(|parent|parent.join("embedding_model"))).filter(|path|path.join("embedding-lock.json").is_file()).unwrap_or_else(||data_dir.join("embedding_model"))}else{data_dir.join("embedding_model")};
             let long_term_client = start_memory_actor(&memory_db_path, &embedding_cache)
                 .ok()
                 .map(|(client, _handle)| {
@@ -1045,7 +1054,8 @@ impl Daemon {
                                         return;
                                     }
                                 };
-                                run_message_via_llm(
+                                let privacy_scope = crate::privacy::task_scope(&store_path, task_id);
+                                akasha_core::privacy::scoped(privacy_scope, run_message_via_llm(
                                     bus,
                                     llm_router,
                                     store_path,
@@ -1076,7 +1086,7 @@ impl Daemon {
                                     studio_reg,
                                     studio_worktree_registry,
                                     incognito,
-                                )
+                                ))
                                 .instrument(span)
                                 .await;
                                 drop(permit);
@@ -1152,7 +1162,8 @@ impl Daemon {
                                         return;
                                     }
                                 };
-                                run_message_via_llm(
+                                let privacy_scope = crate::privacy::task_scope(&store_path, task_id);
+                                akasha_core::privacy::scoped(privacy_scope, run_message_via_llm(
                                     bus,
                                     llm_router,
                                     store_path,
@@ -1183,7 +1194,7 @@ impl Daemon {
                                     studio_reg,
                                     studio_worktree_registry,
                                     incognito,
-                                )
+                                ))
                                 .instrument(span)
                                 .await;
                                 drop(permit);
@@ -1257,7 +1268,7 @@ impl Daemon {
                 }
             });
 
-            if let Some(ref am) = autonomous_mission {
+            if let Some(am) = autonomous_mission.as_ref().filter(|_|!cfg!(feature="consumer-beta")) {
                 let store_path = db_path.clone();
                 let dd = self.data_dir.clone();
                 let cfg = am.clone();
@@ -1267,8 +1278,8 @@ impl Daemon {
                 });
             }
 
-            // Event triggers: dispatch worker + subscribers + pollers.
-            {
+            // Event triggers: developer integrations have not been qualified for personal data.
+            if !cfg!(feature="consumer-beta") {
                 let (trigger_fire_tx, trigger_fire_rx) = tokio::sync::mpsc::channel(64);
                 let trigger_dispatch =
                     crate::event_trigger_engine::TriggerDispatch::new(trigger_fire_tx);
@@ -1345,7 +1356,7 @@ impl Daemon {
 
             // Metadata and selective background downloads; application always requires confirmation.
             const UPDATE_CHECK_INTERVAL_SECS: u64 = 86_400;
-            tokio::spawn({
+            if !cfg!(feature="consumer-beta") {tokio::spawn({
                 let cache = update_check_cache.clone();
                 let update_data_dir = self.data_dir.clone();
                 let base_url = std::env::var("AKASHA_APP_BASE_URL")
@@ -1359,10 +1370,10 @@ impl Daemon {
                         crate::runtime_update::prepare(&update_data_dir).await;
                     }
                 }
-            });
+            });}
 
             // Phase 4: Discord bot (optional)
-            let discord_enabled = if std::env::var("AKASHA_DISCORD_ENABLED").as_deref() == Ok("1") {
+            let discord_enabled = if !cfg!(feature="consumer-beta") && std::env::var("AKASHA_DISCORD_ENABLED").as_deref() == Ok("1") {
                 if let Ok(v) = &vault {
                     if let Ok(token) = v.get("discord_bot_token") {
                         let discord_port = port;
@@ -1386,7 +1397,7 @@ impl Daemon {
             };
 
             // Phase 4 rattrapage: Telegram bot (optional)
-            let telegram_enabled = if std::env::var("AKASHA_TELEGRAM_ENABLED").as_deref() == Ok("1") {
+            let telegram_enabled = if !cfg!(feature="consumer-beta") && std::env::var("AKASHA_TELEGRAM_ENABLED").as_deref() == Ok("1") {
                 if let Ok(v) = &vault {
                     if let Ok(token) = v.get("telegram_bot_token") {
                         let daemon_url = format!("http://127.0.0.1:{}", port);
@@ -1499,7 +1510,7 @@ impl Daemon {
                                                 let update_check_cache_clone = update_check_cache.clone();
                                                 tokio::spawn(async move {
                                     const INITIAL_READ: usize = 65536;
-                                    const MAX_BODY: usize = 10 * 1024 * 1024; // 10 MiB for POST body (e.g. documents in base64)
+                                    const MAX_BODY: usize = 36 * 1024 * 1024; // 36 MiB (one 25 MiB base64 document plus metadata) for POST body (e.g. documents in base64)
                                     let mut buf = vec![0u8; INITIAL_READ];
                                     let n = stream.read(&mut buf).await.unwrap_or(0);
                                     buf.truncate(n);

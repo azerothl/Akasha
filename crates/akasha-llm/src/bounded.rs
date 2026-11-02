@@ -248,10 +248,11 @@ pub(crate) async fn complete_stream(
                     "failed",
                     serde_json::json!({"error":detail,"class":if matches!(error,ProviderError::Timeout){"timeout"}else{"provider_error"}}),
                 );
-                metrics.record_failure(&entry.provider, &entry.model);
+                let consent_denied=matches!(error,ProviderError::ConsentRequired(_));
+                if !consent_denied {metrics.record_failure(&entry.provider, &entry.model);}
                 failures.push(detail);
                 let semantic_protocol_error=error.to_string().contains("tool_protocol_error") || error.to_string().contains("LFM2 tool generation incomplete") || error.to_string().contains("error parsing tool call");
-                if has_tools && !semantic_protocol_error {
+                if has_tools && !semantic_protocol_error && !consent_denied {
                     health.quarantine(entry,model_options,format_provider_error(&entry.provider,&error));
                 }
                 if retry_same && !matches!(class, RetryClass::Transient | RetryClass::RateLimited) {

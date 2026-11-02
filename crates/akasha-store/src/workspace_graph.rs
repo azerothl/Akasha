@@ -221,7 +221,7 @@ fn migrate_legacy_if_needed(conn: &Connection) -> anyhow::Result<()> {
 
 impl WorkspaceGraphStore {
     pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = crate::memory_protection::open_connection(path)?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
         conn.execute_batch(

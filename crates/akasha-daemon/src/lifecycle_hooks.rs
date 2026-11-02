@@ -62,6 +62,7 @@ pub fn lifecycle_hooks_summary(data_dir: &Path) -> Value {
 }
 
 pub fn fire_on_schedule_fire_async(data_dir: &Path, schedule_id: Uuid, task_id: Uuid) {
+    if cfg!(feature="consumer-beta") {return;}
     let path = data_dir.join("lifecycle_hooks.json");
     let data_dir = data_dir.to_path_buf();
     let sid = schedule_id.to_string();
@@ -209,7 +210,7 @@ async fn run_http_hook_array(
     method: &str,
     path: &str,
 ) {
-    if hooks.is_empty() {
+    if cfg!(feature="consumer-beta") || hooks.is_empty() {
         return;
     }
     let timeout_d = gateway_hook_timeout();

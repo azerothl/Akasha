@@ -1,0 +1,82 @@
+{
+  "memory": {
+    "encrypted_at_rest": true,
+    "scope": "long_term_memory_only",
+    "sqlcipher_compiled": true,
+    "state": "encrypted"
+  },
+  "installed_daemon_preserved": true,
+  "new_process": 76360,
+  "old_process": 19532,
+  "consumer_beta": true,
+  "native_demo_documents": [
+    {
+      "added_at": "2026-10-26T21:02:27.293563100+00:00",
+      "id": "f49172c6-0965-4246-9018-413a94a4229b",
+      "index_status": "ready",
+      "index_version": 2,
+      "indexed_at": "2026-10-26T21:02:30.489620800+00:00",
+      "mime_type": "application/pdf",
+      "name": "facture-fictive.pdf",
+      "pages": 2,
+      "path": "f49172c6096542469018413a94a4229b_facture-fictive.pdf",
+      "warnings": []
+    },
+    {
+      "added_at": "2026-10-26T21:02:27.334406200+00:00",
+      "id": "5482c52d-6b45-464f-8826-df150ec78f37",
+      "index_status": "ready",
+      "index_version": 2,
+      "indexed_at": "2026-10-26T21:02:29.930264400+00:00",
+      "mime_type": "image/jpeg",
+      "name": "photo-facture-fictive.jpg",
+      "pages": 1,
+      "path": "5482c52d6b45464f8826df150ec78f37_photo-facture-fictive.jpg",
+      "warnings": []
+    },
+    {
+      "added_at": "2026-10-26T21:02:27.363608800+00:00",
+      "id": "642db24a-dbef-4e09-b23e-c33aa3b2d5ce",
+      "index_status": "ready",
+      "index_version": 2,
+      "indexed_at": "2026-10-26T22:02:30.157681+01:00",
+      "mime_type": "text/plain",
+      "name": "facture-fictive.txt",
+      "pages": 1,
+      "path": "642db24adbef4e09b23ec33aa3b2d5ce_facture-fictive.txt",
+      "warnings": []
+    }
+  ],
+  "tasks": [
+    {
+      "assigned_agent": "document_import",
+      "created_at": "2026-10-26T21:02:27.381260400+00:00",
+      "id": "4b378048-c853-4c51-b5fa-9d8a295a9d97",
+      "label": "Lecture documentaire locale",
+      "parent_task_id": null,
+      "session_id": null,
+      "status": "completed",
+      "updated_at": "2026-10-26T21:02:30.162933500+00:00"
+    },
+    {
+      "assigned_agent": "document_import",
+      "created_at": "2026-10-26T21:02:27.341607400+00:00",
+      "id": "8c5efe7f-6f36-4494-9a94-07812406b1db",
+      "label": "Lecture documentaire locale",
+      "parent_task_id": null,
+      "session_id": null,
+      "status": "completed",
+      "updated_at": "2026-10-26T21:02:29.935475400+00:00"
+    },
+    {
+      "assigned_agent": "document_import",
+      "created_at": "2026-10-26T21:02:27.296672700+00:00",
+      "id": "426caa02-1e61-4a18-9c00-33477549d987",
+      "label": "Lecture documentaire locale",
+      "parent_task_id": null,
+      "session_id": null,
+      "status": "completed",
+      "updated_at": "2026-10-26T21:02:30.494106100+00:00"
+    }
+  ]
+}

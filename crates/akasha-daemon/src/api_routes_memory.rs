@@ -581,6 +581,16 @@ if method == "POST" && path == "/api/memory/rebuild-relations" {
     }
 }
 
+// PUT /api/memory/long-term/:id — explicit correction, keeping source provenance.
+if method=="PUT"&&path.starts_with("/api/memory/long-term/") {
+    let id=path.trim_start_matches("/api/memory/long-term/").split('?').next().unwrap_or("");
+    let value=body.and_then(|bytes|serde_json::from_slice::<serde_json::Value>(bytes).ok());
+    let content=value.as_ref().and_then(|value|value["content"].as_str()).filter(|content|!content.trim().is_empty()&&content.len()<=65536).map(str::to_string);
+    if uuid::Uuid::parse_str(id).is_err()||content.is_none()||value.as_ref().and_then(|value|value["confirmed"].as_bool())!=Some(true){return Some(json_response("400 Bad Request",r#"{"error":"Confirmez le texte corrigé (1 à 65536 octets)"}"#));}
+    let result=if let Some(client)=long_term_client {let id=id.to_string();tokio::task::spawn_blocking(move||client.update(id,content.unwrap())).await.unwrap_or_else(|error|Err(error.to_string()))}else{Err("Mémoire verrouillée ou indisponible".into())};
+    return Some(match result{Ok(())=>json_response("200 OK",r#"{"updated":true,"source_preserved":true}"#),Err(error)=>json_response("400 Bad Request",&serde_json::json!({"error":error}).to_string())});
+}
+
 // DELETE /api/memory/long-term/:id — delete one long-term memory entry by id
 if method == "DELETE" && path.starts_with("/api/memory/long-term/") {
     let id = path

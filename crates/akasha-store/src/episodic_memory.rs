@@ -42,7 +42,7 @@ pub struct EpisodicFilter {
 impl EpisodicStore {
     /// Open the episodic store. Uses the same DB path as long-term memory; creates episodic_events table if missing.
     pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = crate::memory_protection::open_connection(path)?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS episodic_events (
@@ -64,6 +64,7 @@ impl EpisodicStore {
             CREATE INDEX IF NOT EXISTS idx_episodic_events_type ON episodic_events(event_type);
             "#,
         )?;
+        crate::memory_lineage::install(&conn)?;
         Ok(Self { conn })
     }
 

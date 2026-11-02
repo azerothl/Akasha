@@ -107,6 +107,13 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchPermission {
+    pub scope: String,
+    pub recipient: String,
+    pub data_classes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeepResearchRun {
     pub id: String,
     pub topic: String,
@@ -126,6 +133,8 @@ pub struct DeepResearchRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub search_degraded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_permission: Option<ResearchPermission>,
     pub started_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
