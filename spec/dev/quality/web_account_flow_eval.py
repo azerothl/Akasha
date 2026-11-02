@@ -98,6 +98,10 @@ class Fixture(BaseHTTPRequestHandler):
                 response = '{"answer_mode":"delegate","task_type":"orchestrator"}'
             elif state["refuse"]:
                 response = "Je ne peux pas utiliser d'outils ni accéder à votre ordinateur."
+            elif state["read_only"] and "just summarize the requirements" in text:
+                response = "Voici les conditions requises. Aucun compte n'a été créé."
+            elif state["read_only"]:
+                response = "TOOL: web_fetch " + state["origin"] + "/agents.html" if not state["reads"] else 'TOOL: ask_user\n{"question":"Continuer cette inscription fictive ?"}'
             elif state["cancel"]:
                 response = 'TOOL: ask_user\n{"question":"Continuer cette inscription fictive ?"}'
             elif not state["reads"]:
@@ -125,7 +129,7 @@ print(json.dumps({"verified":True,"id":me["id"],"name":me["name"]}))
 '''
 
 
-def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False):
+def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False):
     evidence.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="web-account-", dir=evidence)).resolve()
     test_daemon = copy_daemon_with_runtime(daemon, profile / daemon.name)
@@ -136,7 +140,7 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
     service.state = {"reads": 0, "creates": 0, "create_attempts": 0, "duplicate_attempts": 0, "verified": 0, "selector_calls": 0,
                      "request_bytes": [], "token_exposed_to_model": False,
                      "token": "fixture-token-must-never-leave-worker", "origin": origin,
-                     "client": client, "cancel": cancel, "reject": reject, "refuse": refuse, "real_model": model}
+                     "client": client, "cancel": cancel, "reject": reject, "refuse": refuse, "read_only": read_only, "real_model": model}
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
     write_router(profile, model or "account-fixture", origin, "cuda")
@@ -181,12 +185,12 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
             answered = False
             while time.monotonic() < deadline:
                 task = http_json(base, "GET", f"/api/tasks/{task_id}")
-                if cancel and not answered:
+                if (cancel or read_only) and not answered:
                     events = http_json(base, "GET", f"/api/tasks/{task_id}/events")["events"]
                     questions = [e["payload"] for e in events if e["event_type"] == "task_waiting_user_input"]
                     if questions:
                         q = questions[-1]
-                        http_json(base, "POST", f"/api/tasks/{task_id}/human-reply", {"request_id": q["request_id"], "response": "stop"})
+                        http_json(base, "POST", f"/api/tasks/{task_id}/human-reply", {"request_id": q["request_id"], "response": "Don't register; just summarize the requirements" if read_only else "stop"})
                         answered = True
                 if task["status"] in {"completed", "failed", "cancelled", "interrupted"}:
                     if cancel and not (task.get("outcome") or {}).get("response"):
@@ -210,7 +214,11 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
             (profile / "report.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
             assert not children.get("children"), result
             assert not service.state["token_exposed_to_model"], result
-            if cancel:
+            if read_only:
+                assert answered and task["status"] == "completed" and service.state["creates"] == 0, result
+                assert "conditions" in task["outcome"]["response"].lower(), result
+                assert len(service.state["request_bytes"]) == 3 and "web_fetch" in tools, result
+            elif cancel:
                 assert answered and task["status"] == "cancelled" and service.state["creates"] == 0, result
                 assert task["outcome"]["result"] == "cancelled", result
                 assert "annul" in task["outcome"]["response"].lower(), result
@@ -242,5 +250,6 @@ if __name__ == "__main__":
     parser.add_argument("--cancel", action="store_true")
     parser.add_argument("--reject", action="store_true", help="Service rejects registration; task must fail explicitly")
     parser.add_argument("--refuse", action="store_true", help="Model invents a lack of tools; task must never succeed")
+    parser.add_argument("--read-only", action="store_true", help="Human withdraws registration and asks for a summary only")
     args = parser.parse_args()
-    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse)
+    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only)

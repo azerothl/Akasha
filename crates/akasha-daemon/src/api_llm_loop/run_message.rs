@@ -1909,6 +1909,7 @@ pub(crate) async fn run_message_via_llm(
             && crate::studio_file_effects::has_request(clean_message);
         let mut chat_mutation_succeeded = false;
         let mut web_account_action_succeeded = false;
+        let mut web_account_action_required = web_account_task && !crate::web_account_task::read_only_scope(clean_message);
         let mut chat_effect_repairs = 0u32;
         let mut chat_completion_repairs = 0u32;
         let mut chat_readback = crate::chat_contract::PostMutationRead::new(tool_disk_workspace_root.clone());
@@ -2009,6 +2010,7 @@ pub(crate) async fn run_message_via_llm(
                         st.append(&session_id, "user", steer_text.clone()).await;
                     }
                     user_message = format!("{user_message}\n\n{steer_text}");
+                    if web_account_task && crate::web_account_task::read_only_scope(&item.text) { web_account_action_required = false; }
                     if web_account_task {
                         current_prompt.push_str(&format!("\n\n{steer_text}"));
                     }
@@ -3146,6 +3148,11 @@ pub(crate) async fn run_message_via_llm(
                         let actual_tool = skill_definition.as_ref().map(|s| s.tool_ref.clone()).unwrap_or_else(|| name.clone());
                         let actual_tool = canonicalize_tool_name(&actual_tool);
                         let tool_args: &[String] = args.as_slice();
+                        if web_account_task && !web_account_action_required && !crate::web_account_task::read_only_tool(&actual_tool,tool_args) {
+                            run_outcome.termination=TerminationReason::ToolError;
+                            reply_text="L’utilisateur a limité la tâche à une consultation ; aucune opération susceptible de modifier le compte n’a été exécutée.".into();
+                            break 'tool_rounds;
+                        }
                         let effective_role_tool = if actual_tool.is_empty() {
                             if tool_args.is_empty() { "read_skill" } else { "run_command" }
                         } else { actual_tool.as_str() };
@@ -3858,6 +3865,7 @@ pub(crate) async fn run_message_via_llm(
                                             .await
                                             {
                                                 Ok(Ok(reply)) => {
+                                                    if web_account_task && crate::web_account_task::read_only_scope(&reply) { web_account_action_required = false; }
                                                     if web_account_task && crate::web_account_task::stop_reply(&reply) {
                                                         match TaskStore::open(&store_path).and_then(|s| s.transition_if(task_id,
                                                             &[TaskStatus::Running, TaskStatus::WaitingUserInput], TaskStatus::Cancelled)) {
@@ -5106,7 +5114,7 @@ pub(crate) async fn run_message_via_llm(
                 reply_text = "La vérification explicitement demandée n’a pas été effectuée après deux tentatives de correction. Les résultats déjà obtenus sont conservés dans la tâche.".into();
                 break 'tool_rounds;
             }
-            if web_account_task && !web_account_action_succeeded {
+            if web_account_task && web_account_action_required && !web_account_action_succeeded {
                 if chat_effect_repairs < 1 && run_outcome.failed_tool_calls == 0 {
                     chat_effect_repairs += 1;
                     current_prompt = format!("{delivered_prompt}\n[Account operation was not executed]\nNo account action has succeeded. You run inside Akasha with the actual tools advertised above; do not invent an inability to access the host. Read the supplied URL with web_fetch if not already read, then use the documented API through run_command or the permitted interactive browser. Keep credentials private in a single worker process. Do not repeat completed reads or ask already answered questions. If a tool reports a denial, report that exact failure.\n");
