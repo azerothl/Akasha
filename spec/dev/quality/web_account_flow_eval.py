@@ -314,6 +314,10 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                 assert len(service.state["request_bytes"]) == 1, result
             elif reject or refuse or prepare_only:
                 assert task["status"] == "failed" and service.state["creates"] == 0, result
+                if prepare_only:
+                    assert "Le compte a été créé et vérifié" not in task["outcome"]["response"], result
+                    assert "n’est pas confirmée" in task["outcome"]["response"], result
+                    assert any(check.get("source") == "unverified_model_explanation" for check in task["outcome"]["verification"]), result
             else:
                 assert task["status"] == "completed" and service.state["creates"] == 1 and service.state["verified"] >= 1, result
                 assert model or service.state["repeat_requested"], result
