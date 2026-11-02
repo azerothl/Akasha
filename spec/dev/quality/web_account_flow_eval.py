@@ -89,6 +89,12 @@ class Fixture(BaseHTTPRequestHandler):
             self.send({"template": "{{ .System }} {{ .Messages }} {{ .Tools }}" if state["native_chat"] else "{{ .System }} {{ .Prompt }}", "model_info": {"general.architecture": "qwen", "qwen.context_length": 8192}, "parameters": "num_ctx 8192"})
         elif self.path in {"/api/chat", "/api/generate"}:
             text = json.dumps(body, ensure_ascii=False)
+            # Default-feature Linux builds also extract memory in the background.
+            # This is separate from the foreground task and must not consume a
+            # scripted action, unblock steering, or inflate its exact call count.
+            if not state["real_model"] and "Extract items to remember. One line per item" in body.get("prompt", ""):
+                state["background_memory_calls"] = state.get("background_memory_calls", 0) + 1
+                return self.send({"model": "account-fixture", "response": "", "message": {"role": "assistant", "content": ""}, "done": True, "prompt_eval_count": 1, "eval_count": 0})
             state["request_bytes"].append(len(text.encode()))
             if state["native_chat"]:
                 assert not body.get("tools"), "Incomplete native catalogue must not disable text tools"
@@ -283,6 +289,7 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                       "creates": service.state["creates"], "verified": service.state["verified"],
                       "create_attempts": service.state["create_attempts"], "duplicate_attempts": service.state["duplicate_attempts"],
                       "model_calls": len(service.state["request_bytes"]),
+                      "background_memory_calls": service.state.get("background_memory_calls", 0),
                       "selector_calls": service.state["selector_calls"], "children": children,
                       "max_request_bytes": max(service.state["request_bytes"], default=0),
                       "token_exposed_to_model": service.state["token_exposed_to_model"],
@@ -312,6 +319,8 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                 assert task["outcome"]["result"] == "cancelled", result
                 assert "annul" in task["outcome"]["response"].lower(), result
                 assert len(service.state["request_bytes"]) == 1, result
+                if steer_stop:
+                    assert not tools and service.state["create_attempts"] == 0, result
             elif reject or refuse or prepare_only:
                 assert task["status"] == "failed" and service.state["creates"] == 0, result
                 if prepare_only:
