@@ -140,10 +140,10 @@ class Fixture(BaseHTTPRequestHandler):
             elif state["reject"] and state["create_attempts"]:
                 response = "Le service a refusé l'inscription. Aucun compte n'a été créé."
             elif not state["verified"]:
-                response = "TOOL: run_command " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
+                response = "TOOL: run_terminal " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
             elif not state["repeat_requested"]:
                 state["repeat_requested"] = True
-                response = "TOOL: run_terminal " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
+                response = "TOOL: run_command " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
             elif state["save_receipt"] and not state["receipt_requested"]:
                 state["receipt_requested"] = True
                 response = "TOOL: write_file " + str(state["receipt_path"]) + '\n{"id":"fixture-agent-1","verified":true}'
@@ -322,7 +322,7 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                 assert task["status"] == "completed" and service.state["creates"] == 1 and service.state["verified"] >= 1, result
                 assert model or service.state["repeat_requested"], result
                 assert service.state["duplicate_attempts"] == 0, result
-                assert "web_fetch" in tools and "run_command" in tools and "web_search" not in tools and "web_crawl" not in tools, result
+                assert "web_fetch" in tools and bool({"run_command", "run_terminal"} & set(tools)) and "web_search" not in tools and "web_crawl" not in tools, result
                 if save_receipt:
                     assert json.loads(service.state["receipt_path"].read_text())["id"] == "fixture-agent-1", result
             assert service.state["selector_calls"] == 0, result
