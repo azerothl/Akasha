@@ -118,6 +118,7 @@ pub mod api_routes_life;
 pub mod skills;
 pub mod agent_profiles;
 pub(crate) mod chat_contract;
+pub(crate) mod web_account_task;
 pub mod dashboards;
 pub mod inter_agent;
 pub mod memory_consolidation;

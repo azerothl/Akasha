@@ -414,6 +414,13 @@ mod json_tool_result_template_tests {
 mod ollama_result_identity_tests {
     use super::*;
     #[test]
+    fn text_tool_catalogue_remains_usable_on_a_native_chat_model() {
+        let request:crate::CompletionRequest=serde_json::from_value(json!({"prompt":"Create the account", "system_prompt":"TOOL: browser, ask_user, read_skill, install_skill", "tools":null})).unwrap();
+        let messages=request.ollama_native_messages().to_string();
+        assert!(messages.contains("TOOL: browser, ask_user, read_skill, install_skill"));
+        assert!(!messages.contains("Do not print TOOL:"));
+    }
+    #[test]
     fn result_names_follow_flattened_call_ids_without_guessing() {
         let request:crate::CompletionRequest=serde_json::from_value(json!({"prompt":"","conversation":[
             {"role":"assistant","content":"","tool_calls":[

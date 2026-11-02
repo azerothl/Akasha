@@ -308,6 +308,53 @@ mod studio_native_tests {
     }
 
     #[test]
+    fn ollama_first_turn_keeps_system_and_tools_without_history() {
+        let request: CompletionRequest = serde_json::from_value(serde_json::json!({
+            "prompt":"Create the requested account", "system_prompt":"Exact permissions",
+            "tools":[{"type":"function","function":{"name":"web_fetch","parameters":{"type":"object","properties":{}}}}]
+        })).unwrap();
+        assert!(request.conversation.is_none());
+        let provider = OllamaProvider::new(None);
+        for (name, mode) in [("chat",OllamaConversationTemplate::Chat), ("qwen",OllamaConversationTemplate::Qwen35ChatMl), ("lfm",OllamaConversationTemplate::Lfm2ChatMl)] {
+            provider.chat_templates.lock().unwrap().insert(name.into(),mode);
+            let (url,body)=provider.build_generate_body(&request,name,true);
+            if matches!(mode,OllamaConversationTemplate::Chat) {
+                assert!(url.ends_with("/api/chat"));
+                assert_eq!(body["messages"][0]["role"],"system");
+                assert_eq!(body["tools"][0]["function"]["name"],"web_fetch");
+            } else {
+                assert_eq!(body["raw"],true);
+                let prompt=body["prompt"].as_str().unwrap();
+                assert!(prompt.contains("<|im_start|>system\n"));
+                assert!(prompt.contains("Exact permissions"));
+                assert!(prompt.contains("Create the requested account"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ollama_first_turn_inspects_raw_template_before_inference() {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {
+            let (mut socket,_)=tokio::time::timeout(Duration::from_secs(3),listener.accept()).await.unwrap().unwrap();
+            let mut data=vec![0;4096];
+            let count=socket.read(&mut data).await.unwrap();
+            assert!(String::from_utf8_lossy(&data[..count]).starts_with("POST /api/show "));
+            let metadata=r#"{"template":"{{ .Prompt }}","model_info":{"general.architecture":"qwen35"}}"#;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{metadata}",metadata.len()).as_bytes()).await.unwrap();
+        });
+        let provider=OllamaProvider::new(Some(format!("http://{address}")));
+        let request:CompletionRequest=serde_json::from_value(serde_json::json!({"prompt":"First user request","system_prompt":"Exact permissions"})).unwrap();
+        provider.prepare_conversation(&request,"raw-qwen",Duration::from_secs(3)).await.unwrap();
+        let (_,body)=provider.build_generate_body(&request,"raw-qwen",true);
+        assert_eq!(body["raw"],true);
+        assert!(body["prompt"].as_str().unwrap().contains("<|im_start|>system\nExact permissions"));
+        server.await.unwrap();
+    }
+
+    #[test]
     fn ollama_chat_stream_preserves_text_and_thinking_fields() {
         let (tx, rx) = std::sync::mpsc::channel();
         let (mut text, mut thinking, mut final_thinking, mut done) =
@@ -1161,7 +1208,8 @@ impl OllamaProvider {
         model: &str,
         timeout: Duration,
     ) -> Result<(), ProviderError> {
-        if request.conversation.is_none()
+        if (request.conversation.is_none() && request.system_prompt.is_none()
+            && request.tools.as_ref().is_none_or(|tools| tools.is_empty()))
             || self
                 .chat_templates
                 .lock()
@@ -1261,15 +1309,10 @@ impl OllamaProvider {
         model: &str,
         stream: bool,
     ) -> (String, serde_json::Value) {
-        let mode = request
-            .conversation
-            .as_ref()
-            .and_then(|_| {
-                self.chat_templates
-                    .lock()
-                    .ok()
-                    .and_then(|templates| templates.get(model).copied())
-            })
+        let mode = self.chat_templates
+            .lock()
+            .ok()
+            .and_then(|templates| templates.get(model).copied())
             .unwrap_or(OllamaConversationTemplate::Text);
         let chat = matches!(mode, OllamaConversationTemplate::Chat | OllamaConversationTemplate::JsonToolChat);
         let url = format!(

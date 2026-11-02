@@ -644,6 +644,7 @@ pub(crate) async fn run_message_via_llm(
     // All intent detection / classification uses clean_message so a guardrail prefix never
     // breaks fast-lane matching or memory profile selection.
     let structured = interpret_message(clean_message);
+    let web_account_task = !code_studio_disk_task && crate::web_account_task::matches(clean_message);
     let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
     // Slim prompt for embedded + small Ollama (also for subagents — full RULE dumps cause rule-echo).
     let embedded_compact = embedded_primary_route && !code_studio_disk_task;
@@ -816,6 +817,8 @@ pub(crate) async fn run_message_via_llm(
     let mut code_studio_system_tools_block = String::new();
     let tool_instruction = if is_small_talk_fast_lane {
         String::new()
+    } else if web_account_task && tools_executor_snapshot.is_some() {
+        crate::web_account_task::tools(&tools_executor_snapshot.as_ref().unwrap().policy)
     } else if embedded_compact && tools_executor_snapshot.is_some() {
         let allowed_tools = tools_executor_snapshot
             .as_ref()
@@ -1078,6 +1081,8 @@ pub(crate) async fn run_message_via_llm(
              Respecte sa demande et les consignes du dépôt; garde `workspace:/` comme racine.\
              Utilise uniquement les outils Kanban annoncés, réponds en français et ne modifie aucun fichier source.\n\n",
         );
+    } else if web_account_task {
+        system_prompt.push_str(crate::web_account_task::CONTEXT);
     } else if code_studio_disk_task {
         system_prompt.push_str(CODE_STUDIO_APP_CONTEXT);
     } else if !code_studio_disk_task && embedded_compact {
@@ -1586,7 +1591,7 @@ pub(crate) async fn run_message_via_llm(
                 && akasha_tools::any_provider_available(&e.policy)
         })
         .unwrap_or(false);
-    let web_search_reminder: &str = if intent_flags.external_info {
+    let web_search_reminder: &str = if intent_flags.external_info && !web_account_task {
         if web_search_effectively_available {
             // web_search is available: instruct the model to use it.
             WEB_SEARCH_REMINDER
@@ -1598,7 +1603,7 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let web_search_followup_reminder: &str = if intent_flags.external_info
+    let web_search_followup_reminder: &str = if intent_flags.external_info && !web_account_task
         && web_search_effectively_available
         && tools_executor_snapshot
             .as_ref()
@@ -1903,6 +1908,9 @@ pub(crate) async fn run_message_via_llm(
         let chat_requires_mutation = !code_studio_disk_task && assigned_agent != "ask"
             && crate::studio_file_effects::has_request(clean_message);
         let mut chat_mutation_succeeded = false;
+        let mut web_account_action_succeeded = false;
+        let mut web_account_action_required = web_account_task;
+        let mut web_account_scope=crate::web_account_task::verification_scope(clean_message);
         let mut chat_effect_repairs = 0u32;
         let mut chat_completion_repairs = 0u32;
         let mut chat_readback = crate::chat_contract::PostMutationRead::new(tool_disk_workspace_root.clone());
@@ -1944,6 +1952,16 @@ pub(crate) async fn run_message_via_llm(
                 .or_else(||(checkpoint.round>=max_tool_rounds).then(||serde_json::json!({"tool_round_limit":true,"max_tool_rounds":max_tool_rounds})))
         });
         'tool_rounds: loop {
+            if web_account_task && web_account_scope.is_empty() {
+                run_outcome.termination=TerminationReason::ContextUnavailable;
+                reply_text="La destination du compte est ambiguë parmi les liens fournis. Précisez le site d’inscription ; aucune inscription n’a été lancée.".into();
+                break 'tool_rounds;
+            }
+            if web_account_task && web_account_action_required && !web_account_action_succeeded && !tools_executor_snapshot.as_ref().is_some_and(|executor|crate::web_account_task::verification_available(&executor.policy)) {
+                run_outcome.termination=TerminationReason::ToolError;
+                reply_text="Inscription non démarrée : aucun outil autorisé ne permet la création par API et sa relecture authentifiée. Le navigateur de ce parcours est limité à la consultation ; aucun formulaire n’a été soumis.".into();
+                break 'tool_rounds;
+            }
             if let Some(goal)=goal_tracker.as_mut() {
                 if goal.exhausted() { run_outcome.termination=TerminationReason::BudgetExhausted;reply_text="Limite de cycles, de durée ou de tokens de l’objectif atteinte ; réussite non confirmée.".into();let _=goal.save(&store_path,task_id,"budget_exhausted",&reply_text);break 'tool_rounds; }
                 if let Err(error)=goal.save(&store_path,task_id,"active","Exécution ou vérification en cours") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
@@ -1994,6 +2012,15 @@ pub(crate) async fn run_message_via_llm(
             if let Some(ref sq) = steering_queue {
                 let steering_items = sq.drain_steering(task_id).await;
                 for item in steering_items {
+                    if web_account_task {crate::web_account_task::apply_user_instruction(&mut web_account_scope,&mut web_account_action_required,&mut web_account_action_succeeded,&item.text);}
+                    if web_account_task && crate::web_account_task::stop_reply(&item.text) {
+                        match TaskStore::open(&store_path).and_then(|s|s.transition_if(task_id,
+                            &[TaskStatus::Running,TaskStatus::WaitingUserInput],TaskStatus::Cancelled)) {
+                            Ok(_) => {run_outcome.termination=TerminationReason::Cancelled;reply_text="Tâche annulée à votre demande.".into();}
+                            Err(error) => {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=format!("Impossible d’enregistrer l’annulation : {error}");}
+                        }
+                        break 'tool_rounds;
+                    }
                     explicit_file_goals.clear();scope_unchanged=false;
                     let steer_text = format!(
                         "[Steering — instruction utilisateur à appliquer maintenant]\n{}",
@@ -2003,6 +2030,9 @@ pub(crate) async fn run_message_via_llm(
                         st.append(&session_id, "user", steer_text.clone()).await;
                     }
                     user_message = format!("{user_message}\n\n{steer_text}");
+                    if web_account_task {
+                        current_prompt.push_str(&format!("\n\n{steer_text}"));
+                    }
                     let _ = store.insert_event(
                         task_id,
                         "user_steering_applied",
@@ -2188,9 +2218,12 @@ pub(crate) async fn run_message_via_llm(
                     }
                     (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else if let Some(repair)=compiler_repair.as_ref() {repair.definition(names)}else if let Some(target)=build_missing_target.as_ref() {crate::studio_tool_contract::missing_entrypoint_definition(names,target)}else if let Some((ticket,command))=foundation_boundary {crate::studio_vite_scaffold::foundation_definition(names,ticket,command,foundation_ready)}else{crate::studio_tool_contract::native_definition(names)}])
                 })
-            }else if !code_studio_disk_task && !is_small_talk_fast_lane {
+            }else if !code_studio_disk_task && !is_small_talk_fast_lane && !web_account_task {
                 tools_executor_snapshot.as_ref()
                     .and_then(|executor| crate::chat_contract::native_tools(&executor.policy, &assigned_agent))
+                    .and_then(|mut tools| {
+                        (!tools.is_empty()).then_some(tools)
+                    })
             }else{None};
             let mut turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             // Workflow tools use the text protocol. Include their effective
@@ -2207,6 +2240,7 @@ pub(crate) async fn run_message_via_llm(
                         || (assigned_agent == "studio_project_manager" && !message.contains("[Délégation obligatoire (Code Studio")))
                     && native_tools.as_ref().is_some_and(|tools|tools[0].pointer("/function/parameters/properties/tool/enum").and_then(|v|v.as_array()).is_some_and(|names|names.iter().any(|name|matches!(name.as_str(),Some("write_file"|"write_code"|"edit_file"|"search_replace"|"apply_patch"))))),
                 conversation: if code_studio_disk_task { Some(conversation.clone()) }
+                    else if web_account_task { Some(auxiliary_context.iter().chain(conversation.iter()).cloned().collect()) }
                     else if auxiliary_context.is_empty() { None } else { Some(auxiliary_context.clone()) },
                 prompt: if code_studio_disk_task {
                     format!("{}{}", resume_overlay, current_prompt)
@@ -3061,6 +3095,7 @@ pub(crate) async fn run_message_via_llm(
                 }).collect();
                 let rejected_batch = serde_json::json!({"calls":rejected_calls,"omitted_calls":calls.len().saturating_sub(16),"retry_hint":"No call in this batch was executed. Resubmit from the FIRST unexecuted operation, not just the last call. Read existing files before mutation; expected_version may be omitted when this task has a successful read, in which case the runtime binds to that snapshot and rejects stale edits. Use expected_version: missing for creation. A deferred creation did NOT create its file."});
                 let mut previous_batch_call_succeeded = true;
+                let mut account_reply_changed_batch = false;
                 let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
                 for (lane, mut lane_calls) in scheduled_lanes {
@@ -3084,6 +3119,16 @@ pub(crate) async fn run_message_via_llm(
                         lane_call_index+=1;
                         let (name,args)=(&owned_name,&owned_args);
                         tool_result_starts.push(tool_results.len());
+                        if account_reply_changed_batch {
+                            tool_results.push("[User reply applied] This stale proposed operation did not run. Choose new arguments from the user's latest reply before executing another operation.".into());
+                            continue;
+                        }
+                        if web_account_task {
+                            if let Some(queue)=steering_queue.as_ref() {if queue.has_pending_steering(task_id).await {
+                                tool_results.push("[User guidance pending] This proposed operation did not run. Apply the queued user instruction before choosing another operation.".into());
+                                continue;
+                            }}
+                        }
                         if literal_batch_rejected {
                             let index=tool_result_starts.len()-1;
                             let error=literal_errors[index].clone().unwrap_or_else(||serde_json::json!({"schema_version":1,"success":false,"error_code":"batch_deferred","error":"No operation executed: this batch contains an invalid tool call or a file content that violates the explicit user literal. Correct it and request the required operations again in order."}).to_string());
@@ -3135,6 +3180,25 @@ pub(crate) async fn run_message_via_llm(
                         let effective_role_tool = if actual_tool.is_empty() {
                             if tool_args.is_empty() { "read_skill" } else { "run_command" }
                         } else { actual_tool.as_str() };
+                        if web_account_task && !crate::web_account_task::supported_tool(effective_role_tool) {
+                            run_outcome.failed_tool_calls += 1;
+                            tool_results.push(format!("[{effective_role_tool}] Not executed: this account operation supports only its advertised synchronous tools. Preserve any verified account; never register it again."));
+                            continue;
+                        }
+                        if web_account_task && !web_account_action_succeeded && actual_tool=="browser" && !crate::web_account_task::read_only_tool(&actual_tool,tool_args) {
+                            run_outcome.termination=TerminationReason::ToolError;
+                            reply_text="Ce parcours ne peut pas vérifier une inscription interactive par navigateur. Aucune action sur le formulaire n’a été exécutée ; utilisez une API documentée avec une relecture authentifiée.".into();
+                            break 'tool_rounds;
+                        }
+                        if web_account_task && web_account_action_succeeded && (crate::web_account_task::command_tool(effective_role_tool) || actual_tool=="browser" && !crate::web_account_task::read_only_tool(&actual_tool,tool_args)) {
+                            tool_results.push("[Account already verified] No further mutation ran. Use the previous verified account receipt to answer; never register it again.".into());
+                            continue;
+                        }
+                        if web_account_task && !web_account_action_required && !crate::web_account_task::read_only_tool(effective_role_tool,tool_args) {
+                            run_outcome.termination=TerminationReason::ToolError;
+                            reply_text="L’utilisateur a limité la tâche à une consultation ; aucune opération susceptible de modifier le compte n’a été exécutée.".into();
+                            break 'tool_rounds;
+                        }
                         if !code_studio_disk_task {
                             if let Some(error) = crate::chat_contract::literal_write_error(clean_message, effective_role_tool, tool_args) {
                                 run_outcome.failed_tool_calls += 1;
@@ -3771,6 +3835,12 @@ pub(crate) async fn run_message_via_llm(
                         let approved_delivery_envelope=delivery_approval_identity.as_ref().map(|identity| {
                             vec![serde_json::json!({"schema_version":1,"operation_id":typed_call.as_ref().map(|call|call.envelope.operation_id).unwrap_or_else(Uuid::new_v4),"tool":actual_tool,"arguments":serde_json::from_str::<serde_json::Value>(&tool_args.join(" ")).unwrap_or_default(),"approval_identity":identity}).to_string()]
                         });
+                        if web_account_task {
+                            if let Some(queue)=steering_queue.as_ref() {if queue.has_pending_steering(task_id).await {
+                                tool_results.push("[User guidance pending] This operation did not run; apply the queued correction or cancellation first.".into());
+                                continue;
+                            }}
+                        }
                         let (success, res, captured_image): (bool, String, Option<String>) =
                             if actual_tool == "ask_user" {
                                 // Human in the loop: register pending request, emit event, wait for user reply.
@@ -3844,6 +3914,18 @@ pub(crate) async fn run_message_via_llm(
                                             .await
                                             {
                                                 Ok(Ok(reply)) => {
+                                                    // Every account reply may change the destination,
+                                                    // credentials or permission of later proposed calls.
+                                                    if web_account_task {account_reply_changed_batch=true;}
+                                                    if web_account_task {crate::web_account_task::apply_user_instruction(&mut web_account_scope,&mut web_account_action_required,&mut web_account_action_succeeded,&reply);}
+                                                    if web_account_task && crate::web_account_task::stop_reply(&reply) {
+                                                        match TaskStore::open(&store_path).and_then(|s| s.transition_if(task_id,
+                                                            &[TaskStatus::Running, TaskStatus::WaitingUserInput], TaskStatus::Cancelled)) {
+                                                            Ok(_) => { run_outcome.termination = TerminationReason::Cancelled; reply_text = "Tâche annulée à votre demande.".into(); }
+                                                            Err(error) => { run_outcome.termination = TerminationReason::ContextUnavailable; reply_text = format!("Impossible d’enregistrer l’annulation : {error}"); }
+                                                        }
+                                                        break 'tool_rounds;
+                                                    }
                                                     if let Some(exec)=tools_executor.as_ref(){let policy=crate::studio_policy::for_workspace(&exec.read().await.policy, &tool_disk_workspace_root);if let Err(error)=crate::studio_file_effects::human_reply(&store_path,task_id,&tool_disk_workspace_root,super::studio_conversation::user_request(&task_scope),&question,&reply,&assigned_agent,&policy,&mut run_outcome){run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}}
                                                     (true,format!("[ask_user] User replied: {}",reply),None)
                                                 },
@@ -4289,6 +4371,9 @@ pub(crate) async fn run_message_via_llm(
                         if success {
                             run_outcome.successful_tool_calls += 1;
                             if actual_tool == "web_search" { chat_search_succeeded = true; }
+                            if web_account_task && crate::web_account_task::reported_readback(&web_account_scope,effective_role_tool,&res) {
+                                web_account_action_succeeded = true;
+                            }
                             if actual_tool == "web_fetch" { chat_source_fetched = true; }
                             chat_readback.observe_success(clean_message,&actual_tool,tool_args);
                             if crate::studio_tool_contract::is_file_mutation(&actual_tool)
@@ -4531,14 +4616,20 @@ pub(crate) async fn run_message_via_llm(
                 }
                 let execution_response=runtime_commands_added.then(||super::studio_conversation::scheduled_execution_response(&calls)).flatten();
                 let results_blob = tool_results.join("\n");
-                if code_studio_disk_task {
+                if code_studio_disk_task || web_account_task {
                     let per_call:Vec<String>=tool_result_starts.iter().enumerate().map(|(index,start)| {
                         let end=tool_result_starts.get(index+1).copied().unwrap_or(tool_results.len());
                         let recorded=tool_results[*start..end].join("\n");
                         if recorded.is_empty(){"No execution result recorded; do not assume success.".into()}else{recorded}
                     }).collect();
-                    if !delivered_prompt.trim().is_empty() {conversation.push(if !conversation.is_empty() && (delivered_prompt.trim_start().starts_with("[Active goal") || delivered_prompt.trim_start().starts_with("[Repair the FIRST") || delivered_prompt.trim_start().starts_with("[STUDIO_READ_ONLY_STREAK]")) {akasha_llm::ConversationMessage::runtime_control(delivered_prompt.clone())} else {akasha_llm::ConversationMessage::user(delivered_prompt.clone())});}
-                    conversation.extend(super::studio_conversation::tool_turn_with_results(execution_response.as_deref().unwrap_or(&response), &results_blob, &per_call, round, if scope_unchanged && goal_tracker.is_none() {&task_scope}else{""}));
+                    if web_account_task {
+                        // Persist session/steering instructions, not the repeated
+                        // catalogue and transport suffix added to delivered_prompt.
+                        super::studio_conversation::append_account_turn(&mut conversation,&current_prompt,&response,&results_blob,&per_call,round);
+                    } else {
+                        if !delivered_prompt.trim().is_empty() {conversation.push(if !conversation.is_empty() && (delivered_prompt.trim_start().starts_with("[Active goal") || delivered_prompt.trim_start().starts_with("[Repair the FIRST") || delivered_prompt.trim_start().starts_with("[STUDIO_READ_ONLY_STREAK]")) {akasha_llm::ConversationMessage::runtime_control(delivered_prompt.clone())} else {akasha_llm::ConversationMessage::user(delivered_prompt.clone())});}
+                        conversation.extend(super::studio_conversation::tool_turn_with_results(execution_response.as_deref().unwrap_or(&response), &results_blob, &per_call, round, if scope_unchanged && goal_tracker.is_none() {&task_scope}else{""}));
+                    }
                     // Current policy/context is reloaded on resume, then kept once in the transcript.
                     resume_overlay.clear();
                 }
@@ -4647,7 +4738,7 @@ pub(crate) async fn run_message_via_llm(
                     .count();
                 // Only successful read-only source data can be summarized. Human answers,
                 // repository rules, failures and mutation/unknown receipts stay exact.
-                let results_blob = if !code_studio_disk_task && !calls.is_empty()
+                let results_blob = if !code_studio_disk_task && !web_account_task && !calls.is_empty()
                     && run_outcome.failed_tool_calls == failed_calls_before_round
                     && calls.iter().all(|(name, args)| matches!(name.as_str(), "read_file" | "read_code" | "web_fetch" | "web_search" | "search_files" | "grep_content")
                         && !args.iter().any(|arg| ["agents.md", "skill.md", "code_studio_plan.md", "design.md"].iter().any(|rule| arg.to_ascii_lowercase().contains(rule))))
@@ -4656,11 +4747,11 @@ pub(crate) async fn run_message_via_llm(
                     "Read-only source results are supplied separately as auxiliary context. Use their facts; reread exact file ranges before editing.".to_owned()
                 } else { results_blob };
                 // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
-                current_prompt = if code_studio_disk_task {
+                current_prompt = if code_studio_disk_task || web_account_task {
                     String::new()
                 } else if round_had_ask_user {
                     format!(
-                    "User request (PRIMARY — you must still fulfill this): {}\n\nYour previous assistant reply:\n{}\n\nask_user step result (user's choice; may be unrelated to the primary request):\n{}\n\nContinue the task. If the PRIMARY request is not satisfied yet, you MUST emit TOOL: lines next (web_search, web_fetch, browser navigate + browser snapshot, etc.). Do not reply \"blocked\" or \"no information\" without trying web_search first. When the primary request is fully answered, reply in plain text only (no TOOL: lines).",
+                    "Original user request (subject to the user's latest reply): {}\n\nYour previous assistant reply:\n{}\n\nask_user step result (the user's answer takes precedence over the original request):\n{}\n\nRespect any cancellation, correction or scope change in this answer. Otherwise continue with the next necessary permitted tool. For a supplied URL, fetch that URL directly; do not require web_search or a crawl. Do not repeat an already answered question or retry an unchanged failing tool. Report a concrete configuration or permission failure explicitly. Finish only with the result actually observed.",
                     user_message, response, results_blob
                 )
                 } else if social_pending && browser_ok && navigated_ok {
@@ -5031,6 +5122,9 @@ pub(crate) async fn run_message_via_llm(
                 let follow_items = sq.drain_follow_up(task_id).await;
                 if !follow_items.is_empty() && !is_subagent {
                     for item in follow_items {
+                        if web_account_task {
+                            crate::web_account_task::apply_user_instruction(&mut web_account_scope,&mut web_account_action_required,&mut web_account_action_succeeded,&item.text);
+                        }
                     explicit_file_goals.clear();scope_unchanged=false;
                         let fu = format!(
                             "[Follow-up — poursuivre après le travail en cours]\n{}",
@@ -5073,6 +5167,17 @@ pub(crate) async fn run_message_via_llm(
                 }
                 run_outcome.termination = TerminationReason::VerificationFailed;
                 reply_text = "La vérification explicitement demandée n’a pas été effectuée après deux tentatives de correction. Les résultats déjà obtenus sont conservés dans la tâche.".into();
+                break 'tool_rounds;
+            }
+            if web_account_task && web_account_action_required && !web_account_action_succeeded {
+                if chat_effect_repairs < 1 && run_outcome.failed_tool_calls == 0 {
+                    chat_effect_repairs += 1;
+                    current_prompt = format!("{delivered_prompt}\n[Account verification not established]\nNo verified account receipt is available. Preparatory commands and browser clicks do not prove registration. Retain an already created account: never register it again. Obtain the documented authenticated read-back and report its actual HTTP status, the original mutation status, service_origin, id and verified:true as one JSON object from the worker. You run inside Akasha with the actual tools advertised above; do not invent an inability to access the host. Read the supplied URL with web_fetch if not already read, then use the documented API through an advertised run_command or run_terminal worker; browser navigate/snapshot may only inspect the contract. Keep credentials private in a single worker process. Do not repeat completed reads or ask already answered questions. If a tool reports a denial, report that exact failure.\n");
+                    continue;
+                }
+                run_outcome.termination = TerminationReason::VerificationFailed;
+                run_outcome.checks.push(serde_json::json!({"kind":"account_verification","status":"unverified","source":"unverified_model_explanation","explanation":response.chars().take(1800).collect::<String>()}));
+                reply_text = "La vérification du compte n’est pas confirmée. Le compte peut déjà exister : vérifiez son état avant toute nouvelle inscription. Les éléments de la tentative restent consultables dans la tâche.".into();
                 break 'tool_rounds;
             }
             if chat_requires_mutation && !chat_mutation_succeeded {
@@ -5666,7 +5771,8 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     }
     if studio_verify_error.is_some() { run_outcome.termination = TerminationReason::VerificationFailed; }
     if goal_tracker.as_ref().is_some_and(|goal|goal.state.state!="completed") && !run_outcome.failed() {run_outcome.termination=TerminationReason::VerificationFailed;reply_text="Objectif non vérifié : l’exécution est arrêtée ou bloquée.".into();}
-    let proposed = if run_outcome.failed() { TaskStatus::Failed } else { TaskStatus::Completed };
+    let proposed = if run_outcome.termination == TerminationReason::Cancelled { TaskStatus::Cancelled }
+        else if run_outcome.failed() { TaskStatus::Failed } else { TaskStatus::Completed };
     let reason = if run_outcome.failed() {
         Some(studio_verify_display_message.as_deref().unwrap_or(&reply_text).chars().take(2000).collect::<String>())
     } else { None };

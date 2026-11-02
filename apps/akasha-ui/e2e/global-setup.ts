@@ -49,7 +49,7 @@ export default async function globalSetup(): Promise<void> {
       AKASHA_DATA_DIR: dataDir,
       AKASHA_PORT: "3876",
     },
-    stdio: "ignore",
+    stdio: ["ignore", "inherit", "inherit"],
     detached: false,
   });
 

@@ -2106,7 +2106,8 @@ if method == "POST" && path == "/api/message" {
     // The consumer wizard never asks for a name. Its first ordinary question
     // must not be interpreted as one, nor may private messages save a profile.
     let mut message = message;
-    if !cfg!(feature = "consumer-beta") && !incognito {
+    let queued_delivery=body_json.as_ref().and_then(|v|v.get("queue_mode").or_else(||v.get("message_delivery_mode"))).and_then(|v|v.as_str()).and_then(crate::steering_queue::QueueMode::parse).is_some();
+    if !cfg!(feature = "consumer-beta") && !incognito && !queued_delivery {
         let mut user_profile = UserProfile::load(data_dir);
         if !user_profile.has_how_to_call() && !message.trim().is_empty() {
             let extracted = extract_how_to_call_from_message(message.trim());
