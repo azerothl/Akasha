@@ -43,13 +43,15 @@ jobs:
       ARTIFACT_ZIP: download/${{ matrix.artifact }}
       EXPECTED_VERSION: ${{ inputs.release_tag || 'v0.12.1' }}
       EXPECTED_ARCH: ${{ matrix.arch }}
-      SMOKE_EVIDENCE_DIR: ${{ runner.temp }}/published-first-boot
       INFERENCE_TIMEOUT_SECS: '360'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Select runner-local evidence directory
+        shell: bash
+        run: echo "SMOKE_EVIDENCE_DIR=$RUNNER_TEMP/published-first-boot" >> "$GITHUB_ENV"
       - name: Download existing published archive and identify bytes
         shell: bash
         env:
