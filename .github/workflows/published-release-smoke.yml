@@ -1,0 +1,97 @@
+name: Published release first boot
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing published release to download and verify
+        required: true
+        default: v0.12.1
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/published-release-smoke.yml
+      - scripts/smoke-release-artifact-linux.sh
+      - scripts/smoke-release-artifact-windows.ps1
+
+permissions:
+  contents: read
+
+jobs:
+  first-boot:
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact: akasha-full-linux-x86_64.zip
+            arch: X64
+          - os: windows-2022
+            artifact: akasha-full-windows-x86_64.zip
+            arch: X64
+          - os: macos-15-intel
+            artifact: akasha-full-macos-x86_64.zip
+            arch: X64
+          - os: macos-latest
+            artifact: akasha-full-macos-aarch64.zip
+            arch: ARM64
+    runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || 'v0.12.1' }}
+      ARTIFACT_NAME: ${{ matrix.artifact }}
+      ARTIFACT_ZIP: download/${{ matrix.artifact }}
+      EXPECTED_VERSION: ${{ inputs.release_tag || 'v0.12.1' }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      SMOKE_EVIDENCE_DIR: ${{ runner.temp }}/published-first-boot
+      INFERENCE_TIMEOUT_SECS: '360'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download existing published archive and identify bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import os, re
+          assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?', os.environ['RELEASE_TAG']), 'Invalid release tag'
+          assert os.environ['RUNNER_ARCH'] == os.environ['EXPECTED_ARCH'], 'Wrong runner architecture'
+          PY
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ARTIFACT_NAME" --dir download
+          python - <<'PY'
+          import hashlib, json, os, platform
+          from pathlib import Path
+          archive = Path(os.environ['ARTIFACT_ZIP'])
+          evidence = Path(os.environ['SMOKE_EVIDENCE_DIR'])
+          evidence.mkdir(parents=True, exist_ok=True)
+          receipt = dict(release_tag=os.environ['RELEASE_TAG'], artifact=archive.name,
+                         sha256=hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest(),
+                         size_bytes=archive.stat().st_size, os=platform.platform(), machine=platform.machine(),
+                         runner_arch=os.environ['RUNNER_ARCH'], harness_commit=os.environ['GITHUB_SHA'],
+                         run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
+                         source='published-release-download')
+          (evidence / 'archive-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          PY
+      - name: Install Linux desktop smoke dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-0 libayatana-appindicator3-1 xvfb xdotool x11-utils openbox scrot tesseract-ocr
+      - name: First boot, doctor, real CPU response and desktop UI
+        if: runner.os != 'Windows'
+        run: bash scripts/smoke-release-artifact-linux.sh
+      - name: First boot, doctor, real CPU response and desktop UI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke-release-artifact-windows.ps1 -ArtifactZip $env:ARTIFACT_ZIP -ExpectedVersion $env:EXPECTED_VERSION -InferenceTimeoutSecs 360 -EvidenceDir $env:SMOKE_EVIDENCE_DIR
+      - name: Preserve downloaded archive receipt and actual smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-first-boot-${{ matrix.artifact }}
+          path: ${{ env.SMOKE_EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 30
