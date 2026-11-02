@@ -3200,6 +3200,11 @@ pub(crate) async fn run_message_via_llm(
                         let effective_role_tool = if actual_tool.is_empty() {
                             if tool_args.is_empty() { "read_skill" } else { "run_command" }
                         } else { actual_tool.as_str() };
+                        if web_account_task && !crate::web_account_task::supported_tool(effective_role_tool) {
+                            run_outcome.failed_tool_calls += 1;
+                            tool_results.push(format!("[{effective_role_tool}] Not executed: this account operation supports only its advertised synchronous tools. Preserve any verified account; never register it again."));
+                            continue;
+                        }
                         if web_account_task && !web_account_action_succeeded && actual_tool=="browser" && !crate::web_account_task::read_only_tool(&actual_tool,tool_args) {
                             run_outcome.termination=TerminationReason::ToolError;
                             reply_text="Ce parcours ne peut pas vérifier une inscription interactive par navigateur. Aucune action sur le formulaire n’a été exécutée ; utilisez une API documentée avec une relecture authentifiée.".into();
