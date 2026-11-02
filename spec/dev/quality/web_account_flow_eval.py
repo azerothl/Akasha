@@ -93,7 +93,7 @@ class Fixture(BaseHTTPRequestHandler):
             if state["native_chat"]:
                 assert not body.get("tools"), "Incomplete native catalogue must not disable text tools"
                 assert "Do not print TOOL:" not in text
-            if state["steer_stop"]:
+            if state["steer_stop"] or state["scope_followup"]:
                 state["model_started"].set()
                 assert state["release_model"].wait(20), "Steering was not delivered"
             state["token_exposed_to_model"] |= state["token"] in text
@@ -102,6 +102,15 @@ class Fixture(BaseHTTPRequestHandler):
             if "strict routing selector" in text:
                 state["selector_calls"] += 1
                 response = '{"answer_mode":"delegate","task_type":"orchestrator"}'
+            elif state["scope_followup"]:
+                if "SCOPE_FILE_CONTENT" in text:
+                    response = "SCOPE_OK"
+                elif "Use read_file to read" in text:
+                    response = "TOOL: read_file " + str(state["scope_path"])
+                elif not state["reads"]:
+                    response = "TOOL: web_fetch " + state["origin"] + "/agents.html"
+                else:
+                    response = "Document fetched."
             elif state["refuse"]:
                 response = "Je ne peux pas utiliser d'outils ni accéder à votre ordinateur."
             elif state["steer_stop"]:
@@ -148,7 +157,7 @@ print(json.dumps({"verified":True,"id":me["id"],"name":me["name"],"service_origi
 '''
 
 
-def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False, browser_only: bool = False, save_receipt: bool = False):
+def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False, browser_only: bool = False, save_receipt: bool = False, scope_followup: bool = False):
     read_only = read_only or withdraw_only
     evidence.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="web-account-", dir=evidence)).resolve()
@@ -164,6 +173,8 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                      "native_chat": native_chat, "steer_stop": steer_stop, "model_started": threading.Event(), "release_model": threading.Event()}
     service.state.update(prepare_only=prepare_only, prepared=False, repeat_requested=False)
     service.state.update(save_receipt=save_receipt, receipt_requested=False, receipt_path=profile / "public-receipt.json")
+    service.state.update(scope_followup=scope_followup, scope_path=profile / "scope.txt")
+    service.state["scope_path"].write_text("SCOPE_FILE_CONTENT", encoding="utf-8")
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
     write_router(profile, model or "account-fixture", origin, "cuda")
@@ -211,11 +222,18 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                       "Ce service est une simulation locale, aucune inscription publique.")
             if save_receipt:
                 prompt += f" Enregistre ensuite le reçu public dans le fichier {service.state['receipt_path']}."
+            if scope_followup:
+                prompt = f"Use web_fetch to read {origin}/agents.html."
             task_id = http_json(base, "POST", "/api/message", {"message": prompt, "session_id": "account-fixture"})["task_id"]
             if steer_stop:
                 assert service.state["model_started"].wait(30)
                 queued = http_json(base, "POST", "/api/message", {"message": "annule", "session_id": "account-fixture", "queue_mode": "steering", "target_task_id": task_id})
                 assert queued.get("queued") and queued.get("task_id") == task_id, queued
+                service.state["release_model"].set()
+            if scope_followup:
+                assert service.state["model_started"].wait(30)
+                queued = http_json(base, "POST", "/api/message", {"message": f"Use read_file to read {service.state['scope_path']}", "session_id": "account-fixture", "queue_mode": "follow_up", "target_task_id": task_id})
+                assert queued.get("queued"), queued
                 service.state["release_model"].set()
             deadline = time.monotonic() + (600 if model else 180)
             answered = False
@@ -251,7 +269,10 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
             (profile / "report.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
             assert not children.get("children"), result
             assert not service.state["token_exposed_to_model"], result
-            if browser_only:
+            if scope_followup:
+                assert task["status"] == "completed" and task["outcome"]["response"] == "SCOPE_OK", result
+                assert tools == ["web_fetch", "read_file"] and service.state["creates"] == 0, result
+            elif browser_only:
                 assert task["status"] == "failed" and service.state["creates"] == 0 and not tools and not service.state["request_bytes"], result
             elif read_only:
                 assert answered and task["status"] == "completed" and service.state["creates"] == 0, result
@@ -299,5 +320,6 @@ if __name__ == "__main__":
     parser.add_argument("--withdraw-only", action="store_true", help="Withdraw registration without asking for a summary")
     parser.add_argument("--browser-only", action="store_true", help="Refuse an unsupported verification transport before any remote mutation")
     parser.add_argument("--save-receipt", action="store_true", help="Preserve an authorized file deliverable after verification without replaying registration")
+    parser.add_argument("--scope-followup", action="store_true", help="An explicit single-tool task accepts a user follow-up requiring a different tool")
     args = parser.parse_args()
-    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only, args.browser_only, args.save_receipt)
+    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only, args.browser_only, args.save_receipt, args.scope_followup)

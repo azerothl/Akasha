@@ -3139,7 +3139,7 @@ pub(crate) async fn run_message_via_llm(
                         lane_call_index+=1;
                         let (name,args)=(&owned_name,&owned_args);
                         tool_result_starts.push(tool_results.len());
-                        if web_account_task {
+                        if durable_tool_task {
                             if let Some(queue)=steering_queue.as_ref() {if queue.has_pending_steering(task_id).await {
                                 tool_results.push("[User guidance pending] This proposed operation did not run. Apply the queued user instruction before choosing another operation.".into());
                                 continue;
@@ -4346,7 +4346,7 @@ pub(crate) async fn run_message_via_llm(
                                     }
                                 }
                             } else {
-                                if web_account_task {
+                                if durable_tool_task {
                                     if let Some(queue)=steering_queue.as_ref() {if queue.has_pending_steering(task_id).await {
                                         tool_results.push("[User guidance pending] This operation did not run; apply the queued correction or cancellation first.".into());
                                         continue;
