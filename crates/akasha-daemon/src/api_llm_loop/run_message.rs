@@ -3095,6 +3095,7 @@ pub(crate) async fn run_message_via_llm(
                 }).collect();
                 let rejected_batch = serde_json::json!({"calls":rejected_calls,"omitted_calls":calls.len().saturating_sub(16),"retry_hint":"No call in this batch was executed. Resubmit from the FIRST unexecuted operation, not just the last call. Read existing files before mutation; expected_version may be omitted when this task has a successful read, in which case the runtime binds to that snapshot and rejects stale edits. Use expected_version: missing for creation. A deferred creation did NOT create its file."});
                 let mut previous_batch_call_succeeded = true;
+                let mut account_reply_changed_batch = false;
                 let mut repository_rules_deferred = false;
                 let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
                 for (lane, mut lane_calls) in scheduled_lanes {
@@ -3118,6 +3119,10 @@ pub(crate) async fn run_message_via_llm(
                         lane_call_index+=1;
                         let (name,args)=(&owned_name,&owned_args);
                         tool_result_starts.push(tool_results.len());
+                        if account_reply_changed_batch {
+                            tool_results.push("[User reply applied] This stale proposed operation did not run. Choose new arguments from the user's latest reply before executing another operation.".into());
+                            continue;
+                        }
                         if web_account_task {
                             if let Some(queue)=steering_queue.as_ref() {if queue.has_pending_steering(task_id).await {
                                 tool_results.push("[User guidance pending] This proposed operation did not run. Apply the queued user instruction before choosing another operation.".into());
@@ -3909,6 +3914,9 @@ pub(crate) async fn run_message_via_llm(
                                             .await
                                             {
                                                 Ok(Ok(reply)) => {
+                                                    // Every account reply may change the destination,
+                                                    // credentials or permission of later proposed calls.
+                                                    if web_account_task {account_reply_changed_batch=true;}
                                                     if web_account_task {crate::web_account_task::apply_user_instruction(&mut web_account_scope,&mut web_account_action_required,&mut web_account_action_succeeded,&reply);}
                                                     if web_account_task && crate::web_account_task::stop_reply(&reply) {
                                                         match TaskStore::open(&store_path).and_then(|s| s.transition_if(task_id,
