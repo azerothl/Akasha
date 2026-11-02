@@ -34,10 +34,9 @@ pub(crate) fn schedule_literal_error(message: &str, tool: &str, args: &[String])
     (args.get(1).map(String::as_str)!=Some(expected)).then(||format!("[schedule_task] No schedule was created. Preserve the complete exact requested prompt: {}",serde_json::json!(expected)))
 }
 
-pub(crate) fn native_tools(policy: &akasha_tools::ToolsPolicy, role: &str, name: &str, message: &str) -> Option<Vec<serde_json::Value>> {
+pub(crate) fn native_tools(policy: &akasha_tools::ToolsPolicy, role: &str, name: &str) -> Option<Vec<serde_json::Value>> {
     (matches!(name,"schedule_task"|"cancel_scheduled_task") && policy.can_use_tool(name) && crate::studio_role_policy::allows_tool(role,name)).then(||{
-        let mut schema=crate::studio_tool_contract::argument_schema(name);
-        if name=="schedule_task" {if let Some(prompt)=literal_schedule_prompt(message){schema["properties"]["prompt"]["const"]=serde_json::json!(prompt);}}
+        let schema=crate::studio_tool_contract::argument_schema(name);
         vec![serde_json::json!({"type":"function","function":{"name":name,"description":"Execute the explicitly requested scheduled operation, preserving its literal arguments, and wait for its receipt.","parameters":schema}})]
     })
 }
