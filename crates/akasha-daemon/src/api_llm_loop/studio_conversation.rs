@@ -6,8 +6,10 @@ pub(super) fn initial_user_context<'a>(history: &'a [ConversationMessage], fallb
         .map(|message|message.content.as_str()).unwrap_or(fallback)
 }
 
-pub(super) fn append_account_turn(history: &mut Vec<ConversationMessage>, request: &str, response: &str, results: &str, per_call: &[String], round: u32) {
-    if history.is_empty() { history.push(ConversationMessage::user(request.to_owned())); }
+pub(super) fn append_account_turn(history: &mut Vec<ConversationMessage>, delivered_prompt: &str, response: &str, results: &str, per_call: &[String], round: u32) {
+    // Preserve the full initial session context and each later steering/repair
+    // instruction exactly as delivered, alongside the completed tool receipts.
+    if !delivered_prompt.trim().is_empty() { history.push(ConversationMessage::user(delivered_prompt.to_owned())); }
     history.extend(tool_turn_with_results(response, results, per_call, round, ""));
 }
 
@@ -22,10 +24,11 @@ mod account_history_regressions {
             (1,r#"TOOL_JSON: {"schema_version":1,"tool":"web_fetch","arguments":{"url":"https://example.org/agents.html"}}"#,"Account API contract"),
             (2,r#"TOOL_JSON: {"schema_version":1,"tool":"run_command","arguments":{"program":"worker.exe","args":[]}}"#,"Account created and authenticated read-back passed; id=agent-1"),
             (3,r#"TOOL_JSON: {"schema_version":1,"tool":"web_fetch","arguments":{"url":"https://example.org/docs"}}"#,"Additional public documentation"),
-        ] { append_account_turn(&mut history,"Create and verify one account",call,result,&[result.into()],round); }
+        ] { append_account_turn(&mut history,if round==1 {"Session: account name is beta.\nCreate and verify one account"} else {""},call,result,&[result.into()],round); }
         assert_eq!(history.iter().filter(|m|matches!(m.role,akasha_llm::MessageRole::User)).count(),1);
         assert!(history.iter().any(|m|m.content.contains("id=agent-1")));
         assert!(history.iter().any(|m|m.content.contains("Additional public documentation")));
+        assert!(history[0].content.contains("account name is beta"));
         let calls:Vec<_>=history.iter().flat_map(|m|&m.tool_calls).collect();
         assert_eq!(calls.len(),3);
         for call in calls { assert!(history.iter().any(|m|m.tool_call_id.as_deref()==call["id"].as_str())); }
@@ -35,9 +38,20 @@ mod account_history_regressions {
     fn text_fallback_also_preserves_previous_receipts() {
         let mut history=Vec::new();
         append_account_turn(&mut history,"Create one account","TOOL: run_command worker.exe","id=agent-1 verified",&[],1);
-        append_account_turn(&mut history,"Create one account","TOOL: web_fetch https://example.org/docs","public documentation",&[],2);
+        append_account_turn(&mut history,"","TOOL: web_fetch https://example.org/docs","public documentation",&[],2);
         assert_eq!(history.iter().filter(|m|m.content=="Create one account").count(),1);
         assert!(history.iter().any(|m|m.content.contains("id=agent-1 verified")));
+    }
+
+    #[test]
+    fn account_steering_survives_subsequent_tool_rounds() {
+        let mut history=Vec::new();
+        append_account_turn(&mut history,"Session rules: ask before registration.\nCreate account beta","TOOL: web_fetch https://example.org","API contract",&[],1);
+        append_account_turn(&mut history,"[Steering] Use gamma; permission to register is withdrawn.","TOOL: ask_user","Waiting for permission",&[],2);
+        append_account_turn(&mut history,"","TOOL: read_file public.txt","Public data",&[],3);
+        assert!(history[0].content.contains("ask before registration"));
+        assert_eq!(history.iter().filter(|m|m.content.contains("permission to register is withdrawn")).count(),1);
+        assert!(history.iter().any(|m|m.content.contains("API contract")));
     }
 }
 

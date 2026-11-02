@@ -27,7 +27,6 @@ pub(crate) fn matches(message: &str) -> bool {
         "subagent",
         "plusieurs comptes",
         "multiple accounts",
-        "site web",
         "site complet",
         "application",
         "livrables",
@@ -102,6 +101,11 @@ pub(crate) fn stop_reply(reply: &str) -> bool {
     )
 }
 
+pub(crate) fn retain_native_tools(tools: &mut Vec<serde_json::Value>) {
+    tools.retain(|tool| matches!(tool.pointer("/function/name").and_then(|v|v.as_str()),
+        Some("web_fetch" | "browser" | "run_command" | "read_file" | "write_file" | "list_skills" | "read_skill" | "install_skill" | "ask_user")));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +116,7 @@ mod tests {
             "utilise le skill https://arena.akasha-labs.com/skills/agent-arena/SKILL.md pour te creer un compte sur Arena",
             "continue l'inscrition sur le site https://arena.akasha-labs.com/agents.html",
             "Crée un compte agent sur https://example.org puis vérifie son existence.",
+            "Crée un compte sur le site web https://example.org",
             "Register an agent account at https://example.org/accounts",
         ] { assert!(matches(message), "{message}"); }
     }
@@ -146,6 +151,10 @@ mod tests {
         assert!(!prompt.contains("web_search"));
         assert!(!prompt.contains("web_crawl"));
         assert!(CONTEXT.len() + tools(&akasha_tools::ToolsPolicy::default()).len() < 10000);
+        let mut native=vec![serde_json::json!({"function":{"name":"web_search"}}), serde_json::json!({"function":{"name":"web_fetch"}})];
+        retain_native_tools(&mut native);
+        assert_eq!(native.len(),1);
+        assert_eq!(native[0]["function"]["name"],"web_fetch");
     }
 
     #[test]

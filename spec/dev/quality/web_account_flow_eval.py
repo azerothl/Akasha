@@ -189,6 +189,9 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                         http_json(base, "POST", f"/api/tasks/{task_id}/human-reply", {"request_id": q["request_id"], "response": "stop"})
                         answered = True
                 if task["status"] in {"completed", "failed", "cancelled", "interrupted"}:
+                    if cancel and not (task.get("outcome") or {}).get("response"):
+                        time.sleep(0.25)
+                        continue
                     break
                 time.sleep(0.25)
             else:
@@ -209,6 +212,8 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
             assert not service.state["token_exposed_to_model"], result
             if cancel:
                 assert answered and task["status"] == "cancelled" and service.state["creates"] == 0, result
+                assert task["outcome"]["result"] == "cancelled", result
+                assert "annul" in task["outcome"]["response"].lower(), result
                 assert len(service.state["request_bytes"]) == 1, result
             elif reject or refuse:
                 assert task["status"] == "failed" and service.state["creates"] == 0, result

@@ -2009,6 +2009,9 @@ pub(crate) async fn run_message_via_llm(
                         st.append(&session_id, "user", steer_text.clone()).await;
                     }
                     user_message = format!("{user_message}\n\n{steer_text}");
+                    if web_account_task {
+                        current_prompt.push_str(&format!("\n\n{steer_text}"));
+                    }
                     let _ = store.insert_event(
                         task_id,
                         "user_steering_applied",
@@ -2197,6 +2200,10 @@ pub(crate) async fn run_message_via_llm(
             }else if !code_studio_disk_task && !is_small_talk_fast_lane {
                 tools_executor_snapshot.as_ref()
                     .and_then(|executor| crate::chat_contract::native_tools(&executor.policy, &assigned_agent))
+                    .and_then(|mut tools| {
+                        if web_account_task { crate::web_account_task::retain_native_tools(&mut tools); }
+                        (!tools.is_empty()).then_some(tools)
+                    })
             }else{None};
             let mut turn_tool_names: Option<Vec<String>> = native_tools.as_ref().and_then(|tools|tools.first()?.pointer("/function/parameters/properties/tool/enum")?.as_array().map(|names|names.iter().filter_map(|name|name.as_str().map(str::to_owned)).collect()));
             // Workflow tools use the text protocol. Include their effective
@@ -4556,7 +4563,7 @@ pub(crate) async fn run_message_via_llm(
                         if recorded.is_empty(){"No execution result recorded; do not assume success.".into()}else{recorded}
                     }).collect();
                     if web_account_task {
-                        super::studio_conversation::append_account_turn(&mut conversation,&user_message,&response,&results_blob,&per_call,round);
+                        super::studio_conversation::append_account_turn(&mut conversation,&delivered_prompt,&response,&results_blob,&per_call,round);
                     } else {
                         if !delivered_prompt.trim().is_empty() {conversation.push(if !conversation.is_empty() && (delivered_prompt.trim_start().starts_with("[Active goal") || delivered_prompt.trim_start().starts_with("[Repair the FIRST") || delivered_prompt.trim_start().starts_with("[STUDIO_READ_ONLY_STREAK]")) {akasha_llm::ConversationMessage::runtime_control(delivered_prompt.clone())} else {akasha_llm::ConversationMessage::user(delivered_prompt.clone())});}
                         conversation.extend(super::studio_conversation::tool_turn_with_results(execution_response.as_deref().unwrap_or(&response), &results_blob, &per_call, round, if scope_unchanged && goal_tracker.is_none() {&task_scope}else{""}));
@@ -5698,7 +5705,8 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     }
     if studio_verify_error.is_some() { run_outcome.termination = TerminationReason::VerificationFailed; }
     if goal_tracker.as_ref().is_some_and(|goal|goal.state.state!="completed") && !run_outcome.failed() {run_outcome.termination=TerminationReason::VerificationFailed;reply_text="Objectif non vérifié : l’exécution est arrêtée ou bloquée.".into();}
-    let proposed = if run_outcome.failed() { TaskStatus::Failed } else { TaskStatus::Completed };
+    let proposed = if run_outcome.termination == TerminationReason::Cancelled { TaskStatus::Cancelled }
+        else if run_outcome.failed() { TaskStatus::Failed } else { TaskStatus::Completed };
     let reason = if run_outcome.failed() {
         Some(studio_verify_display_message.as_deref().unwrap_or(&reply_text).chars().take(2000).collect::<String>())
     } else { None };
