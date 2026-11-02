@@ -9,6 +9,8 @@ pub(crate) fn matches(message: &str) -> bool {
     {
         return false;
     }
+    let normalized=message.to_lowercase().replace(['é','è','ê'],"e").replace('’',"'");
+    if registration_withdrawn(&normalized) {return false;}
     // URL paths and query parameters are data, not an instruction to register.
     let text = urls
         .replace_all(message, " ")
@@ -37,7 +39,6 @@ pub(crate) fn matches(message: &str) -> bool {
     {
         return false;
     }
-    if registration_withdrawn(&text) { return false; }
     let account = [
         "compte", "account", "inscri", "sign up", "signup", "register",
     ]
@@ -107,13 +108,34 @@ pub(crate) fn verification_available(policy: &akasha_tools::ToolsPolicy) -> bool
 }
 
 pub(crate) fn update_destination(scope: &mut String, correction: &str) -> bool {
-    if regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("corrected URL").find_iter(correction).any(|m|url::Url::parse(m.as_str()).is_ok()) {
-        *scope=correction.to_owned();true
-    } else {false}
+    let urls=request_urls(correction);
+    let Some(first)=urls.first() else{return false;};
+    let cue=correction.to_lowercase();
+    let relation=regex::Regex::new(r"(?i)\b(?:instead of|rather than|à la place de|a la place de|plutôt que|plutot que)\b").expect("replacement relation");
+    let before=relation.find(correction).map(|at|&correction[..at.start()]);
+    let replacement=before.and_then(|text|request_urls(text).last().cloned());
+    let prose=regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("URL data").replace_all(&cue," ");
+    let replace_cue=regex::Regex::new(r"(?i)\b(?:replace|remplace|from|not|pas)\b").expect("replacement direction").is_match(&prose);
+    let destination=replacement.as_ref().unwrap_or_else(||if replace_cue {urls.last().unwrap()}else{first});
+    let reference=regex::Regex::new(r"\b(?:documentation|docs|reference|référence|exemple)\b").expect("reference link").is_match(&prose);
+    let explicit=correction.trim().trim_end_matches(['.',',',';','!',')',']','/'])==destination.as_str().trim_end_matches('/')
+        || !reference && regex::Regex::new(r"(?i)\b(?:instead|rather|destination|replace|remplace|plutôt|plutot|à la place|a la place)\b").expect("destination correction").is_match(&prose)
+        || matches(correction);
+    if !explicit || request_urls(scope).iter().any(|url|url.origin()==destination.origin()) {return false;}
+    *scope=destination.as_str().to_owned();true
+}
+
+fn request_urls(text: &str) -> Vec<url::Url> {
+    regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("request URLs").find_iter(text)
+        .filter_map(|m|url::Url::parse(m.as_str().trim_end_matches(['.',',',';',':','!',')',']','}'])).ok()).collect()
 }
 
 fn registration_withdrawn(text: &str) -> bool {
-    regex::Regex::new(r"\b(?:don't|do not|never)\s+(?:register|sign\s+up|create\s+(?:(?:an?|the)\s+)?account)\b|\bne\s+(?:cree|creer|creez)\s+pas\b|\bne\s+pas\s+(?:creer|inscrire)\b|\bn'inscri\w*\s+pas\b").expect("withdrawn registration").is_match(text)
+    let text=regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("URL data").replace_all(text,|capture:&regex::Captures| {
+        let value=&capture[0];let trimmed=value.trim_end_matches(['.',',',';',':','!',')',']','}']);format!(" {}",&value[trimmed.len()..])
+    });
+    let prohibition=regex::Regex::new(r"^(?:(?:please|merci de)\s+)?(?:(?:don't|do not|never)\s+(?:register|sign[ -]?up)(?:\s+(?:(?:an?|the|any)\s+)?(?:account|me))?|(?:don't|do not|never)\s+create\s+(?:(?:an?|the|any)\s+)?account|ne\s+(?:cree|creer|creez)\s+pas(?:\s+(?:de|un|le)\s+compte)?|ne\s+pas\s+(?:creer|inscrire)(?:\s+(?:de|un|le)\s+compte)?|n'inscri\w*\s+pas(?:\s+(?:de|un|le)\s+compte)?)(?:\s+(?:at|on|sur)(?:\s+le\s+site)?)?$").expect("withdrawn registration");
+    text.split([';',':','!','\n','.']).any(|clause|prohibition.is_match(clause.trim()))
 }
 
 pub(crate) fn read_only_scope(reply: &str) -> bool {
@@ -121,7 +143,7 @@ pub(crate) fn read_only_scope(reply: &str) -> bool {
     let text=regex::Regex::new(r#"`[^`]*`|"[^"]*""#).expect("quoted data").replace_all(&text," ");
     if registration_withdrawn(&text) {return true;}
     // A summary followed by registration retains the requested mutation.
-    if regex::Regex::new(r"\b(?:create|register|sign\s+up|cree|creer|creez|inscris|inscrire|inscrivez|inscris-moi)\b").expect("retained registration").is_match(&text) {return false;}
+    if regex::Regex::new(r"\b(?:create|register|sign[ -]?up|cree|creer|creez|inscris|inscrire|inscrivez|inscris-moi|continu\w*|reprend\w*|resume\s+(?:registration|signup))\b").expect("retained registration").is_match(&text) {return false;}
     matches!(text.trim(),"read-only"|"read only"|"lecture seule") || ["just summarize", "only summarize", "just summarise", "only summarise", "switch to read-only", "passe en lecture seule", "resume seulement", "resume uniquement", "juste resumer", "contente-toi de resumer", "resume les conditions", "resume les exigences"].iter().any(|phrase|text.contains(phrase))
 }
 
@@ -137,11 +159,12 @@ pub(crate) fn reported_readback(request: &str, tool: &str, result: &str) -> bool
     // returns a body without StatusCode. A verified authenticated read-back
     // still establishes the requested account; never demand a second creation.
     let mutation_ok=receipt.get("mutation_status").map_or(true,|status|status.is_null() || success_status("mutation_status"));
-    if receipt["verified"]!=true || !mutation_ok || !success_status("readback_status") || !receipt["id"].as_str().is_some_and(|id|!id.trim().is_empty()) {return false;}
+    let valid_id=receipt["id"].is_number() || receipt["id"].as_str().is_some_and(|id|!id.trim().is_empty());
+    if receipt["verified"]!=true || !mutation_ok || !success_status("readback_status") || !valid_id {return false;}
     let Some(origin)=receipt["service_origin"].as_str() else{return false;};
     let Ok(origin)=url::Url::parse(origin) else{return false;};
     if !matches!(origin.scheme(),"http"|"https") || !origin.username().is_empty() || origin.password().is_some() || origin.query().is_some() || origin.fragment().is_some() || origin.path()!="/" {return false;}
-    regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("requested URL").find_iter(crate::consumer_workflow::user_text(request)).any(|m|url::Url::parse(m.as_str()).is_ok_and(|url|url.origin()==origin.origin()))
+    request_urls(crate::consumer_workflow::user_text(request)).iter().any(|url|url.origin()==origin.origin())
 }
 
 pub(crate) fn read_only_tool(name: &str, args: &[String]) -> bool {
@@ -156,6 +179,7 @@ mod tests {
     fn a_read_only_correction_withdraws_the_original_account_operation() {
         for reply in ["Don't register; just summarize the requirements", "Ne crée pas de compte : résume les conditions", "Passe en lecture seule", "Don't register", "Please do not register", "Ne crée pas de compte", "Merci de ne pas créer de compte"] {assert!(read_only_scope(reply));}
         for reply in ["Utilise le nom Alpha", "Oui, continue l'inscription", "Create a read-only account at https://example.org", "Avant de créer le compte, montre les conditions puis inscris-moi", "Crée le compte et résume les conditions", "Résume les conditions puis inscris-moi", "Please summarize the requirements then create an account", "Create an account and just summarize the terms afterwards"] {assert!(!read_only_scope(reply));}
+        for reply in ["Crée le compte, ne crée pas de doublon", "Create an account; don't register duplicates", "Oui continue l'inscription et résume les conditions", "Résume les conditions puis reprends l'inscription"] {assert!(!read_only_scope(reply),"{reply}");}
         assert!(read_only_tool("web_fetch",&[]));
         assert!(read_only_tool("browser",&["snapshot".into()]));
         assert!(!read_only_tool("browser",&["click".into(),"submit".into()]));
@@ -168,6 +192,9 @@ mod tests {
         let receipt=serde_json::json!({"verified":true,"id":"agent-1","service_origin":"https://example.org","mutation_status":201,"readback_status":200});
         let output=|value:&serde_json::Value|format!("[run_command worker] exit 0 stdout: {value} stderr: ");
         assert!(reported_readback(request,"run_command",&output(&receipt)));
+        assert!(reported_readback("Create an account at https://example.org.","run_command",&output(&receipt)));
+        let mut numeric=receipt.clone();numeric["id"]=serde_json::json!(42);
+        assert!(reported_readback(request,"run_command",&output(&numeric)));
         let mut powershell_receipt=receipt.clone();powershell_receipt["mutation_status"]=serde_json::Value::Null;
         assert!(reported_readback(request,"run_command",&output(&powershell_receipt)));
         assert!(!reported_readback(request,"browser",&output(&receipt)));
@@ -181,8 +208,16 @@ mod tests {
     fn a_corrected_destination_changes_the_receipt_scope() {
         let mut scope="Create an account at https://old.example".to_owned();
         assert!(!update_destination(&mut scope,"Use the name Alpha"));
+        assert!(!update_destination(&mut scope,"Use https://docs.example.org/api for the API documentation"));
+        assert!(!update_destination(&mut scope,"Use https://docs.example.org/api instead for documentation"));
+        assert!(!update_destination(&mut scope,"Read https://destination.example/profile"));
+        assert!(!update_destination(&mut scope,"Use https://old.example/api instead"));
         assert!(scope.contains("old.example"));
         assert!(update_destination(&mut scope,"Use https://new.example instead"));
+        assert!(!update_destination(&mut scope,"Use https://new.example instead of https://old.example"));
+        assert!(update_destination(&mut scope,"Use https://third.example instead of https://new.example"));
+        assert!(!scope.contains("new.example"));
+        assert!(update_destination(&mut scope,"Use https://new.example instead of https://third.example"));
         let receipt=r#"[run_command worker] exit 0 stdout: {"verified":true,"id":"agent-1","service_origin":"https://new.example","readback_status":200} stderr: "#;
         assert!(reported_readback(&scope,"run_command",receipt));
         let mut policy=akasha_tools::ToolsPolicy::default();policy.allowed_commands.clear();

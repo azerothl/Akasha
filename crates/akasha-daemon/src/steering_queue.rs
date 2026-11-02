@@ -84,6 +84,10 @@ impl SteeringQueueStore {
         item
     }
 
+    pub async fn has_pending_steering(&self, task_id: Uuid) -> bool {
+        self.inner.read().await.get(&task_id).is_some_and(|queue|!queue.steering.is_empty())
+    }
+
     pub async fn drain_steering(&self, task_id: Uuid) -> Vec<QueuedMessage> {
         let mut g = self.inner.write().await;
         let Some(q) = g.get_mut(&task_id) else {
@@ -210,13 +214,16 @@ mod tests {
     async fn drain_steering_then_follow_up() {
         let store = SteeringQueueStore::new();
         let task_id = Uuid::new_v4();
+        assert!(!store.has_pending_steering(task_id).await);
         store
             .enqueue(task_id, QueueMode::Steering, "a".into())
             .await;
         store
             .enqueue(task_id, QueueMode::FollowUp, "b".into())
             .await;
+        assert!(store.has_pending_steering(task_id).await);
         let steering = store.drain_steering(task_id).await;
+        assert!(!store.has_pending_steering(task_id).await);
         assert_eq!(steering.len(), 1);
         assert_eq!(steering[0].text, "a");
         let snap = store.snapshot(task_id).await;

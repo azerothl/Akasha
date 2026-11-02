@@ -104,6 +104,8 @@ class Fixture(BaseHTTPRequestHandler):
                 response = '{"answer_mode":"delegate","task_type":"orchestrator"}'
             elif state["refuse"]:
                 response = "Je ne peux pas utiliser d'outils ni accéder à votre ordinateur."
+            elif state["steer_stop"]:
+                response = "TOOL: run_command " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
             elif state["prepare_only"] and not state["prepared"]:
                 state["prepared"] = True
                 response = "TOOL: run_command " + sys.executable + " -c print(42)"
@@ -124,6 +126,9 @@ class Fixture(BaseHTTPRequestHandler):
             elif not state["repeat_requested"]:
                 state["repeat_requested"] = True
                 response = "TOOL: run_command " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
+            elif state["save_receipt"] and not state["receipt_requested"]:
+                state["receipt_requested"] = True
+                response = "TOOL: write_file " + str(state["receipt_path"]) + '\n{"id":"fixture-agent-1","verified":true}'
             else:
                 response = "Le compte FixtureAgent a été créé et vérifié."
             self.send({"model": "account-fixture", "response": response, "message": {"role": "assistant", "content": response}, "done": True, "prompt_eval_count": len(text) // 3, "eval_count": 60})
@@ -143,7 +148,7 @@ print(json.dumps({"verified":True,"id":me["id"],"name":me["name"],"service_origi
 '''
 
 
-def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False, browser_only: bool = False):
+def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False, browser_only: bool = False, save_receipt: bool = False):
     read_only = read_only or withdraw_only
     evidence.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="web-account-", dir=evidence)).resolve()
@@ -158,6 +163,7 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                      "client": client, "cancel": cancel, "reject": reject, "refuse": refuse, "read_only": read_only, "real_model": model,
                      "native_chat": native_chat, "steer_stop": steer_stop, "model_started": threading.Event(), "release_model": threading.Event()}
     service.state.update(prepare_only=prepare_only, prepared=False, repeat_requested=False)
+    service.state.update(save_receipt=save_receipt, receipt_requested=False, receipt_path=profile / "public-receipt.json")
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
     write_router(profile, model or "account-fixture", origin, "cuda")
@@ -172,6 +178,8 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
               "allowed_commands": [sys.executable, "powershell.exe", "curl.exe"],
               "command_timeout_secs": 20, "default_profile": "fixture",
               "tool_profiles": {"fixture": ["web_fetch", "run_command", "read_file"]}}
+    if save_receipt:
+        policy["tool_profiles"]["fixture"].append("write_file")
     (profile / "tools_policy.yaml").write_text(json.dumps(policy), encoding="utf-8")
     if browser_only:
         policy.update(browser_enabled=True, allowed_commands=[])
@@ -201,6 +209,8 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                       "Nom : FixtureAgent. Mot de passe fictif : SyntheticOnly-2026. "
                       "Vérifie ensuite ce compte avec l'API documentée ; garde le jeton privé. "
                       "Ce service est une simulation locale, aucune inscription publique.")
+            if save_receipt:
+                prompt += f" Enregistre ensuite le reçu public dans le fichier {service.state['receipt_path']}."
             task_id = http_json(base, "POST", "/api/message", {"message": prompt, "session_id": "account-fixture"})["task_id"]
             if steer_stop:
                 assert service.state["model_started"].wait(30)
@@ -259,6 +269,8 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                 assert model or service.state["repeat_requested"], result
                 assert service.state["duplicate_attempts"] == 0, result
                 assert "web_fetch" in tools and "run_command" in tools and "web_search" not in tools and "web_crawl" not in tools, result
+                if save_receipt:
+                    assert json.loads(service.state["receipt_path"].read_text())["id"] == "fixture-agent-1", result
             assert service.state["selector_calls"] == 0, result
             print(json.dumps(result, ensure_ascii=False))
         finally:
@@ -286,5 +298,6 @@ if __name__ == "__main__":
     parser.add_argument("--prepare-only", action="store_true", help="A successful preparation and false claim must fail without an account receipt")
     parser.add_argument("--withdraw-only", action="store_true", help="Withdraw registration without asking for a summary")
     parser.add_argument("--browser-only", action="store_true", help="Refuse an unsupported verification transport before any remote mutation")
+    parser.add_argument("--save-receipt", action="store_true", help="Preserve an authorized file deliverable after verification without replaying registration")
     args = parser.parse_args()
-    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only, args.browser_only)
+    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only, args.browser_only, args.save_receipt)
