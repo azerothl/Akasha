@@ -95,10 +95,12 @@ mod tests {
     }
     #[test]
     fn composer_rules_are_separate_from_the_actual_operation() {
-        let prompt="Private rules\n\nUse write_file for a different example é.";
+        let prompt="Private rules\n\nUse write_file for a different example é, then read it and web_fetch the source.";
         for mode in ["ask","architect","code","custom"] {
             let request=format!("[Guardrail: runtime]\n\n[Composer mode: {mode}; prompt_bytes: {}]\n{prompt}\n\nUse memory_store to save a message",prompt.len());
             assert_eq!(named_tool(&request),Some("memory_store"));
+            assert!(!crate::chat_contract::requires_post_write_read(&request));
+            assert!(!crate::chat_contract::requires_source_fetch(&request));
         }
         assert_eq!(named_tool("[Composer mode: ask; prompt_bytes: 1]\né\n\nUse memory_store"),None);
     }

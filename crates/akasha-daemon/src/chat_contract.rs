@@ -235,7 +235,7 @@ pub(crate) fn requires_source_fetch(request: &str) -> bool {
 
 pub(crate) fn instruction_text(request: &str) -> String {
     regex::Regex::new(r#"`[^`]*`|"(?:\\.|[^"\\])*""#)
-        .expect("literal arguments").replace_all(request, " ").into_owned()
+        .expect("literal arguments").replace_all(crate::consumer_workflow::user_text(request), " ").into_owned()
 }
 
 pub(crate) fn requires_post_write_read(request: &str) -> bool {
