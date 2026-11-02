@@ -1181,7 +1181,7 @@ pub(crate) async fn run_message_via_llm(
     if code_studio_disk_task && !studio_initial_kanban_planning {
         system_prompt.push_str("\n[Studio execution protocol — file contents are structured data]\nFollow the provider native function transport when available (studio_call or the provider adapter). For text fallback, use one TOOL_JSON: object per line with schema_version:1, tool and arguments. File mutations must target the exact requested workspace:/ path and contain only the requested content. Read an existing file successfully before editing it. Include expected_version from that read when available; if omitted, the runtime binds the mutation to this task's latest successful read and still rejects stale edits. For a new file, pass expected_version: missing. Never put call syntax inside file content. Square-bracket/function notation is valid only when the provider adapter explicitly requires its native format; it is not a legacy TOOL format. Do not add a summary to a legacy write_file body: it would become file contents. Wait for the execution result before summarizing in a separate assistant turn. Retain the original user request until ALL requested operations and checks are done. Project templates and maintenance examples never authorize additional files outside the user's explicit task scope.\n");
     }
-    let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
+    let mut system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
     } else {
         Some(system_prompt.trim_end().to_string())
@@ -1917,6 +1917,7 @@ pub(crate) async fn run_message_via_llm(
         let mut web_account_action_succeeded = false;
         let mut direct_tool_succeeded = false;
         let mut scheduled_literal_rejections = 0u32;
+        let mut direct_catalogue_expanded=false;
         let mut web_account_action_required = web_account_task;
         let mut web_account_scope=clean_message.to_owned();
         let mut chat_effect_repairs = 0u32;
@@ -2058,6 +2059,16 @@ pub(crate) async fn run_message_via_llm(
                         .with_correlation(task_id),
                     );
                 }
+            }
+            // Later trusted guidance can change the operation. Lift the initial
+            // restriction and expose the ordinary permitted catalogue once.
+            let direct_tool=direct_tool.filter(|_|scope_unchanged);
+            if durable_tool_task && !web_account_task && !scope_unchanged && !direct_catalogue_expanded {
+                if let Some(registry)=tools_executor.as_ref() {
+                    let executor=registry.read().await;
+                    system_prompt.get_or_insert_with(String::new).push_str(&crate::direct_tool_task::expanded_tools(&executor.policy,&assigned_agent));
+                }
+                direct_catalogue_expanded=true;
             }
             // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
             if let Some(ref store) = task_usage_store {
@@ -2222,7 +2233,7 @@ pub(crate) async fn run_message_via_llm(
                     }
                     (!names.is_empty()).then(||vec![if literal_only {crate::studio_tool_contract::literal_native_definition(names,&explicit_file_literals)}else if let Some(repair)=compiler_repair.as_ref() {repair.definition(names)}else if let Some(target)=build_missing_target.as_ref() {crate::studio_tool_contract::missing_entrypoint_definition(names,target)}else if let Some((ticket,command))=foundation_boundary {crate::studio_vite_scaffold::foundation_definition(names,ticket,command,foundation_ready)}else{crate::studio_tool_contract::native_definition(names)}])
                 })
-            }else if !code_studio_disk_task && !is_small_talk_fast_lane && !web_account_task {
+            }else if !code_studio_disk_task && !is_small_talk_fast_lane && !web_account_task && (!durable_tool_task || scope_unchanged) {
                 tools_executor_snapshot.as_ref()
                     .and_then(|executor| crate::chat_contract::native_tools(&executor.policy, &assigned_agent))
                     .and_then(|mut tools| {
