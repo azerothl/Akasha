@@ -5166,7 +5166,8 @@ pub(crate) async fn run_message_via_llm(
                     continue;
                 }
                 run_outcome.termination = TerminationReason::VerificationFailed;
-                reply_text = format!("La vérification du compte n’est pas confirmée. Le compte peut déjà exister : vérifiez son état avant toute nouvelle inscription.\n{}", response.chars().take(1800).collect::<String>());
+                run_outcome.checks.push(serde_json::json!({"kind":"account_verification","status":"unverified","source":"unverified_model_explanation","explanation":response.chars().take(1800).collect::<String>()}));
+                reply_text = "La vérification du compte n’est pas confirmée. Le compte peut déjà exister : vérifiez son état avant toute nouvelle inscription. Les éléments de la tentative restent consultables dans la tâche.".into();
                 break 'tool_rounds;
             }
             if chat_requires_mutation && !chat_mutation_succeeded {
