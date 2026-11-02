@@ -189,6 +189,27 @@ jobs:
         run: |
           ldd target/debug/akasha-daemon | tee daemon-loader.log
           ! grep -q 'not found' daemon-loader.log
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Chat and agent runtime regressions (isolated local fixtures)
+        timeout-minutes: 5
+        run: |
+          for scenario in native-chat steer-stop withdraw-only prepare-only save-receipt browser-only scope-followup; do
+            python3 spec/dev/quality/web_account_flow_eval.py \
+              --daemon "$PWD/target/debug/akasha-daemon" \
+              --evidence "$RUNNER_TEMP/chat-agent-runtime/$scenario" \
+              "--$scenario"
+          done
+      - name: Preserve chat runtime reports and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-agent-runtime-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/chat-agent-runtime/**/report.json
+            ${{ runner.temp }}/chat-agent-runtime/**/daemon.log
+          if-no-files-found: warn
       - uses: actions/setup-node@v4
         with:
           # Match the Windows candidate toolchain instead of following new LTS majors.
