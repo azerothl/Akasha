@@ -5138,6 +5138,10 @@ pub(crate) async fn run_message_via_llm(
                 let follow_items = sq.drain_follow_up(task_id).await;
                 if !follow_items.is_empty() && !is_subagent {
                     for item in follow_items {
+                        if web_account_task {
+                            if crate::web_account_task::update_destination(&mut web_account_scope,&item.text) {web_account_action_succeeded=false;}
+                            web_account_action_required=crate::web_account_task::authorization_after(web_account_action_required,&web_account_scope,&item.text);
+                        }
                     explicit_file_goals.clear();scope_unchanged=false;
                         let fu = format!(
                             "[Follow-up — poursuivre après le travail en cours]\n{}",
