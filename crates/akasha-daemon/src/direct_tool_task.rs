@@ -8,6 +8,9 @@ pub(crate) fn named_tool(message: &str) -> Option<&'static str> {
     let cue=regex::Regex::new(r"^(?:use(?: only)?|call(?: the)?|utilise(?: uniquement)?|appelle|exécute)(?: l'outil)?\s+([a-z][a-z0-9_]+)\b").expect("explicit tool cue");
     let captures=cue.captures(&text)?;
     let name=captures.get(1)?.as_str();
+    // Only qualified primitive operations use this shortcut. Asynchronous
+    // workflows (crawl start/status, etc.) keep the ordinary tool catalogue.
+    if !matches!(name,"memory_store"|"memory_search"|"schedule_task"|"cancel_scheduled_task"|"read_file"|"write_file"|"web_fetch"|"web_search") {return None;}
     if name!="web_fetch" && crate::chat_contract::requires_source_fetch(&text) {return None;}
     let positive=text.split("do not").next()?.split("n'appelle").next()?.split("n'utilise").next()?;
     let followup=regex::Regex::new(r"\b(then|and|puis|et)\s+(?:(use|call|utilise|appelle)\s+)?([a-z][a-z0-9_]+)\b").expect("tool follow-up");
@@ -57,7 +60,7 @@ mod tests {
     }
     #[test]
     fn explanations_unknown_tools_and_explicit_delegation_keep_their_router() {
-        for message in ["Use web_search to find release notes, then open the source", "Explique memory_store", "Use invented_tool now", "Utilise memory_store puis appelle schedule_task", "Use read_file then write_file", "Use write_file to create notes.txt containing hello, then read it", "Utilise write_file puis relis le fichier", "Utilise memory_search et schedule_task", "Use memory_store then build a complete app", "Use memory_search and delegate the research"] {assert_eq!(named_tool(message),None);}
+        for message in ["Use web_crawl to crawl https://example.org and summarize the collected pages", "Use run_command to start a background worker", "Use web_search to find release notes, then open the source", "Explique memory_store", "Use invented_tool now", "Utilise memory_store puis appelle schedule_task", "Use read_file then write_file", "Use write_file to create notes.txt containing hello, then read it", "Utilise write_file puis relis le fichier", "Utilise memory_search et schedule_task", "Use memory_store then build a complete app", "Use memory_search and delegate the research"] {assert_eq!(named_tool(message),None);}
     }
     #[test]
     fn catalogue_keeps_permissions_and_only_the_requested_operation() {
