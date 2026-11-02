@@ -86,10 +86,16 @@ class Fixture(BaseHTTPRequestHandler):
         elif self.path == "/api/show":
             if state["real_model"]:
                 return self.forward_ollama(body)
-            self.send({"template": "{{ .System }} {{ .Prompt }}", "model_info": {"general.architecture": "qwen", "qwen.context_length": 8192}, "parameters": "num_ctx 8192"})
+            self.send({"template": "{{ .System }} {{ .Messages }} {{ .Tools }}" if state["native_chat"] else "{{ .System }} {{ .Prompt }}", "model_info": {"general.architecture": "qwen", "qwen.context_length": 8192}, "parameters": "num_ctx 8192"})
         elif self.path in {"/api/chat", "/api/generate"}:
             text = json.dumps(body, ensure_ascii=False)
             state["request_bytes"].append(len(text.encode()))
+            if state["native_chat"]:
+                assert not body.get("tools"), "Incomplete native catalogue must not disable text tools"
+                assert "Do not print TOOL:" not in text
+            if state["steer_stop"]:
+                state["model_started"].set()
+                assert state["release_model"].wait(20), "Steering was not delivered"
             state["token_exposed_to_model"] |= state["token"] in text
             if state["real_model"]:
                 return self.forward_ollama(body)
@@ -129,7 +135,7 @@ print(json.dumps({"verified":True,"id":me["id"],"name":me["name"]}))
 '''
 
 
-def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False):
+def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False):
     evidence.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="web-account-", dir=evidence)).resolve()
     test_daemon = copy_daemon_with_runtime(daemon, profile / daemon.name)
@@ -140,7 +146,8 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
     service.state = {"reads": 0, "creates": 0, "create_attempts": 0, "duplicate_attempts": 0, "verified": 0, "selector_calls": 0,
                      "request_bytes": [], "token_exposed_to_model": False,
                      "token": "fixture-token-must-never-leave-worker", "origin": origin,
-                     "client": client, "cancel": cancel, "reject": reject, "refuse": refuse, "read_only": read_only, "real_model": model}
+                     "client": client, "cancel": cancel, "reject": reject, "refuse": refuse, "read_only": read_only, "real_model": model,
+                     "native_chat": native_chat, "steer_stop": steer_stop, "model_started": threading.Event(), "release_model": threading.Event()}
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
     write_router(profile, model or "account-fixture", origin, "cuda")
@@ -181,6 +188,11 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                       "Vérifie ensuite ce compte avec l'API documentée ; garde le jeton privé. "
                       "Ce service est une simulation locale, aucune inscription publique.")
             task_id = http_json(base, "POST", "/api/message", {"message": prompt, "session_id": "account-fixture"})["task_id"]
+            if steer_stop:
+                assert service.state["model_started"].wait(30)
+                queued = http_json(base, "POST", "/api/message", {"message": "annule", "session_id": "account-fixture", "queue_mode": "steering", "target_task_id": task_id})
+                assert queued.get("queued") and queued.get("task_id") == task_id, queued
+                service.state["release_model"].set()
             deadline = time.monotonic() + (600 if model else 180)
             answered = False
             while time.monotonic() < deadline:
@@ -193,7 +205,7 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                         http_json(base, "POST", f"/api/tasks/{task_id}/human-reply", {"request_id": q["request_id"], "response": "Don't register; just summarize the requirements" if read_only else "stop"})
                         answered = True
                 if task["status"] in {"completed", "failed", "cancelled", "interrupted"}:
-                    if cancel and not (task.get("outcome") or {}).get("response"):
+                    if (cancel or steer_stop) and not (task.get("outcome") or {}).get("response"):
                         time.sleep(0.25)
                         continue
                     break
@@ -218,8 +230,8 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                 assert answered and task["status"] == "completed" and service.state["creates"] == 0, result
                 assert "conditions" in task["outcome"]["response"].lower(), result
                 assert len(service.state["request_bytes"]) == 3 and "web_fetch" in tools, result
-            elif cancel:
-                assert answered and task["status"] == "cancelled" and service.state["creates"] == 0, result
+            elif cancel or steer_stop:
+                assert (answered or steer_stop) and task["status"] == "cancelled" and service.state["creates"] == 0, result
                 assert task["outcome"]["result"] == "cancelled", result
                 assert "annul" in task["outcome"]["response"].lower(), result
                 assert len(service.state["request_bytes"]) == 1, result
@@ -251,5 +263,7 @@ if __name__ == "__main__":
     parser.add_argument("--reject", action="store_true", help="Service rejects registration; task must fail explicitly")
     parser.add_argument("--refuse", action="store_true", help="Model invents a lack of tools; task must never succeed")
     parser.add_argument("--read-only", action="store_true", help="Human withdraws registration and asks for a summary only")
+    parser.add_argument("--native-chat", action="store_true", help="Native-chat model retains the complete text tool catalogue")
+    parser.add_argument("--steer-stop", action="store_true", help="Cancel through the steering queue during the first model call")
     args = parser.parse_args()
-    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only)
+    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop)
