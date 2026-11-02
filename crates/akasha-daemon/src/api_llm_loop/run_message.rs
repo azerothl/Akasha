@@ -1910,6 +1910,7 @@ pub(crate) async fn run_message_via_llm(
         let mut chat_mutation_succeeded = false;
         let mut web_account_action_succeeded = false;
         let mut web_account_action_required = web_account_task;
+        let mut web_account_scope=clean_message.to_owned();
         let mut chat_effect_repairs = 0u32;
         let mut chat_completion_repairs = 0u32;
         let mut chat_readback = crate::chat_contract::PostMutationRead::new(tool_disk_workspace_root.clone());
@@ -1951,6 +1952,11 @@ pub(crate) async fn run_message_via_llm(
                 .or_else(||(checkpoint.round>=max_tool_rounds).then(||serde_json::json!({"tool_round_limit":true,"max_tool_rounds":max_tool_rounds})))
         });
         'tool_rounds: loop {
+            if web_account_task && web_account_action_required && !web_account_action_succeeded && !tools_executor_snapshot.as_ref().is_some_and(|executor|crate::web_account_task::verification_available(&executor.policy)) {
+                run_outcome.termination=TerminationReason::ToolError;
+                reply_text="Inscription non démarrée : aucun outil autorisé ne permet la création par API et sa relecture authentifiée. Le navigateur de ce parcours est limité à la consultation ; aucun formulaire n’a été soumis.".into();
+                break 'tool_rounds;
+            }
             if let Some(goal)=goal_tracker.as_mut() {
                 if goal.exhausted() { run_outcome.termination=TerminationReason::BudgetExhausted;reply_text="Limite de cycles, de durée ou de tokens de l’objectif atteinte ; réussite non confirmée.".into();let _=goal.save(&store_path,task_id,"budget_exhausted",&reply_text);break 'tool_rounds; }
                 if let Err(error)=goal.save(&store_path,task_id,"active","Exécution ou vérification en cours") {run_outcome.termination=TerminationReason::ContextUnavailable;reply_text=error;break 'tool_rounds;}
@@ -2001,6 +2007,7 @@ pub(crate) async fn run_message_via_llm(
             if let Some(ref sq) = steering_queue {
                 let steering_items = sq.drain_steering(task_id).await;
                 for item in steering_items {
+                    if web_account_task && crate::web_account_task::update_destination(&mut web_account_scope,&item.text) {web_account_action_succeeded=false;}
                     if web_account_task && crate::web_account_task::stop_reply(&item.text) {
                         match TaskStore::open(&store_path).and_then(|s|s.transition_if(task_id,
                             &[TaskStatus::Running,TaskStatus::WaitingUserInput],TaskStatus::Cancelled)) {
@@ -3155,6 +3162,15 @@ pub(crate) async fn run_message_via_llm(
                         let actual_tool = skill_definition.as_ref().map(|s| s.tool_ref.clone()).unwrap_or_else(|| name.clone());
                         let actual_tool = canonicalize_tool_name(&actual_tool);
                         let tool_args: &[String] = args.as_slice();
+                        if web_account_task && actual_tool=="browser" && !crate::web_account_task::read_only_tool(&actual_tool,tool_args) {
+                            run_outcome.termination=TerminationReason::ToolError;
+                            reply_text="Ce parcours ne peut pas vérifier une inscription interactive par navigateur. Aucune action sur le formulaire n’a été exécutée ; utilisez une API documentée avec une relecture authentifiée.".into();
+                            break 'tool_rounds;
+                        }
+                        if web_account_task && web_account_action_succeeded && !crate::web_account_task::read_only_tool(&actual_tool,tool_args) {
+                            tool_results.push("[Account already verified] No further mutation ran. Use the previous verified account receipt to answer; never register it again.".into());
+                            continue;
+                        }
                         if web_account_task && !web_account_action_required && !crate::web_account_task::read_only_tool(&actual_tool,tool_args) {
                             run_outcome.termination=TerminationReason::ToolError;
                             reply_text="L’utilisateur a limité la tâche à une consultation ; aucune opération susceptible de modifier le compte n’a été exécutée.".into();
@@ -3872,6 +3888,7 @@ pub(crate) async fn run_message_via_llm(
                                             .await
                                             {
                                                 Ok(Ok(reply)) => {
+                                                    if web_account_task && crate::web_account_task::update_destination(&mut web_account_scope,&reply) {web_account_action_succeeded=false;}
                                                     if web_account_task && crate::web_account_task::read_only_scope(&reply) { web_account_action_required = false; }
                                                     if web_account_task && crate::web_account_task::stop_reply(&reply) {
                                                         match TaskStore::open(&store_path).and_then(|s| s.transition_if(task_id,
@@ -4326,7 +4343,7 @@ pub(crate) async fn run_message_via_llm(
                         if success {
                             run_outcome.successful_tool_calls += 1;
                             if actual_tool == "web_search" { chat_search_succeeded = true; }
-                            if web_account_task && crate::web_account_task::reported_readback(clean_message,&actual_tool,&res) {
+                            if web_account_task && crate::web_account_task::reported_readback(&web_account_scope,&actual_tool,&res) {
                                 web_account_action_succeeded = true;
                             }
                             if actual_tool == "web_fetch" { chat_source_fetched = true; }
@@ -5124,7 +5141,7 @@ pub(crate) async fn run_message_via_llm(
             if web_account_task && web_account_action_required && !web_account_action_succeeded {
                 if chat_effect_repairs < 1 && run_outcome.failed_tool_calls == 0 {
                     chat_effect_repairs += 1;
-                    current_prompt = format!("{delivered_prompt}\n[Account operation was not executed]\nNo verified account receipt is available. Preparatory commands and browser clicks do not prove registration. Retain an already created account: never register it again. Obtain the documented authenticated read-back and report its actual HTTP status, the original mutation status, service_origin, id and verified:true as one JSON object from the worker. You run inside Akasha with the actual tools advertised above; do not invent an inability to access the host. Read the supplied URL with web_fetch if not already read, then use the documented API through run_command or the permitted interactive browser. Keep credentials private in a single worker process. Do not repeat completed reads or ask already answered questions. If a tool reports a denial, report that exact failure.\n");
+                    current_prompt = format!("{delivered_prompt}\n[Account operation was not executed]\nNo verified account receipt is available. Preparatory commands and browser clicks do not prove registration. Retain an already created account: never register it again. Obtain the documented authenticated read-back and report its actual HTTP status, the original mutation status, service_origin, id and verified:true as one JSON object from the worker. You run inside Akasha with the actual tools advertised above; do not invent an inability to access the host. Read the supplied URL with web_fetch if not already read, then use the documented API through run_command; browser navigate/snapshot may only inspect the contract. Keep credentials private in a single worker process. Do not repeat completed reads or ask already answered questions. If a tool reports a denial, report that exact failure.\n");
                     continue;
                 }
                 run_outcome.termination = TerminationReason::VerificationFailed;
