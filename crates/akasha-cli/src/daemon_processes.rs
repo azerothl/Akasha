@@ -157,7 +157,7 @@ pub fn inventory() -> anyhow::Result<Vec<Instance>> {
     let uid=String::from_utf8_lossy(&identity.stdout).trim().parse::<u32>()
         .ok().filter(|_|identity.status.success()).ok_or_else(||anyhow::anyhow!("Impossible de déterminer l'utilisateur courant"))?;
     let output = Command::new("ps")
-        .args(["-u", &uid.to_string(), "-o", "pid=,ppid=,lstart=,rss=,comm="])
+        .args(if cfg!(target_os="macos") {vec!["-U".to_owned(),uid.to_string(),"-x".to_owned(),"-o".to_owned(),"pid=,ppid=,lstart=,rss=,comm=".to_owned()]} else {vec!["-u".to_owned(),uid.to_string(),"-o".to_owned(),"pid=,ppid=,lstart=,rss=,comm=".to_owned()]})
         .env("LC_ALL", "C")
         .output()?;
     if !output.status.success() {
