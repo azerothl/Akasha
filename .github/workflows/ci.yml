@@ -147,7 +147,8 @@ jobs:
       always() && needs.changes.result == 'success' &&
       needs.changes.outputs.ui == 'true' &&
       (needs.rust-tests.result == 'success' || needs.rust-tests.result == 'skipped')
-    runs-on: ubuntu-latest
+    # Playwright 1.59 supports Ubuntu 24.04, not the rolling latest image (26.04).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Free disk space

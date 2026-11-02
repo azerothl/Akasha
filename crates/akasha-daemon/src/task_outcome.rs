@@ -15,6 +15,7 @@ pub(crate) enum TerminationReason {
     ToolRoundLimit,
     VerificationFailed,
     ContextUnavailable,
+    Cancelled,
 }
 
 #[derive(Default,Clone,Serialize,Deserialize)]
@@ -37,7 +38,7 @@ impl RunOutcome {
         serde_json::json!({
             "schema_version": 1,
             "termination_reason": self.termination,
-            "result": if !self.failed() { "succeeded" } else if self.successful_tool_calls > 0 { "partial" } else { "failed" },
+            "result": if self.termination == TerminationReason::Cancelled { "cancelled" } else if !self.failed() { "succeeded" } else if self.successful_tool_calls > 0 { "partial" } else { "failed" },
             "successful_tool_calls": self.successful_tool_calls,
             "failed_tool_calls": self.failed_tool_calls,
             "confirmed_file_mutation": self.confirmed_file_mutation(),
