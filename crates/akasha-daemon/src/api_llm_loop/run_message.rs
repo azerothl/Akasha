@@ -2012,7 +2012,7 @@ pub(crate) async fn run_message_via_llm(
             if let Some(ref sq) = steering_queue {
                 let steering_items = sq.drain_steering(task_id).await;
                 for item in steering_items {
-                    if web_account_task && crate::web_account_task::update_destination(&mut web_account_scope,&item.text) {web_account_action_succeeded=false;}
+                    if web_account_task {crate::web_account_task::apply_user_instruction(&mut web_account_scope,&mut web_account_action_required,&mut web_account_action_succeeded,&item.text);}
                     if web_account_task && crate::web_account_task::stop_reply(&item.text) {
                         match TaskStore::open(&store_path).and_then(|s|s.transition_if(task_id,
                             &[TaskStatus::Running,TaskStatus::WaitingUserInput],TaskStatus::Cancelled)) {
@@ -2030,7 +2030,6 @@ pub(crate) async fn run_message_via_llm(
                         st.append(&session_id, "user", steer_text.clone()).await;
                     }
                     user_message = format!("{user_message}\n\n{steer_text}");
-                    if web_account_task {web_account_action_required=crate::web_account_task::authorization_after(web_account_action_required,&web_account_scope,&item.text);}
                     if web_account_task {
                         current_prompt.push_str(&format!("\n\n{steer_text}"));
                     }
@@ -3905,8 +3904,7 @@ pub(crate) async fn run_message_via_llm(
                                             .await
                                             {
                                                 Ok(Ok(reply)) => {
-                                                    if web_account_task && crate::web_account_task::update_destination(&mut web_account_scope,&reply) {web_account_action_succeeded=false;}
-                                                    if web_account_task {web_account_action_required=crate::web_account_task::authorization_after(web_account_action_required,&web_account_scope,&reply);}
+                                                    if web_account_task {crate::web_account_task::apply_user_instruction(&mut web_account_scope,&mut web_account_action_required,&mut web_account_action_succeeded,&reply);}
                                                     if web_account_task && crate::web_account_task::stop_reply(&reply) {
                                                         match TaskStore::open(&store_path).and_then(|s| s.transition_if(task_id,
                                                             &[TaskStatus::Running, TaskStatus::WaitingUserInput], TaskStatus::Cancelled)) {
@@ -5112,7 +5110,7 @@ pub(crate) async fn run_message_via_llm(
                 if !follow_items.is_empty() && !is_subagent {
                     for item in follow_items {
                         if web_account_task {
-                            crate::web_account_task::apply_followup(&mut web_account_scope,&mut web_account_action_required,&mut web_account_action_succeeded,&item.text);
+                            crate::web_account_task::apply_user_instruction(&mut web_account_scope,&mut web_account_action_required,&mut web_account_action_succeeded,&item.text);
                         }
                     explicit_file_goals.clear();scope_unchanged=false;
                         let fu = format!(
@@ -5161,7 +5159,7 @@ pub(crate) async fn run_message_via_llm(
             if web_account_task && web_account_action_required && !web_account_action_succeeded {
                 if chat_effect_repairs < 1 && run_outcome.failed_tool_calls == 0 {
                     chat_effect_repairs += 1;
-                    current_prompt = format!("{delivered_prompt}\n[Account verification not established]\nNo verified account receipt is available. Preparatory commands and browser clicks do not prove registration. Retain an already created account: never register it again. Obtain the documented authenticated read-back and report its actual HTTP status, the original mutation status, service_origin, id and verified:true as one JSON object from the worker. You run inside Akasha with the actual tools advertised above; do not invent an inability to access the host. Read the supplied URL with web_fetch if not already read, then use the documented API through run_command; browser navigate/snapshot may only inspect the contract. Keep credentials private in a single worker process. Do not repeat completed reads or ask already answered questions. If a tool reports a denial, report that exact failure.\n");
+                    current_prompt = format!("{delivered_prompt}\n[Account verification not established]\nNo verified account receipt is available. Preparatory commands and browser clicks do not prove registration. Retain an already created account: never register it again. Obtain the documented authenticated read-back and report its actual HTTP status, the original mutation status, service_origin, id and verified:true as one JSON object from the worker. You run inside Akasha with the actual tools advertised above; do not invent an inability to access the host. Read the supplied URL with web_fetch if not already read, then use the documented API through an advertised run_command or run_terminal worker; browser navigate/snapshot may only inspect the contract. Keep credentials private in a single worker process. Do not repeat completed reads or ask already answered questions. If a tool reports a denial, report that exact failure.\n");
                     continue;
                 }
                 run_outcome.termination = TerminationReason::VerificationFailed;
