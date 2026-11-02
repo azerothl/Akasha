@@ -13,7 +13,7 @@ pub(crate) fn matches(message: &str) -> bool {
     if registration_withdrawn(&normalized) {return false;}
     // URL paths and query parameters are data, not an instruction to register.
     let text = urls
-        .replace_all(message, " ")
+        .replace_all(message, |capture:&regex::Captures| {let value=&capture[0];let trimmed=value.trim_end_matches(['.',',',';',':','!',')',']','}']);format!(" {}",&value[trimmed.len()..])})
         .to_lowercase()
         .replace(['é', 'è', 'ê'], "e")
         .replace('’', "'");
@@ -112,6 +112,16 @@ pub(crate) fn verification_available(policy: &akasha_tools::ToolsPolicy) -> bool
     policy.can_use_tool("run_command") && !policy.allowed_commands.is_empty()
 }
 
+fn positive_targets(text: &str) -> Vec<url::Url> {
+    let pattern=regex::Regex::new(r#"(?i)\b(?:register|create|cr[eé]e(?:r|z)?|inscri\w*)\b[^\n;]*?\b(?:at|on|sur)\s+(https?://[^\s<>"`]+)"#).expect("registration target");
+    let negated=regex::Regex::new(r"(?i)(?:don't|do not|never|ne(?:\s+(?:vous|te)|\s+t')?|n')\s*$").expect("negated target");
+    pattern.captures_iter(text).filter(|capture|!negated.is_match(&text[..capture.get(0).unwrap().start()])).filter_map(|capture|request_urls(&capture[1]).into_iter().next()).collect()
+}
+
+pub(crate) fn verification_scope(message: &str) -> String {
+    positive_targets(crate::consumer_workflow::user_text(message)).last().map(|url|url.as_str().to_owned()).unwrap_or_else(||message.to_owned())
+}
+
 pub(crate) fn update_destination(scope: &mut String, correction: &str) -> bool {
     let urls=request_urls(correction);
     let Some(first)=urls.first() else{return false;};
@@ -121,9 +131,7 @@ pub(crate) fn update_destination(scope: &mut String, correction: &str) -> bool {
     let before=relation.find(correction).map(|at|&correction[..at.start()]);
     let replacement=before.and_then(|text|request_urls(text).last().cloned());
     let prose=regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("URL data").replace_all(&cue," ");
-    let target_pattern=regex::Regex::new(r#"(?i)\b(?:register|create|cree|creer|inscri\w*)\b[^\n;]*?\b(?:at|on|sur)\s+(https?://[^\s<>"`]+)"#).expect("registration target");
-    let negated=regex::Regex::new(r"(?i)(?:don't|do not|never|ne(?:\s+(?:vous|te))?|n')\s*$").expect("negated target");
-    let target=target_pattern.captures_iter(correction).filter(|capture|!negated.is_match(&correction[..capture.get(0).unwrap().start()])).filter_map(|capture|request_urls(&capture[1]).into_iter().next()).last();
+    let target=positive_targets(correction).pop();
     let padded=regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("URL positions").replace_all(correction,|capture:&regex::Captures|" ".repeat(capture[0].len()));
     let negative=regex::Regex::new(r"(?i)\b(?:not|pas)\b").expect("rejected target").find(&padded);
     let before_negative=negative.as_ref().and_then(|at|request_urls(&correction[..at.start()]).last().cloned());
@@ -140,7 +148,7 @@ pub(crate) fn update_destination(scope: &mut String, correction: &str) -> bool {
 }
 
 pub(crate) fn authorization_after(current: bool, scope: &str, correction: &str) -> bool {
-    if read_only_scope(correction) {return false;}
+    if read_only_scope_at(correction,Some(scope)) {return false;}
     current || request_urls(scope).first().is_some_and(|url|matches(&format!("{correction}\n{url}")))
 }
 
@@ -154,17 +162,33 @@ fn request_urls(text: &str) -> Vec<url::Url> {
 }
 
 fn registration_withdrawn(text: &str) -> bool {
-    let text=regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("URL data").replace_all(text,|capture:&regex::Captures| {
-        let value=&capture[0];let trimmed=value.trim_end_matches(['.',',',';',':','!',')',']','}']);format!(" {}",&value[trimmed.len()..])
+    registration_withdrawn_at(text,None)
+}
+
+fn registration_withdrawn_at(text: &str, scope: Option<&str>) -> bool {
+    let permitted=scope.map(request_urls).unwrap_or_else(||positive_targets(text));
+    let mut targets=Vec::new();
+    let text=regex::Regex::new(r#"[`"]?(https?://[^\s<>"`]+)[`"]?"#).expect("URL data").replace_all(text,|capture:&regex::Captures| {
+        let value=&capture[1];let trimmed=value.trim_end_matches(['.',',',';',':','!',')',']','}']);
+        match url::Url::parse(trimmed) {Ok(url)=>{let index=targets.len();targets.push(url);format!(" AKASHA_URL_{index} {}",&value[trimmed.len()..])},Err(_)=>format!(" {}",&value[trimmed.len()..])}
     });
     let prohibition=regex::Regex::new(r"^(?:(?:please|merci de)\s+)?(?:(?:don't|do not|never)\s+(?:register|sign[ -]?up)(?:\s+(?:(?:an?|the|any)\s+)?(?:account|me))?|(?:don't|do not|never)\s+create\s+(?:(?:an?|the|any)\s+)?account|ne\s+(?:cree|creer|creez)\s+pas(?:\s+(?:de|un|le)\s+compte)?|ne\s+pas\s+(?:creer|inscrire)(?:\s+(?:de|un|le)\s+compte)?|n'inscri\w*\s+pas(?:\s+(?:de|un|le)\s+compte)?)(?:\s+(?:at|on|sur)(?:\s+le\s+site)?)?$").expect("withdrawn registration");
-    text.split([';',':','!','\n','.']).any(|clause|prohibition.is_match(clause.trim()))
+    let token=regex::Regex::new(r"\bAKASHA_URL_(\d+)\b").expect("URL identity");
+    text.split([';',':','!','\n','.']).any(|clause| {
+        if !prohibition.is_match(token.replace_all(clause," ").trim()) {return false;}
+        let affected=token.captures_iter(clause).filter_map(|capture|capture[1].parse::<usize>().ok().and_then(|index|targets.get(index))).collect::<Vec<_>>();
+        affected.is_empty() || permitted.is_empty() || affected.iter().any(|target|permitted.iter().any(|url|url.origin()==target.origin()))
+    })
 }
 
 pub(crate) fn read_only_scope(reply: &str) -> bool {
+    read_only_scope_at(reply,None)
+}
+
+fn read_only_scope_at(reply: &str, scope: Option<&str>) -> bool {
     let text=reply.to_lowercase().replace(['é','è','ê'],"e").replace('’',"'");
+    if registration_withdrawn_at(&text,scope) {return true;}
     let text=regex::Regex::new(r#"`[^`]*`|"[^"]*""#).expect("quoted data").replace_all(&text," ");
-    if registration_withdrawn(&text) {return true;}
     // A summary followed by registration retains the requested mutation.
     if regex::Regex::new(r"\b(?:create|register|sign[ -]?up|cree|creer|creez|inscris|inscrire|inscrivez|inscris-moi|continu\w*|reprend\w*|resume\s+(?:registration|signup))\b").expect("retained registration").is_match(&text) {return false;}
     matches!(text.trim(),"read-only"|"read only"|"lecture seule") || ["just summarize", "only summarize", "just summarise", "only summarise", "switch to read-only", "passe en lecture seule", "resume seulement", "resume uniquement", "juste resumer", "contente-toi de resumer", "resume les conditions", "resume les exigences"].iter().any(|phrase|text.contains(phrase))
@@ -255,6 +279,16 @@ mod tests {
         assert!(reported_readback(&scope,"run_command",receipt));
         let mut policy=akasha_tools::ToolsPolicy::default();policy.allowed_commands.clear();
         assert!(!verification_available(&policy));
+        let correction="Create an account at https://new.example; don't register at https://old.example";
+        assert!(matches(correction));
+        assert!(!read_only_scope(correction));
+        let mut scope="https://old.example".to_owned();
+        assert!(update_destination(&mut scope,correction));
+        assert!(authorization_after(true,&scope,correction));
+        assert!(authorization_after(true,&scope,"Don't register at https://old.example"));
+        assert!(!authorization_after(true,&scope,"Don't register at https://new.example"));
+        assert_eq!(verification_scope(correction),"https://new.example/");
+        assert!(reported_readback(&scope,"run_command",receipt));
     }
 
     #[test]

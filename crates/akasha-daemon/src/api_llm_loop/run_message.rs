@@ -1910,7 +1910,7 @@ pub(crate) async fn run_message_via_llm(
         let mut chat_mutation_succeeded = false;
         let mut web_account_action_succeeded = false;
         let mut web_account_action_required = web_account_task;
-        let mut web_account_scope=clean_message.to_owned();
+        let mut web_account_scope=crate::web_account_task::verification_scope(clean_message);
         let mut chat_effect_repairs = 0u32;
         let mut chat_completion_repairs = 0u32;
         let mut chat_readback = crate::chat_contract::PostMutationRead::new(tool_disk_workspace_root.clone());
