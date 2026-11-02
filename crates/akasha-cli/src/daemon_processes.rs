@@ -28,6 +28,11 @@ fn role(path: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+fn executable_role(path: &str, linux: bool) -> Option<&'static str> {
+    // /proc/<pid>/exe retains the original path plus this kernel suffix after
+    // replacement. Only role recognition strips it; identity stays byte-exact.
+    role(if linux { path.strip_suffix(" (deleted)").unwrap_or(path) } else { path })
+}
 fn retain_instances(mut rows: Vec<Instance>) -> Vec<Instance> {
     let parents: Vec<_> = rows
         .iter()
@@ -227,7 +232,7 @@ fn kill_plan(rows: &[Instance], pid: u32) -> anyhow::Result<Vec<Instance>> {
         );
     }
     for row in &plan {
-        if row.started.is_empty() || row.executable.is_empty() || role(&row.executable).is_none() {
+        if row.started.is_empty() || row.executable.is_empty() || executable_role(&row.executable, cfg!(target_os="linux")).is_none() {
             bail!(
                 "Identité du PID {} inaccessible ou invalide ; aucun processus arrêté",
                 row.pid
@@ -440,6 +445,21 @@ mod tests {
         );
         assert!(role("other-akasha-daemon.exe").is_none());
         assert!(role("C:/akasha-daemon.exe/not-a-daemon.exe").is_none());
+    }
+    #[test]
+    fn replaced_linux_binary_keeps_its_full_identity() {
+        assert_eq!(executable_role("/opt/akasha/akasha-daemon (deleted)",true),Some("daemon"));
+        assert_eq!(executable_role("/opt/akasha/akasha (deleted)",true),Some("launcher"));
+        assert_eq!(executable_role("/opt/other-akasha-daemon (deleted)",true),None);
+        assert_eq!(executable_role("C:/akasha-daemon.exe (deleted)",false),None);
+        let mut deleted=instance(100,10,"daemon");
+        deleted.executable="/opt/akasha/akasha-daemon (deleted)".into();
+        let mut replaced=deleted.clone();
+        replaced.executable="/opt/akasha/akasha-daemon".into();
+        assert!(!same_instance(&deleted,&replaced));
+        assert!(same_instance(&deleted,&deleted.clone()));
+        #[cfg(target_os="linux")]
+        assert!(kill_plan(&[deleted],100).is_ok());
     }
     #[test]
     fn kill_stops_supervisor_first_and_keeps_other_instances_out_of_plan() {
