@@ -12,6 +12,7 @@ foreach ($file in $manifest.files) {
     finally { $stream.Dispose();$algorithm.Dispose() }
     if ($hash -ne $file.sha256) { throw "Changed package component: $($file.path)" }
 }
+$explicitProfile=!!$ProfileDir -or !!$env:AKASHA_DATA_DIR
 if (!$ProfileDir) { $ProfileDir=if ($env:AKASHA_DATA_DIR) {$env:AKASHA_DATA_DIR} else {Join-Path $env:USERPROFILE 'akasha'} }
 if ($ProfileDir -eq '~') {$ProfileDir=$env:USERPROFILE}
 elseif ($ProfileDir.StartsWith('~\') -or $ProfileDir.StartsWith('~/')) {$ProfileDir=Join-Path $env:USERPROFILE $ProfileDir.Substring(2)}
@@ -21,7 +22,10 @@ $probe=New-Object Net.Sockets.TcpClient
 try { $busy=$probe.ConnectAsync('127.0.0.1',$Port).Wait(1000) -and $probe.Connected } catch {$busy=$false} finally {$probe.Dispose()}
 if ($busy) {throw "Port $Port is already in use. Close the existing Akasha instance first. No process was stopped."}
 New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
-$env:AKASHA_DATA_DIR=$profilePath;$env:AKASHA_PORT=[string]$Port;$env:AKASHA_BIND='127.0.0.1'
+# Without an override, leave bootstrap resolution to the daemon. Its legacy
+# akasha.env/connectors.env redirects must not be shadowed by our log directory.
+if ($explicitProfile) {$env:AKASHA_DATA_DIR=$profilePath}
+$env:AKASHA_PORT=[string]$Port;$env:AKASHA_BIND='127.0.0.1'
 $env:AKASHA_SPEC_DIR=Join-Path $package 'spec'
 # A prerelease must never stage a downgrade from the stable update channel.
 $env:AKASHA_AUTO_UPDATE='0'
