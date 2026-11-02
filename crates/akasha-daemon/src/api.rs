@@ -5141,6 +5141,9 @@ pub async fn handle_api(
         return resp;
     }
 
+    if method=="GET" && path_only=="/api/status" && !crate::health::status_origin_allowed(headers.iter().find(|(key,_)|key.eq_ignore_ascii_case("origin")).map(|(_,value)|value.as_str())) {
+        return json_response("403 Forbidden",r#"{"error":"origin_not_allowed"}"#);
+    }
     if let Some(resp) = crate::api_routes_docs::try_handle(
         method,
         path_only,
