@@ -151,8 +151,13 @@ fn parse_windows(text: &str) -> anyhow::Result<Vec<Instance>> {
 
 #[cfg(not(windows))]
 pub fn inventory() -> anyhow::Result<Vec<Instance>> {
+    // Only the caller's effective user is within the termination scope. Other
+    // users' /proc identities may be unreadable and must not block our stops.
+    let identity=Command::new("id").arg("-u").output()?;
+    let uid=String::from_utf8_lossy(&identity.stdout).trim().parse::<u32>()
+        .ok().filter(|_|identity.status.success()).ok_or_else(||anyhow::anyhow!("Impossible de déterminer l'utilisateur courant"))?;
     let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,lstart=,rss=,comm="])
+        .args(["-u", &uid.to_string(), "-o", "pid=,ppid=,lstart=,rss=,comm="])
         .env("LC_ALL", "C")
         .output()?;
     if !output.status.success() {
@@ -264,7 +269,11 @@ fn same_instance(expected: &Instance, actual: &Instance) -> bool {
 
 #[cfg(any(target_os="macos",test))]
 fn supervisor_command_line(executable: &str, command: &str) -> bool {
-    [executable.to_owned(),format!("\"{executable}\""),basename(executable).to_owned()].iter().any(|prefix|command.strip_prefix(prefix).is_some_and(|rest|rest.starts_with(char::is_whitespace) && rest.split_whitespace().next()==Some("start")))
+    command.match_indices(char::is_whitespace).any(|(index,_)| {
+        let candidate=command[..index].trim_matches('"');
+        let identity=if executable.contains('/') {candidate==executable || candidate==basename(executable)} else {basename(candidate)==executable};
+        identity && command[index..].split_whitespace().next()==Some("start")
+    })
 }
 
 #[cfg(any(windows,test))]
@@ -455,6 +464,7 @@ mod tests {
     #[test]
     fn macos_supervisors_are_recognized_without_a_live_child() {
         for command in ["/Applications/Akasha Test/akasha start","\"/Applications/Akasha Test/akasha\" start --foreground","akasha start"] {assert!(supervisor_command_line("/Applications/Akasha Test/akasha",command));}
+        for command in ["/usr/local/bin/akasha start","\"/Applications/Akasha Test/akasha\" start --foreground"] {assert!(supervisor_command_line("akasha",command));}
         for command in ["akasha status","akasha-start start","other-akasha start"] {assert!(!supervisor_command_line("/Applications/Akasha Test/akasha",command));}
     }
     #[test]
