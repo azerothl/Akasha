@@ -42,12 +42,13 @@ pub(crate) fn matches(message: &str) -> bool {
     // A negated operation with qualifiers is still not a positive request to
     // create an account. Keep independent positive clauses, e.g. create once
     // followed by "don't register duplicates".
-    let positive=regex::Regex::new(r"\b(?:don't|do not|never|ne|n')\b[^;.!?\n]*").expect("negated clause").replace_all(&text," ");
+    let positive=regex::Regex::new(r"\b(?:don't|do not|never|ne|n')\b[^,;.!?\n]*").expect("negated clause").replace_all(&text," ");
     let account = [
         "compte", "account", "inscri", "sign up", "signup", "register",
     ]
     .iter()
-    .any(|word| positive.contains(word));
+    .any(|word| positive.contains(word))
+        || text.contains("account") && regex::Regex::new(r"\bcreate\s+one\b").expect("account reference").is_match(&positive);
     let action = [
         "cree", "creer", "create", "inscri", "register", "sign up", "signup", "continue",
         "reprend", "connect",
@@ -114,19 +115,37 @@ pub(crate) fn verification_available(policy: &akasha_tools::ToolsPolicy) -> bool
 pub(crate) fn update_destination(scope: &mut String, correction: &str) -> bool {
     let urls=request_urls(correction);
     let Some(first)=urls.first() else{return false;};
+    if read_only_scope(correction) {return false;}
     let cue=correction.to_lowercase();
     let relation=regex::Regex::new(r"(?i)\b(?:instead of|rather than|à la place de|a la place de|plutôt que|plutot que)\b").expect("replacement relation");
     let before=relation.find(correction).map(|at|&correction[..at.start()]);
     let replacement=before.and_then(|text|request_urls(text).last().cloned());
     let prose=regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("URL data").replace_all(&cue," ");
-    let replace_cue=regex::Regex::new(r"(?i)\b(?:replace|remplace|from|not|pas)\b").expect("replacement direction").is_match(&prose);
-    let destination=replacement.as_ref().unwrap_or_else(||if replace_cue {urls.last().unwrap()}else{first});
+    let target_pattern=regex::Regex::new(r#"(?i)\b(?:register|create|cree|creer|inscri\w*)\b[^\n;]*?\b(?:at|on|sur)\s+(https?://[^\s<>"`]+)"#).expect("registration target");
+    let negated=regex::Regex::new(r"(?i)(?:don't|do not|never|ne(?:\s+(?:vous|te))?|n')\s*$").expect("negated target");
+    let target=target_pattern.captures_iter(correction).filter(|capture|!negated.is_match(&correction[..capture.get(0).unwrap().start()])).filter_map(|capture|request_urls(&capture[1]).into_iter().next()).last();
+    let padded=regex::Regex::new(r#"https?://[^\s<>"`]+"#).expect("URL positions").replace_all(correction,|capture:&regex::Captures|" ".repeat(capture[0].len()));
+    let negative=regex::Regex::new(r"(?i)\b(?:not|pas)\b").expect("rejected target").find(&padded);
+    let before_negative=negative.as_ref().and_then(|at|request_urls(&correction[..at.start()]).last().cloned());
+    let after_choice=regex::Regex::new(r"(?i)\b(?:but|mais|with|to|vers)\b").expect("positive replacement").find_iter(&padded).filter_map(|at|request_urls(&correction[at.end()..]).first().cloned()).last();
+    let selected=replacement.or(target).or(before_negative).or(after_choice);
+    if negative.is_some() && selected.is_none() {return false;}
+    let destination=selected.as_ref().unwrap_or(first);
     let reference=regex::Regex::new(r"\b(?:documentation|docs|reference|référence|exemple)\b").expect("reference link").is_match(&prose);
     let explicit=correction.trim().trim_end_matches(['.',',',';','!',')',']','/'])==destination.as_str().trim_end_matches('/')
         || !reference && regex::Regex::new(r"(?i)\b(?:instead|rather|destination|replace|remplace|plutôt|plutot|à la place|a la place)\b").expect("destination correction").is_match(&prose)
         || matches(correction);
     if !explicit || request_urls(scope).iter().any(|url|url.origin()==destination.origin()) {return false;}
     *scope=destination.as_str().to_owned();true
+}
+
+pub(crate) fn authorization_after(current: bool, scope: &str, correction: &str) -> bool {
+    if read_only_scope(correction) {return false;}
+    current || request_urls(scope).first().is_some_and(|url|matches(&format!("{correction}\n{url}")))
+}
+
+pub(crate) fn command_tool(tool: &str) -> bool {
+    matches!(tool,"run_command"|"run_terminal")
 }
 
 fn request_urls(text: &str) -> Vec<url::Url> {
@@ -155,7 +174,7 @@ pub(crate) fn read_only_scope(reply: &str) -> bool {
 /// These are reported HTTP results from the worker, never independent attestation
 /// of an arbitrary command's implementation. End-to-end tests observe the service.
 pub(crate) fn reported_readback(request: &str, tool: &str, result: &str) -> bool {
-    if tool!="run_command" {return false;}
+    if !command_tool(tool) {return false;}
     let Some(stdout)=result.split_once(" stdout: ").map(|(_,tail)|tail.rsplit_once(" stderr: ").map_or(tail,|(out,_)|out)) else{return false;};
     let Ok(receipt)=serde_json::from_str::<serde_json::Value>(stdout.trim()) else{return false;};
     let success_status=|key:&str|receipt[key].as_u64().is_some_and(|status|(200..300).contains(&status));
@@ -188,6 +207,11 @@ mod tests {
         assert!(read_only_tool("browser",&["snapshot".into()]));
         assert!(!read_only_tool("browser",&["click".into(),"submit".into()]));
         assert!(!read_only_tool("run_command",&["curl.exe".into()]));
+        let scope="Create an account at https://example.org";
+        assert!(!authorization_after(true,scope,"Don't register"));
+        assert!(!authorization_after(false,scope,"Use the name Alpha"));
+        assert!(authorization_after(false,scope,"Oui, continue l'inscription"));
+        assert!(authorization_after(false,scope,"Create the account now"));
     }
 
     #[test]
@@ -196,6 +220,7 @@ mod tests {
         let receipt=serde_json::json!({"verified":true,"id":"agent-1","service_origin":"https://example.org","mutation_status":201,"readback_status":200});
         let output=|value:&serde_json::Value|format!("[run_command worker] exit 0 stdout: {value} stderr: ");
         assert!(reported_readback(request,"run_command",&output(&receipt)));
+        assert!(reported_readback(request,"run_terminal",&output(&receipt)));
         assert!(reported_readback("Create an account at https://example.org.","run_command",&output(&receipt)));
         let mut numeric=receipt.clone();numeric["id"]=serde_json::json!(42);
         assert!(reported_readback(request,"run_command",&output(&numeric)));
@@ -222,6 +247,10 @@ mod tests {
         assert!(update_destination(&mut scope,"Use https://third.example instead of https://new.example"));
         assert!(!scope.contains("new.example"));
         assert!(update_destination(&mut scope,"Use https://new.example instead of https://third.example"));
+        assert!(update_destination(&mut scope,"Register at https://fourth.example not https://new.example"));
+        assert!(scope.starts_with("https://fourth.example/"));
+        assert!(update_destination(&mut scope,"Use https://docs.example.org/skill to register at https://new.example"));
+        assert!(scope.starts_with("https://new.example/"));
         let receipt=r#"[run_command worker] exit 0 stdout: {"verified":true,"id":"agent-1","service_origin":"https://new.example","readback_status":200} stderr: "#;
         assert!(reported_readback(&scope,"run_command",receipt));
         let mut policy=akasha_tools::ToolsPolicy::default();policy.allowed_commands.clear();
@@ -238,6 +267,9 @@ mod tests {
             "Register an agent account at https://example.org/accounts",
             "Crée un compte sur https://example.org et résume les conditions",
             "Crée un compte sur https://example.org, ne crée pas de doublon",
+            "I don't have an account, create one at https://example.org",
+            "Je n'ai pas de compte, inscris-moi sur https://example.org",
+            "Don't delay, create an account at https://example.org",
         ] { assert!(matches(message), "{message}"); }
     }
 

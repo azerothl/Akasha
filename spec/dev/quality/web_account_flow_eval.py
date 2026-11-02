@@ -134,7 +134,7 @@ class Fixture(BaseHTTPRequestHandler):
                 response = "TOOL: run_command " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
             elif not state["repeat_requested"]:
                 state["repeat_requested"] = True
-                response = "TOOL: run_command " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
+                response = "TOOL: run_terminal " + sys.executable + " " + str(state["client"]) + " " + state["origin"]
             elif state["save_receipt"] and not state["receipt_requested"]:
                 state["receipt_requested"] = True
                 response = "TOOL: write_file " + str(state["receipt_path"]) + '\n{"id":"fixture-agent-1","verified":true}'
@@ -188,7 +188,7 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
               "web_crawl_enabled": False, "browser_enabled": False, "require_approval": [],
               "allowed_commands": [sys.executable, "powershell.exe", "curl.exe"],
               "command_timeout_secs": 20, "default_profile": "fixture",
-              "tool_profiles": {"fixture": ["web_fetch", "run_command", "read_file"]}}
+              "tool_profiles": {"fixture": ["web_fetch", "run_command", "run_terminal", "read_file"]}}
     if save_receipt:
         policy["tool_profiles"]["fixture"].append("write_file")
     (profile / "tools_policy.yaml").write_text(json.dumps(policy), encoding="utf-8")
