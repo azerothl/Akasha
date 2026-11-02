@@ -149,7 +149,8 @@ def write_router(data_dir: Path, model: str, ollama_url: str, device: str, unava
         "task_types": {},
         "model_options": {},
     }
-    options: dict[str, Any] = {"temperature": 0.0, "max_tokens": MAX_OUTPUT_TOKENS}
+    options: dict[str, Any] = {"temperature": 0.0, "max_tokens": MAX_OUTPUT_TOKENS,
+                               "thinking_level": "off", "num_ctx": 16384}
     if device == "cpu":
         options["num_gpu"] = 0
     elif device == "cuda":
@@ -1094,6 +1095,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                 "generation_config": {
                     "temperature": 0.0,
                     "max_tokens": MAX_OUTPUT_TOKENS,
+                    "thinking_level": "off",
+                    "num_ctx": 16384,
                     "num_gpu": 99 if args.device == "cuda" else 0 if args.device == "cpu" else None,
                 },
                 "provider_observed": sorted({item["provider"] for scenario in scenarios for item in scenario["provider_model_deltas"]}),

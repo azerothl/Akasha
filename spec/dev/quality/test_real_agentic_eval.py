@@ -15,6 +15,16 @@ SPEC.loader.exec_module(eval_runner)
 
 
 class RealAgenticEvalTests(unittest.TestCase):
+    def test_router_pins_context_and_thinking_on_every_measured_route(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            eval_runner.write_router(root,"synthetic-model","http://127.0.0.1:11434","cpu")
+            config=json.loads((root/"llm_router.yaml").read_text())
+            for route in config["task_types"].values():
+                self.assertEqual(route["primary"]["config"]["num_ctx"],16384)
+                self.assertEqual(route["primary"]["config"]["thinking_level"],"off")
+                self.assertEqual(route["primary"]["config"]["num_gpu"],0)
+
     def test_memory_precondition_rejects_incomplete_or_locked_builds(self):
         for state, compiled in [("not_initialized", False), ("locked", True), ("migration_required", True), ("encrypted", False)]:
             with self.subTest(state=state, compiled=compiled), self.assertRaisesRegex(RuntimeError, "memory prerequisite unavailable"):
