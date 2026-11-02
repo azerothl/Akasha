@@ -3139,6 +3139,12 @@ pub(crate) async fn run_message_via_llm(
                         lane_call_index+=1;
                         let (name,args)=(&owned_name,&owned_args);
                         tool_result_starts.push(tool_results.len());
+                        if web_account_task {
+                            if let Some(queue)=steering_queue.as_ref() {if queue.has_pending_steering(task_id).await {
+                                tool_results.push("[User guidance pending] This proposed operation did not run. Apply the queued user instruction before choosing another operation.".into());
+                                continue;
+                            }}
+                        }
                         if literal_batch_rejected {
                             let index=tool_result_starts.len()-1;
                             let error=literal_errors[index].clone().unwrap_or_else(||serde_json::json!({"schema_version":1,"success":false,"error_code":"batch_deferred","error":"No operation executed: this batch contains an invalid tool call or a file content that violates the explicit user literal. Correct it and request the required operations again in order."}).to_string());
@@ -3187,12 +3193,12 @@ pub(crate) async fn run_message_via_llm(
                         let actual_tool = skill_definition.as_ref().map(|s| s.tool_ref.clone()).unwrap_or_else(|| name.clone());
                         let actual_tool = canonicalize_tool_name(&actual_tool);
                         let tool_args: &[String] = args.as_slice();
-                        if web_account_task && actual_tool=="browser" && !crate::web_account_task::read_only_tool(&actual_tool,tool_args) {
+                        if web_account_task && !web_account_action_succeeded && actual_tool=="browser" && !crate::web_account_task::read_only_tool(&actual_tool,tool_args) {
                             run_outcome.termination=TerminationReason::ToolError;
                             reply_text="Ce parcours ne peut pas vérifier une inscription interactive par navigateur. Aucune action sur le formulaire n’a été exécutée ; utilisez une API documentée avec une relecture authentifiée.".into();
                             break 'tool_rounds;
                         }
-                        if web_account_task && web_account_action_succeeded && !crate::web_account_task::read_only_tool(&actual_tool,tool_args) {
+                        if web_account_task && web_account_action_succeeded && (actual_tool=="run_command" || actual_tool=="browser" && !crate::web_account_task::read_only_tool(&actual_tool,tool_args)) {
                             tool_results.push("[Account already verified] No further mutation ran. Use the previous verified account receipt to answer; never register it again.".into());
                             continue;
                         }
@@ -4340,6 +4346,12 @@ pub(crate) async fn run_message_via_llm(
                                     }
                                 }
                             } else {
+                                if web_account_task {
+                                    if let Some(queue)=steering_queue.as_ref() {if queue.has_pending_steering(task_id).await {
+                                        tool_results.push("[User guidance pending] This operation did not run; apply the queued correction or cancellation first.".into());
+                                        continue;
+                                    }}
+                                }
                                 execute_tool_call(
                                     exec,
                                     if code_studio_disk_task && (typed_call.is_some() || approved_delivery_envelope.is_some()){"studio_call"}else{&actual_tool},
