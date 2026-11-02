@@ -195,7 +195,7 @@ jobs:
       - name: Chat and agent runtime regressions (isolated local fixtures)
         timeout-minutes: 5
         run: |
-          for scenario in native-chat steer-stop withdraw-only prepare-only save-receipt browser-only scope-followup; do
+          for scenario in native-chat steer-stop withdraw-only prepare-only save-receipt browser-only scope-followup account-followup; do
             python3 spec/dev/quality/web_account_flow_eval.py \
               --daemon "$PWD/target/debug/akasha-daemon" \
               --evidence "$RUNNER_TEMP/chat-agent-runtime/$scenario" \

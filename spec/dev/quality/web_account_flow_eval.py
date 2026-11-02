@@ -93,7 +93,7 @@ class Fixture(BaseHTTPRequestHandler):
             if state["native_chat"]:
                 assert not body.get("tools"), "Incomplete native catalogue must not disable text tools"
                 assert "Do not print TOOL:" not in text
-            if state["steer_stop"] or state["scope_followup"]:
+            if state["steer_stop"] or state["scope_followup"] or state["account_followup"]:
                 state["model_started"].set()
                 assert state["release_model"].wait(20), "Steering was not delivered"
             state["token_exposed_to_model"] |= state["token"] in text
@@ -102,6 +102,15 @@ class Fixture(BaseHTTPRequestHandler):
             if "strict routing selector" in text:
                 state["selector_calls"] += 1
                 response = '{"answer_mode":"delegate","task_type":"orchestrator"}'
+            elif state["account_followup"]:
+                other = state["secondary"].state
+                current = other if other["origin"] in text else state
+                if not current["reads"]:
+                    response = "TOOL: web_fetch " + current["origin"] + "/agents.html"
+                elif not current["verified"]:
+                    response = "TOOL: run_command " + sys.executable + " " + str(state["client"]) + " " + current["origin"]
+                else:
+                    response = "Compte créé et vérifié."
             elif state["scope_followup"]:
                 if "SCOPE_FILE_CONTENT" in text:
                     response = "SCOPE_OK"
@@ -157,7 +166,7 @@ print(json.dumps({"verified":True,"id":me["id"],"name":me["name"],"service_origi
 '''
 
 
-def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False, browser_only: bool = False, save_receipt: bool = False, scope_followup: bool = False):
+def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False, browser_only: bool = False, save_receipt: bool = False, scope_followup: bool = False, account_followup: bool = False):
     read_only = read_only or withdraw_only
     evidence.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="web-account-", dir=evidence)).resolve()
@@ -175,6 +184,13 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
     service.state.update(save_receipt=save_receipt, receipt_requested=False, receipt_path=profile / "public-receipt.json")
     service.state.update(scope_followup=scope_followup, scope_path=profile / "scope.txt")
     service.state["scope_path"].write_text("SCOPE_FILE_CONTENT", encoding="utf-8")
+    service.state["account_followup"] = account_followup
+    secondary = None
+    if account_followup:
+        secondary = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
+        secondary.state = dict(service.state, origin=f"http://127.0.0.1:{secondary.server_port}", request_bytes=[])
+        service.state["secondary"] = secondary
+        threading.Thread(target=secondary.serve_forever, daemon=True).start()
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
     write_router(profile, model or "account-fixture", origin, "cuda")
@@ -230,6 +246,11 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                 queued = http_json(base, "POST", "/api/message", {"message": "annule", "session_id": "account-fixture", "queue_mode": "steering", "target_task_id": task_id})
                 assert queued.get("queued") and queued.get("task_id") == task_id, queued
                 service.state["release_model"].set()
+            if account_followup:
+                assert service.state["model_started"].wait(30)
+                queued = http_json(base, "POST", "/api/message", {"message": f"Crée aussi un compte agent sur {secondary.state['origin']}/agents.html avec les mêmes informations et vérifie-le.", "session_id": "account-fixture", "queue_mode": "follow_up", "target_task_id": task_id})
+                assert queued.get("queued"), queued
+                service.state["release_model"].set()
             if scope_followup:
                 assert service.state["model_started"].wait(30)
                 queued = http_json(base, "POST", "/api/message", {"message": f"Use read_file to read {service.state['scope_path']}", "session_id": "account-fixture", "queue_mode": "follow_up", "target_task_id": task_id})
@@ -266,10 +287,18 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                       "max_request_bytes": max(service.state["request_bytes"], default=0),
                       "token_exposed_to_model": service.state["token_exposed_to_model"],
                       "model": model or "deterministic-fixture", "profile": str(profile)}
+            if secondary:
+                result["second_service"] = {key: secondary.state[key] for key in ("creates", "verified", "duplicate_attempts")}
             (profile / "report.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
             assert not children.get("children"), result
             assert not service.state["token_exposed_to_model"], result
-            if scope_followup:
+            if account_followup:
+                assert task["status"] == "completed", result
+                assert service.state["creates"] == secondary.state["creates"] == 1, result
+                assert service.state["verified"] == secondary.state["verified"] == 1, result
+                assert service.state["duplicate_attempts"] == secondary.state["duplicate_attempts"] == 0, result
+                assert tools == ["web_fetch", "run_command", "web_fetch", "run_command"], result
+            elif scope_followup:
                 assert task["status"] == "completed" and task["outcome"]["response"] == "SCOPE_OK", result
                 assert tools == ["web_fetch", "read_file"] and service.state["creates"] == 0, result
             elif browser_only:
@@ -303,6 +332,9 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
                 process.wait(timeout=10)
             service.shutdown()
             service.server_close()
+            if secondary:
+                secondary.shutdown()
+                secondary.server_close()
 
 
 if __name__ == "__main__":
@@ -321,5 +353,6 @@ if __name__ == "__main__":
     parser.add_argument("--browser-only", action="store_true", help="Refuse an unsupported verification transport before any remote mutation")
     parser.add_argument("--save-receipt", action="store_true", help="Preserve an authorized file deliverable after verification without replaying registration")
     parser.add_argument("--scope-followup", action="store_true", help="An explicit single-tool task accepts a user follow-up requiring a different tool")
+    parser.add_argument("--account-followup", action="store_true", help="A queued request creates and verifies exactly one account on a second independent local service")
     args = parser.parse_args()
-    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only, args.browser_only, args.save_receipt, args.scope_followup)
+    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only, args.browser_only, args.save_receipt, args.scope_followup, args.account_followup)
