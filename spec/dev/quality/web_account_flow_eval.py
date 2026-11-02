@@ -108,6 +108,18 @@ class Fixture(BaseHTTPRequestHandler):
             if "strict routing selector" in text:
                 state["selector_calls"] += 1
                 response = '{"answer_mode":"delegate","task_type":"orchestrator"}'
+            elif state["retarget_human"]:
+                other = state["secondary"].state
+                state["stale_deferred"] |= "[User reply applied]" in text
+                if not state["asked_retarget"]:
+                    state["asked_retarget"] = True
+                    response = 'TOOL: ask_user\n{"question":"Quel site utiliser ?"}\nTOOL: run_command ' + sys.executable + " " + str(state["client"]) + " " + state["origin"]
+                elif not other["reads"]:
+                    response = "TOOL: web_fetch " + other["origin"] + "/agents.html"
+                elif not other["verified"]:
+                    response = "TOOL: run_command " + sys.executable + " " + str(state["client"]) + " " + other["origin"]
+                else:
+                    response = "Compte créé et vérifié sur le site corrigé."
             elif state["account_followup"]:
                 other = state["secondary"].state
                 current = other if other["origin"] in text else state
@@ -172,7 +184,7 @@ print(json.dumps({"verified":True,"id":me["id"],"name":me["name"],"service_origi
 '''
 
 
-def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False, browser_only: bool = False, save_receipt: bool = False, scope_followup: bool = False, account_followup: bool = False):
+def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, reject: bool = False, refuse: bool = False, read_only: bool = False, native_chat: bool = False, steer_stop: bool = False, prepare_only: bool = False, withdraw_only: bool = False, browser_only: bool = False, save_receipt: bool = False, scope_followup: bool = False, account_followup: bool = False, retarget_human: bool = False):
     read_only = read_only or withdraw_only
     evidence.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="web-account-", dir=evidence)).resolve()
@@ -191,8 +203,9 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
     service.state.update(scope_followup=scope_followup, scope_path=profile / "scope.txt")
     service.state["scope_path"].write_text("SCOPE_FILE_CONTENT", encoding="utf-8")
     service.state["account_followup"] = account_followup
+    service.state.update(retarget_human=retarget_human, asked_retarget=False, stale_deferred=False)
     secondary = None
-    if account_followup:
+    if account_followup or retarget_human:
         secondary = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
         secondary.state = dict(service.state, origin=f"http://127.0.0.1:{secondary.server_port}", request_bytes=[])
         service.state["secondary"] = secondary
@@ -266,12 +279,14 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
             answered = False
             while time.monotonic() < deadline:
                 task = http_json(base, "GET", f"/api/tasks/{task_id}")
-                if (cancel or read_only) and not answered:
+                if (cancel or read_only or retarget_human) and not answered:
                     events = http_json(base, "GET", f"/api/tasks/{task_id}/events")["events"]
                     questions = [e["payload"] for e in events if e["event_type"] == "task_waiting_user_input"]
                     if questions:
                         q = questions[-1]
                         reply = "Don't register" if withdraw_only else "Don't register; just summarize the requirements" if read_only else "stop"
+                        if retarget_human:
+                            reply = f"Use {secondary.state['origin']} instead"
                         http_json(base, "POST", f"/api/tasks/{task_id}/human-reply", {"request_id": q["request_id"], "response": reply})
                         answered = True
                 if task["status"] in {"completed", "failed", "cancelled", "interrupted"}:
@@ -299,7 +314,11 @@ def run(daemon: Path, evidence: Path, model: str | None, cancel: bool = False, r
             (profile / "report.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
             assert not children.get("children"), result
             assert not service.state["token_exposed_to_model"], result
-            if account_followup:
+            if retarget_human:
+                assert answered and task["status"] == "completed" and service.state["stale_deferred"], result
+                assert service.state["create_attempts"] == 0 and secondary.state["creates"] == secondary.state["verified"] == 1, result
+                assert tools == ["ask_user", "web_fetch", "run_command"], result
+            elif account_followup:
                 assert task["status"] == "completed", result
                 assert service.state["creates"] == secondary.state["creates"] == 1, result
                 assert service.state["verified"] == secondary.state["verified"] == 1, result
@@ -367,5 +386,6 @@ if __name__ == "__main__":
     parser.add_argument("--save-receipt", action="store_true", help="Preserve an authorized file deliverable after verification without replaying registration")
     parser.add_argument("--scope-followup", action="store_true", help="An explicit single-tool task accepts a user follow-up requiring a different tool")
     parser.add_argument("--account-followup", action="store_true", help="A queued request creates and verifies exactly one account on a second independent local service")
+    parser.add_argument("--retarget-human", action="store_true", help="Discard a stale batched registration after a human changes its destination")
     args = parser.parse_args()
-    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only, args.browser_only, args.save_receipt, args.scope_followup, args.account_followup)
+    run(args.daemon, args.evidence, args.model, args.cancel, args.reject, args.refuse, args.read_only, args.native_chat, args.steer_stop, args.prepare_only, args.withdraw_only, args.browser_only, args.save_receipt, args.scope_followup, args.account_followup, args.retarget_human)
