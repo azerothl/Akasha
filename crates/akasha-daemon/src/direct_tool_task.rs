@@ -61,6 +61,10 @@ mod tests {
             assert!(!crate::chat_contract::requires_post_write_read(request));
         }
         assert!(crate::chat_contract::requires_post_write_read(r#"Use write_file containing "then read", then read the file"#));
+        let query=r#"Use web_search to search for "web_fetch" documentation"#;
+        assert_eq!(named_tool(query), Some("web_search"));
+        assert!(!crate::chat_contract::requires_source_fetch(query));
+        assert!(crate::chat_contract::requires_source_fetch(&format!("{query}, then open the source")));
     }
     #[test]
     fn explicit_tool_requests_do_not_need_a_project_planner() {

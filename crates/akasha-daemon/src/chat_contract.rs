@@ -230,7 +230,7 @@ pub(crate) fn literal_write_error(request: &str, tool: &str, args: &[String]) ->
 }
 
 pub(crate) fn requires_source_fetch(request: &str) -> bool {
-    regex::Regex::new(r"(?i)(?:ouvre|ouvrir|open|fetch|consulte|consulter)\s+(?:(?:la|sa|cette|the|its)\s+)?(?:source|page)|web_fetch").unwrap().is_match(request)
+    regex::Regex::new(r"(?i)(?:ouvre|ouvrir|open|fetch|consulte|consulter)\s+(?:(?:la|sa|cette|the|its)\s+)?(?:source|page)|web_fetch").unwrap().is_match(&instruction_text(request))
 }
 
 pub(crate) fn instruction_text(request: &str) -> String {
