@@ -45,9 +45,11 @@ class ExpertLaunchSafetyTests(unittest.TestCase):
         self.assertFalse(profile.exists())
 
     def test_relative_profile_is_rejected_before_starting_any_binary(self):
-        result = self.invoke('relative-profile', 3876)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('must be absolute', result.stderr)
+        for profile in ['relative-profile', 'C:relative-profile', r'\relative-profile']:
+            with self.subTest(profile=profile):
+                result = self.invoke(profile, 3876)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('must be absolute', result.stderr)
         self.assertFalse((self.root / 'relative-profile').exists())
 
     def test_tampered_component_is_rejected_before_profile_creation(self):

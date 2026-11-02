@@ -65,6 +65,8 @@ jobs:
           $sourceStatus = git status --porcelain
           if ($LASTEXITCODE) { throw 'Unable to inspect source provenance' }
           if ($sourceStatus) { $sourceStatus; throw 'Candidate compilation requires a clean checkout' }
+      - name: Verify Expert launcher safety
+        run: python -m unittest discover -s scripts/ci/tests -p test_expert_beta_launch.py -v
       - name: Build Expert CLI and TUI
         run: cargo build --locked --release -p akasha-cli -p akasha-tui --features akasha-store/memory-sqlcipher
       - name: Compile CPU candidate

@@ -15,7 +15,7 @@ foreach ($file in $manifest.files) {
 if (!$ProfileDir) { $ProfileDir=if ($env:AKASHA_DATA_DIR) {$env:AKASHA_DATA_DIR} else {Join-Path $env:USERPROFILE 'akasha'} }
 if ($ProfileDir -eq '~') {$ProfileDir=$env:USERPROFILE}
 elseif ($ProfileDir.StartsWith('~\') -or $ProfileDir.StartsWith('~/')) {$ProfileDir=Join-Path $env:USERPROFILE $ProfileDir.Substring(2)}
-if (![IO.Path]::IsPathRooted($ProfileDir)) {throw 'The data directory must be absolute.'}
+if ($ProfileDir -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') {throw 'The data directory must be absolute.'}
 $profilePath=[IO.Path]::GetFullPath($ProfileDir)
 $probe=New-Object Net.Sockets.TcpClient
 try { $busy=$probe.ConnectAsync('127.0.0.1',$Port).Wait(1000) -and $probe.Connected } catch {$busy=$false} finally {$probe.Dispose()}
