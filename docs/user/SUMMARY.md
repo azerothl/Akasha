@@ -1,0 +1,16 @@
+# Parcours utilisateur Akasha
+
+- [Accueil](./accueil.md)
+- [Installation](./installation.md)
+- [Configuration](./configuration.md)
+- [Commandes](./commandes.md)
+- [Interfaces](./interfaces.md)
+- [Mission autonome](./mission.md)
+- [Données et mémoire](./donnees.md)
+- [Workspace](./workspace.md)
+- [Skills, plugins et canaux](./extensions.md)
+- [Extensions vs akasha-os](./extensions-vs-akasha-os.md)
+- [Observabilité](./observabilite.md)
+- [Companion LAN](./companion-lan.md)
+- [Dépannage](./depannage.md)
+- [Nouveautés](./nouveautes.md)
