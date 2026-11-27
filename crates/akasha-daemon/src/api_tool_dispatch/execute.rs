@@ -729,6 +729,27 @@ pub(crate) async fn execute_tool_call_impl(
             }
         }
         "read_file" => {
+            if let [path, mode] = args {
+                if mode == "--exact-utf8" && Path::new(path).is_absolute() {
+                    use tokio::io::AsyncReadExt;
+                    let path = resolve_tool_disk_path(path, workspace_root);
+                    let result = async {
+                        anyhow::ensure!(executor.policy.can_read(&path), "path not allowed by policy");
+                        anyhow::ensure!(tokio::fs::metadata(&path).await?.is_file(), "expected a regular file");
+                        let limit = READ_FILE_FULL_OUTPUT_MAX_BYTES;
+                        let mut content = Vec::new();
+                        tokio::fs::File::open(&path).await?.take(limit as u64 + 1)
+                            .read_to_end(&mut content).await?;
+                        anyhow::ensure!(content.len() <= limit, "file exceeds the complete read limit");
+                        let content = String::from_utf8(content)?;
+                        Ok::<_, anyhow::Error>(content)
+                    }.await;
+                    return match result {
+                        Ok(content) => (true, format!("[read_file {}] full file ({} UTF-8 bytes):\n{}", path.display(), content.len(), content), None),
+                        Err(error) => (false, format!("[read_file] {error}"), None),
+                    };
+                }
+            }
             let (path_tokens, explicit_window, want_full) = parse_read_file_args(args);
             let path_input = path_tokens.join(" ");
             let path_str = normalize_tool_path_hint(&path_input);
@@ -2683,7 +2704,10 @@ pub(crate) async fn execute_tool_call_impl(
                     None,
                 );
             };
-            let content = strip_markdown_fences_from_write_content(&content);
+            let preserve_text = !code_only && args.len() == 1
+                && serde_json::from_str::<serde_json::Value>(&args[0])
+                    .is_ok_and(|value| value["preserve_text"] == true);
+            let content = if preserve_text { content } else { strip_markdown_fences_from_write_content(&content) };
             let ext_check_path = path_for_agent_write_extension_check(&path_str);
             if code_only && !crate::api_studio::path_has_agent_code_extension(&ext_check_path) {
                 return (

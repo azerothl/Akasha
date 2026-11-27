@@ -641,6 +641,9 @@ User message:\n{}",
             && crate::web_account_task::matches(&original_user_message_owned);
         let single_tool_operation = studio_disk_root.is_none() && studio_forced_spawn.is_none()
             && crate::direct_tool_task::named_tool(&original_user_message_owned).is_some();
+        let verified_copy = studio_disk_root.is_none() && studio_forced_spawn.is_none()
+            && image_data_urls.as_ref().is_none_or(Vec::is_empty)
+            && crate::direct_tool_task::VerifiedCopy::parse(&original_user_message_owned).is_some();
         tokio::spawn(async move {
             let store_path = store_path_buf.as_path();
             let message = message_owned.as_str();
@@ -697,13 +700,13 @@ User message:\n{}",
                     timed_out: false,
                     elapsed_ms: 0,
                 }
-            } else if forward_to_orchestrator && !has_source_workflow && (web_account_operation || single_tool_operation) {
+            } else if forward_to_orchestrator && !has_source_workflow && (web_account_operation || single_tool_operation || verified_copy) {
                 SelectorRunResult {
                     decision: Some(SelectorDecision {
                         answer_mode: SelectorAnswerMode::Direct,
                         task_type: Some("conversation".into()),
                         target_agent: None,
-                        reason: Some(if web_account_operation {"single_web_account_operation"}else{"explicit_single_tool_operation"}.into()),
+                        reason: Some(if web_account_operation {"single_web_account_operation"}else if verified_copy {"verified_file_copy"}else{"explicit_single_tool_operation"}.into()),
                     }),
                     enabled: false,
                     timed_out: false,

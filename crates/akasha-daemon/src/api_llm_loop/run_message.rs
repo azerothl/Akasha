@@ -1929,6 +1929,14 @@ pub(crate) async fn run_message_via_llm(
         let mut chat_effect_repairs = 0u32;
         let mut chat_completion_repairs = 0u32;
         let mut chat_readback = crate::chat_contract::PostMutationRead::new(tool_disk_workspace_root.clone());
+        let mut verified_copy = if !code_studio_disk_task && !is_subagent
+            && assigned_agent == "conversation" && tools_executor_snapshot.is_some()
+            && image_data_urls.as_ref().is_none_or(Vec::is_empty)
+        {
+            crate::direct_tool_task::VerifiedCopy::parse(clean_message)
+        } else {
+            None
+        };
         let mut chat_search_succeeded = false;
         let mut chat_source_fetched = false;
         let mut chat_literal_rejections = 0u32;
@@ -2303,6 +2311,14 @@ pub(crate) async fn run_message_via_llm(
                 insert_task_tracking_event(&store_path,task_id,"bounded_native_model_wait",serde_json::json!({"round":round+1,"timeout_secs":llm_timeout_secs,"files_changed":false}));
             }
             let delivered_prompt = request.prompt.clone();
+            let copy_call = if scope_unchanged {
+                verified_copy.as_ref().and_then(crate::direct_tool_task::VerifiedCopy::call)
+            } else {
+                None
+            };
+            let response = if copy_call.is_some() {
+                String::new()
+            } else {
             let estimated_request_tokens=serde_json::to_vec(&request).map(|bytes|bytes.len() as u64).unwrap_or(request.prompt.len() as u64);
             let (stream_tx, std_rx) = std::sync::mpsc::channel::<String>();
             let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -2678,11 +2694,13 @@ pub(crate) async fn run_message_via_llm(
             // `contains("TOOL:")` check so that any provider-specific formatting is handled consistently.
             let response =
                 crate::api_llm_stream::choose_merged_response_for_tools(&response, &accumulated);
+            response
+            };
 
             // One observable retry is allowed for an explicit file creation before
             // any effect, with the physical/tool guards still enforced. Persist its
             // marker in checks so a restart cannot reset this retry allowance.
-            if response.trim().is_empty() {
+            if copy_call.is_none() && response.trim().is_empty() {
                 if code_studio_disk_task && scope_unchanged && super::studio_completion::can_retry_empty(&explicit_file_goals,run_outcome.successful_tool_calls,run_outcome.failed_tool_calls,&run_outcome.checks) {
                     run_outcome.checks.push(serde_json::json!({"kind":"empty_generation_retry","status":"retried","attempt":1,"detail":"Empty response before any tool effect; a real operation is still required. A second empty generation remains model_empty."}));
                     current_prompt=format!("{delivered_prompt}\n[Empty generation retry — no tool operation ran]\nYour previous generation was empty. Execute the explicitly requested file operations with real tools, in their requested order and exact contents. A final claim cannot replace an operation. After the confirmed operations, finish normally.");
@@ -2717,7 +2735,8 @@ pub(crate) async fn run_message_via_llm(
             }
 
             let requested_tool_example = !code_studio_disk_task && crate::chat_contract::requested_tool_example(clean_message, &response);
-            let mut parsed_tool_calls = tools_executor_snapshot.as_ref().filter(|_| !requested_tool_example).and_then(|_| {
+            let verified_copy_turn = copy_call.is_some();
+            let mut parsed_tool_calls = copy_call.map(|call| vec![call]).or_else(|| tools_executor_snapshot.as_ref().filter(|_| !requested_tool_example).and_then(|_| {
                 let calls = if code_studio_disk_task {super::studio_conversation::parse_calls_for_turn(&response,turn_tool_names.as_deref())}
                     else if let Some(name)=direct_tool {super::studio_conversation::parse_calls_for_turn(&response,Some(&[name.to_owned(),"ask_user".into()]))}
                     else {parse_tool_calls(&response)};
@@ -2726,7 +2745,7 @@ pub(crate) async fn run_message_via_llm(
                 } else {
                     Some(calls)
                 }
-            });
+            }));
             if code_studio_disk_task && assigned_agent.eq_ignore_ascii_case("studio_project_manager")
             {
                 if let Some(calls) = parsed_tool_calls.as_ref() {
@@ -4636,6 +4655,24 @@ pub(crate) async fn run_message_via_llm(
                                 });
                             }
                         }
+                        if verified_copy_turn && scope_unchanged {
+                            let copy = verified_copy.as_mut().expect("verified copy turn");
+                            match copy.observe(success, &res) {
+                                Ok(Some(message)) => {
+                                    reply_text = message.into();
+                                    break 'tool_rounds;
+                                }
+                                Ok(None) => {
+                                    round += 1;
+                                    continue 'tool_rounds;
+                                }
+                                Err(error) => {
+                                    run_outcome.termination = TerminationReason::ToolError;
+                                    reply_text = error;
+                                    break 'tool_rounds;
+                                }
+                            }
+                        }
                         tool_results.push(res);
                         // A fresh foundation receipt authorizes one mechanical
                         // handoff, through the ordinary policy/ledger lane. No
@@ -4651,6 +4688,11 @@ pub(crate) async fn run_message_via_llm(
                             }
                         }
                     }
+                }
+                if verified_copy_turn && scope_unchanged {
+                    run_outcome.termination = TerminationReason::ToolError;
+                    reply_text = tool_results.join("\n");
+                    break 'tool_rounds;
                 }
                 let execution_response=runtime_commands_added.then(||super::studio_conversation::scheduled_execution_response(&calls)).flatten();
                 let results_blob = tool_results.join("\n");
