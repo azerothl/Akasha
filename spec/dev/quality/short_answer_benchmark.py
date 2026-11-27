@@ -161,13 +161,20 @@ def run_case(case, root, base, calls, timeout, index):
                 status = task["status"]
                 elapsed = time.monotonic() - start
                 answer = (task.get("outcome") or {}).get("response") or ""
-                events = http_json(base, "GET", f"/api/tasks/{task_id}/events").get("events", [])
                 break
             time.sleep(0.1)
     except (RuntimeError, KeyError) as exc:
         status = "timeout" if time.monotonic() - start >= timeout else "error"
         error = str(exc)
     elapsed = elapsed if elapsed is not None else time.monotonic() - start
+    # A timed-out workflow can already have performed some of its operations.
+    generation_requests = calls[previous:]
+    event_error = None
+    if task_id is not None:
+        try:
+            events = http_json(base, "GET", f"/api/tasks/{task_id}/events", timeout=2).get("events", [])
+        except RuntimeError as exc:
+            event_error = str(exc)
     tool_events = [
         event["payload"] for event in events
         if event.get("event_type") == "tool_invoked" and event.get("payload")
@@ -177,13 +184,13 @@ def run_case(case, root, base, calls, timeout, index):
         "case": case, "repetition": index, "status": status,
         "correct": (status == "completed" or (case == "ambigu" and status == "waiting_user_input"))
         and bool(verify(answer, tools)),
-        "latency_ms": round(elapsed * 1000, 1), "model_calls": len(calls) - previous,
-        "generation_requests": calls[previous:], "task_id": task_id, "prompt": prompt,
+        "latency_ms": round(elapsed * 1000, 1), "model_calls": len(generation_requests),
+        "generation_requests": generation_requests, "task_id": task_id, "prompt": prompt,
         "expected_fixture": marker if case in {"lecture", "plusieurs_etapes"} else None,
         "copy_matches": target.is_file() and target.read_bytes() == marker.encode() if case == "plusieurs_etapes" else None,
         "tool_events": tool_events,
         "route": next((event.get("payload") for event in events if event.get("event_type") == "short_answer_route"), None),
-        "answer": answer, "error": error,
+        "answer": answer, "error": error, "event_error": event_error,
     }
 
 

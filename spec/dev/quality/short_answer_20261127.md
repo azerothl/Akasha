@@ -75,3 +75,35 @@ n'a été produite. La campagne montre que ces demandes continuent d'emprunter l
 parcours agentique, dont l'exécution reste à qualifier avec un modèle capable
 d'appeler les outils dans cette configuration. Le taux global de 60 % décrit
 uniquement ces cinq scénarios sur `qwen3.5:2b`.
+
+## Validation complémentaire des outils
+
+Les mêmes binaires ont été rejoués avec `qwen3.5:9b` et `gpt-oss:20b`, dont
+Ollama déclare la prise en charge des outils. Chaque comparaison utilise le
+même modèle sur les deux variantes, chargé sur la RTX 4080 SUPER. Le contexte
+reste à 8 192 jetons et la température à zéro. La limite de sortie est de
+512 jetons et le délai par essai de 45 secondes. Le
+[fichier de résultats](short_answer_tools_20261127.json) contient les commandes,
+les empreintes et le détail des opérations observées, y compris après expiration
+du délai. Ces petits lots visent à vérifier l’exécution des outils. Ils ne
+permettent pas de comparer des percentiles ni d’établir une régression.
+
+| Modèle | Lecture réussie avant → après | Copie et relecture terminées avant → après | Détail de la tâche multiétape |
+| --- | ---: | ---: | --- |
+| Qwen3.5 9B | 1/1 → 1/1 | 0/1 → 0/1 | Deux délais dépassés. Le candidat lit la source et crée une copie exacte, puis relit la source. |
+| GPT-OSS 20B | 2/2 → 1/2 | 0/2 → 0/2 | Avant, un délai dépassé et un échec. Après, deux délais dépassés. Aucune copie produite. |
+
+La lecture est vérifiée par un appel `read_file` réussi sur le fichier de test
+et une réponse qui correspond exactement à son contenu. Aucun essai sur les
+fichiers n'a emprunté le parcours court. La lecture fonctionne sur les deux
+versions avec les deux modèles, avec un délai dépassé sur le second essai
+GPT-OSS du candidat.
+
+Un premier lot Qwen 9B a produit six résultats sur huit. L’observateur SQLite
+de diagnostic a verrouillé le profil temporaire au moment de son nettoyage
+sous Windows. Ce lot est conservé à titre exploratoire. Dans le deuxième essai
+multiétape du candidat, les événements capturés montrent la lecture de la
+source, l’écriture de la copie puis sa relecture avec le contenu attendu. La
+tâche continuait néanmoins de réécrire et relire la copie et a atteint le délai
+de 45 secondes sans état terminal. Le benchmark récupère désormais les événements
+via l’API même après expiration du délai.
