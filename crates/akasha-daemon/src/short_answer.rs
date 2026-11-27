@@ -28,10 +28,10 @@ static DISCOUNT: LazyLock<Regex> = LazyLock::new(|| {
     )).expect("valid discount pattern")
 });
 static AUTONOMOUS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:qu.est-ce qu[e'’]|c.est quoi|définis|explique brièvement|what is|define)\s*[\p{L}\p{N} '’()/-]{2,100}[?.!]?$").expect("valid question pattern")
+    Regex::new(r"(?i)^(?:qu['’]est-ce qu[e'’]|c['’]est quoi\s+|définis\s+|explique brièvement\s+|what is an?\s+|define\s+)[\p{L}\p{N} '’()-]{2,100}[?.!]?$").expect("valid question pattern")
 });
 static EXCLUSION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:fichier|file|joint|pièce|document|dépôt|repo|workspace|projet|project|mon|ma|mes|notre|my|our|actualité|actuel|actuelle|dernier|dernière|aujourd.hui|current|latest|today|agenda|météo|web|cherche|recherche|vérifie|crée|ouvre|écris|envoie|puis|ensuite|compare|search|find|open|send|create|then|and|et)\b").expect("valid exclusion pattern")
+    Regex::new(r"(?i)\b(?:fichier|file|dossier|folder|répertoire|directory|contenu|contents?|inside|dans|inspecte?|list|liste|joint|pièce|document|dépôt|repo|workspace|projet|project|mon|ma|mes|notre|my|our|actualité|actuel|actuelle|dernier|dernière|aujourd.hui|current|latest|today|agenda|météo|web|cherche|recherche|vérifie|crée|ouvre|écris|envoie|puis|ensuite|compare|search|find|open|send|create|then|and|et)\b").expect("valid exclusion pattern")
 });
 
 pub(crate) fn route_reason(message: &str) -> Option<&'static str> {
@@ -187,7 +187,7 @@ pub(crate) async fn run(
             repeat_penalty: None,
             num_ctx: None,
             num_gpu: None,
-            thinking_level: None,
+            thinking_level: Some("off".into()),
             preferred_task_type: Some("conversation".into()),
             system_prompt: None,
             image_data_urls: None,
@@ -323,8 +323,17 @@ mod tests {
             route_reason("Qu’est-ce qu’un algorithme ?"),
             Some("autonomous_conversation")
         );
+        assert_eq!(
+            route_reason("What is an algorithm?"),
+            Some("autonomous_conversation")
+        );
         for prompt in [
             "What is the latest price?",
+            "What is inside /tmp?",
+            "Define /tmp",
+            "What is in README?",
+            "C'est quoi le contenu du dossier temporaire ?",
+            "Explique brièvement ce qui se trouve dans AppData",
             "Explique brièvement mon projet",
             "Définis le mot puis écris un fichier",
             "Ouvre le document.",
