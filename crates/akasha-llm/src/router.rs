@@ -792,7 +792,6 @@ impl LLMRouter {
             }
         }
         let routes = self.strict_routes(request, routes, selected.is_some()).await?;
-        let routes = tool_compatible_routes(request, routes, &options)?;
         let resolve = self.resolve();
         let routes = routes.into_iter().filter(|entry| !self.degraded_mode || resolve(&entry.provider).is_some_and(|provider|provider.is_local())).collect();
         crate::bounded::complete_stream(request, routes, &resolve, &options, &self.metrics, chunk_tx, budget, allow_same_retry, &self.studio_health, selected.is_some(), observe).await
