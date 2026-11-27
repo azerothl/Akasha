@@ -309,20 +309,28 @@ cargo test -p akasha-daemon --no-default-features --lib
 
 ## Parcours court et justesse des réponses
 
-Le benchmark lance deux binaires du daemon avec des profils jetables et un modèle
-Ollama local déjà chargé. La réponse est évaluée sur un corpus de questions
-autonomes, de calculs, de demandes ambiguës et d’opérations sur des fichiers
-fictifs. Les appels au modèle sont comptés au niveau HTTP, y compris la
-sélection, la planification et les tentatives supplémentaires.
+Le benchmark compare deux binaires du daemon avec des profils jetables et le
+même modèle Ollama local préchargé. Il alterne l’ordre des versions à chaque
+répétition. Le corpus couvre une question autonome, le calcul de la remise
+de 25 % sur 80 € suivi de 5 € de frais, une demande ambiguë, la lecture d’un
+fichier fictif et sa copie suivie d’une relecture.
+
+Les appels HTTP de génération incluent la sélection, la planification et les
+tentatives supplémentaires. Les scénarios sur fichiers vérifient les
+événements d’outils réussis. Le scénario multiétape vérifie aussi le contenu de
+la copie et l’ordre lecture, écriture et relecture.
 
 ```bash
 python spec/dev/quality/short_answer_benchmark.py \
   --baseline /chemin/avant/akasha-daemon --candidate /chemin/apres/akasha-daemon \
-  --model qwen3.5:2b --device cpu --repetitions 30 --out short-answer-results.json
+  --model qwen3.5:2b --device cuda --repetitions 30 --timeout 30 \
+  --context-size 8192 --out short-answer-results.json
 ```
 
-Le rapport JSON contient les versions et empreintes des binaires, les résultats
-par essai, le taux de réponses correctes, le p50 et le p95 des réponses correctes
-et les statuts des échecs. Pour un contrôle rapide, utiliser
-`--repetitions 1 --cases question calcul ambigu`. Le p95 de ce contrôle est
-indicatif. Les binaires comparés doivent utiliser les mêmes options de compilation.
+Les binaires doivent utiliser les mêmes options de compilation. Le rapport
+JSON conserve leur version et leur empreinte, les réglages, le taux de justesse,
+les erreurs et les délais dépassés. Le fichier JSONL reçoit chaque essai au
+fur et à mesure. Les p50 et p95 sont calculés par rang sur les réponses
+correctes uniquement. Un effectif nul donne un percentile indisponible. En
+dessous de vingt réponses correctes, interpréter le p95 avec prudence.
+Pour un contrôle rapide, utiliser `--repetitions 1 --cases question calcul ambigu`.
