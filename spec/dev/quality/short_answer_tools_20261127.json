@@ -1,0 +1,1086 @@
+{
+  "campaigns": [
+    {
+      "model": "qwen3.5:9b",
+      "device": "cuda",
+      "host": "Windows-11-10.0.26320-SP0",
+      "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "gpu": [
+        "NVIDIA GeForce RTX 4080 SUPER, 16376 MiB"
+      ],
+      "command": [
+        "python",
+        "spec/dev/quality/short_answer_benchmark.py",
+        "--baseline",
+        "E:\\workspace\\akasha-short-answer-bins\\baseline.exe",
+        "--candidate",
+        "E:\\workspace\\akasha-short-answer-bins\\candidate-334f8de.exe",
+        "--ollama",
+        "http://127.0.0.1:11477",
+        "--model",
+        "qwen3.5:9b",
+        "--device",
+        "cuda",
+        "--context-size",
+        "8192",
+        "--timeout",
+        "45",
+        "--max-tokens",
+        "512",
+        "--repetitions",
+        "1",
+        "--cases",
+        "lecture",
+        "plusieurs_etapes",
+        "--work-dir",
+        "E:/workspace",
+        "--out",
+        "E:\\workspace\\akasha-short-answer-bins\\tools-recheck-qwen3.5-9b.json"
+      ],
+      "settings": {
+        "temperature": 0,
+        "num_ctx": 8192,
+        "max_tokens": 512,
+        "thinking_level": "off",
+        "num_gpu": 99,
+        "fallback": false
+      },
+      "ollama": {
+        "version": "0.40.16"
+      },
+      "warm_model": {
+        "name": "qwen3.5:9b",
+        "size_vram_bytes": 5762732522,
+        "context_length": 8192
+      },
+      "repetitions": 1,
+      "timeout_s": 45,
+      "cases": [
+        "lecture",
+        "plusieurs_etapes"
+      ],
+      "baseline": {
+        "binary": {
+          "name": "baseline.exe",
+          "sha256": "0eb0fc49e0112651ad93779f039c28d1131cc8450eb9a4c7f5c47cee73e1debe",
+          "size_bytes": 110436864
+        },
+        "samples": [
+          {
+            "case": "lecture",
+            "repetition": 1,
+            "status": "completed",
+            "correct": true,
+            "latency_ms": 15031.0,
+            "model_calls": 3,
+            "generation_requests": [
+              "/api/generate",
+              "/api/generate",
+              "/api/generate"
+            ],
+            "task_id": "8ea7695a-4c37-4639-aa8f-a291a92f8cc8",
+            "prompt": "Lis le fichier \"E:/workspace/akasha-answer-f1po44yj/fixtures/lecture/source.txt\" avec read_file puis renvoie uniquement son contenu.",
+            "expected_fixture": "AKASHA-457fe39f22ca4d4bb861dabf64eee949",
+            "copy_matches": null,
+            "tool_events": [
+              {
+                "args": [
+                  "E:/workspace/akasha-answer-f1po44yj/fixtures/lecture/source.txt",
+                  "--full"
+                ],
+                "explanation": null,
+                "result_preview": "[read_file E:/workspace/akasha-answer-f1po44yj/fixtures/lecture/source.txt] full file (1 lines, 39 bytes):\nAKASHA-457fe39f22ca4d4bb861dabf64eee949",
+                "skill": null,
+                "success": true,
+                "tool": "read_file"
+              }
+            ],
+            "route": null,
+            "answer": "AKASHA-457fe39f22ca4d4bb861dabf64eee949",
+            "error": null,
+            "event_error": null
+          },
+          {
+            "case": "plusieurs_etapes",
+            "repetition": 1,
+            "status": "timeout",
+            "correct": false,
+            "latency_ms": 45016.0,
+            "model_calls": 7,
+            "generation_requests": [
+              "/api/generate",
+              "/api/generate",
+              "/api/generate",
+              "/api/generate",
+              "/api/generate",
+              "/api/generate",
+              "/api/generate"
+            ],
+            "task_id": "731fbf90-acd3-44d4-ac74-d986d03a3613",
+            "prompt": "Lis \"E:/workspace/akasha-answer-f1po44yj/fixtures/plusieurs_etapes/source.txt\" avec read_file, copie son contenu exact dans \"E:/workspace/akasha-answer-f1po44yj/fixtures/plusieurs_etapes/copie.txt\" avec write_file, puis relis la copie avec read_file pour vérifier qu'elle est identique.",
+            "expected_fixture": "AKASHA-1749bb8c93914a1f9113cb1e65d05add",
+            "copy_matches": false,
+            "tool_events": [
+              {
+                "args": [
+                  "E:/workspace/akasha-answer-f1po44yj/fixtures/plusieurs_etapes/source.txt",
+                  "--full"
+                ],
+                "explanation": null,
+                "result_preview": "[read_file E:/workspace/akasha-answer-f1po44yj/fixtures/plusieurs_etapes/source.txt] full file (1 lines, 39 bytes):\nAKASHA-1749bb8c93914a1f9113cb1e65d05add",
+                "skill": null,
+                "success": true,
+                "tool": "read_file"
+              },
+              {
+                "args": [
+                  "E:/workspace/akasha-answer-f1po44yj/fixtures/plusieurs_etapes/source.txt"
+                ],
+                "explanation": null,
+                "result_preview": "[read_file E:/workspace/akasha-answer-f1po44yj/fixtures/plusieurs_etapes/source.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nAKASHA-1749bb8c93914a1f9113cb1e65d05add",
+                "skill": null,
+                "success": true,
+                "tool": "read_file"
+              }
+            ],
+            "route": null,
+            "answer": "",
+            "error": null,
+            "event_error": null
+          }
+        ],
+        "version": "0.13.0-beta.3",
+        "overall": {
+          "samples": 2,
+          "correct": 1,
+          "accuracy": 0.5,
+          "p50_correct_ms": 15031.0,
+          "p95_correct_ms": 15031.0,
+          "model_calls": 10,
+          "statuses": {
+            "completed": 1,
+            "timeout": 1
+          },
+          "timeouts": 1,
+          "errors": 0,
+          "p95_sample_count": 1
+        },
+        "summary": {
+          "lecture": {
+            "samples": 1,
+            "correct": 1,
+            "accuracy": 1.0,
+            "p50_correct_ms": 15031.0,
+            "p95_correct_ms": 15031.0,
+            "model_calls": 3,
+            "statuses": {
+              "completed": 1
+            },
+            "timeouts": 0,
+            "errors": 0,
+            "p95_sample_count": 1
+          },
+          "plusieurs_etapes": {
+            "samples": 1,
+            "correct": 0,
+            "accuracy": 0.0,
+            "p50_correct_ms": null,
+            "p95_correct_ms": null,
+            "model_calls": 7,
+            "statuses": {
+              "timeout": 1
+            },
+            "timeouts": 1,
+            "errors": 0,
+            "p95_sample_count": 0
+          }
+        }
+      },
+      "candidate": {
+        "binary": {
+          "name": "candidate-334f8de.exe",
+          "sha256": "62f88a9099635f525e8b9356d3e020ae155dcb6ef580def6673abbf5a62dde94",
+          "size_bytes": 110503424
+        },
+        "samples": [
+          {
+            "case": "lecture",
+            "repetition": 1,
+            "status": "completed",
+            "correct": true,
+            "latency_ms": 10172.0,
+            "model_calls": 3,
+            "generation_requests": [
+              "/api/generate",
+              "/api/generate",
+              "/api/generate"
+            ],
+            "task_id": "3fe9b001-3d82-4462-81d2-b5a91955e0f4",
+            "prompt": "Lis le fichier \"E:/workspace/akasha-answer-16kt3gmq/fixtures/lecture/source.txt\" avec read_file puis renvoie uniquement son contenu.",
+            "expected_fixture": "AKASHA-cc68b7b19fbf4989b798df57874242e2",
+            "copy_matches": null,
+            "tool_events": [
+              {
+                "args": [
+                  "E:/workspace/akasha-answer-16kt3gmq/fixtures/lecture/source.txt",
+                  "--full"
+                ],
+                "explanation": null,
+                "result_preview": "[read_file E:/workspace/akasha-answer-16kt3gmq/fixtures/lecture/source.txt] full file (1 lines, 39 bytes):\nAKASHA-cc68b7b19fbf4989b798df57874242e2",
+                "skill": null,
+                "success": true,
+                "tool": "read_file"
+              }
+            ],
+            "route": null,
+            "answer": "AKASHA-cc68b7b19fbf4989b798df57874242e2",
+            "error": null,
+            "event_error": null
+          },
+          {
+            "case": "plusieurs_etapes",
+            "repetition": 1,
+            "status": "timeout",
+            "correct": false,
+            "latency_ms": 45000.0,
+            "model_calls": 6,
+            "generation_requests": [
+              "/api/generate",
+              "/api/generate",
+              "/api/generate",
+              "/api/generate",
+              "/api/generate",
+              "/api/generate"
+            ],
+            "task_id": "13789b6c-d1ea-4964-b2aa-0c1e139deea3",
+            "prompt": "Lis \"E:/workspace/akasha-answer-16kt3gmq/fixtures/plusieurs_etapes/source.txt\" avec read_file, copie son contenu exact dans \"E:/workspace/akasha-answer-16kt3gmq/fixtures/plusieurs_etapes/copie.txt\" avec write_file, puis relis la copie avec read_file pour vérifier qu'elle est identique.",
+            "expected_fixture": "AKASHA-d77e645e958d486588fb4d5f82e53aca",
+            "copy_matches": true,
+            "tool_events": [
+              {
+                "args": [
+                  "E:/workspace/akasha-answer-16kt3gmq/fixtures/plusieurs_etapes/source.txt"
+                ],
+                "explanation": null,
+                "result_preview": "[read_file E:/workspace/akasha-answer-16kt3gmq/fixtures/plusieurs_etapes/source.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nAKASHA-d77e645e958d486588fb4d5f82e53aca",
+                "skill": null,
+                "success": true,
+                "tool": "read_file"
+              },
+              {
+                "args": [
+                  "[redacted for write-like tool]"
+                ],
+                "explanation": null,
+                "result_preview": "[write_file E:/workspace/akasha-answer-16kt3gmq/fixtures/plusieurs_etapes/copie.txt] wrote 39 bytes",
+                "skill": null,
+                "success": true,
+                "tool": "write_file"
+              },
+              {
+                "args": [
+                  "E:/workspace/akasha-answer-16kt3gmq/fixtures/plusieurs_etapes/source.txt"
+                ],
+                "explanation": null,
+                "result_preview": "[read_file E:/workspace/akasha-answer-16kt3gmq/fixtures/plusieurs_etapes/source.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nAKASHA-d77e645e958d486588fb4d5f82e53aca",
+                "skill": null,
+                "success": true,
+                "tool": "read_file"
+              }
+            ],
+            "route": null,
+            "answer": "",
+            "error": null,
+            "event_error": null
+          }
+        ],
+        "version": "0.13.0-beta.3",
+        "overall": {
+          "samples": 2,
+          "correct": 1,
+          "accuracy": 0.5,
+          "p50_correct_ms": 10172.0,
+          "p95_correct_ms": 10172.0,
+          "model_calls": 9,
+          "statuses": {
+            "completed": 1,
+            "timeout": 1
+          },
+          "timeouts": 1,
+          "errors": 0,
+          "p95_sample_count": 1
+        },
+        "summary": {
+          "lecture": {
+            "samples": 1,
+            "correct": 1,
+            "accuracy": 1.0,
+            "p50_correct_ms": 10172.0,
+            "p95_correct_ms": 10172.0,
+            "model_calls": 3,
+            "statuses": {
+              "completed": 1
+            },
+            "timeouts": 0,
+            "errors": 0,
+            "p95_sample_count": 1
+          },
+          "plusieurs_etapes": {
+            "samples": 1,
+            "correct": 0,
+            "accuracy": 0.0,
+            "p50_correct_ms": null,
+            "p95_correct_ms": null,
+            "model_calls": 6,
+            "statuses": {
+              "timeout": 1
+            },
+            "timeouts": 1,
+            "errors": 0,
+            "p95_sample_count": 0
+          }
+        }
+      },
+      "model_manifest_sha256": "9cda952e5d8f43bd4ddd3954c82e404e6cc286e04ceb77fa536f9f7113d7b28d"
+    },
+    {
+      "model": "gpt-oss:20b",
+      "device": "cuda",
+      "host": "Windows-11-10.0.26320-SP0",
+      "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "gpu": [
+        "NVIDIA GeForce RTX 4080 SUPER, 16376 MiB"
+      ],
+      "command": [
+        "python",
+        "spec/dev/quality/short_answer_benchmark.py",
+        "--baseline",
+        "E:\\workspace\\akasha-short-answer-bins\\baseline.exe",
+        "--candidate",
+        "E:\\workspace\\akasha-short-answer-bins\\candidate-334f8de.exe",
+        "--ollama",
+        "http://127.0.0.1:11476",
+        "--model",
+        "gpt-oss:20b",
+        "--device",
+        "cuda",
+        "--context-size",
+        "8192",
+        "--timeout",
+        "45",
+        "--max-tokens",
+        "512",
+        "--repetitions",
+        "2",
+        "--cases",
+        "lecture",
+        "plusieurs_etapes",
+        "--work-dir",
+        "E:/workspace",
+        "--out",
+        "E:\\workspace\\akasha-short-answer-bins\\tools-smoke-gpt-oss-20b.json"
+      ],
+      "settings": {
+        "temperature": 0,
+        "num_ctx": 8192,
+        "max_tokens": 512,
+        "thinking_level": "off",
+        "num_gpu": 99,
+        "fallback": false
+      },
+      "ollama": {
+        "version": "0.40.16"
+      },
+      "warm_model": {
+        "name": "gpt-oss:20b",
+        "size_vram_bytes": 12743815986,
+        "context_length": 8192
+      },
+      "repetitions": 2,
+      "timeout_s": 45,
+      "cases": [
+        "lecture",
+        "plusieurs_etapes"
+      ],
+      "baseline": {
+        "binary": {
+          "name": "baseline.exe",
+          "sha256": "0eb0fc49e0112651ad93779f039c28d1131cc8450eb9a4c7f5c47cee73e1debe",
+          "size_bytes": 110436864
+        },
+        "samples": [
+          {
+            "case": "lecture",
+            "repetition": 1,
+            "status": "completed",
+            "correct": true,
+            "latency_ms": 19500.0,
+            "model_calls": 3,
+            "generation_requests": [
+              "/api/generate",
+              "/api/chat",
+              "/api/chat"
+            ],
+            "task_id": "41fa5df9-d3f3-4746-b697-28b6a797ddc0",
+            "prompt": "Lis le fichier \"E:/workspace/akasha-answer-fkmk8cbm/fixtures/lecture/source.txt\" avec read_file puis renvoie uniquement son contenu.",
+            "expected_fixture": "AKASHA-6b0a863e57254b6580364eeb891fd57d",
+            "copy_matches": null,
+            "tool_events": [
+              {
+                "args": [
+                  "E:/workspace/akasha-answer-fkmk8cbm/fixtures/lecture/source.txt",
+                  "--full"
+                ],
+                "explanation": null,
+                "result_preview": "[read_file E:/workspace/akasha-answer-fkmk8cbm/fixtures/lecture/source.txt] full file (1 lines, 39 bytes):\nAKASHA-6b0a863e57254b6580364eeb891fd57d",
+                "skill": null,
+                "success": true,
+                "tool": "read_file"
+              }
+            ],
+            "route": null,
+            "answer": "AKASHA-6b0a863e57254b6580364eeb891fd57d",
+            "error": null,
+            "event_error": null
+          },
+          {
+            "case": "plusieurs_etapes",
+            "repetition": 1,
+            "status": "timeout",
+            "correct": false,
+            "latency_ms": 45047.0,
+            "model_calls": 4,
+            "generation_requests": [
+              "/api/chat",
+              "/api/chat",
+              "/api/chat",
+              "/api/chat"
+            ],
+            "task_id": "1bbdefd2-e918-4020-94d7-197affc334f1",
+            "prompt": "Lis \"E:/workspace/akasha-answer-fkmk8cbm/fixtures/plusieurs_etapes/source.txt\" avec read_file, copie son contenu exact dans \"E:/workspace/akasha-answer-fkmk8cbm/fixtures/plusieurs_etapes/copie.txt\" avec write_file, puis relis la copie avec read_file pour vérifier qu'elle est identique.",
+            "expected_fixture": "AKASHA-71e253019d5b4bb4a949f5898387dd8a",
+            "copy_matches": false,
+            "tool_events": [],
+            "route": null,
+            "answer": "",
+            "error": null,
+            "event_error": null
+          },
+          {
+            "case": "lecture",
+            "repetition": 2,
+            "status": "completed",
+            "correct": true,
+            "latency_ms": 7250.0,
+            "model_calls": 3,
+            "generation_requests": [
+              "/api/generate",
+              "/api/chat",
+              "/api/chat"
+            ],
+            "task_id": "65edde16-6f78-4299-b88f-2af49ab6f594",
+            "prompt": "Lis le fichier \"E:/workspace/akasha-answer-68cskhda/fixtures/lecture/source.txt\" avec read_file puis renvoie uniquement son contenu.",
+            "expected_fixture": "AKASHA-efdeee187fcd46fdb01dc480157bb0d0",
+            "copy_matches": null,
+            "tool_events": [
+              {
+                "args": [
+                  "E:/workspace/akasha-answer-68cskhda/fixtures/lecture/source.txt",
+                  "--full"
+                ],
+                "explanation": null,
+                "result_preview": "[read_file E:/workspace/akasha-answer-68cskhda/fixtures/lecture/source.txt] full file (1 lines, 39 bytes):\nAKASHA-efdeee187fcd46fdb01dc480157bb0d0",
+                "skill": null,
+                "success": true,
+                "tool": "read_file"
+              }
+            ],
+            "route": null,
+            "answer": "AKASHA-efdeee187fcd46fdb01dc480157bb0d0",
+            "error": null,
+            "event_error": null
+          },
+          {
+            "case": "plusieurs_etapes",
+            "repetition": 2,
+            "status": "failed",
+            "correct": false,
+            "latency_ms": 20516.0,
+            "model_calls": 4,
+            "generation_requests": [
+              "/api/chat",
+              "/api/chat",
+              "/api/chat",
+              "/api/chat"
+            ],
+            "task_id": "37844db3-3eea-41e3-8486-cfc2d6cd8975",
+            "prompt": "Lis \"E:/workspace/akasha-answer-68cskhda/fixtures/plusieurs_etapes/source.txt\" avec read_file, copie son contenu exact dans \"E:/workspace/akasha-answer-68cskhda/fixtures/plusieurs_etapes/copie.txt\" avec write_file, puis relis la copie avec read_file pour vérifier qu'elle est identique.",
+            "expected_fixture": "AKASHA-9bfadb1b7d3948a2a67b1d191fdb2bb5",
+            "copy_matches": false,
+            "tool_events": [],
+            "route": null,
+            "answer": "No response from the model. Check Ollama or your LLM provider.",
+            "error": null,
+            "event_error": null
+          }
+        ],
+        "version": "0.13.0-beta.3",
+        "overall": {
+          "samples": 4,
+          "correct": 2,
+          "accuracy": 0.5,
+          "p50_correct_ms": 7250.0,
+          "p95_correct_ms": 19500.0,
+          "model_calls": 14,
+          "statuses": {
+            "completed": 2,
+            "timeout": 1,
+            "failed": 1
+          },
+          "timeouts": 1,
+          "errors": 1,
+          "p95_sample_count": 2
+        },
+        "summary": {
+          "lecture": {
+            "samples": 2,
+            "correct": 2,
+            "accuracy": 1.0,
+            "p50_correct_ms": 7250.0,
+            "p95_correct_ms": 19500.0,
+            "model_calls": 6,
+            "statuses": {
+              "completed": 2
+            },
+            "timeouts": 0,
+            "errors": 0,
+            "p95_sample_count": 2
+          },
+          "plusieurs_etapes": {
+            "samples": 2,
+            "correct": 0,
+            "accuracy": 0.0,
+            "p50_correct_ms": null,
+            "p95_correct_ms": null,
+            "model_calls": 8,
+            "statuses": {
+              "timeout": 1,
+              "failed": 1
+            },
+            "timeouts": 1,
+            "errors": 1,
+            "p95_sample_count": 0
+          }
+        }
+      },
+      "candidate": {
+        "binary": {
+          "name": "candidate-334f8de.exe",
+          "sha256": "62f88a9099635f525e8b9356d3e020ae155dcb6ef580def6673abbf5a62dde94",
+          "size_bytes": 110503424
+        },
+        "samples": [
+          {
+            "case": "lecture",
+            "repetition": 1,
+            "status": "completed",
+            "correct": true,
+            "latency_ms": 24922.0,
+            "model_calls": 3,
+            "generation_requests": [
+              "/api/generate",
+              "/api/chat",
+              "/api/chat"
+            ],
+            "task_id": "e424a94c-f64f-4bf3-b9fe-9add72ae6389",
+            "prompt": "Lis le fichier \"E:/workspace/akasha-answer-tnuab513/fixtures/lecture/source.txt\" avec read_file puis renvoie uniquement son contenu.",
+            "expected_fixture": "AKASHA-ba1896170053456c9ce3022b841952eb",
+            "copy_matches": null,
+            "tool_events": [
+              {
+                "args": [
+                  "E:/workspace/akasha-answer-tnuab513/fixtures/lecture/source.txt",
+                  "--full"
+                ],
+                "explanation": null,
+                "result_preview": "[read_file E:/workspace/akasha-answer-tnuab513/fixtures/lecture/source.txt] full file (1 lines, 39 bytes):\nAKASHA-ba1896170053456c9ce3022b841952eb",
+                "skill": null,
+                "success": true,
+                "tool": "read_file"
+              }
+            ],
+            "route": null,
+            "answer": "AKASHA-ba1896170053456c9ce3022b841952eb",
+            "error": null,
+            "event_error": null
+          },
+          {
+            "case": "plusieurs_etapes",
+            "repetition": 1,
+            "status": "timeout",
+            "correct": false,
+            "latency_ms": 45031.0,
+            "model_calls": 3,
+            "generation_requests": [
+              "/api/generate",
+              "/api/generate",
+              "/api/generate"
+            ],
+            "task_id": "044e4432-1878-4d82-b905-ea53d902ed8a",
+            "prompt": "Lis \"E:/workspace/akasha-answer-tnuab513/fixtures/plusieurs_etapes/source.txt\" avec read_file, copie son contenu exact dans \"E:/workspace/akasha-answer-tnuab513/fixtures/plusieurs_etapes/copie.txt\" avec write_file, puis relis la copie avec read_file pour vérifier qu'elle est identique.",
+            "expected_fixture": "AKASHA-c868f4ef9f414a4aa2fcbb2fafeadade",
+            "copy_matches": false,
+            "tool_events": [],
+            "route": null,
+            "answer": "",
+            "error": null,
+            "event_error": null
+          },
+          {
+            "case": "lecture",
+            "repetition": 2,
+            "status": "timeout",
+            "correct": false,
+            "latency_ms": 45000.0,
+            "model_calls": 2,
+            "generation_requests": [
+              "/api/generate",
+              "/api/chat"
+            ],
+            "task_id": "14b4eaa0-493b-438e-9cf2-8afbb1c662bd",
+            "prompt": "Lis le fichier \"E:/workspace/akasha-answer-dectep18/fixtures/lecture/source.txt\" avec read_file puis renvoie uniquement son contenu.",
+            "expected_fixture": "AKASHA-f23a589e07714642be0d4ecdb07427c8",
+            "copy_matches": null,
+            "tool_events": [],
+            "route": null,
+            "answer": "",
+            "error": null,
+            "event_error": null
+          },
+          {
+            "case": "plusieurs_etapes",
+            "repetition": 2,
+            "status": "timeout",
+            "correct": false,
+            "latency_ms": 45047.0,
+            "model_calls": 2,
+            "generation_requests": [
+              "/api/generate",
+              "/api/generate"
+            ],
+            "task_id": "3ca0590f-4fba-4948-8cae-28d029b5b702",
+            "prompt": "Lis \"E:/workspace/akasha-answer-dectep18/fixtures/plusieurs_etapes/source.txt\" avec read_file, copie son contenu exact dans \"E:/workspace/akasha-answer-dectep18/fixtures/plusieurs_etapes/copie.txt\" avec write_file, puis relis la copie avec read_file pour vérifier qu'elle est identique.",
+            "expected_fixture": "AKASHA-858d8336d7d648dab94c51fabb91e7b3",
+            "copy_matches": false,
+            "tool_events": [],
+            "route": null,
+            "answer": "",
+            "error": null,
+            "event_error": null
+          }
+        ],
+        "version": "0.13.0-beta.3",
+        "overall": {
+          "samples": 4,
+          "correct": 1,
+          "accuracy": 0.25,
+          "p50_correct_ms": 24922.0,
+          "p95_correct_ms": 24922.0,
+          "model_calls": 10,
+          "statuses": {
+            "completed": 1,
+            "timeout": 3
+          },
+          "timeouts": 3,
+          "errors": 0,
+          "p95_sample_count": 1
+        },
+        "summary": {
+          "lecture": {
+            "samples": 2,
+            "correct": 1,
+            "accuracy": 0.5,
+            "p50_correct_ms": 24922.0,
+            "p95_correct_ms": 24922.0,
+            "model_calls": 5,
+            "statuses": {
+              "completed": 1,
+              "timeout": 1
+            },
+            "timeouts": 1,
+            "errors": 0,
+            "p95_sample_count": 1
+          },
+          "plusieurs_etapes": {
+            "samples": 2,
+            "correct": 0,
+            "accuracy": 0.0,
+            "p50_correct_ms": null,
+            "p95_correct_ms": null,
+            "model_calls": 5,
+            "statuses": {
+              "timeout": 2
+            },
+            "timeouts": 2,
+            "errors": 0,
+            "p95_sample_count": 0
+          }
+        }
+      },
+      "model_manifest_sha256": "17052f91a42e97930aa6e28a6c6c06a983e6a58dbb00434885a0cf5313e376f7"
+    }
+  ],
+  "exploratory_qwen35_9b": {
+    "repetitions_requested": 2,
+    "interrupted_by": "Windows temporary-profile cleanup blocked by the SQLite observer",
+    "settings": {
+      "temperature": 0,
+      "num_ctx": 8192,
+      "max_tokens": 512,
+      "thinking_level": "off",
+      "num_gpu": 99,
+      "fallback": false
+    },
+    "timeout_s": 45,
+    "samples": [
+      {
+        "variant": "baseline",
+        "case": "lecture",
+        "repetition": 1,
+        "status": "completed",
+        "correct": true,
+        "latency_ms": 4437.0,
+        "model_calls": 3,
+        "generation_requests": [
+          "/api/generate",
+          "/api/generate",
+          "/api/generate"
+        ],
+        "task_id": "d3f708d1-a038-40e5-a882-946e1ab0f8cd",
+        "prompt": "Lis le fichier \"E:/workspace/akasha-answer-x3p0s8pv/fixtures/lecture/source.txt\" avec read_file puis renvoie uniquement son contenu.",
+        "expected_fixture": "AKASHA-5ccd0ddd912c4238855aba916f0e17bc",
+        "copy_matches": null,
+        "tool_events": [
+          {
+            "args": [
+              "E:/workspace/akasha-answer-x3p0s8pv/fixtures/lecture/source.txt",
+              "--full"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file E:/workspace/akasha-answer-x3p0s8pv/fixtures/lecture/source.txt] full file (1 lines, 39 bytes):\nAKASHA-5ccd0ddd912c4238855aba916f0e17bc",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        ],
+        "route": null,
+        "answer": "AKASHA-5ccd0ddd912c4238855aba916f0e17bc",
+        "error": null
+      },
+      {
+        "variant": "baseline",
+        "case": "plusieurs_etapes",
+        "repetition": 1,
+        "status": "timeout",
+        "correct": false,
+        "latency_ms": 45031.0,
+        "model_calls": 12,
+        "generation_requests": [
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate"
+        ],
+        "task_id": "2ce201a0-f224-46fe-b688-cfc8a61699d2",
+        "prompt": "Lis \"E:/workspace/akasha-answer-x3p0s8pv/fixtures/plusieurs_etapes/source.txt\" avec read_file, copie son contenu exact dans \"E:/workspace/akasha-answer-x3p0s8pv/fixtures/plusieurs_etapes/copie.txt\" avec write_file, puis relis la copie avec read_file pour vérifier qu'elle est identique.",
+        "expected_fixture": "AKASHA-59179c8111764be196d4c02bf3355df6",
+        "copy_matches": true,
+        "tool_events": [],
+        "route": null,
+        "answer": "",
+        "error": null
+      },
+      {
+        "variant": "candidate",
+        "case": "lecture",
+        "repetition": 1,
+        "status": "completed",
+        "correct": true,
+        "latency_ms": 4141.0,
+        "model_calls": 3,
+        "generation_requests": [
+          "/api/generate",
+          "/api/generate",
+          "/api/generate"
+        ],
+        "task_id": "d789c1bc-6626-46fe-a9e0-caa26b2e58f4",
+        "prompt": "Lis le fichier \"E:/workspace/akasha-answer-yuib913d/fixtures/lecture/source.txt\" avec read_file puis renvoie uniquement son contenu.",
+        "expected_fixture": "AKASHA-190538e7ddac4d8da49f0d1ff470ee01",
+        "copy_matches": null,
+        "tool_events": [
+          {
+            "args": [
+              "E:/workspace/akasha-answer-yuib913d/fixtures/lecture/source.txt",
+              "--full"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file E:/workspace/akasha-answer-yuib913d/fixtures/lecture/source.txt] full file (1 lines, 39 bytes):\nAKASHA-190538e7ddac4d8da49f0d1ff470ee01",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        ],
+        "route": null,
+        "answer": "AKASHA-190538e7ddac4d8da49f0d1ff470ee01",
+        "error": null
+      },
+      {
+        "variant": "candidate",
+        "case": "plusieurs_etapes",
+        "repetition": 1,
+        "status": "timeout",
+        "correct": false,
+        "latency_ms": 45063.0,
+        "model_calls": 12,
+        "generation_requests": [
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate"
+        ],
+        "task_id": "a59819de-ef28-4f81-a36f-e9ff298eaac7",
+        "prompt": "Lis \"E:/workspace/akasha-answer-yuib913d/fixtures/plusieurs_etapes/source.txt\" avec read_file, copie son contenu exact dans \"E:/workspace/akasha-answer-yuib913d/fixtures/plusieurs_etapes/copie.txt\" avec write_file, puis relis la copie avec read_file pour vérifier qu'elle est identique.",
+        "expected_fixture": "AKASHA-144db0f2a3924f99b3c96001b48ec518",
+        "copy_matches": true,
+        "tool_events": [],
+        "route": null,
+        "answer": "",
+        "error": null
+      },
+      {
+        "variant": "candidate",
+        "case": "lecture",
+        "repetition": 2,
+        "status": "completed",
+        "correct": true,
+        "latency_ms": 3969.0,
+        "model_calls": 3,
+        "generation_requests": [
+          "/api/generate",
+          "/api/generate",
+          "/api/generate"
+        ],
+        "task_id": "fd7489f5-70a7-4404-af3b-a0a01326ea81",
+        "prompt": "Lis le fichier \"E:/workspace/akasha-answer-dnift8lq/fixtures/lecture/source.txt\" avec read_file puis renvoie uniquement son contenu.",
+        "expected_fixture": "AKASHA-4be74de7f79a428fa085dc9c86381a4b",
+        "copy_matches": null,
+        "tool_events": [
+          {
+            "args": [
+              "E:/workspace/akasha-answer-dnift8lq/fixtures/lecture/source.txt",
+              "--full"
+            ],
+            "explanation": null,
+            "result_preview": "[read_file E:/workspace/akasha-answer-dnift8lq/fixtures/lecture/source.txt] full file (1 lines, 39 bytes):\nAKASHA-4be74de7f79a428fa085dc9c86381a4b",
+            "skill": null,
+            "success": true,
+            "tool": "read_file"
+          }
+        ],
+        "route": null,
+        "answer": "AKASHA-4be74de7f79a428fa085dc9c86381a4b",
+        "error": null
+      },
+      {
+        "variant": "candidate",
+        "case": "plusieurs_etapes",
+        "repetition": 2,
+        "status": "timeout",
+        "correct": false,
+        "latency_ms": 45094.0,
+        "model_calls": 16,
+        "generation_requests": [
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate",
+          "/api/generate"
+        ],
+        "task_id": "afb60190-a28b-4f92-a701-c96ed476db43",
+        "prompt": "Lis \"E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/source.txt\" avec read_file, copie son contenu exact dans \"E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt\" avec write_file, puis relis la copie avec read_file pour vérifier qu'elle est identique.",
+        "expected_fixture": "AKASHA-cf1bb16a02f34af194cf907e61f7a3d1",
+        "copy_matches": true,
+        "tool_events": [],
+        "route": null,
+        "answer": "",
+        "error": null
+      }
+    ],
+    "snapshot_task_id": "afb60190-a28b-4f92-a701-c96ed476db43",
+    "snapshot": {
+      "status_at_snapshot": "running",
+      "agent": "orchestrator",
+      "events": [
+        {
+          "args": [
+            "E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/source.txt",
+            "--full"
+          ],
+          "explanation": null,
+          "result_preview": "[read_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/source.txt] full file (1 lines, 39 bytes):\nAKASHA-cf1bb16a02f34af194cf907e61f7a3d1",
+          "skill": null,
+          "success": true,
+          "tool": "read_file"
+        },
+        {
+          "args": [
+            "[redacted for write-like tool]"
+          ],
+          "explanation": null,
+          "result_preview": "[write_file] path not allowed by policy",
+          "skill": null,
+          "success": false,
+          "tool": "write_file"
+        },
+        {
+          "args": [
+            "[redacted for write-like tool]"
+          ],
+          "explanation": null,
+          "result_preview": "[write_file] path not allowed by policy",
+          "skill": null,
+          "success": false,
+          "tool": "write_file"
+        },
+        {
+          "args": [
+            "E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/source.txt",
+            "--full"
+          ],
+          "explanation": null,
+          "result_preview": "[read_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/source.txt] full file (1 lines, 39 bytes):\nAKASHA-cf1bb16a02f34af194cf907e61f7a3d1",
+          "skill": null,
+          "success": true,
+          "tool": "read_file"
+        },
+        {
+          "args": [
+            "[redacted for write-like tool]"
+          ],
+          "explanation": null,
+          "result_preview": "[write_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt] wrote 39 bytes",
+          "skill": null,
+          "success": true,
+          "tool": "write_file"
+        },
+        {
+          "args": [
+            "E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt"
+          ],
+          "explanation": null,
+          "result_preview": "[read_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nAKASHA-cf1bb16a02f34af194cf907e61f7a3d1",
+          "skill": null,
+          "success": true,
+          "tool": "read_file"
+        },
+        {
+          "args": [
+            "[redacted for write-like tool]"
+          ],
+          "explanation": null,
+          "result_preview": "[write_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt] wrote 39 bytes",
+          "skill": null,
+          "success": true,
+          "tool": "write_file"
+        },
+        {
+          "args": [
+            "E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt"
+          ],
+          "explanation": null,
+          "result_preview": "[read_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nAKASHA-cf1bb16a02f34af194cf907e61f7a3d1",
+          "skill": null,
+          "success": true,
+          "tool": "read_file"
+        },
+        {
+          "args": [
+            "[redacted for write-like tool]"
+          ],
+          "explanation": null,
+          "result_preview": "[write_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt] wrote 39 bytes",
+          "skill": null,
+          "success": true,
+          "tool": "write_file"
+        },
+        {
+          "args": [
+            "E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt"
+          ],
+          "explanation": null,
+          "result_preview": "[read_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nAKASHA-cf1bb16a02f34af194cf907e61f7a3d1",
+          "skill": null,
+          "success": true,
+          "tool": "read_file"
+        },
+        {
+          "args": [
+            "[redacted for write-like tool]"
+          ],
+          "explanation": null,
+          "result_preview": "[write_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt] wrote 39 bytes",
+          "skill": null,
+          "success": true,
+          "tool": "write_file"
+        },
+        {
+          "args": [
+            "E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt"
+          ],
+          "explanation": null,
+          "result_preview": "[read_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt] requested lines 1..500; returned lines 1..1 (file has 1 lines):\nAKASHA-cf1bb16a02f34af194cf907e61f7a3d1",
+          "skill": null,
+          "success": true,
+          "tool": "read_file"
+        },
+        {
+          "args": [
+            "[redacted for write-like tool]"
+          ],
+          "explanation": null,
+          "result_preview": "[write_file E:/workspace/akasha-answer-dnift8lq/fixtures/plusieurs_etapes/copie.txt] wrote 39 bytes",
+          "skill": null,
+          "success": true,
+          "tool": "write_file"
+        }
+      ]
+    }
+  }
+}
