@@ -120,6 +120,7 @@ pub mod agent_profiles;
 pub(crate) mod chat_contract;
 pub(crate) mod web_account_task;
 pub(crate) mod direct_tool_task;
+mod short_answer;
 pub mod dashboards;
 pub mod inter_agent;
 pub mod memory_consolidation;

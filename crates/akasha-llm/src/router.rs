@@ -5,7 +5,8 @@ use crate::config::{configured_ollama_num_ctx, prepare_ollama_request, RoutingCo
 use crate::fallback::{FallbackEngine, ProviderResolver};
 use crate::metrics::{MetricsCollector, MetricsPersistence};
 use crate::provider::{
-    provider_error_is_context_window_exceeded, CompletionRequest, CompletionResponse, LLMProvider,
+    provider_error_is_context_window_exceeded, provider_error_is_tool_incompatible,
+    CompletionRequest, CompletionResponse, LLMProvider,
 };
 use crate::retry::RetryPolicy;
 use std::collections::HashMap;
@@ -118,6 +119,48 @@ fn task_config_for_completion(
     let mut cfg = task_config.clone();
     cfg.fallback.clear();
     cfg
+}
+
+fn tool_compatible_routes(
+    request: &CompletionRequest,
+    mut routes: Vec<crate::config::RouteEntry>,
+    options: &HashMap<String, crate::config::ModelOption>,
+) -> Result<Vec<crate::config::RouteEntry>, String> {
+    if request.tools.as_ref().is_none_or(Vec::is_empty) {
+        return Ok(routes);
+    }
+    let originally_empty = routes.is_empty();
+    routes.retain(|entry| {
+        if entry.provider != "ollama" {
+            return true;
+        }
+        let model = &entry.model;
+        let metadata = options.get(model).or_else(|| {
+            if let Some(name) = model.strip_suffix(":latest") {
+                options.get(name)
+            } else if !model.contains(':') {
+                options.get(&format!("{model}:latest"))
+            } else {
+                None
+            }
+        });
+        metadata.and_then(|row| row.capabilities.as_ref())
+            .filter(|capabilities| !capabilities.is_empty())
+            .is_none_or(|capabilities| capabilities.iter().any(|value| value.eq_ignore_ascii_case("tools")))
+    });
+    if routes.is_empty() && !originally_empty {
+        return Err("Aucun modèle configuré pour ce parcours ne prend en charge les appels d’outils requis.".into());
+    }
+    Ok(routes)
+}
+
+fn tool_compatible_config(
+    request: &CompletionRequest,
+    config: TaskTypeConfig,
+    options: &HashMap<String, crate::config::ModelOption>,
+) -> Result<TaskTypeConfig, String> {
+    let mut routes = tool_compatible_routes(request, config.primary.into_iter().chain(config.fallback).collect(), options)?.into_iter();
+    Ok(TaskTypeConfig { primary: routes.next(), fallback: routes.collect(), constraints: config.constraints })
 }
 
 pub struct LLMRouter {
@@ -704,6 +747,7 @@ impl LLMRouter {
             .unwrap_or_else(|e| e.into_inner())
             .model_options
             .clone();
+        let task_config = tool_compatible_config(request, task_config, &model_options)?;
         self.fallback
             .complete(
                 request,
@@ -748,6 +792,7 @@ impl LLMRouter {
             }
         }
         let routes = self.strict_routes(request, routes, selected.is_some()).await?;
+        let routes = tool_compatible_routes(request, routes, &options)?;
         let resolve = self.resolve();
         let routes = routes.into_iter().filter(|entry| !self.degraded_mode || resolve(&entry.provider).is_some_and(|provider|provider.is_local())).collect();
         crate::bounded::complete_stream(request, routes, &resolve, &options, &self.metrics, chunk_tx, budget, allow_same_retry, &self.studio_health, selected.is_some(), observe).await
@@ -810,6 +855,7 @@ impl LLMRouter {
             .unwrap_or_else(|e| e.into_inner())
             .model_options
             .clone();
+        let task_config = tool_compatible_config(request, task_config, &model_options)?;
         let primary_entry = task_config.primary.as_ref();
         if let Some(entry) = primary_entry {
             if let Some(provider) = resolve(entry.provider.as_str()) {
@@ -867,6 +913,16 @@ impl LLMRouter {
                             }
                             // Wait for the bridge to drain any already-queued chunks before checking.
                             let _ = bridge_handle.await;
+                            let mut task_config = task_config.clone();
+                            if request.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+                                && provider_error_is_tool_incompatible(&e)
+                            {
+                                task_config.primary = None;
+                                task_config.fallback.retain(|route| route.provider != entry.provider || route.model != entry.model);
+                                if task_config.fallback.is_empty() {
+                                    return Err(crate::provider::format_provider_error(&entry.provider, &e));
+                                }
+                            }
                             let response = self
                                 .fallback
                                 .complete(
@@ -899,6 +955,21 @@ impl LLMRouter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn known_ollama_tool_capabilities_filter_only_native_requests() {
+        let mut request: CompletionRequest = serde_json::from_value(serde_json::json!({"prompt":"test","tools":[{}]})).unwrap();
+        let route = |model: &str| crate::config::RouteEntry { provider: "ollama".into(), model: model.into(), config: None };
+        let options = HashMap::from([
+            ("phi4".into(), crate::config::ModelOption { capabilities: Some(vec!["completion".into()]), ..Default::default() }),
+            ("known".into(), crate::config::ModelOption { capabilities: Some(vec!["completion".into(), "tools".into()]), ..Default::default() }),
+        ]);
+        let routes = vec![route("phi4:latest"), route("known"), route("unknown")];
+        let compatible = tool_compatible_routes(&request, routes.clone(), &options).unwrap();
+        assert_eq!(compatible.iter().map(|route| route.model.as_str()).collect::<Vec<_>>(), ["known", "unknown"]);
+        assert!(tool_compatible_routes(&request, vec![route("phi4")], &options).is_err());
+        request.tools = None;
+        assert_eq!(tool_compatible_routes(&request, routes, &options).unwrap().len(), 3);
+    }
     use super::*;
     use crate::config::RouteEntry;
     use crate::provider::{ProviderError, TokenUsage};

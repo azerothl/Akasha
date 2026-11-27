@@ -323,6 +323,14 @@ impl TaskStore {
         Ok(())
     }
 
+    pub fn has_event(&self, task_id: Uuid, event_type: &str) -> anyhow::Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id = ?1 AND event_type = ?2)",
+            rusqlite::params![task_id.to_string(), event_type],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Get persisted task events for a task in chronological order.
     pub fn get_events(&self, task_id: Uuid) -> anyhow::Result<Vec<TaskEventRecord>> {
         let mut stmt = self.conn.prepare(

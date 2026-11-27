@@ -519,6 +519,25 @@ User message:\n{}",
         // immediately, satisfying the "ack < 500ms" guarantee and ensuring the task_id is in
         // the DB before any events that carry it as a correlation ID.
         let routing_message = display_request.unwrap_or(message);
+        let short_answer = if forward_to_orchestrator
+            && self.direct_conversation_tx.is_some()
+            && priority != TaskPriority::Scheduled
+            && image_data_urls.as_ref().is_none_or(Vec::is_empty)
+            && studio_disk_root.is_none()
+            && studio_forced_agent.is_none()
+            && studio_evolution_branch.is_none()
+            && studio_execution.is_none()
+            && document_request.is_none()
+            && organization_request.is_none()
+            && routing_message == message
+            && !is_session_recall_message(message)
+            && !is_external_info_request(message)
+            && !crate::consumer_workflow::runtime_version_request(message)
+        {
+            crate::short_answer::route_reason(message)
+        } else {
+            None
+        };
         let execution_mode = if forward_to_orchestrator {
             Some(classify_execution_mode(routing_message))
         } else {
@@ -559,6 +578,11 @@ User message:\n{}",
                 studio_project_id,
             };
             store.insert(&task)?;
+            if let Some(reason) = short_answer {
+                store.insert_event(task_id, crate::short_answer::ROUTE_EVENT,
+                    Some(&serde_json::json!({"route":"short_answer","reason":reason})),
+                    &Utc::now().to_rfc3339())?;
+            }
             if let Some(request)=&organization_request {store.insert_event(task_id,"organization_request",Some(&serde_json::to_value(request)?),&Utc::now().to_rfc3339())?;}
             if let Some(request)=&document_request {store.insert_event(task_id,"document_request",Some(&serde_json::to_value(request)?),&Utc::now().to_rfc3339())?;}
             if let Some(options) = &studio_execution {
@@ -627,7 +651,19 @@ User message:\n{}",
             // Run the LLM selector after the task is safely persisted.
             // Use the original (unprefixed) message so studio prefixes don't break recall detection.
             let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(original_message);
-            let selector_result = if !has_source_workflow&&crate::consumer_workflow::runtime_version_request(original_message) {
+            let selector_result = if let Some(reason) = short_answer {
+                SelectorRunResult {
+                    decision: Some(SelectorDecision {
+                        answer_mode: SelectorAnswerMode::Direct,
+                        task_type: Some("conversation".into()),
+                        target_agent: None,
+                        reason: Some(reason.into()),
+                    }),
+                    enabled: false,
+                    timed_out: false,
+                    elapsed_ms: 0,
+                }
+            } else if !has_source_workflow&&crate::consumer_workflow::runtime_version_request(original_message) {
                 SelectorRunResult{decision:Some(SelectorDecision{answer_mode:SelectorAnswerMode::Direct,task_type:Some("conversation".into()),target_agent:Some("ask".into()),reason:Some("runtime_metadata".into())}),enabled:false,timed_out:false,elapsed_ms:0}
             } else if let Some(agent) = studio_forced_spawn
                 .as_ref()
@@ -684,7 +720,7 @@ User message:\n{}",
                     elapsed_ms: 0,
                 }
             };
-            if forward_to_orchestrator && !skip_selector_for_recall {
+            if forward_to_orchestrator && !skip_selector_for_recall && short_answer.is_none() {
                 emit_timeline_for_task(
                     &agent_clone.bus,
                     Some(store_path),

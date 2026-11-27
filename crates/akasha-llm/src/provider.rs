@@ -906,6 +906,12 @@ pub enum ProviderError {
     Auth(String),
 }
 
+pub(crate) fn provider_error_is_tool_incompatible(error: &ProviderError) -> bool {
+    let ProviderError::Api(message) = error else { return false; };
+    let message = message.to_ascii_lowercase();
+    message.contains("does not support tools") || message.contains("tool calling is not supported")
+}
+
 /// Message FR dédié quand le routeur tombe sur `akasha_embedded` / `akasha_core` indisponible
 /// (reste P2 v0.10 / P0 v0.11 — évite le seul libellé anglais `unavailable`).
 pub const EMBEDDED_UNAVAILABLE_FR: &str = "Le modèle embarqué n'est pas disponible. \

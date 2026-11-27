@@ -306,3 +306,23 @@ cargo test -p akasha-tools --lib policy::tests
 cargo test -p akasha-llm --no-default-features
 cargo test -p akasha-daemon --no-default-features --lib
 ```
+
+## Parcours court et justesse des réponses
+
+Le benchmark lance deux binaires du daemon avec des profils jetables et un modèle
+Ollama local déjà chargé. La réponse est évaluée sur un corpus de questions
+autonomes, de calculs, de demandes ambiguës et d’opérations sur des fichiers
+fictifs. Les appels au modèle sont comptés au niveau HTTP, y compris la
+sélection, la planification et les tentatives supplémentaires.
+
+```bash
+python spec/dev/quality/short_answer_benchmark.py \
+  --baseline /chemin/avant/akasha-daemon --candidate /chemin/apres/akasha-daemon \
+  --model qwen3.5:2b --device cpu --repetitions 30 --out short-answer-results.json
+```
+
+Le rapport JSON contient les versions et empreintes des binaires, les résultats
+par essai, le taux de réponses correctes, le p50 et le p95 des réponses correctes
+et les statuts des échecs. Pour un contrôle rapide, utiliser
+`--repetitions 1 --cases question calcul ambigu`. Le p95 de ce contrôle est
+indicatif. Les binaires comparés doivent utiliser les mêmes options de compilation.

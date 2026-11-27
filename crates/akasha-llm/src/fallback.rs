@@ -4,7 +4,8 @@ use crate::config::{prepare_ollama_request, ModelOption, RouteEntry, TaskTypeCon
 use crate::metrics::MetricsCollector;
 use crate::provider::{
     format_fallback_chain_failure, format_provider_error,
-    provider_error_is_context_window_exceeded, CompletionRequest, CompletionResponse, LLMProvider,
+    provider_error_is_context_window_exceeded, provider_error_is_tool_incompatible,
+    CompletionRequest, CompletionResponse, LLMProvider,
 };
 use crate::retry::{RetryClass, RetryPolicy};
 use std::collections::HashMap;
@@ -293,6 +294,9 @@ impl FallbackEngine {
                             error = %e,
                             "Attempt failed, try next in chain"
                         );
+                        if provider_error_is_tool_incompatible(&e) {
+                            break;
+                        }
                         if provider_error_is_context_window_exceeded(&e) {
                             warn!(
                                 provider = %entry.provider,
