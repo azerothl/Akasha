@@ -75,7 +75,14 @@ def count_generations(upstream, timeout):
 
 def corpus(case, fixture, target, marker):
     if case == "question":
-        return "Qu’est-ce qu’un hexagone ?", lambda text: bool(re.search(r"\b(?:six|6)\s+côtés\b", text.lower()))
+        def valid(text):
+            lower = text.lower().strip()
+            return (
+                bool(re.search(r"\b(?:six|6)\s+côtés\b", lower))
+                and not re.search(r"polygone régulier|tous ses côtés|triangles équilatéraux", lower)
+                and len(re.split(r"(?<=[.!?])\s+(?=\S)", lower)) == 1
+            )
+        return "Définis un hexagone en une phrase.", valid
     if case == "calcul":
         def valid(text):
             lower = text.lower()
