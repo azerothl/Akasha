@@ -79,7 +79,10 @@ def corpus(case, fixture, target, marker):
     if case == "calcul":
         def valid(text):
             lower = text.lower()
-            return (re.search(r"(?<![\d.,])65(?:[,.]00)?\s*(?:€|euros?)", lower)
+            totals = re.findall(r"\b(?:total|prix final|montant final)(?:\s+(?:final|est|s'élève|de|à|égal|vaut))*\s*[:=]?\s*(\d+(?:[,.]\d+)?)\s*(?:€|euros?)", lower)
+            if not totals:
+                totals = re.findall(r"=\s*(\d+(?:[,.]\d+)?)\s*(?:€|euros?)", lower)[-1:]
+            return (totals and all(value in {"65", "65,0", "65.0", "65,00", "65.00"} for value in totals)
                     and re.search(r"\b80\b", lower) and re.search(r"\b5\b", lower)
                     and re.search(r"(?:0[,.]75|25\s*%|75\s*%)", lower)
                     and len(re.split(r"(?<=[.!?])\s+(?=\S)", lower.strip())) == 1)

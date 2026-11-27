@@ -152,7 +152,7 @@ pub(crate) async fn run(
             Some(memory) => memory.get_turns(session_id).await,
             None => Vec::new(),
         };
-        let history = turns
+        let history: Vec<_> = turns
             .into_iter()
             .rev()
             .take(6)
@@ -175,7 +175,7 @@ pub(crate) async fn run(
             .collect();
         let request = CompletionRequest {
             require_tool: false,
-            conversation: Some(history),
+            conversation: (!history.is_empty()).then_some(history),
             tools: None,
             prompt: message.into(),
             max_tokens: Some(256),
