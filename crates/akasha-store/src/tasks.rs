@@ -316,11 +316,19 @@ impl TaskStore {
         )?;
         if count > max_events {
             self.conn.execute(
-                "DELETE FROM task_events WHERE task_id = ?1 AND seq IN (SELECT seq FROM task_events WHERE task_id = ?1 ORDER BY CASE WHEN event_type IN ('tool_invoked','tool_call_started','tool_call_finished','chat_literal_rejected','task_completed','task_failed','task_cancelled') THEN 1 ELSE 0 END, seq ASC LIMIT ?2)",
+                "DELETE FROM task_events WHERE task_id = ?1 AND seq IN (SELECT seq FROM task_events WHERE task_id = ?1 ORDER BY CASE WHEN event_type IN ('tool_invoked','tool_call_started','tool_call_finished','chat_literal_rejected','task_completed','task_failed','task_cancelled','short_answer_route') THEN 1 ELSE 0 END, seq ASC LIMIT ?2)",
                 rusqlite::params![task_id.to_string(), count - max_events],
             )?;
         }
         Ok(())
+    }
+
+    pub fn has_event(&self, task_id: Uuid, event_type: &str) -> anyhow::Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id = ?1 AND event_type = ?2)",
+            rusqlite::params![task_id.to_string(), event_type],
+            |row| row.get(0),
+        )?)
     }
 
     /// Get persisted task events for a task in chronological order.

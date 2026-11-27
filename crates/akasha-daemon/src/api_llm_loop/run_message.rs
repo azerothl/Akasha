@@ -315,6 +315,12 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     if !started {notify_task_completion(&task_completion_registry,task_id).await;return;}
+    if crate::short_answer::selected(&store_path, task_id) {
+        crate::short_answer::run(&bus, &llm_router, &store_path, task_id, &message, &session_id,
+            short_term.as_deref().filter(|_| !incognito)).await;
+        notify_task_completion(&task_completion_registry, task_id).await;
+        return;
+    }
     // Explicit consumer workflows keep the existing task, router, and privacy scope.
     // Only trusted persisted source snapshots select these read-only branches.
     let data=store_path.parent().unwrap_or(&store_path);

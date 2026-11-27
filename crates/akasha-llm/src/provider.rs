@@ -308,6 +308,20 @@ mod studio_native_tests {
     }
 
     #[test]
+    fn ollama_plain_prompt_does_not_reuse_a_cached_conversation_template() {
+        let provider = OllamaProvider::new(None);
+        provider.chat_templates.lock().unwrap()
+            .insert("qwen".into(), OllamaConversationTemplate::Qwen35ChatMl);
+        let request: CompletionRequest =
+            serde_json::from_value(serde_json::json!({"prompt":"Définis un hexagone."})).unwrap();
+        let (url, body) = provider.build_generate_body(&request, "qwen", true);
+        assert!(url.ends_with("/api/generate"));
+        assert_eq!(body["prompt"], request.prompt);
+        assert!(body.get("raw").is_none());
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
     fn ollama_first_turn_keeps_system_and_tools_without_history() {
         let request: CompletionRequest = serde_json::from_value(serde_json::json!({
             "prompt":"Create the requested account", "system_prompt":"Exact permissions",
@@ -906,6 +920,12 @@ pub enum ProviderError {
     Auth(String),
 }
 
+pub(crate) fn provider_error_is_tool_incompatible(error: &ProviderError) -> bool {
+    let ProviderError::Api(message) = error else { return false; };
+    let message = message.to_ascii_lowercase();
+    message.contains("does not support tools") || message.contains("tool calling is not supported")
+}
+
 /// Message FR dédié quand le routeur tombe sur `akasha_embedded` / `akasha_core` indisponible
 /// (reste P2 v0.10 / P0 v0.11 — évite le seul libellé anglais `unavailable`).
 pub const EMBEDDED_UNAVAILABLE_FR: &str = "Le modèle embarqué n'est pas disponible. \
@@ -1167,6 +1187,12 @@ pub struct OllamaProvider {
     context_limits: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, crate::ollama_context::OllamaContextLimits)>>,
 }
 
+fn uses_ollama_conversation(request: &CompletionRequest) -> bool {
+    request.conversation.is_some()
+        || request.system_prompt.is_some()
+        || request.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+}
+
 impl OllamaProvider {
     pub fn new(base_url: Option<String>) -> Self {
         Self {
@@ -1208,8 +1234,7 @@ impl OllamaProvider {
         model: &str,
         timeout: Duration,
     ) -> Result<(), ProviderError> {
-        if (request.conversation.is_none() && request.system_prompt.is_none()
-            && request.tools.as_ref().is_none_or(|tools| tools.is_empty()))
+        if !uses_ollama_conversation(request)
             || self
                 .chat_templates
                 .lock()
@@ -1309,10 +1334,9 @@ impl OllamaProvider {
         model: &str,
         stream: bool,
     ) -> (String, serde_json::Value) {
-        let mode = self.chat_templates
-            .lock()
-            .ok()
-            .and_then(|templates| templates.get(model).copied())
+        let mode = uses_ollama_conversation(request)
+            .then(|| self.chat_templates.lock().ok().and_then(|templates| templates.get(model).copied()))
+            .flatten()
             .unwrap_or(OllamaConversationTemplate::Text);
         let chat = matches!(mode, OllamaConversationTemplate::Chat | OllamaConversationTemplate::JsonToolChat);
         let url = format!(
