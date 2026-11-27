@@ -60,9 +60,112 @@ pub(crate) fn native_tools(policy: &akasha_tools::ToolsPolicy, role: &str, name:
     })
 }
 
+pub(crate) struct VerifiedCopy {
+    source: String,
+    target: String,
+    french: bool,
+    step: CopyStep,
+}
+
+enum CopyStep {
+    Read,
+    Write(String),
+    Verify(String),
+    Done,
+}
+
+impl VerifiedCopy {
+    pub(crate) fn parse(message: &str) -> Option<Self> {
+        use std::sync::LazyLock;
+        static FR: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(
+            r#"(?i)^lis (?:le fichier )?"([^"\r\n]+)"(?: avec read_file)?\s*[,;]\s*copie (?:son contenu exact|son contenu|le fichier) dans "([^"\r\n]+)"(?: avec write_file)?\s*[,;]?\s+puis relis (?:la copie|le fichier copié)(?: avec read_file)? pour vérifier (?:qu'elle est identique|le contenu)\.?$"#,
+        ).expect("French verified copy"));
+        static EN: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(
+            r#"(?i)^read (?:the file )?"([^"\r\n]+)"(?: (?:with|using) read_file)?\s*[,;]\s*copy (?:its exact contents|its contents|the file) (?:to|into) "([^"\r\n]+)"(?: (?:with|using) write_file)?\s*[,;]?\s+then (?:re-?read|read) (?:the copy|the destination)(?: (?:with|using) read_file)? to verify (?:that it is identical|the contents)\.?$"#,
+        ).expect("English verified copy"));
+        let message = crate::consumer_workflow::user_text(message).trim();
+        let (matches, french) = FR.captures(message).map(|m| (m, true))
+            .or_else(|| EN.captures(message).map(|m| (m, false)))?;
+        let source = &matches[1];
+        let target = &matches[2];
+        if [source, target].iter().any(|path| {
+            !std::path::Path::new(path).is_absolute()
+                || path.chars().any(char::is_control)
+        }) || crate::chat_contract::path_key(source) == crate::chat_contract::path_key(target) {
+            return None;
+        }
+        Some(Self { source: source.into(), target: target.into(), french, step: CopyStep::Read })
+    }
+
+    pub(crate) fn call(&self) -> Option<(String, Vec<String>)> {
+        let read = |path: &str| ("read_file".into(), vec![path.into(), "--exact-utf8".into()]);
+        match &self.step {
+            CopyStep::Read => Some(read(&self.source)),
+            CopyStep::Write(content) => Some(("write_file".into(), vec![
+                serde_json::json!({"path": self.target, "content": content, "preserve_text": true}).to_string(),
+            ])),
+            CopyStep::Verify(_) => Some(read(&self.target)),
+            CopyStep::Done => None,
+        }
+    }
+
+    pub(crate) fn observe(&mut self, success: bool, result: &str) -> Result<Option<&'static str>, String> {
+        if !success {
+            return Err(result.to_owned());
+        }
+        let next = match std::mem::replace(&mut self.step, CopyStep::Done) {
+            CopyStep::Read => CopyStep::Write(exact_read_body(result)?.to_owned()),
+            CopyStep::Write(content) => CopyStep::Verify(content),
+            CopyStep::Verify(expected) => {
+                if exact_read_body(result)? != expected {
+                    return Err(if self.french { "La copie relue diffère de la source." }
+                        else { "The copy differs from the source." }.into());
+                }
+                return Ok(Some(if self.french { "Fichier copié et contenu vérifié par relecture." }
+                    else { "File copied and verified by reading the copy." }));
+            }
+            CopyStep::Done => return Ok(None),
+        };
+        self.step = next;
+        Ok(None)
+    }
+}
+
+fn exact_read_body(result: &str) -> Result<&str, String> {
+    result.split_once('\n').filter(|(header, _)| header.ends_with(" UTF-8 bytes):"))
+        .map(|(_, body)| body).ok_or_else(|| "The tool did not return a complete UTF-8 file.".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn verified_copy_binds_paths_and_requires_matching_readback() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.txt");
+        let target = root.path().join("target with spaces.txt");
+        let request = format!(
+            r#"Read "{}", copy its exact contents to "{}", then reread the copy to verify that it is identical."#,
+            source.display(), target.display()
+        );
+        assert!(VerifiedCopy::parse(&format!("{request} Then delete the source.")).is_none());
+        let mut copy = VerifiedCopy::parse(&request).unwrap();
+        assert_eq!(copy.call().unwrap().1[0], source.to_string_lossy());
+
+        let body = " `text`\r\n";
+        let receipt = format!("[read_file {}] full file ({} UTF-8 bytes):\n{body}", source.display(), body.len());
+        assert_eq!(copy.observe(true, &receipt).unwrap(), None);
+        let (tool, args) = copy.call().unwrap();
+        assert_eq!(tool, "write_file");
+        let payload: serde_json::Value = serde_json::from_str(&args[0]).unwrap();
+        assert_eq!(payload["path"].as_str(), target.to_str());
+        assert_eq!(payload["content"], body);
+
+        assert_eq!(copy.observe(true, "write completed").unwrap(), None);
+        assert_eq!(copy.call().unwrap().1[0], target.to_string_lossy());
+        assert!(copy.observe(true, "header (1 UTF-8 bytes):\nx").is_err());
+    }
+
     #[test]
     fn quoted_content_does_not_require_an_unrequested_read() {
         for request in [r#"Use write_file to create notes.txt containing exactly "then read""#, "Use write_file with `puis relis` as its content"] {

@@ -37,7 +37,8 @@ pub fn parse_read_file_args(args: &[String]) -> (Vec<String>, Option<(usize, usi
     let filtered: Vec<String> = args
         .iter()
         .filter_map(|a| {
-            if a == "--full" {
+            if a == "--full" || (args.len() == 2 && a == "--exact-utf8"
+                && std::path::Path::new(&args[0]).is_absolute()) {
                 want_full = true;
                 None
             } else {
